@@ -595,8 +595,8 @@ db-connection-refused            any        pbs_db_restart_triage      (never)  
 db-pg-hba-corrupt                any        pbs_db_config_recovery     (never)                -
 host-container-stopped           docker/vm  (none)                     NO PLAYBOOK            -
 db-wal-disk-full                 docker/vm  pbs_wal_disk_full          2026-05-03  PASS       -
-db-wal-disk-full-k8s             k8s        pbs_wal_disk_full          (never)                -
-k8s-oomkilled                    k8s        (none)                     NO PLAYBOOK            -
+db-wal-disk-full-k8s             k8s        pbs_k8s_pod_crash_triage  (never)              -
+k8s-oomkilled                    k8s        pbs_k8s_pod_crash_triage  (never)              -
 compound-db-pod-crash            multi      (none)                     NO PLAYBOOK            -
 ```
 
@@ -786,7 +786,8 @@ These faults target PostgreSQL running in Kubernetes and require kubectl access 
 | `k8s-pvc-pending` | PVC stuck in Pending | critical | Creates a StorageClass that does not exist, leaving the PVC unbound |
 | `k8s-oomkilled` | Pod OOMKilled | critical | Patches the container memory limit to 10Mi — too low for PostgreSQL to start; pod enters OOMKilled restart loop |
 | `k8s-scale-to-zero` | Deployment scaled to zero | high | Patches replicas to 0; k8s agent must scale back up |
-| `db-wal-disk-full-k8s` | WAL disk full — writes failing (Kubernetes) | critical | Writes fake PANIC lines to the container's stderr via `kubectl exec`, then kills the postmaster with SIGABRT (exitcode=134, not OOMKilled). Pod auto-restarts clean; PANIC lines visible in `kubectl logs --previous`. |
+| `db-wal-disk-full-k8s` | WAL disk full — writes failing (Kubernetes) | critical | Writes fake PANIC lines to the on-disk PostgreSQL log file via `kubectl exec`, then sends SIGQUIT to the postmaster (exit code 0, reason=Completed — a controlled emergency shutdown, not OOMKilled). `kubectl logs --previous` is empty (`logging_collector=on` redirects output to disk); the K8s agent must call `read_pod_file` on the on-disk log to find the PANIC lines. Diagnosed via `pbs_k8s_pod_crash_triage` — the entry point for a live-verified 3-hop chain from `pbs_db_restart_triage` (see [PLAYBOOKS.md §Escalation graph](PLAYBOOKS.md#escalation-graph)). |
+| `k8s-node-memory-pressure` | Noisy neighbor exhausts node memory | medium | Deploys a memory-hogging pod on postgres's node until kubelet's eviction-hard threshold is crossed; kubelet evicts the noisy pod (not postgres). Requires the cluster to have memory-based eviction configured — see the fault's `prerequisites` text. Diagnosed via `pbs_k8s_node_pressure_triage`; carries a `remediation` block (`pbs_k8s_node_pressure_remediate`, see §6.5) that verifies postgres was unaffected or, if node pressure is still present, escalates for capacity planning rather than taking any action. |
 
 ### 6.5 Remediation specs
 
@@ -800,8 +801,9 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db | |
 | `db-tx-lock-chain-blocker` | `pbs_lock_chain_triage` | db | |
 | `db-wal-disk-full` | `pbs_wal_disk_full` | sysadmin | |
-| `db-wal-disk-full-k8s` | `pbs_wal_disk_full` | k8s | |
+| `db-wal-disk-full-k8s` | `pbs_k8s_pod_crash_triage` | k8s | Remediation itself is an ad-hoc `agent_prompt` (no `playbook_id`), same pattern as `db-wal-disk-full` above — this column shows the diagnosis playbook for reference. |
 | `db-wal-stale-slot` | `pbs_wal_stale_slot` | postgres_database_agent | |
+| `k8s-node-memory-pressure` | `pbs_k8s_node_pressure_remediate` | k8s | Carries `namespace: helpdesk-test` alongside `playbook_id` — K8s-target remediation playbooks need a `namespace`, not a `connection_string`, to know where to operate. In the common case (postgres was never evicted) the playbook verifies and takes no action; if node `MemoryPressure` is still `True` on recheck it escalates for capacity planning instead. |
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 

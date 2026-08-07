@@ -108,8 +108,18 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 		idSet[id] = true
 	}
 
+	excludeSet := make(map[string]bool, len(cfg.ExcludeIDs))
+	for _, id := range cfg.ExcludeIDs {
+		excludeSet[id] = true
+	}
+
 	var result []Failure
 	for _, f := range catalog.Failures {
+		// Exclude list wins over everything else — applied first so an
+		// excluded ID can never sneak back in via categories or an allowlist.
+		if excludeSet[f.ID] {
+			continue
+		}
 		// External mode: skip faults that don't work without Docker/OS access.
 		if cfg.External && !f.ExternalCompat {
 			continue

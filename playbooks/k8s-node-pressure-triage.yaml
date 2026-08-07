@@ -1,0 +1,117 @@
+series_id: pbs_k8s_node_pressure_triage
+name: "K8s Node Memory Pressure — Triage"
+version: "1.0"
+playbook_type: triage
+entry_point: true
+execution_mode: agent
+agent_name: k8s_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Diagnose a node-level memory pressure alert on a node hosting a PostgreSQL
+  pod. Determine whether postgres itself was affected (evicted, restarted, or
+  OOMKilled) or whether a different pod on the same node consumed memory and
+  triggered kubelet's node-pressure eviction manager, leaving postgres
+  untouched. Distinct from a container-level OOM kill: here the signal
+  originates at the node, not from postgres's own memory limit.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - noisy-neighbor-eviction
+    - postgres-own-oom
+    - node-undersized
+    - transient-pressure-no-impact
+symptoms:
+  - "node experiencing MemoryPressure condition"
+  - "kubelet node-pressure eviction alert for the node hosting postgres"
+  - "Evicted event in namespace events"
+  - "node memory pressure alert"
+  - "noisy neighbor consuming node memory"
+guidance: |
+  IMPORTANT: Always work within the namespace explicitly named in the ticket.
+  This playbook diagnoses NODE-level memory pressure, which is a different
+  failure mode from a container's own OOM kill — do not conflate the two.
+  A node under memory pressure can evict pods to relieve pressure WITHOUT
+  postgres's own container memory limit ever being exceeded, because kubelet
+  ranks eviction candidates by usage-over-request across ALL pods on the
+  node, not just postgres.
+
+  Step 1 — Confirm postgres's own current state:
+  Call get_pods for the ticket namespace. Check the postgres pod: is it
+  Running, and has RestartCount stayed at its pre-incident value? If
+  postgres itself shows Restarts increasing or a LastState with
+  Reason=OOMKilled, STOP — this is NOT node pressure, it is the postgres
+  container's own memory limit being undersized. Do not proceed with this
+  playbook; that scenario is pbs_k8s_pod_crash_triage territory
+  (ExitCode=137, Reason=OOMKilled at the CONTAINER level, distinct from
+  what this playbook covers).
+
+  Step 2 — Find the node and check for eviction events:
+  From Step 1's get_pods output, note postgres's node (the `node` field).
+  Call get_events for the ticket namespace. Look for an event with
+  reason=Evicted. Read the involvedObject — if it names a pod OTHER than
+  postgres (e.g. "noisy-neighbor" or similar), that pod was evicted to
+  relieve node pressure, and postgres was not the target. The event message
+  typically reads like:
+    "The node was low on resource: memory. Threshold quantity: <X>,
+    available: <Y>. Container <name> was using <Z>, request is <R>Mi, has
+    larger consumption of memory."
+  Quote this message verbatim as EVIDENCE. If the Evicted event's
+  involvedObject IS postgres itself, this is a genuine postgres eviction —
+  treat it as a true incident requiring escalation, not a "no impact" finding.
+
+  Step 3 — Confirm the node-level condition:
+  Call get_node_status for the specific node from Step 1. Check the
+  MemoryPressure condition. Status=True (or a recent Message referencing
+  low memory) around the time of the alert confirms the node genuinely
+  crossed its eviction threshold — this corroborates Step 2's event, it does
+  not replace it. If MemoryPressure is False and there is no Evicted event
+  at all, the alert may be stale or transient; note this explicitly rather
+  than fabricating a root cause.
+
+  Step 4 — Identify what drove the pressure (only if Step 2/3 confirm a real
+  event):
+  If dmesg or event context doesn't already make the offending pod's memory
+  footprint clear, call debug_node_dmesg on the node to check for kernel-level
+  OOM/eviction-adjacent log lines corroborating which workload consumed the
+  memory. Do NOT assume without evidence — the offending pod's own
+  request/limit values from Step 2's event message are the primary evidence;
+  dmesg is corroborating only.
+
+  Step 5 — Confirm postgres was never actually disrupted:
+  Re-check get_pods restart count for postgres one more time and cross-check
+  against Step 1: if unchanged and status is Running throughout, state
+  explicitly in FINDINGS that postgres was not evicted, not restarted, and
+  its own memory limit was not implicated — the node event is informational
+  for capacity planning, not an active postgres incident.
+
+  Step 6 — Root cause summary:
+  State clearly:
+  - Which pod was evicted (postgres or another pod) and the verbatim
+    Evicted event message
+  - Whether the node's MemoryPressure condition corroborates the timing
+  - Whether postgres was affected (restarted/evicted) or unaffected
+  - Recommended action: if a recurring noisy neighbor, recommend resource
+    requests/limits or a PriorityClass/pod anti-affinity change for the
+    offending workload (manifest change — do not attempt automatically).
+
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. Two things in FINDINGS are
+  MANDATORY, not optional, and remediation will target the WRONG namespace
+  or fail outright if you omit them: (1) namespace must be the exact literal
+  namespace named in the ticket — never omit it, never write "default" or
+  guess. (2) The handoff signal (TRANSITION_TO or ESCALATE_TO) is mandatory:
+  omitting it stalls the operator review gate:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: namespace=<the exact namespace named in the ticket — MANDATORY, do not omit>; evicted_pod=<name or none>; node=<name>; memory_pressure=<True|False>; postgres_restarted=<yes|no>; action=<none|resource_limits|anti_affinity|investigate>
+  TRANSITION_TO: pbs_k8s_node_pressure_remediate
+escalation:
+  - "the Evicted event names postgres itself, not a different pod — this is a real postgres incident, not a benign noisy-neighbor event"
+  - "postgres's own RestartCount increased or LastState shows OOMKilled — this is a container-level OOM, use pbs_k8s_pod_crash_triage instead"
+  - "MemoryPressure remains True on repeated checks — the node itself may be undersized for its workload, a capacity-planning escalation"
+transitions_to:
+  - pbs_k8s_node_pressure_remediate
+target_hints: []

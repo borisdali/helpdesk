@@ -28,23 +28,23 @@ type Failure struct {
 	Severity      string     `yaml:"severity"`
 	Description   string     `yaml:"description"`
 	Prerequisites string     `yaml:"prerequisites,omitempty"`
-	Inject      InjectSpec `yaml:"inject"`
-	Teardown    InjectSpec `yaml:"teardown"`
-	Prompt      string     `yaml:"prompt"`
-	Evaluation  EvalSpec   `yaml:"evaluation"`
-	Timeout     string     `yaml:"timeout"`
-	GovernanceGap bool `yaml:"governance_gap,omitempty"`
+	Inject        InjectSpec `yaml:"inject"`
+	Teardown      InjectSpec `yaml:"teardown"`
+	Prompt        string     `yaml:"prompt"`
+	Evaluation    EvalSpec   `yaml:"evaluation"`
+	Timeout       string     `yaml:"timeout"`
+	GovernanceGap bool       `yaml:"governance_gap,omitempty"`
 
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required).
-	ExternalCompat   bool       `yaml:"external_compat,omitempty"`
+	ExternalCompat bool `yaml:"external_compat,omitempty"`
 	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
 	// diagnosis. When set and --via-gateway is active, faulttest calls
 	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
-	DiagnosisPlaybookSeriesID string `yaml:"diagnosis_playbook_series_id,omitempty"`
-	ExternalInject   InjectSpec `yaml:"external_inject,omitempty"`
-	ExternalTeardown InjectSpec `yaml:"external_teardown,omitempty"`
-	Remediation RemediationSpec `yaml:"remediation,omitempty"`
+	DiagnosisPlaybookSeriesID string          `yaml:"diagnosis_playbook_series_id,omitempty"`
+	ExternalInject            InjectSpec      `yaml:"external_inject,omitempty"`
+	ExternalTeardown          InjectSpec      `yaml:"external_teardown,omitempty"`
+	Remediation               RemediationSpec `yaml:"remediation,omitempty"`
 
 	// Source is set programmatically to "builtin" or "custom". It is never
 	// read from or written to YAML — the yaml:"-" tag ensures that.
@@ -53,9 +53,12 @@ type Failure struct {
 
 // RemediationSpec describes how to remediate a fault and verify recovery.
 type RemediationSpec struct {
-	PlaybookID    string `yaml:"playbook_id,omitempty"`
-	AgentName     string `yaml:"agent_name,omitempty"`
-	AgentPrompt   string `yaml:"agent_prompt,omitempty"`
+	PlaybookID  string `yaml:"playbook_id,omitempty"`
+	AgentName   string `yaml:"agent_name,omitempty"`
+	AgentPrompt string `yaml:"agent_prompt,omitempty"`
+	// Namespace is the target Kubernetes namespace for k8s-agent playbook
+	// remediation — analogous to a connection string for DB remediation.
+	Namespace     string `yaml:"namespace,omitempty"`
 	VerifySQL     string `yaml:"verify_sql,omitempty"`
 	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }
@@ -84,30 +87,30 @@ func (f Failure) TimeoutDuration() time.Duration {
 
 // InjectSpec describes how to inject or tear down a failure.
 type InjectSpec struct {
-	Type         string            `yaml:"type"`
-	Script       string            `yaml:"script,omitempty"`
-	ScriptInline string            `yaml:"script_inline,omitempty"`
+	Type         string `yaml:"type"`
+	Script       string `yaml:"script,omitempty"`
+	ScriptInline string `yaml:"script_inline,omitempty"`
 	// ExecVia is the container/host target for docker_exec and ssh_exec types.
 	// For ssh_exec it is the remote host in "user@host" or "host" form.
-	ExecVia      string            `yaml:"exec_via,omitempty"`
+	ExecVia string `yaml:"exec_via,omitempty"`
 	// User is the OS user to run the script as in docker_exec mode (e.g., "postgres").
-	User         string            `yaml:"user,omitempty"`
-	Action       string            `yaml:"action,omitempty"`
-	Service      string            `yaml:"service,omitempty"`
-	Signal       string            `yaml:"signal,omitempty"`
-	Overlay      string            `yaml:"overlay,omitempty"`
-	Restore      interface{}       `yaml:"restore,omitempty"`
-	Target       string            `yaml:"target,omitempty"`
-	Override     map[string]string `yaml:"override,omitempty"`
-	Detach       bool              `yaml:"detach,omitempty"`
-	Wait         string            `yaml:"wait,omitempty"`
+	User     string            `yaml:"user,omitempty"`
+	Action   string            `yaml:"action,omitempty"`
+	Service  string            `yaml:"service,omitempty"`
+	Signal   string            `yaml:"signal,omitempty"`
+	Overlay  string            `yaml:"overlay,omitempty"`
+	Restore  interface{}       `yaml:"restore,omitempty"`
+	Target   string            `yaml:"target,omitempty"`
+	Override map[string]string `yaml:"override,omitempty"`
+	Detach   bool              `yaml:"detach,omitempty"`
+	Wait     string            `yaml:"wait,omitempty"`
 }
 
 // EvalSpec describes how to evaluate the agent's response.
 type EvalSpec struct {
-	ExpectedTools     []string          `yaml:"expected_tools"`
-	ExpectedKeywords  KeywordSpec       `yaml:"expected_keywords"`
-	ExpectedDiagnosis DiagnosisSpec     `yaml:"expected_diagnosis"`
+	ExpectedTools     []string      `yaml:"expected_tools"`
+	ExpectedKeywords  KeywordSpec   `yaml:"expected_keywords"`
+	ExpectedDiagnosis DiagnosisSpec `yaml:"expected_diagnosis"`
 }
 
 // KeywordSpec defines expected keywords with synonym tolerance.
@@ -135,6 +138,11 @@ type HarnessConfig struct {
 	KubeContext      string
 	Categories       []string
 	FailureIDs       []string
+	// ExcludeIDs removes specific failure IDs from the run, applied after
+	// Categories/FailureIDs filtering. A denylist, unlike FailureIDs —
+	// useful for "run everything except this one slow fault" without
+	// enumerating every other fault ID.
+	ExcludeIDs []string
 
 	// External enables external PG mode: only external_compat faults are run,
 	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
@@ -331,8 +339,18 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 		idSet[id] = true
 	}
 
+	excludeSet := make(map[string]bool, len(cfg.ExcludeIDs))
+	for _, id := range cfg.ExcludeIDs {
+		excludeSet[id] = true
+	}
+
 	var result []Failure
 	for _, f := range catalog.Failures {
+		// Exclude list wins over everything else — applied first so an
+		// excluded ID can never sneak back in via categories or an allowlist.
+		if excludeSet[f.ID] {
+			continue
+		}
 		// Auto-DB mode: only faults that work against a spun-up Docker PostgreSQL.
 		if cfg.AutoDB && !f.IsAutoDBCompat() {
 			continue

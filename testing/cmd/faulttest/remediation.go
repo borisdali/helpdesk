@@ -154,7 +154,7 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 	var triggerErr error
 	if spec.PlaybookID != "" {
 		method = "playbook"
-		remRunID, triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID)
+		remRunID, triggerErr = r.triggerPlaybook(ctx, spec.PlaybookID, priorRunID, spec.Namespace)
 	} else if spec.AgentPrompt != "" {
 		method = "agent_prompt"
 		agentName := spec.AgentName
@@ -202,14 +202,14 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 // triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
 // approval loop when the run returns pending_approval. Returns the remediation
 // run_id so the caller can fetch steps for the remediation judge.
-func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID string) (string, error) {
+func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID, namespace string) (string, error) {
 	// Give the remediation run a distinct faulttest-* trace so it stays
 	// recognisable as injected (not a real tr_* incident) while remaining a
 	// separate journey from the triage trace (WHY vs WHAT).
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
 	}
-	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID)
+	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID, namespace)
 	if err != nil {
 		return "", err
 	}
@@ -937,11 +937,15 @@ func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout
 }
 
 // resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
-// that named aliases are expanded to a real DSN before being passed to psql.
+// that named aliases — or a raw DSN matching an entry's connection_string —
+// are expanded to a real DSN (with password_env applied) before being passed
+// to psql. Uses FindDBByConnStr rather than a literal map-key lookup because
+// --conn is documented as the literal injection DSN, not necessarily an infra
+// config key (see Injector.resolvedConnEnv in testing/faultlib/injector.go).
 func (r *Remediator) resolvedConnStr() string {
 	if r.cfg.InfraConfigPath != "" {
 		if cfg, err := infra.Load(r.cfg.InfraConfigPath); err == nil {
-			if db, ok := cfg.DBServers[r.cfg.ConnStr]; ok {
+			if db, _, ok := cfg.FindDBByConnStr(r.cfg.ConnStr); ok {
 				return db.ResolvedConnectionString()
 			}
 		}

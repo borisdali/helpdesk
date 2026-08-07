@@ -103,7 +103,7 @@ Every Playbook carries two classes of fields:
 | Field | Type | Purpose |
 |---|---|---|
 | `problem_class` | string | `performance` \| `availability` \| `capacity` \| `data_integrity` \| `security` |
-| `symptoms` | []string | Observable indicators that should trigger this Playbook |
+| `symptoms` | []string | Observable indicators that should trigger this Playbook. For `entry_point: true` playbooks, these are also matched against free-text queries to `POST /api/v1/query` (no `agent` specified) for automatic playbook selection — a strong keyword match selects the playbook directly; otherwise an LLM routing call considers the same symptom text. See [Automatic routing and playbook selection](API.md#automatic-routing-and-playbook-selection). Write symptom text as a human would describe the problem, not as internal jargon — that's what the matcher and the LLM both see. |
 | `guidance` | string | Expert reasoning injected into the planner prompt at run time |
 | `escalation` | []string | Conditions under which the agent must stop and escalate to a human |
 | `related_playbooks` | []string | `pb_*` IDs of related Playbooks |
@@ -825,6 +825,7 @@ Optional request body:
 | Field | Description |
 |---|---|
 | `connection_string` | PostgreSQL DSN for the target database |
+| `namespace` | Kubernetes namespace for the target — analogous to `connection_string`, for playbooks whose `agent_name` is `k8s_agent`. In `agent_approve` mode this value is forcibly injected into every proposed tool call's `args.namespace`, overriding whatever the agent proposes — the target is authoritative from the request, never inferred from free text. |
 | `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
 | `context_id` | A2A session ID for multi-turn continuity within an existing session |
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
@@ -1241,10 +1242,20 @@ pbs_db_restart_triage  (entry_point: true)
         │
         ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
         │
-        └─ Docker-hosted DB (agent cannot read docker logs)
+        └─ Docker-hosted DB, or hosting type unknown
+           (agent cannot read docker logs)
                                           → pbs_sysadmin_docker_inspect
-                                              (sysadmin agent reads container
-                                               state + logs, revises hypothesis)
+                                              (sysadmin agent calls check_host,
+                                               reads the `runtime` field first)
+                                                    │
+                                                    ├─ runtime=kubectl (target is actually
+                                                    │  K8s-managed, not Docker/Podman)
+                                                    │       → pbs_k8s_pod_crash_triage
+                                                    │           (K8s agent diagnoses from
+                                                    │            pod state + on-disk logs)
+                                                    │                 │
+                                                    │                 └─ TRANSITION_TO
+                                                    │                     → pbs_k8s_pod_crash_remediate
                                                     │
                                                     ├─ exitcode=0, clean shutdown
                                                     │       → pbs_db_restart_action [manual]
@@ -1255,11 +1266,18 @@ pbs_db_restart_triage  (entry_point: true)
                                                                then restart)
 ```
 
+This is the deepest path in the graph: two cross-domain escalations (DB agent → sysadmin agent
+→ K8s agent) followed by a same-domain transition (K8s triage → K8s remediation). It is
+live-verified end-to-end against a real cluster with the `db-wal-disk-full-k8s` fault (see
+[FAULTTEST.md](FAULTTEST.md)) — not just unit-tested with synthetic run data.
+
 The agent is prompted with the escalation paths at run time:
 
 > "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
 
 For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
+
+If instead `check_host` reports `runtime=kubectl`, the target is Kubernetes-managed rather than a plain Docker/Podman container — the sysadmin agent's docker-oriented tools (`get_host_logs` in container mode, `check_memory`, `restart_container`) do not apply, since the workload runs in a pod on a cluster, not on the host the sysadmin agent has shell access to. It escalates a third time, to `pbs_k8s_pod_crash_triage`, which has the Kubernetes-native tools (`get_pods`, `describe_pod`, `get_pod_logs`, `read_pod_file`) to diagnose the pod directly. That playbook's exit-code and OOM semantics are Kubernetes-specific and distinct from Docker's — the K8s agent does not reuse the sysadmin agent's `exitcode=`/`oomkilled=` reasoning to interpret them.
 
 ### Requires-evidence warnings
 
@@ -2445,7 +2463,7 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `name` | string | Human-readable name |
 | `description` | string | Planner intent — passed verbatim at run time |
 | `problem_class` | string | `performance` \| `availability` \| `capacity` \| `data_integrity` \| `security` |
-| `symptoms` | []string | Observable indicators that should trigger this Playbook |
+| `symptoms` | []string | Observable indicators that should trigger this Playbook. Used for automatic playbook selection on `entry_point` playbooks — see the field reference above. |
 | `guidance` | string | Expert reasoning injected into the planner prompt |
 | `escalation` | []string | Conditions requiring human escalation |
 | `target_hints` | []string | Tag names or server name patterns for target resolution |

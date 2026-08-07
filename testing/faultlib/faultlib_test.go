@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const builtinMinimum = 32
+const builtinMinimum = 33
 
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Find the catalog relative to this test file.
@@ -238,6 +238,51 @@ func TestFilterFailures_ByID(t *testing.T) {
 	}
 	if result[0].ID != "db-2" {
 		t.Errorf("got ID %q, want %q", result[0].ID, "db-2")
+	}
+}
+
+func TestFilterFailures_ExcludeIDs(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "db-1", Category: "database"},
+			{ID: "db-2", Category: "database"},
+			{ID: "k8s-1", Category: "kubernetes"},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{ExcludeIDs: []string{"k8s-1"}})
+	if len(result) != 2 {
+		t.Fatalf("FilterFailures(exclude k8s-1) = %d, want 2", len(result))
+	}
+	for _, f := range result {
+		if f.ID == "k8s-1" {
+			t.Error("excluded fault k8s-1 present in result")
+		}
+	}
+}
+
+func TestFilterFailures_ExcludeIDs_WinsOverCategory(t *testing.T) {
+	// Exclude must win even when the excluded fault also matches an
+	// explicitly-requested category — otherwise excluding one slow fault
+	// from a category-scoped run wouldn't actually work.
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "k8s-1", Category: "kubernetes"},
+			{ID: "k8s-2", Category: "kubernetes"},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{
+		Categories: []string{"kubernetes"},
+		ExcludeIDs: []string{"k8s-1"},
+	})
+	if len(result) != 1 {
+		t.Fatalf("FilterFailures(category=kubernetes, exclude=k8s-1) = %d, want 1", len(result))
+	}
+	if result[0].ID != "k8s-2" {
+		t.Errorf("got ID %q, want %q", result[0].ID, "k8s-2")
 	}
 }
 

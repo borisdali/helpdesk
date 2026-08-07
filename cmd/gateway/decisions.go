@@ -239,7 +239,7 @@ func (g *Gateway) fetchPendingApprovals(ctx context.Context, status string, limi
 	url := fmt.Sprintf("%s/v1/approvals?status=%s&limit=%d",
 		strings.TrimSuffix(g.auditURL, "/"), status, limit)
 
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, url, nil)
@@ -371,7 +371,7 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 			approvalID = strings.TrimPrefix(id, "fleet:")
 		}
 		aURL := strings.TrimSuffix(g.auditURL, "/") + "/v1/approvals/" + approvalID
-		ctx2, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx2, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx2, http.MethodGet, aURL, nil)
 		if err != nil {
@@ -429,7 +429,7 @@ func (g *Gateway) handleGetDecision(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(id, "feedback:"):
 		runID := strings.TrimPrefix(id, "feedback:")
 		aURL := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID + "/feedback"
-		ctx2, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		ctx2, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
 		req2, err := http.NewRequestWithContext(ctx2, http.MethodGet, aURL, nil)
 		if err != nil {
@@ -538,7 +538,7 @@ func (g *Gateway) fetchPendingGates(ctx context.Context, limit int) ([]decisions
 	url := fmt.Sprintf("%s/v1/fleet/playbook-runs?outcome=%s&limit=%d",
 		strings.TrimSuffix(g.auditURL, "/"), audit.OutcomeGatePending, limit)
 
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, url, nil)
@@ -604,7 +604,7 @@ func (g *Gateway) fetchPendingFeedback(ctx context.Context, limit int) ([]decisi
 	url := fmt.Sprintf("%s/v1/fleet/playbook-runs/feedback-pending",
 		strings.TrimSuffix(g.auditURL, "/"))
 
-	ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx2, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, url, nil)

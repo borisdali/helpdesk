@@ -11,7 +11,7 @@ import (
 	"helpdesk/playbooks"
 )
 
-const builtinMinimum = 32
+const builtinMinimum = 33
 
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Load the real catalog and verify structure.
@@ -294,6 +294,51 @@ func TestFilterFailures_ByCategoryAndID(t *testing.T) {
 	}
 }
 
+func TestFilterFailures_ExcludeIDs(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "db-1", Category: "database"},
+			{ID: "db-2", Category: "database"},
+			{ID: "k8s-1", Category: "kubernetes"},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{ExcludeIDs: []string{"k8s-1"}})
+	if len(result) != 2 {
+		t.Fatalf("FilterFailures(exclude k8s-1) = %d failures, want 2", len(result))
+	}
+	for _, f := range result {
+		if f.ID == "k8s-1" {
+			t.Error("excluded fault k8s-1 present in result")
+		}
+	}
+}
+
+func TestFilterFailures_ExcludeIDs_WinsOverCategory(t *testing.T) {
+	// Exclude must win even when the excluded fault also matches an
+	// explicitly-requested category — otherwise excluding one slow fault
+	// from a category-scoped run wouldn't actually work.
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "k8s-1", Category: "kubernetes"},
+			{ID: "k8s-2", Category: "kubernetes"},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{
+		Categories: []string{"kubernetes"},
+		ExcludeIDs: []string{"k8s-1"},
+	})
+	if len(result) != 1 {
+		t.Fatalf("FilterFailures(category=kubernetes, exclude=k8s-1) = %d failures, want 1", len(result))
+	}
+	if result[0].ID != "k8s-2" {
+		t.Errorf("got ID %q, want %q", result[0].ID, "k8s-2")
+	}
+}
+
 func TestFilterFailures_External(t *testing.T) {
 	catalog := &Catalog{
 		Version: "1",
@@ -323,10 +368,10 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 		t.Errorf("database category count = %d, want >= 16", len(dbFailures))
 	}
 
-	// Filter by kubernetes category should return at least 8 failures.
+	// Filter by kubernetes category should return at least 9 failures.
 	k8sFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"kubernetes"}})
-	if len(k8sFailures) < 8 {
-		t.Errorf("kubernetes category count = %d, want >= 8", len(k8sFailures))
+	if len(k8sFailures) < 9 {
+		t.Errorf("kubernetes category count = %d, want >= 9", len(k8sFailures))
 	}
 
 	// Filter by host category should return at least 2 failures.

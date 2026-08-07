@@ -48,7 +48,7 @@ func TestTriggerPlaybook_Success(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err != nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 
@@ -71,14 +71,14 @@ func TestTriggerPlaybook_ServerError(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
 }
 
 func TestTriggerPlaybook_NoGateway(t *testing.T) {
 	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", ""); err == nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err == nil {
 		t.Error("expected error when GatewayURL is empty, got nil")
 	}
 }
@@ -271,7 +271,7 @@ func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate", ""); err != nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_lock_chain_remediate", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if proceedCount != 1 {
@@ -321,7 +321,7 @@ func TestTriggerPlaybook_BridgesTraceID(t *testing.T) {
 
 	r := newTestRemediator(t, srv.URL)
 	ctx := context.WithValue(context.Background(), ctxKeyFaultTraceID{}, "trace-rem-bridge")
-	if _, err := r.triggerPlaybook(ctx, "pbs_test", ""); err != nil {
+	if _, err := r.triggerPlaybook(ctx, "pbs_test", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	// triggerPlaybook appends -remed so the gateway run lands under the remediation trace.
@@ -341,7 +341,7 @@ func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_test", "plr_triage01"); err != nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_test", "plr_triage01", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if gotBody["prior_run_id"] != "plr_triage01" {
@@ -358,7 +358,7 @@ func TestTriggerPlaybook_OmitsPriorRunIDWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	r := newTestRemediator(t, srv.URL)
-	if _, err := r.triggerPlaybook(context.Background(), "pbs_test", ""); err != nil {
+	if _, err := r.triggerPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
 		t.Fatalf("triggerPlaybook: %v", err)
 	}
 	if _, present := gotBody["prior_run_id"]; present {

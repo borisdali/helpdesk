@@ -64,6 +64,13 @@ type RemediationSpec struct {
 	AgentName string `yaml:"agent_name,omitempty"`
 	// AgentPrompt is the prompt sent to the agent for remediation.
 	AgentPrompt string `yaml:"agent_prompt,omitempty"`
+	// Namespace is the target Kubernetes namespace for k8s-agent playbook
+	// remediation — analogous to a connection string for DB remediation.
+	// Sent as the authoritative namespace on the playbook run request; the
+	// gateway forces it into every tool call's args rather than relying on
+	// the remediation LLM to parse it out of free-text triage findings
+	// (that proved unreliable — see cmd/gateway/step_proposer.go).
+	Namespace string `yaml:"namespace,omitempty"`
 	// VerifySQL is the SQL query run to confirm recovery (default: "SELECT 1").
 	VerifySQL string `yaml:"verify_sql,omitempty"`
 	// VerifyTimeout is the max time to wait for recovery (default: "120s").
@@ -95,26 +102,26 @@ func (f Failure) IsAutoDBCompat() bool {
 
 // InjectSpec describes how to inject or tear down a failure.
 type InjectSpec struct {
-	Type         string            `yaml:"type"`
-	Script       string            `yaml:"script,omitempty"`
-	ScriptInline string            `yaml:"script_inline,omitempty"`
+	Type         string `yaml:"type"`
+	Script       string `yaml:"script,omitempty"`
+	ScriptInline string `yaml:"script_inline,omitempty"`
 	// ExecVia is the container/host target for docker_exec and ssh_exec types.
 	// For ssh_exec it is the remote host in "user@host" or "host" form.
-	ExecVia      string            `yaml:"exec_via,omitempty"`
+	ExecVia string `yaml:"exec_via,omitempty"`
 	// User is the OS user to run the script as in docker_exec mode (e.g., "postgres").
-	User         string            `yaml:"user,omitempty"`
-	Action       string            `yaml:"action,omitempty"`
-	Service      string            `yaml:"service,omitempty"`
-	Signal       string            `yaml:"signal,omitempty"`
-	Overlay      string            `yaml:"overlay,omitempty"`
-	Restore      interface{}       `yaml:"restore,omitempty"`
-	Target       string            `yaml:"target,omitempty"`
-	Override     map[string]string `yaml:"override,omitempty"`
-	Detach       bool              `yaml:"detach,omitempty"`
+	User     string            `yaml:"user,omitempty"`
+	Action   string            `yaml:"action,omitempty"`
+	Service  string            `yaml:"service,omitempty"`
+	Signal   string            `yaml:"signal,omitempty"`
+	Overlay  string            `yaml:"overlay,omitempty"`
+	Restore  interface{}       `yaml:"restore,omitempty"`
+	Target   string            `yaml:"target,omitempty"`
+	Override map[string]string `yaml:"override,omitempty"`
+	Detach   bool              `yaml:"detach,omitempty"`
 	// Wait is an optional duration to sleep after the injection action completes
 	// (e.g. "30s"). Useful for kustomize overlays that trigger a rolling update:
 	// the sleep lets the pod enter its failure state before the agent prompt is sent.
-	Wait         string            `yaml:"wait,omitempty"`
+	Wait string `yaml:"wait,omitempty"`
 }
 
 // EvalSpec describes how to evaluate the agent's response.
@@ -153,6 +160,13 @@ type HarnessConfig struct {
 	KubeContext      string
 	Categories       []string
 	FailureIDs       []string
+	// ExcludeIDs removes specific failure IDs from the run, applied after
+	// Categories/FailureIDs filtering. Unlike FailureIDs (an allowlist),
+	// this is a denylist — useful for "run everything except this one slow
+	// fault" without having to enumerate every other fault ID, which would
+	// silently drift out of date whenever a new fault is added to the
+	// catalog.
+	ExcludeIDs []string
 
 	// External enables external PG mode: only external_compat faults are run,
 	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
@@ -161,6 +175,12 @@ type HarnessConfig struct {
 	// and use it as the injection target. Implies External=true. Only auto-db-compat
 	// faults are run (ExternalCompat, non-kubernetes, non-ssh_exec inject).
 	AutoDB bool
+	// AutoDBContainerName is the docker container name for the auto-db instance
+	// (e.g. "faulttest-auto-db-deadbeef"). Set by the caller after provisioning
+	// the container; used as a fallback by Injector.resolvedContainerName when
+	// no infra config entry matches ConnStr, and exposed as $FAULTTEST_CONTAINER
+	// to shell_exec/ssh_exec inject/teardown scripts.
+	AutoDBContainerName string
 	// RemediateEnabled runs the remediation phase after injection + diagnosis.
 	RemediateEnabled bool
 	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
@@ -257,13 +277,13 @@ type EvalResult struct {
 	// OrderingPass is true when all ExpectedToolOrder pairs are satisfied
 	// (tool_a evidence precedes tool_b evidence in the response text).
 	// Always true when ExpectedToolOrder is empty.
-	OrderingPass bool    `json:"ordering_pass"`
-	ResponseText string  `json:"response_text"`
-	Duration     string  `json:"duration"`
-	Error        string  `json:"error,omitempty"`
+	OrderingPass bool   `json:"ordering_pass"`
+	ResponseText string `json:"response_text"`
+	Duration     string `json:"duration"`
+	Error        string `json:"error,omitempty"`
 
 	// Judge fields (populated by EvaluateWithJudge when judge is enabled).
-	DiagnosisScore float64 `json:"diagnosis_score"`           // 0.0-1.0 from judge or category match
+	DiagnosisScore float64 `json:"diagnosis_score"` // 0.0-1.0 from judge or category match
 	JudgeReasoning string  `json:"judge_reasoning,omitempty"`
 	JudgeModel     string  `json:"judge_model,omitempty"`
 	JudgeSkipped   bool    `json:"judge_skipped,omitempty"`
@@ -277,9 +297,9 @@ type EvalResult struct {
 	// Phase 2 scoring fields.
 	// RemediationScore is 0.0-1.0: 1.0 if recovered within half the verify timeout,
 	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
-	RemediationScore  float64 `json:"remediation_score,omitempty"`
+	RemediationScore float64 `json:"remediation_score,omitempty"`
 	// RemediationMethod records how remediation was triggered: "playbook", "agent_prompt", or "none".
-	RemediationMethod string  `json:"remediation_method,omitempty"`
+	RemediationMethod string `json:"remediation_method,omitempty"`
 	// OverallScore combines diagnosis and remediation: DiagnosisScore*0.6 + RemediationScore*0.4
 	// when remediation was attempted; equals DiagnosisScore (i.e. Score) when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`

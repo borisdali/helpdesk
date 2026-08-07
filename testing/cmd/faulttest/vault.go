@@ -25,8 +25,8 @@ import (
 
 // historyRun is one faulttest run record stored in the history file.
 type historyRun struct {
-	RunID     string               `json:"run_id"`
-	Timestamp string               `json:"timestamp"`
+	RunID     string `json:"run_id"`
+	Timestamp string `json:"timestamp"`
 	// Target identifies the database server that was tested — the --agent-conn
 	// alias (e.g. "alloydb-on-vm") when set, otherwise the hostname extracted
 	// from --conn. Allows vault commands to filter by deployment environment.
@@ -42,7 +42,7 @@ type historyFaultResult struct {
 	FailureID        string  `json:"failure_id"`
 	FailureName      string  `json:"failure_name"`
 	Passed           bool    `json:"passed"`
-	Score            float64 `json:"score"`             // composite (keyword+tool+category/judge)
+	Score            float64 `json:"score"` // composite (keyword+tool+category/judge)
 	KeywordScore     float64 `json:"keyword_score,omitempty"`
 	ToolScore        float64 `json:"tool_score,omitempty"`
 	DiagnosisScore   float64 `json:"diagnosis_score,omitempty"` // category match OR judge score
@@ -149,7 +149,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
-	fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
+		fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
@@ -216,7 +216,7 @@ func cmdVault(args []string) {
 // playbookGatewayInfo holds live data fetched from the gateway for one playbook series.
 type playbookGatewayInfo struct {
 	check          playbookCheckResult
-	source         string  // "system" | "imported" | "manual" | "generated"
+	source         string // "system" | "imported" | "manual" | "generated"
 	totalRuns      int
 	resolved       int
 	resolutionRate float64 // 0.0–1.0
@@ -300,8 +300,8 @@ func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo 
 				RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
 				RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
 				RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
-				AvgStepCount                  float64 `json:"avg_step_count"`
-				AvgRecoverySecs               float64 `json:"avg_recovery_secs"`
+				AvgStepCount                   float64 `json:"avg_step_count"`
+				AvgRecoverySecs                float64 `json:"avg_recovery_secs"`
 			} `json:"stats"`
 		} `json:"playbooks"`
 	}
@@ -1609,6 +1609,12 @@ type incidentRun struct {
 	FindingsSummary string `json:"findings_summary"`
 	PriorRunID      string `json:"prior_run_id"`
 	TraceID         string `json:"trace_id"`
+	// EscalatedTo/TransitionedTo classify what a run's successor (if any) is:
+	// a non-empty EscalatedTo means the successor is another diagnosis hop;
+	// a non-empty TransitionedTo means the successor is the remediation run.
+	// See walkToRemediation.
+	EscalatedTo    string `json:"escalated_to,omitempty"`
+	TransitionedTo string `json:"transitioned_to,omitempty"`
 }
 
 // incidentFeedback is the feedback response shape from GET .../feedback.
@@ -1754,12 +1760,21 @@ func fetchFeedback(gatewayURL, apiKey, runID string) *incidentFeedback {
 	return fallback
 }
 
-// fetchRemediationRun fetches the remediation run linked to a triage run via
-// GET /api/v1/fleet/playbook-runs?prior_run_id={triageRunID}&limit=1.
-// Returns nil when no remediation run exists for the triage run.
-func fetchRemediationRun(gatewayURL, apiKey, triageRunID string) *incidentRun {
+// maxEscalationHops bounds how many prior_run_id hops walkToRemediation will
+// follow. A read-path runaway/cycle guard only — independent of the
+// gateway's identically-named, identically-valued constant in
+// cmd/gateway/incident_narrative.go (two separate binaries, no shared
+// package for this small a constant), and independent of playbooks.go's
+// maxChainDepth (5), which is a live, single-request auto-chaining policy,
+// not a display-time replay bound.
+const maxEscalationHops = 20
+
+// fetchNextHop finds the run whose prior_run_id equals runID — i.e. the run
+// that runID escalated or transitioned into — or nil if none exists (yet).
+// GET /api/v1/fleet/playbook-runs?prior_run_id={runID}&limit=1.
+func fetchNextHop(gatewayURL, apiKey, runID string) *incidentRun {
 	url := strings.TrimSuffix(gatewayURL, "/") +
-		"/api/v1/fleet/playbook-runs?prior_run_id=" + triageRunID + "&limit=1"
+		"/api/v1/fleet/playbook-runs?prior_run_id=" + runID + "&limit=1"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil
@@ -1779,6 +1794,40 @@ func fetchRemediationRun(gatewayURL, apiKey, triageRunID string) *incidentRun {
 		return nil
 	}
 	return &result.Runs[0]
+}
+
+// walkToRemediation walks the prior_run_id chain from a triage run and
+// returns the run that was reached via an explicit TRANSITION_TO signal —
+// the true remediation run — or nil if the chain hasn't reached one yet
+// (still mid-escalation, or terminated without ever transitioning). This
+// mirrors the classification rule in cmd/gateway/incident_narrative.go's
+// fetchEscalationHops/handleGetIncident: a successor is classified by its
+// PREDECESSOR's EscalatedTo/TransitionedTo, not by chain position — a run
+// reached via ESCALATE_TO is another diagnosis hop, not remediation, however
+// many of those hops exist.
+func walkToRemediation(gatewayURL, apiKey string, triageRun *incidentRun) *incidentRun {
+	predecessor := triageRun
+	seen := map[string]bool{triageRun.RunID: true}
+	cursor := triageRun.RunID
+	for i := 0; i < maxEscalationHops; i++ {
+		hop := fetchNextHop(gatewayURL, apiKey, cursor)
+		if hop == nil {
+			return nil // chain ends here — no remediation reached (yet)
+		}
+		if seen[hop.RunID] {
+			return nil // cycle — data anomaly, stop rather than loop forever
+		}
+		if predecessor.TransitionedTo != "" {
+			return hop // reached via TRANSITION_TO — this is the remediation run
+		}
+		// Reached via ESCALATE_TO (or neither signal set — defensive
+		// default, never guess a hop into "remediation" without an
+		// explicit TRANSITION_TO): keep walking.
+		seen[hop.RunID] = true
+		predecessor = hop
+		cursor = hop.RunID
+	}
+	return nil // hit maxEscalationHops without reaching a transition
 }
 
 // faultFromTraceID extracts the fault ID from a faulttest trace ID of the form
@@ -2059,7 +2108,7 @@ func vaultIncidents(args []string) {
 			diagOutcome = "unknown"
 		}
 
-		remed := fetchRemediationRun(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		remed := walkToRemediation(cfg.GatewayURL, cfg.GatewayAPIKey, &run)
 		remedStr := formatRemediationOutcome(remed)
 
 		fb := fetchFeedback(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
@@ -2125,22 +2174,22 @@ func vaultIncidents(args []string) {
 
 // journeySummary mirrors audit.JourneySummary for JSON decoding.
 type journeySummary struct {
-	TraceID       string               `json:"trace_id"`
-	StartedAt     string               `json:"started_at"`
-	EndedAt       string               `json:"ended_at"`
-	DurationMs    int64                `json:"duration_ms"`
-	UserID        string               `json:"user_id,omitempty"`
-	UserQuery     string               `json:"user_query,omitempty"`
-	Agent         string               `json:"agent,omitempty"`
-	Category      string               `json:"category,omitempty"`
-	Delegations   []delegationSummary  `json:"delegations,omitempty"`
-	ToolsUsed     []string             `json:"tools_used"`
-	Outcome       string               `json:"outcome,omitempty"`
-	EventCount    int                  `json:"event_count"`
-	RetryCount    int                  `json:"retry_count,omitempty"`
-	Origin        string               `json:"origin,omitempty"`
-	HasMismatch   bool                 `json:"has_mismatch,omitempty"`
-	IncidentRunID string               `json:"incident_run_id,omitempty"`
+	TraceID       string              `json:"trace_id"`
+	StartedAt     string              `json:"started_at"`
+	EndedAt       string              `json:"ended_at"`
+	DurationMs    int64               `json:"duration_ms"`
+	UserID        string              `json:"user_id,omitempty"`
+	UserQuery     string              `json:"user_query,omitempty"`
+	Agent         string              `json:"agent,omitempty"`
+	Category      string              `json:"category,omitempty"`
+	Delegations   []delegationSummary `json:"delegations,omitempty"`
+	ToolsUsed     []string            `json:"tools_used"`
+	Outcome       string              `json:"outcome,omitempty"`
+	EventCount    int                 `json:"event_count"`
+	RetryCount    int                 `json:"retry_count,omitempty"`
+	Origin        string              `json:"origin,omitempty"`
+	HasMismatch   bool                `json:"has_mismatch,omitempty"`
+	IncidentRunID string              `json:"incident_run_id,omitempty"`
 }
 
 // delegationSummary mirrors audit.DelegationSummary.
@@ -2507,9 +2556,9 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 
 // journeyEvent is a minimal mirror of audit.Event for JSON decoding.
 type journeyEvent struct {
-	EventID   string `json:"event_id"`
-	Timestamp string `json:"timestamp"`
-	EventType string `json:"event_type"`
+	EventID        string            `json:"event_id"`
+	Timestamp      string            `json:"timestamp"`
+	EventType      string            `json:"event_type"`
 	ToolExecution  *journeyToolExec  `json:"tool,omitempty"`
 	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
 }
@@ -3065,18 +3114,18 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 			continue
 		}
 		payload := map[string]any{
-			"failure_id":                    r.FailureID,
-			"failure_name":                  r.FailureName,
-			"keyword_score":                 r.KeywordScore,
-			"tool_score":                    r.ToolScore,
-			"diagnosis_score":               r.DiagnosisScore,
-			"remediation_score":             r.RemediationScore,
-			"overall_score":                 r.OverallScore,
-			"judge_used":                    !r.JudgeSkipped && r.JudgeModel != "",
-			"passed":                        r.Passed,
-			"remediation_judge_score":       r.RemediationJudgeScore,
-			"remediation_judge_reasoning":   r.RemediationJudgeReasoning,
-			"primary_confidence":            r.PrimaryConfidence,
+			"failure_id":                  r.FailureID,
+			"failure_name":                r.FailureName,
+			"keyword_score":               r.KeywordScore,
+			"tool_score":                  r.ToolScore,
+			"diagnosis_score":             r.DiagnosisScore,
+			"remediation_score":           r.RemediationScore,
+			"overall_score":               r.OverallScore,
+			"judge_used":                  !r.JudgeSkipped && r.JudgeModel != "",
+			"passed":                      r.Passed,
+			"remediation_judge_score":     r.RemediationJudgeScore,
+			"remediation_judge_reasoning": r.RemediationJudgeReasoning,
+			"primary_confidence":          r.PrimaryConfidence,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -3167,20 +3216,20 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 
 // versionStats mirrors the PlaybookVersionStats struct returned by the gateway.
 type versionStats struct {
-	SeriesID        string  `json:"series_id"`
-	PlaybookID      string  `json:"playbook_id"`
-	OriginTrace     string  `json:"origin_trace"`
-	Version         string  `json:"version"`
-	IsActive        bool    `json:"is_active"`
-	TotalRuns       int     `json:"total_runs"`
-	Resolved        int     `json:"resolved"`
-	ResolutionRate  float64 `json:"resolution_rate"`
-	Transitioned    int     `json:"transitioned"`
-	TransitionRate  float64 `json:"transition_rate"`
-	Escalated       int     `json:"escalated"`
-	EscalationRate  float64 `json:"escalation_rate"`
-	AvgStepCount    float64 `json:"avg_step_count"`
-	AvgRecoverySecs float64 `json:"avg_recovery_secs"`
+	SeriesID            string  `json:"series_id"`
+	PlaybookID          string  `json:"playbook_id"`
+	OriginTrace         string  `json:"origin_trace"`
+	Version             string  `json:"version"`
+	IsActive            bool    `json:"is_active"`
+	TotalRuns           int     `json:"total_runs"`
+	Resolved            int     `json:"resolved"`
+	ResolutionRate      float64 `json:"resolution_rate"`
+	Transitioned        int     `json:"transitioned"`
+	TransitionRate      float64 `json:"transition_rate"`
+	Escalated           int     `json:"escalated"`
+	EscalationRate      float64 `json:"escalation_rate"`
+	AvgStepCount        float64 `json:"avg_step_count"`
+	AvgRecoverySecs     float64 `json:"avg_recovery_secs"`
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`
 	DiagEvalCount       int     `json:"diag_eval_count"`
 	AvgRemediationScore float64 `json:"avg_remediation_score"`
@@ -3562,14 +3611,14 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	type judgeRow struct {
-		SeriesID       string
-		Version        string
-		JudgeVerdict   string
-		JudgeModel     string
-		JudgeAt        string
-		TotalRuns      int
-		ResolvedRate   float64
-		EscalatedRate  float64
+		SeriesID      string
+		Version       string
+		JudgeVerdict  string
+		JudgeModel    string
+		JudgeAt       string
+		TotalRuns     int
+		ResolvedRate  float64
+		EscalatedRate float64
 	}
 
 	// Build rows by reading judge verdicts directly from each playbook in the
@@ -3623,8 +3672,8 @@ func vaultJudgeAccuracy(args []string) {
 				JudgeAt:      pb.JudgeAt,
 			}
 			if v, ok := runsByPB[pb.PlaybookID]; ok {
-				row.TotalRuns     = v.TotalRuns
-				row.ResolvedRate  = v.ResolutionRate + v.TransitionRate
+				row.TotalRuns = v.TotalRuns
+				row.ResolvedRate = v.ResolutionRate + v.TransitionRate
 				row.EscalatedRate = v.EscalationRate
 			}
 			rows = append(rows, row)
@@ -3637,11 +3686,11 @@ func vaultJudgeAccuracy(args []string) {
 	}
 
 	const (
-		colSeries   = 32
-		colVer      = 10
-		colVerdict  = 20
-		colRuns     = 6
-		colResolved = 10
+		colSeries    = 32
+		colVer       = 10
+		colVerdict   = 20
+		colRuns      = 6
+		colResolved  = 10
 		colEscalated = 11
 	)
 	sepWidth := colSeries + 2 + colVer + 2 + colVerdict + 2 + colRuns + 2 + colResolved + 2 + colEscalated + 2 + 20
@@ -4105,6 +4154,18 @@ type narrativeJourneyRef struct {
 	TraceID string `json:"trace_id"`
 }
 
+// narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
+type narrativeEscalationHop struct {
+	RunID            string               `json:"run_id"`
+	Playbook         string               `json:"playbook"`
+	Outcome          string               `json:"outcome"`
+	EscalatedTo      string               `json:"escalated_to,omitempty"`
+	Findings         string               `json:"findings,omitempty"`
+	DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+	Steps            []narrativeStep      `json:"steps,omitempty"`
+	TraceID          string               `json:"trace_id,omitempty"`
+}
+
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
 type incidentNarrative struct {
 	IncidentID     string     `json:"incident_id"`
@@ -4113,7 +4174,7 @@ type incidentNarrative struct {
 	DurationSec    float64    `json:"duration_sec,omitempty"`
 	Operator       string     `json:"operator"`
 	TriggerContext string     `json:"trigger_context,omitempty"`
-	Triage      struct {
+	Triage         struct {
 		RunID            string               `json:"run_id"`
 		Playbook         string               `json:"playbook"`
 		Findings         string               `json:"findings,omitempty"`
@@ -4125,6 +4186,9 @@ type incidentNarrative struct {
 		Resolution     string    `json:"resolution"`
 		Reason         string    `json:"reason,omitempty"`
 	} `json:"gate,omitempty"`
+	// Escalations holds every intermediate hop reached via ESCALATE_TO,
+	// strictly between Triage and the (optional) terminal Remediation.
+	Escalations []narrativeEscalationHop `json:"escalations,omitempty"`
 	Remediation *struct {
 		RunID      string          `json:"run_id"`
 		Playbook   string          `json:"playbook"`
@@ -4255,6 +4319,39 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		}
 	}
 
+	// ── ESCALATION ───────────────────────────────────────────
+	for i, hop := range n.Escalations {
+		section(fmt.Sprintf("ESCALATION %d/%d", i+1, len(n.Escalations)))
+		fmt.Printf("Playbook:  %s   Outcome: %s\n", hop.Playbook, hop.Outcome)
+		if hop.EscalatedTo != "" {
+			fmt.Printf("Escalated to: %s\n", hop.EscalatedTo)
+		}
+		if hop.Findings != "" {
+			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
+		}
+		if hop.DiagnosticReport != nil && len(hop.DiagnosticReport.Hypotheses) > 0 {
+			fmt.Println("\nHypotheses:")
+			for _, h := range hop.DiagnosticReport.Hypotheses {
+				tag := fmt.Sprintf("[REJECTED %2.0f%%]", h.Confidence*100)
+				if h.IsPrimary {
+					tag = fmt.Sprintf("[PRIMARY  %2.0f%%]", h.Confidence*100)
+				}
+				fmt.Printf("  %s %s\n", tag, h.Text)
+			}
+		}
+		if len(hop.Steps) > 0 {
+			stepNames := make([]string, 0, len(hop.Steps))
+			for _, s := range hop.Steps {
+				prefix := "✓"
+				if s.Status == "failed" || s.Status == "error" {
+					prefix = "✗"
+				}
+				stepNames = append(stepNames, prefix+" "+s.StepName)
+			}
+			fmt.Printf("Steps:     %s\n", strings.Join(stepNames, "  "))
+		}
+	}
+
 	// ── REMEDIATION ──────────────────────────────────────────
 	if n.Remediation != nil {
 		section("REMEDIATION")
@@ -4337,13 +4434,15 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		for _, j := range n.Journeys {
 			label := j.Phase
 			desc := ""
-			switch j.Phase {
-			case "triage":
+			switch {
+			case j.Phase == "triage":
 				desc = "reasoning chain, hypothesis building"
-			case "remediation":
+			case j.Phase == "remediation":
 				desc = "tool calls, approvals, blast-radius decisions"
-			case "triage+remediation":
+			case j.Phase == "triage+remediation":
 				desc = "full session: diagnosis through fix"
+			case strings.HasPrefix(j.Phase, "escalation:"):
+				desc = "intermediate escalation hop — further diagnosis, not yet resolved"
 			}
 			fmt.Printf("  %-22s %s\n", label+":", j.TraceID)
 			if desc != "" {
@@ -4389,10 +4488,14 @@ func wrapLines(text string, maxWidth int) []string {
 }
 
 func wordWrap(text string, maxWidth int, indent string) string {
-	if len(text) <= maxWidth {
-		return text
-	}
 	words := strings.Fields(text)
+	if len(words) == 0 {
+		return ""
+	}
+	normalized := strings.Join(words, " ")
+	if len(normalized) <= maxWidth {
+		return normalized
+	}
 	var lines []string
 	current := ""
 	for _, w := range words {

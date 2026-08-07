@@ -499,9 +499,9 @@ func TestHandleGetDecisions_IncludesFeedbackType(t *testing.T) {
 		switch {
 		case r.URL.Path == "/v1/fleet/playbook-runs/feedback-pending":
 			json.NewEncoder(w).Encode([]map[string]any{{ //nolint:errcheck
-				"run_id":      "plr_fb05",
-				"series_id":   "pbs_lock_chain_triage",
-				"operator":    "faulttest",
+				"run_id":       "plr_fb05",
+				"series_id":    "pbs_lock_chain_triage",
+				"operator":     "faulttest",
 				"submitted_at": "2026-06-08T10:00:00Z",
 			}})
 		case r.URL.Path == "/v1/approvals":
@@ -661,13 +661,13 @@ func TestHandleGetIncident(t *testing.T) {
 func TestHandleGetIncident_JourneyRefs(t *testing.T) {
 	makeRun := func(runID, seriesID, outcome, priorRunID, traceID string) *audit.PlaybookRun {
 		return &audit.PlaybookRun{
-			RunID:      runID,
-			SeriesID:   seriesID,
-			Outcome:    outcome,
-			PriorRunID: priorRunID,
-			TraceID:    traceID,
-			Operator:   "alice",
-			StartedAt:  time.Now().Add(-30 * time.Second).UTC(),
+			RunID:       runID,
+			SeriesID:    seriesID,
+			Outcome:     outcome,
+			PriorRunID:  priorRunID,
+			TraceID:     traceID,
+			Operator:    "alice",
+			StartedAt:   time.Now().Add(-30 * time.Second).UTC(),
 			CompletedAt: time.Now().UTC(),
 		}
 	}
@@ -715,6 +715,7 @@ func TestHandleGetIncident_JourneyRefs(t *testing.T) {
 
 	t.Run("two distinct traces → separate triage and remediation refs", func(t *testing.T) {
 		triage := makeRun("plr_t1", "pbs_lock_triage", audit.OutcomeTransitioned, "", "trace-triage-001")
+		triage.TransitionedTo = "pbs_lock_remediate" // production always sets Outcome+TransitionedTo together
 		rem := makeRun("plr_r1", "pbs_lock_remediate", audit.OutcomeResolved, "plr_t1", "trace-remed-001")
 		n := runGateway(t, triage, rem)
 
@@ -731,6 +732,7 @@ func TestHandleGetIncident_JourneyRefs(t *testing.T) {
 
 	t.Run("shared trace ID → single triage+remediation ref", func(t *testing.T) {
 		triage := makeRun("plr_t2", "pbs_lock_triage", audit.OutcomeTransitioned, "", "trace-shared-001")
+		triage.TransitionedTo = "pbs_lock_remediate" // production always sets Outcome+TransitionedTo together
 		rem := makeRun("plr_r2", "pbs_lock_remediate", audit.OutcomeResolved, "plr_t2", "trace-shared-001")
 		n := runGateway(t, triage, rem)
 

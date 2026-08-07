@@ -19,6 +19,10 @@
 //   - FAULTTEST_KUBE_CONTEXT: Kubernetes context (optional)
 //   - FAULTTEST_CATEGORIES: Comma-separated categories to test (optional)
 //   - FAULTTEST_IDS: Comma-separated failure IDs to test (optional)
+//   - FAULTTEST_EXCLUDE_IDS: Comma-separated failure IDs to skip (optional) —
+//     a denylist, applied after FAULTTEST_CATEGORIES/FAULTTEST_IDS; useful
+//     for excluding one slow fault from a routine run without having to
+//     enumerate every other fault ID
 //   - FAULTTEST_GATEWAY_URL: Gateway base URL (e.g., http://localhost:8080)
 //   - FAULTTEST_VIA_GATEWAY: Set to "true" to route diagnosis through gateway playbooks
 //   - FAULTTEST_APPROVAL_MODE: Override playbook approval_mode (use "force" for automated runs)
@@ -73,7 +77,7 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		ApprovalMode:     approvalMode,
 		RemediateEnabled: os.Getenv("FAULTTEST_REMEDIATE") == "true",
 		// Audit service — enables structured tool evidence and emit-and-wait step approvals.
-		AuditURL:  os.Getenv("FAULTTEST_AUDIT_URL"),
+		AuditURL: os.Getenv("FAULTTEST_AUDIT_URL"),
 		// Operator identity sent as X-User on gateway requests.
 		OperatorID: os.Getenv("FAULTTEST_OPERATOR"),
 		// Gate and emit-and-wait options (K8s/Docker safe; safe with approval_mode=force).
@@ -86,6 +90,9 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 	}
 	if ids := os.Getenv("FAULTTEST_IDS"); ids != "" {
 		cfg.FailureIDs = strings.Split(ids, ",")
+	}
+	if excludeIDs := os.Getenv("FAULTTEST_EXCLUDE_IDS"); excludeIDs != "" {
+		cfg.ExcludeIDs = strings.Split(excludeIDs, ",")
 	}
 
 	// Find the testing directory and resolve paths relative to it.
@@ -242,13 +249,15 @@ func TestFaultInjection(t *testing.T) {
 			// Save original conn string for config-override failures.
 			origConn := cfg.ConnStr
 
-			// 1. Inject failure.
-			t.Log("Injecting failure...")
-			if err := injector.Inject(ctx, f); err != nil {
-				t.Fatalf("Injection failed: %v", err)
-			}
-
-			// 2. Ensure teardown happens.
+			// 1. Ensure teardown happens — registered BEFORE Inject runs, not
+			// after, so a t.Fatalf on injection failure (which calls
+			// runtime.Goexit and unwinds the goroutine immediately) still
+			// runs teardown for whatever the failed injection already
+			// created. A defer registered after the Inject call is never
+			// reached at all when Inject itself fails, silently stranding
+			// resources — confirmed live: a failed k8s-node-memory-pressure
+			// injection left a noisy-neighbor pod running on the cluster for
+			// 36+ minutes until manually deleted.
 			defer func() {
 				t.Log("Tearing down...")
 				cfg.ConnStr = origConn
@@ -256,6 +265,12 @@ func TestFaultInjection(t *testing.T) {
 					t.Errorf("Teardown failed: %v", err)
 				}
 			}()
+
+			// 2. Inject failure.
+			t.Log("Injecting failure...")
+			if err := injector.Inject(ctx, f); err != nil {
+				t.Fatalf("Injection failed: %v", err)
+			}
 
 			// 3. Send prompt to agent (or gateway playbook when ViaGateway is set).
 			t.Log("Sending prompt to agent...")

@@ -31,21 +31,23 @@ type mockK8sToolContext struct {
 	context.Context
 }
 
-func (mockK8sToolContext) UserContent() *genai.Content                                          { return nil }
-func (mockK8sToolContext) InvocationID() string                                                 { return "test-invocation" }
-func (mockK8sToolContext) AgentName() string                                                    { return "k8s_agent" }
-func (mockK8sToolContext) ReadonlyState() session.ReadonlyState                                 { return nil }
-func (mockK8sToolContext) UserID() string                                                       { return "test-user" }
-func (mockK8sToolContext) AppName() string                                                      { return "test-app" }
-func (mockK8sToolContext) SessionID() string                                                    { return "test-session" }
-func (mockK8sToolContext) Branch() string                                                       { return "" }
-func (mockK8sToolContext) Artifacts() agent.Artifacts                                           { return nil }
-func (mockK8sToolContext) State() session.State                                                 { return nil }
-func (mockK8sToolContext) FunctionCallID() string                                               { return "test-call-id" }
-func (mockK8sToolContext) Actions() *session.EventActions                                       { return nil }
-func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) { return nil, nil }
-func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation                 { return nil }
-func (mockK8sToolContext) RequestConfirmation(string, any) error                                { return nil }
+func (mockK8sToolContext) UserContent() *genai.Content          { return nil }
+func (mockK8sToolContext) InvocationID() string                 { return "test-invocation" }
+func (mockK8sToolContext) AgentName() string                    { return "k8s_agent" }
+func (mockK8sToolContext) ReadonlyState() session.ReadonlyState { return nil }
+func (mockK8sToolContext) UserID() string                       { return "test-user" }
+func (mockK8sToolContext) AppName() string                      { return "test-app" }
+func (mockK8sToolContext) SessionID() string                    { return "test-session" }
+func (mockK8sToolContext) Branch() string                       { return "" }
+func (mockK8sToolContext) Artifacts() agent.Artifacts           { return nil }
+func (mockK8sToolContext) State() session.State                 { return nil }
+func (mockK8sToolContext) FunctionCallID() string               { return "test-call-id" }
+func (mockK8sToolContext) Actions() *session.EventActions       { return nil }
+func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (mockK8sToolContext) RequestConfirmation(string, any) error                { return nil }
 
 func newK8sTestContext() tool.Context {
 	return mockK8sToolContext{context.Background()}
@@ -164,6 +166,34 @@ policies:
 		PolicyEnabled: true,
 		PolicyFile:    path,
 		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+// newDenyK8sWriteEnforcer creates a PolicyEnforcer that denies write k8s operations.
+// Mirrors newDenyK8sDestructiveEnforcer but for action: write, since
+// debug_node_dmesg is classified ActionWrite, not ActionDestructive.
+func newDenyK8sWriteEnforcer(t *testing.T) *agentutil.PolicyEnforcer {
+	t.Helper()
+	const yaml = `
+version: "1"
+policies:
+  - name: deny-k8s-write
+    resources:
+      - type: kubernetes
+    rules:
+      - action: write
+        effect: deny
+        message: "write kubernetes operations are not permitted in this test"
+`
+	path := writeTempK8sPolicyFile(t, yaml)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
 	})
 	if err != nil {
 		t.Fatalf("InitPolicyEngine: %v", err)
@@ -425,7 +455,7 @@ func TestDeletePodTool_VerificationWarning_PodStillTerminating(t *testing.T) {
 	// Level-2 verification fires because kubectl get pod returns exit 0.
 	defer withZeroVerifyConfig()()
 	defer withMockKubectlSequence(
-		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},                          // delete accepted
+		kubectlResponse{out: `pod "stuck-pod" deleted` + "\n", err: nil},                            // delete accepted
 		kubectlResponse{out: "NAME      READY   STATUS\nstuck-pod 0/1     Terminating\n", err: nil}, // pod still visible
 	)()
 
@@ -622,9 +652,9 @@ func TestScaleDeploymentTool_CapturesPreState(t *testing.T) {
 	defer func() { toolAuditor = origAuditor }()
 
 	defer withMockKubectlSequence(
-		kubectlResponse{out: "3", err: nil},                                    // pre-state read → previous = 3
+		kubectlResponse{out: "3", err: nil},                                   // pre-state read → previous = 3
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
-		kubectlResponse{out: "5", err: nil},                                    // verify
+		kubectlResponse{out: "5", err: nil},                                   // verify
 	)()
 
 	ctx := newK8sTestContext()
@@ -666,9 +696,9 @@ func TestScaleDeploymentTool_CapturesPreState(t *testing.T) {
 func TestScaleDeploymentTool_PreStateReadFailure_ToolStillRuns(t *testing.T) {
 	// If the pre-state kubectl read fails, the scale must still proceed.
 	defer withMockKubectlSequence(
-		kubectlResponse{out: "", err: fmt.Errorf("connection refused")},        // pre-state read fails
+		kubectlResponse{out: "", err: fmt.Errorf("connection refused")},       // pre-state read fails
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // scale
-		kubectlResponse{out: "2", err: nil},                                    // verify
+		kubectlResponse{out: "2", err: nil},                                   // verify
 	)()
 
 	ctx := newK8sTestContext()
@@ -860,9 +890,9 @@ func TestScaleDeploymentTool_Level2_RetryApplySucceeds(t *testing.T) {
 	//   call #4: verify → "5" (correct) → resolved
 	defer withMockKubectlSequence(
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // initial scale
-		kubectlResponse{out: "3", err: nil},                                    // verify #1: wrong
+		kubectlResponse{out: "3", err: nil},                                   // verify #1: wrong
 		kubectlResponse{out: `deployment.apps "web" scaled` + "\n", err: nil}, // re-apply
-		kubectlResponse{out: "5", err: nil},                                    // verify #2: correct
+		kubectlResponse{out: "5", err: nil},                                   // verify #2: correct
 	)()
 	old := verifyRetryConfig
 	verifyRetryConfig = retryutil.Config{MaxAttempts: 3, InitialDelay: 0, BackoffFactor: 1}
@@ -1145,6 +1175,116 @@ func TestResolveNamespaceInfo_InfraPermissive_UnknownNamespace(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// resolveKubeContext tests
+// =============================================================================
+
+func TestResolveKubeContext_ExplicitContextWins(t *testing.T) {
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("prod-namespace", "gke_staging")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil for explicit context", err)
+	}
+	if got != "gke_staging" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_staging'", got)
+	}
+}
+
+func TestResolveKubeContext_SoleClusterNoAmbiguity(t *testing.T) {
+	// Only one cluster registered — no context needed, resolves to it.
+	defer withK8sInfraConfig(makeK8sTestInfraConfig())()
+
+	got, err := resolveKubeContext("prod-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil with sole cluster", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClustersSameContext_NoAmbiguity(t *testing.T) {
+	// Two registered clusters that happen to share the same kubeconfig context
+	// (e.g. two logical names for the same physical cluster) — not ambiguous.
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["prod-cluster-alias"] = infra.K8sCluster{Name: "alias", Context: "gke_prod", Tags: []string{"production"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("any-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil when all clusters share one context", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClusters_DisambiguatedByNamespace(t *testing.T) {
+	// Two distinct clusters registered; the namespace matches a DB entry that
+	// explicitly names its cluster — resolves without needing an explicit context.
+	cfg := makeK8sTestInfraConfig()
+	cfg.K8sClusters["other-cluster"] = infra.K8sCluster{Name: "other", Context: "gke_staging", Tags: []string{"staging"}}
+	defer withK8sInfraConfig(cfg)()
+
+	got, err := resolveKubeContext("prod-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil when namespace uniquely maps to a cluster", err)
+	}
+	if got != "gke_prod" {
+		t.Errorf("resolveKubeContext() = %q, want 'gke_prod'", got)
+	}
+}
+
+func TestResolveKubeContext_MultipleClusters_AmbiguousNamespace_Errors(t *testing.T) {
+	// Reproduces the real bug found during 3-hop live verification: two distinct
+	// clusters registered, the namespace matches a DB entry via K8sNamespace but
+	// that DB entry does NOT name a K8sCluster, and no explicit context is passed.
+	// Must error rather than silently falling back to kubeconfig's ambient
+	// current-context (which could be an unrelated cluster).
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-db": {
+				Name:         "faulttest-db",
+				K8sNamespace: "helpdesk-test",
+				// No K8sCluster set — this is the exact shape that triggered
+				// the bug.
+				Tags: []string{"development"},
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"minikube-cluster":   {Name: "minikube", Context: "minikube", Tags: []string{"development"}},
+			"faulttest-eviction": {Name: "eviction", Context: "faulttest-eviction", Tags: []string{"development"}},
+		},
+	}
+	defer withK8sInfraConfig(cfg)()
+
+	_, err := resolveKubeContext("helpdesk-test", "")
+	if err == nil {
+		t.Fatal("resolveKubeContext() error = nil, want ambiguity error when namespace doesn't uniquely resolve across multiple distinct-context clusters")
+	}
+	if !strings.Contains(err.Error(), "multiple Kubernetes clusters are registered") {
+		t.Errorf("resolveKubeContext() error = %q, want ambiguity message naming multiple clusters", err.Error())
+	}
+	if !strings.Contains(err.Error(), "minikube") || !strings.Contains(err.Error(), "faulttest-eviction") {
+		t.Errorf("resolveKubeContext() error = %q, want both known contexts listed", err.Error())
+	}
+}
+
+func TestResolveKubeContext_NoInfraConfig_DevMode(t *testing.T) {
+	defer withK8sInfraConfig(nil)()
+
+	got, err := resolveKubeContext("any-namespace", "")
+	if err != nil {
+		t.Fatalf("resolveKubeContext() error = %v, want nil in dev mode (no infra config)", err)
+	}
+	if got != "" {
+		t.Errorf("resolveKubeContext() = %q, want empty (ambient context) in dev mode", got)
+	}
+}
+
 func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
 	// infraConfig is set with multiple clusters; namespace is not registered and
 	// context doesn't match any cluster → tool returns access denied.
@@ -1166,6 +1306,45 @@ func TestGetPodsTool_InfraEnforced_Rejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not registered in infrastructure config") {
 		t.Errorf("getPodsTool() error = %v, want infra rejection message", err)
+	}
+}
+
+// TestGetPodsTool_AmbiguousCluster_Rejected is a regression test proving the
+// resolveKubeContext ambiguity check (unit-tested in isolation above) is
+// actually wired into a real tool call — reproducing the exact live bug: the
+// namespace resolves fine (it's a registered DB's K8sNamespace, so
+// resolveNamespaceInfo succeeds), but which of two distinct, registered
+// cluster contexts it belongs to is genuinely ambiguous. Before this fix,
+// getPodsTool would have silently used kubeconfig's ambient current-context;
+// it must now return an error instead of guessing.
+func TestGetPodsTool_AmbiguousCluster_Rejected(t *testing.T) {
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"faulttest-db": {
+				Name:         "faulttest-db",
+				K8sNamespace: "helpdesk-test",
+				// No K8sCluster set — matches the real bug shape.
+				Tags: []string{"development"},
+			},
+		},
+		K8sClusters: map[string]infra.K8sCluster{
+			"minikube-cluster":   {Name: "minikube", Context: "minikube", Tags: []string{"development"}},
+			"faulttest-eviction": {Name: "eviction", Context: "faulttest-eviction", Tags: []string{"development"}},
+		},
+	}
+	defer withK8sInfraConfig(cfg)()
+	defer withMockKubectl("", nil)() // should not be reached — must fail before any cluster call
+
+	ctx := newK8sTestContext()
+	_, err := getPodsTool(ctx, GetPodsArgs{Namespace: "helpdesk-test"})
+	if err == nil {
+		t.Fatal("getPodsTool() expected an ambiguous-cluster error, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple Kubernetes clusters are registered") {
+		t.Errorf("getPodsTool() error = %v, want ambiguous-cluster message", err)
+	}
+	if !strings.Contains(err.Error(), "minikube") || !strings.Contains(err.Error(), "faulttest-eviction") {
+		t.Errorf("getPodsTool() error = %v, want both known contexts listed", err)
 	}
 }
 
@@ -1402,3 +1581,305 @@ func TestGetNodeStatus_MemoryPressure_IncludesMessage(t *testing.T) {
 		t.Error("MemoryPressure condition should have Message set when Status=True")
 	}
 }
+
+// =============================================================================
+// debugNodeDmesgTool
+// =============================================================================
+
+func TestResolveDmesgLines(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines int
+		want  int
+	}{
+		{"unset defaults to 200", 0, defaultDmesgLines},
+		{"negative defaults to 200", -5, defaultDmesgLines},
+		{"under cap passes through", 500, 500},
+		{"exactly at cap passes through", maxDmesgLines, maxDmesgLines},
+		{"over cap clamps to 2000", 5000, maxDmesgLines},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveDmesgLines(tt.lines); got != tt.want {
+				t.Errorf("resolveDmesgLines(%d) = %d, want %d", tt.lines, got, tt.want)
+			}
+		})
+	}
+}
+
+// withKeyedMockKubectl replaces runKubectl with a mock keyed by the kubectl
+// subcommand — "debug", "logs", "delete" (single-token), or "get pods"/
+// "get pod" (two-token: debug_node_dmesg issues both a list call for pod
+// discovery/cleanup and a singular get for the status poll, and they need
+// different canned responses). Records every call's full args slice so
+// tests can assert a specific step was actually invoked, not just tolerate
+// it being skipped.
+func withKeyedMockKubectl(responses map[string]kubectlResponse) (calls *[][]string, cleanup func()) {
+	orig := runKubectl
+	recorded := make([][]string, 0)
+	runKubectl = func(_ context.Context, _ string, args ...string) (string, error) {
+		recorded = append(recorded, append([]string(nil), args...))
+		if len(args) == 0 {
+			return "", nil
+		}
+		key := args[0]
+		if args[0] == "get" && len(args) > 1 {
+			key = args[0] + " " + args[1]
+		}
+		r, ok := responses[key]
+		if !ok {
+			return "", nil
+		}
+		return r.out, r.err
+	}
+	return &recorded, func() { runKubectl = orig }
+}
+
+// calledWithPrefix reports whether any recorded call's leading arguments
+// match prefix exactly, token by token (e.g. "get", "pod" matches the
+// singular status-poll call without also matching "get", "pods").
+func calledWithPrefix(calls [][]string, prefix ...string) bool {
+	return firstCallArgsWithPrefix(calls, prefix...) != nil
+}
+
+// firstCallArgsWithPrefix returns the full args slice of the first recorded
+// call whose leading arguments match prefix exactly, or nil if none is found.
+func firstCallArgsWithPrefix(calls [][]string, prefix ...string) []string {
+	for _, c := range calls {
+		if len(c) < len(prefix) {
+			continue
+		}
+		match := true
+		for i, p := range prefix {
+			if c[i] != p {
+				match = false
+				break
+			}
+		}
+		if match {
+			return c
+		}
+	}
+	return nil
+}
+
+func TestDebugNodeDmesgTool_Success(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":    {out: "Creating debugging pod node-debugger-worker-1-abc12 with container debugger on node worker-1.\n"},
+		"get pods": {out: "pod/node-debugger-worker-1-abc12\n"},
+		"get pod":  {out: "Running"},
+		"logs":     {out: "[12345.678901] Out of memory: Killed process 4242 (stress)\n"},
+		"delete":   {out: `pod "node-debugger-worker-1-abc12" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "Out of memory") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain dmesg text", result.Output)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("debugNodeDmesgTool() VerifyStatus = %q, want %q", result.VerifyStatus, "ok")
+	}
+	if !calledWithPrefix(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete — debug pod not cleaned up")
+	}
+}
+
+// TestDebugNodeDmesgTool_CommandConstruction inspects the exact kubectl args
+// built for every step — every other test keys mocks by subcommand only and
+// never checks the surrounding flags, so a typo in --profile, -n, or the
+// tail -n N substitution would otherwise go uncaught by any test. Also
+// verifies the discovered pod name (from the mocked "get pods" list, since
+// kubectl controls this name — see runNodeDebugCommand's doc comment) is
+// threaded consistently through poll, logs, and delete.
+func TestDebugNodeDmesgTool_CommandConstruction(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	const mockPodName = "node-debugger-worker-1-abc12"
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":    {out: "Creating debugging pod " + mockPodName + " with container debugger on node worker-1.\n"},
+		"get pods": {out: "pod/" + mockPodName + "\n"},
+		"get pod":  {out: "Running"},
+		"logs":     {out: "kernel log line\n"},
+		"delete":   {out: `pod "` + mockPodName + `" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	if _, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1", Lines: 500}); err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+
+	create := firstCallArgsWithPrefix(*calls, "debug")
+	if create == nil {
+		t.Fatal("no 'debug' call recorded")
+	}
+	createStr := strings.Join(create, " ")
+	wantSubstrings := []string{
+		"node/worker-1",
+		"--image=busybox:1.36",
+		"--profile=sysadmin",
+		"--attach=false",
+		"-n default",
+		"chroot /host sh -c",
+		"tail -n 500",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(createStr, want) {
+			t.Errorf("debug command = %q, want it to contain %q", createStr, want)
+		}
+	}
+	if strings.Contains(createStr, "--name=") {
+		t.Errorf("debug command = %q, should not pass --name — kubectl v1.32.2 has no such flag for `debug node/X`", createStr)
+	}
+
+	// The discovered pod name must thread consistently through poll, logs,
+	// and delete — a mismatch would mean polling/deleting the wrong pod.
+	for _, prefix := range [][]string{{"get", "pod"}, {"logs"}, {"delete"}} {
+		args := firstCallArgsWithPrefix(*calls, prefix...)
+		if args == nil {
+			t.Fatalf("no %v call recorded", prefix)
+		}
+		if !strings.Contains(strings.Join(args, " "), mockPodName) {
+			t.Errorf("%v command = %q, want it to target discovered pod name %q", prefix, args, mockPodName)
+		}
+	}
+
+	del := firstCallArgsWithPrefix(*calls, "delete")
+	delStr := strings.Join(del, " ")
+	for _, want := range []string{"pod", "-n default", "--ignore-not-found", "--wait=false"} {
+		if !strings.Contains(delStr, want) {
+			t.Errorf("delete command = %q, want it to contain %q", delStr, want)
+		}
+	}
+}
+
+func TestDebugNodeDmesgTool_PodNeverReady(t *testing.T) {
+	old := verifyRetryConfig
+	verifyRetryConfig = retryutil.Config{MaxAttempts: 2, InitialDelay: 0, BackoffFactor: 1}
+	defer func() { verifyRetryConfig = old }()
+
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":    {out: "Creating debugging pod node-debugger-worker-1-abc12 with container debugger on node worker-1.\n"},
+		"get pods": {out: "pod/node-debugger-worker-1-abc12\n"},
+		"get pod":  {out: "Pending"}, // never leaves Pending
+		"delete":   {out: `pod "node-debugger-worker-1-abc12" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("debugNodeDmesgTool() VerifyStatus = %q, want %q", result.VerifyStatus, "warning")
+	}
+	if !calledWithPrefix(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after verification timeout — debug pod not cleaned up")
+	}
+	if calledWithPrefix(*calls, "logs") {
+		t.Error("debugNodeDmesgTool() should not fetch logs when the pod never became ready")
+	}
+}
+
+func TestDebugNodeDmesgTool_CleanupOnLogsError(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":    {out: "Creating debugging pod node-debugger-worker-1-abc12 with container debugger on node worker-1.\n"},
+		"get pods": {out: "pod/node-debugger-worker-1-abc12\n"},
+		"get pod":  {out: "Running"},
+		"logs":     {out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): pods "node-debugger-worker-1-abc12" not found`)},
+		"delete":   {out: `pod "node-debugger-worker-1-abc12" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR fetching output") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain 'ERROR fetching output'", result.Output)
+	}
+	if !calledWithPrefix(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not call delete after logs error — debug pod not cleaned up")
+	}
+}
+
+// TestDebugNodeDmesgTool_CleanupOnCreateError simulates a pod already
+// existing under this node's debug-pod prefix — e.g. orphaned by a
+// previous failed run — to verify the cleanup sweep still runs (and removes
+// it) even when THIS call's own create step fails outright. Cleanup is now a
+// list+prefix-filter sweep (see deleteDebugPodsByPrefix), not a delete of a
+// single caller-chosen name, since kubectl assigns the debug pod's name
+// itself; when nothing matches the prefix, delete is correctly never
+// called, so this test verifies the sweep actually inspects the cluster and
+// removes a match, not just that "cleanup ran" in name only.
+func TestDebugNodeDmesgTool_CleanupOnCreateError(t *testing.T) {
+	defer withZeroVerifyConfig()()
+	calls, cleanup := withKeyedMockKubectl(map[string]kubectlResponse{
+		"debug":    {out: "", err: fmt.Errorf(`kubectl failed: exit status 1\nOutput: Error from server (NotFound): nodes "bad-node" not found`)},
+		"get pods": {out: "pod/node-debugger-bad-node-stale1\n"},
+		"delete":   {out: `pod "node-debugger-bad-node-stale1" deleted` + "\n"},
+	})
+	defer cleanup()
+
+	ctx := newK8sTestContext()
+	result, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "bad-node"})
+	if err != nil {
+		t.Fatalf("debugNodeDmesgTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR:") {
+		t.Errorf("debugNodeDmesgTool() output = %q, want to contain 'ERROR:'", result.Output)
+	}
+	if !calledWithPrefix(*calls, "get", "pods") {
+		t.Error("debugNodeDmesgTool() did not attempt the cleanup sweep list after a create error")
+	}
+	if !calledWithPrefix(*calls, "delete") {
+		t.Error("debugNodeDmesgTool() did not clean up the orphaned pod found by the cleanup sweep")
+	}
+	if calledWithPrefix(*calls, "get", "pod") || calledWithPrefix(*calls, "logs") {
+		t.Error("debugNodeDmesgTool() should not poll or fetch logs after a create error")
+	}
+}
+
+func TestDebugNodeDmesgTool_PolicyDenied(t *testing.T) {
+	defer withK8sPolicyEnforcer(newDenyK8sWriteEnforcer(t))()
+	kubectlCalled := false
+	orig := runKubectl
+	runKubectl = func(context.Context, string, ...string) (string, error) {
+		kubectlCalled = true
+		return "", nil
+	}
+	defer func() { runKubectl = orig }()
+
+	ctx := newK8sTestContext()
+	_, err := debugNodeDmesgTool(ctx, DebugNodeDmesgArgs{NodeName: "worker-1"})
+	if err == nil {
+		t.Fatal("debugNodeDmesgTool() expected error when write policy denies")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("debugNodeDmesgTool() error = %v, want 'policy denied'", err)
+	}
+	if kubectlCalled {
+		t.Error("debugNodeDmesgTool() called kubectl despite pre-execution policy denial")
+	}
+}
+
+// Note: there is deliberately no TestDebugNodeDmesgTool_BlastRadiusDenied.
+// debug_node_dmesg checks blast radius pre-execution with a hardcoded
+// PodsAffected=1 (see debugNodeDmesgImpl / checkK8sBlastRadiusPreExec), and
+// internal/policy/engine.go:328 gates the max_pods_affected condition on
+// `> 0` — max_pods_affected: 0 is treated as "unset" (no limit), not "deny
+// anything". Since PodsAffected is always exactly 1 here, no valid
+// threshold can ever satisfy `1 > N` for N >= 1 either, so there is
+// currently no way to construct a policy that actually denies this call —
+// a test asserting denial would be testing something the engine cannot do,
+// not verifying real behavior. This is a pre-existing engine limitation
+// (also true of newK8sBlastRadiusEnforcer's default-destructive tests),
+// not something introduced or fixable in this change.

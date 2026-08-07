@@ -134,6 +134,59 @@ func resolveContext(contextOrDBName string) string {
 	return contextOrDBName
 }
 
+// resolveKubeContext determines which kubeconfig context a tool call should
+// use. If contextOrDBName resolves to an explicit context (literal or via a
+// registered DB name), that wins. Otherwise, when the infra config registers
+// more than one distinct cluster context, an unresolved namespace is
+// ambiguous — silently falling back to kubeconfig's ambient current-context
+// risks diagnosing the wrong cluster entirely, so this returns an error
+// instead of guessing. namespace may be empty for cluster-scoped tools.
+func resolveKubeContext(namespace, contextOrDBName string) (string, error) {
+	resolvedCtx := resolveContext(contextOrDBName)
+	if resolvedCtx != "" {
+		return resolvedCtx, nil
+	}
+	if infraConfig == nil || len(infraConfig.K8sClusters) == 0 {
+		return "", nil // dev mode / no clusters registered — use ambient context
+	}
+
+	distinct := make(map[string]bool)
+	for _, c := range infraConfig.K8sClusters {
+		distinct[c.Context] = true
+	}
+	if len(distinct) <= 1 {
+		// All registered clusters share one context (or there's only one) —
+		// no real ambiguity.
+		for ctx := range distinct {
+			return ctx, nil
+		}
+		return "", nil
+	}
+
+	// More than one distinct cluster context is registered. Try to
+	// disambiguate via a DB entry that names both this namespace and an
+	// explicit cluster.
+	if namespace != "" {
+		for _, db := range infraConfig.DBServers {
+			if db.K8sNamespace == namespace && db.K8sCluster != "" {
+				if cluster, ok := infraConfig.K8sClusters[db.K8sCluster]; ok {
+					return cluster.Context, nil
+				}
+			}
+		}
+	}
+
+	known := make([]string, 0, len(distinct))
+	for ctx := range distinct {
+		known = append(known, ctx)
+	}
+	sort.Strings(known)
+	return "", fmt.Errorf(
+		"multiple Kubernetes clusters are registered (contexts: %s) and this request does not "+
+			"unambiguously resolve to one of them; pass an explicit context (one of: %s)",
+		strings.Join(known, ", "), strings.Join(known, ", "))
+}
+
 // diagnoseKubectlError examines kubectl output for common failure patterns and returns
 // a clear, actionable error message alongside the raw output.
 func diagnoseKubectlError(output string) string {
@@ -383,7 +436,10 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 		return GetPodsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetPodsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -426,7 +482,10 @@ func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult,
 		return GetServiceResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetServiceResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -464,7 +523,10 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -571,7 +633,10 @@ func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsR
 		return GetEndpointsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetEndpointsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -609,7 +674,10 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 		return GetEventsResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetEventsResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -650,7 +718,10 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -725,7 +796,10 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -809,7 +883,10 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	// Check policy before executing
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
@@ -872,7 +949,10 @@ type GetNodesArgs struct {
 }
 
 func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error) {
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return GetNodesResult{}, err
+	}
 
 	// Nodes are cluster-scoped; use "cluster" as the sentinel resource_name.
 	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
@@ -897,10 +977,10 @@ func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
 
 // DeletePodArgs defines arguments for the delete_pod tool.
 type DeletePodArgs struct {
-	Context          string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
-	Namespace        string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the pod."`
-	PodName          string `json:"pod_name" jsonschema:"required,The exact pod name to delete. Use get_pods to find the name."`
-	GracePeriodSeconds int  `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
+	Context            string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace          string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the pod."`
+	PodName            string `json:"pod_name" jsonschema:"required,The exact pod name to delete. Use get_pods to find the name."`
+	GracePeriodSeconds int    `json:"grace_period_seconds,omitempty" jsonschema:"Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion."`
 }
 
 func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, error) {
@@ -909,7 +989,10 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -983,7 +1066,10 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1053,7 +1139,10 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1158,7 +1247,10 @@ func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodR
 		return GetPodResourcesResult{}, fmt.Errorf("access denied: %w", err)
 	}
 	namespace := nsInfo.Namespace
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return GetPodResourcesResult{}, err
+	}
 
 	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetPodResourcesResult{}, fmt.Errorf("policy denied: %w", err)
@@ -1188,7 +1280,10 @@ type GetNodeStatusArgs struct {
 }
 
 func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
-	kubeContext := resolveContext(args.Context)
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return GetNodeStatusResult{}, err
+	}
 
 	// Nodes are cluster-scoped (no namespace); use the sentinel "cluster" so the
 	// policy check request carries a non-empty resource_name.
@@ -1210,6 +1305,221 @@ func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStat
 
 func getNodeStatusTool(ctx tool.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
 	return getNodeStatusImpl(ctx, args)
+}
+
+const (
+	// debugPodNamespace is the fixed namespace debug_node_dmesg (and any future
+	// node-debug tool built on runNodeDebugCommand) creates its debug pod in.
+	debugPodNamespace = "default"
+	// defaultDmesgLines/maxDmesgLines bound the dmesg tail requested per call —
+	// dmesg on a busy node can be huge, and the tool's caller controls only the
+	// line count, never the underlying command.
+	defaultDmesgLines = 200
+	maxDmesgLines     = 2000
+)
+
+// DebugNodeDmesgArgs defines arguments for the debug_node_dmesg tool.
+type DebugNodeDmesgArgs struct {
+	Context  string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	NodeName string `json:"node_name" jsonschema:"required,The exact node name to pull dmesg from. Use get_nodes, get_node_status, or the 'node' field returned by get_pods/describe_pod to find it."`
+	Lines    int    `json:"lines,omitempty" jsonschema:"Number of most recent dmesg lines to return (default 200, max 2000)."`
+}
+
+// resolveDmesgLines applies the default/cap bounds to a caller-supplied line count.
+func resolveDmesgLines(lines int) int {
+	if lines <= 0 {
+		return defaultDmesgLines
+	}
+	if lines > maxDmesgLines {
+		return maxDmesgLines
+	}
+	return lines
+}
+
+// debugPodNamePrefix returns the name prefix kubectl assigns to the pod
+// created by `kubectl debug node/<nodeName>`. Verified against kubectl
+// v1.32.2: there is no --name flag for this command (--copy-to exists but is
+// pod-copy-only, not applicable to node targets), so kubectl always
+// auto-generates a name of the form node-debugger-<node>-<random-suffix>
+// (e.g. "node-debugger-minikube-4gstw"). nodeName is used as-is, not
+// sanitized — K8s node names are already-validated RFC1123 DNS labels, and
+// this must match exactly what kubectl itself derives the prefix from.
+func debugPodNamePrefix(nodeName string) string {
+	return "node-debugger-" + nodeName + "-"
+}
+
+// listPodNamesByPrefix lists pod names in namespace whose name starts with
+// prefix, in ascending creation-time order (oldest first). Used both to
+// discover the pod kubectl debug just created (take the last/newest entry)
+// and to sweep every matching pod for cleanup.
+func listPodNamesByPrefix(ctx context.Context, kubeContext, namespace, prefix string) ([]string, error) {
+	out, err := runKubectl(ctx, kubeContext, "get", "pods", "-n", namespace,
+		"-o", "name", "--sort-by=.metadata.creationTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		name := strings.TrimPrefix(strings.TrimSpace(line), "pod/")
+		if name != "" && strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// deleteDebugPodsByPrefix deletes every pod in debugPodNamespace whose name
+// starts with prefix. Used for the deferred cleanup in runNodeDebugCommand:
+// since kubectl assigns the debug pod's name itself (see
+// debugPodNamePrefix), cleanup sweeps by the known naming convention rather
+// than an exact name — which also mops up anything orphaned by a previous
+// failed run for this node. Errors are swallowed (best-effort, mirrors the
+// original single-name --ignore-not-found delete this replaces).
+func deleteDebugPodsByPrefix(ctx context.Context, kubeContext, prefix string) {
+	names, err := listPodNamesByPrefix(ctx, kubeContext, debugPodNamespace, prefix)
+	if err != nil || len(names) == 0 {
+		return
+	}
+	args := append([]string{"delete", "pod", "-n", debugPodNamespace, "--ignore-not-found", "--wait=false"}, names...)
+	_, _ = runKubectl(ctx, kubeContext, args...)
+}
+
+// runNodeDebugCommand creates a short-lived debug pod on the given node via
+// `kubectl debug node/<name>`, runs hostCommand chroot'd into the node's
+// filesystem, captures its output, and always deletes the debug pod
+// afterward regardless of outcome. toolName is used for audit logging on the
+// mutating create step. Callers own the actual policy decisions (which
+// action class, which tags) — this helper only handles the kubectl
+// mechanics, so future node-diagnostic tools (e.g. disk usage, memory) can
+// reuse it with their own fixed hostCommand and policy calls.
+//
+// The debug pod's name is not caller-controlled — verified against kubectl
+// v1.32.2, `kubectl debug node/X` has no --name flag — so this discovers the
+// name kubectl assigned via a list+prefix-filter immediately after create
+// (kubectl's create call is synchronous against the API server, so the pod
+// object already exists by the time it returns) rather than parsing
+// kubectl's human-readable "Creating debugging pod X ..." status line, whose
+// exact wording is not a stable contract.
+//
+// --profile=general (kubectl's suggested replacement for the now-deprecated
+// --profile=legacy) was tried and rejected: `dmesg` inside the chroot fails
+// with "Operation not permitted" under that profile — it lacks the
+// kernel-log-read capability this tool needs. --profile=sysadmin grants it
+// and is not deprecated.
+//
+// Callers must do their own blast-radius accounting before calling this —
+// deliberately not attempted here from the create step's output. kubectl's
+// real message ("Creating debugging pod X with container Y on node Z.")
+// does not end in " created" the way parsePodsAffected's suffix heuristic
+// expects, so text-based detection would silently read PodsAffected=0 for
+// every call. Since `kubectl debug node/X` always creates exactly one pod —
+// a known constant of the operation, not something that varies per call —
+// callers should check blast radius pre-execution with that literal 1
+// (see checkK8sBlastRadiusPreExec), not attempt to parse it from output here.
+func runNodeDebugCommand(ctx context.Context, kubeContext, toolName, nodeName, hostCommand string) (KubectlResult, error) {
+	prefix := debugPodNamePrefix(nodeName)
+
+	// Cleanup is deferred immediately, before anything else can fail. It's a
+	// prefix sweep, not a single named delete, so it doesn't depend on ever
+	// successfully discovering the pod's exact name — it cleans up
+	// regardless of where in the sequence something goes wrong.
+	defer deleteDebugPodsByPrefix(context.WithoutCancel(ctx), kubeContext, prefix)
+
+	createOutput, err := runKubectlWithToolName(ctx, kubeContext, toolName,
+		"debug", "node/"+nodeName,
+		"--image=busybox:1.36",
+		"--profile=sysadmin",
+		"--attach=false",
+		"-n", debugPodNamespace,
+		"--", "chroot", "/host", "sh", "-c", hostCommand,
+	)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	matches, err := listPodNamesByPrefix(ctx, kubeContext, debugPodNamespace, prefix)
+	if err != nil || len(matches) == 0 {
+		return KubectlResult{Output: fmt.Sprintf(
+			"ERROR: created debug pod but could not identify it (list error: %v).\n\n--- Create result ---\n%s",
+			err, createOutput)}, nil
+	}
+	debugPodName := matches[len(matches)-1] // newest, per ascending creation-time sort
+
+	// Poll until the debug pod leaves Pending.
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "pod", debugPodName,
+				"-n", debugPodNamespace, "-o", "jsonpath={.status.phase}")
+			phase := strings.TrimSpace(out)
+			return err == nil && (phase == "Running" || phase == "Succeeded"), nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, toolName, attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved {
+		if toolAuditor != nil {
+			toolAuditor.RecordToolVerification(ctx, toolName, "warning")
+		}
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: debug pod %q on node %q did not become Running/Succeeded after %d check(s).\n\n"+
+					"--- Create result ---\n%s",
+				debugPodName, nodeName, attempts, createOutput),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+
+	logs, err := runKubectl(ctx, kubeContext, "logs", debugPodName, "-n", debugPodNamespace)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR fetching output: %v", err)}, nil
+	}
+	if strings.TrimSpace(logs) == "" {
+		return KubectlResult{Output: "No output captured.", VerifyStatus: "ok", RetryCount: retryCount}, nil
+	}
+	return KubectlResult{Output: logs, VerifyStatus: "ok", RetryCount: retryCount}, nil
+}
+
+func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+	kubeContext, err := resolveKubeContext("", args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
+	lines := resolveDmesgLines(args.Lines)
+
+	if err := checkK8sPolicy(ctx, args.NodeName, policy.ActionWrite, nil); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Blast radius is a known constant (1) for this operation — see
+	// runNodeDebugCommand's doc comment for why this is checked
+	// pre-execution with a literal 1 rather than parsed from output.
+	//
+	// NOTE: internal/policy/engine.go:328 gates the max_pods_affected
+	// condition on `> 0`, treating max_pods_affected: 0 as "unset" (no
+	// limit) rather than "deny anything". Since this call's PodsAffected is
+	// always exactly 1, no valid threshold can ever satisfy `1 > N` for
+	// N >= 1 either — so as currently implemented, no policy can actually
+	// deny this call via max_pods_affected. This check is kept for
+	// consistency with other mutating k8s tools and in case the engine's
+	// zero-semantics are fixed later; it is not currently enforceable.
+	if err := checkK8sBlastRadiusPreExec(ctx, args.NodeName, policy.ActionWrite, nil, 1); err != nil {
+		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
+	}
+
+	return runNodeDebugCommand(ctx, kubeContext, "debug_node_dmesg", args.NodeName,
+		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines))
+}
+
+func debugNodeDmesgTool(ctx tool.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+	return debugNodeDmesgImpl(ctx, args)
 }
 
 // k8sArgsToStruct converts a map[string]any to a typed struct via JSON round-trip.
@@ -1354,6 +1664,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := deletePodImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
+	})
+
+	r.Register("debug_node_dmesg", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[DebugNodeDmesgArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := debugNodeDmesgImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

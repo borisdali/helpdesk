@@ -373,10 +373,10 @@ func TestFetchPlaybookInfo_DecodesBreakdown(t *testing.T) {
 				{
 					"source": "system",
 					"stats": map[string]any{
-						"total_runs":      10,
-						"feedback_count":  6,
-						"correct_count":   5,
-						"accuracy_rate":   5.0 / 6.0,
+						"total_runs":                  10,
+						"feedback_count":              6,
+						"correct_count":               5,
+						"accuracy_rate":               5.0 / 6.0,
 						"at_gate_count":               4,
 						"at_gate_correct":             4,
 						"at_gate_accuracy_rate":       1.0,
@@ -554,10 +554,10 @@ func TestPostEvaluations_IncludesRemediationJudgeFields(t *testing.T) {
 
 func TestFetchEvaluation_Found(t *testing.T) {
 	payload := map[string]any{
-		"run_id":       "plr_ev01",
-		"failure_id":   "db-oom",
+		"run_id":        "plr_ev01",
+		"failure_id":    "db-oom",
 		"overall_score": 0.9,
-		"passed":       true,
+		"passed":        true,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1305,6 +1305,258 @@ func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
 	}
 }
 
+// ── fetchNextHop / walkToRemediation ─────────────────────────────────────
+
+// mockPriorRunIDServer serves GET .../playbook-runs?prior_run_id=<id>&limit=1
+// from a map, mirroring auditd's raw {"runs":[...]} response shape. Missing
+// keys return an empty runs array (no successor for that hop).
+func mockPriorRunIDServer(t *testing.T, next map[string]incidentRun) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		priorID := r.URL.Query().Get("prior_run_id")
+		runs := []incidentRun{}
+		if hop, ok := next[priorID]; ok {
+			runs = []incidentRun{hop}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestFetchNextHop_Success(t *testing.T) {
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect"},
+	})
+	hop := fetchNextHop(srv.URL, "", "plr_t1")
+	if hop == nil || hop.RunID != "plr_e1" {
+		t.Fatalf("fetchNextHop = %+v, want run_id=plr_e1", hop)
+	}
+}
+
+func TestFetchNextHop_NoSuccessor(t *testing.T) {
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{})
+	hop := fetchNextHop(srv.URL, "", "plr_t1")
+	if hop != nil {
+		t.Errorf("fetchNextHop = %+v, want nil (no successor)", hop)
+	}
+}
+
+// TestWalkToRemediation_TwoHopTransition verifies the simple case: triage's
+// only successor was reached via TRANSITION_TO, so it is the remediation run.
+func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", TransitionedTo: "pbs_lock_remediate"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_r1", SeriesID: "pbs_lock_remediate", Outcome: "resolved"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1", rem)
+	}
+}
+
+// TestWalkToRemediation_EscalationOnly verifies that a successor reached via
+// ESCALATE_TO (not TRANSITION_TO) is not treated as remediation — the same
+// misclassification this whole fix closes, exercised against the
+// independently-implemented table-view walker.
+func TestWalkToRemediation_EscalationOnly(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "escalated"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem != nil {
+		t.Errorf("walkToRemediation = %+v, want nil (successor was ESCALATE_TO, not TRANSITION_TO)", rem)
+	}
+}
+
+// TestWalkToRemediation_ThreeHopChain verifies the walk continues past an
+// escalation hop to find the true, terminal remediation hop — not the
+// middle one.
+func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
+		"plr_e1": {RunID: "plr_r1", SeriesID: "pbs_k8s_pod_crash_remediate", Outcome: "resolved"},
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the terminal hop, not plr_e1)", rem)
+	}
+}
+
+// TestWalkToRemediation_CycleGuard verifies a cyclic prior_run_id chain
+// doesn't hang the table view's walker.
+func TestWalkToRemediation_CycleGuard(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_a", EscalatedTo: "pbs_b"}
+	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+		"plr_a": {RunID: "plr_b", SeriesID: "pbs_b", EscalatedTo: "pbs_a"},
+		"plr_b": {RunID: "plr_a", SeriesID: "pbs_a"}, // cycle back to the start
+	})
+
+	done := make(chan *incidentRun, 1)
+	go func() { done <- walkToRemediation(srv.URL, "", triage) }()
+
+	select {
+	case rem := <-done:
+		if rem != nil {
+			t.Errorf("walkToRemediation = %+v, want nil (cyclic chain never transitions)", rem)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walkToRemediation did not return — cycle guard failed to stop the walk")
+	}
+}
+
+// TestWalkToRemediation_MaxHopsBound verifies the walker gives up after
+// maxEscalationHops on a long, strictly acyclic chain that never transitions,
+// rather than walking forever.
+func TestWalkToRemediation_MaxHopsBound(t *testing.T) {
+	const chainLen = maxEscalationHops + 5
+	next := map[string]incidentRun{}
+	for i := 0; i < chainLen; i++ {
+		runID := fmt.Sprintf("plr_long%d", i+1)
+		priorID := fmt.Sprintf("plr_long%d", i)
+		if i == 0 {
+			priorID = "plr_long0"
+		}
+		next[priorID] = incidentRun{RunID: runID, SeriesID: fmt.Sprintf("pbs_long%d", i+1), EscalatedTo: fmt.Sprintf("pbs_long%d", i+2)}
+	}
+	srv := mockPriorRunIDServer(t, next)
+	triage := &incidentRun{RunID: "plr_long0", EscalatedTo: "pbs_long1"}
+
+	done := make(chan *incidentRun, 1)
+	go func() { done <- walkToRemediation(srv.URL, "", triage) }()
+
+	select {
+	case rem := <-done:
+		if rem != nil {
+			t.Errorf("walkToRemediation = %+v, want nil (chain never reaches a TRANSITION_TO within the bound)", rem)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walkToRemediation did not return — max-hops bound failed to stop the walk")
+	}
+}
+
+// TestFetchIncidentNarrative_DecodesEscalations verifies that the
+// escalations[] array from a multi-hop incident narrative decodes correctly
+// into narrativeEscalationHop, and that the terminal remediation hop (which
+// carried the actual fix) is distinguished from the intermediate hop.
+func TestFetchIncidentNarrative_DecodesEscalations(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_t1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"operator":    "alice",
+			"triage": map[string]any{
+				"run_id":   "plr_t1",
+				"playbook": "pbs_connection_triage",
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":       "plr_e1",
+					"playbook":     "pbs_sysadmin_docker_inspect",
+					"outcome":      "transitioned",
+					"escalated_to": "",
+					"findings":     "dmesg shows OOM-killer event",
+				},
+			},
+			"remediation": map[string]any{
+				"run_id":   "plr_r1",
+				"playbook": "pbs_k8s_pod_crash_remediate",
+				"outcome":  "resolved",
+				"findings": "noisy-neighbor pod identified and rescheduled",
+			},
+			"journeys": []map[string]any{
+				{"phase": "triage", "trace_id": "trace-t1"},
+				{"phase": "escalation:1", "trace_id": "trace-e1"},
+				{"phase": "remediation", "trace_id": "trace-r1"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	n, err := fetchIncidentNarrative(srv.URL, "", "plr_t1")
+	if err != nil {
+		t.Fatalf("fetchIncidentNarrative: %v", err)
+	}
+	if len(n.Escalations) != 1 {
+		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
+	}
+	if n.Escalations[0].RunID != "plr_e1" || n.Escalations[0].Playbook != "pbs_sysadmin_docker_inspect" {
+		t.Errorf("Escalations[0] = %+v, want run_id=plr_e1 playbook=pbs_sysadmin_docker_inspect", n.Escalations[0])
+	}
+	if n.Escalations[0].Findings != "dmesg shows OOM-killer event" {
+		t.Errorf("Escalations[0].Findings = %q", n.Escalations[0].Findings)
+	}
+	if n.Remediation == nil {
+		t.Fatal("Remediation is nil, want non-nil")
+	}
+	if n.Remediation.RunID != "plr_r1" {
+		t.Errorf("Remediation.RunID = %q, want plr_r1 (the terminal hop, not the escalation)", n.Remediation.RunID)
+	}
+	if len(n.Journeys) != 3 || n.Journeys[1].Phase != "escalation:1" {
+		t.Errorf("Journeys = %+v, want 3 entries with Journeys[1].Phase = escalation:1", n.Journeys)
+	}
+}
+
+// TestPrintIncidentJourney_Escalations verifies that printIncidentJourney
+// renders a distinct ESCALATION section for intermediate hops, separate from
+// the terminal REMEDIATION section.
+func TestPrintIncidentJourney_Escalations(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_t1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_t1",
+				"playbook": "pbs_connection_triage",
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":   "plr_e1",
+					"playbook": "pbs_sysadmin_docker_inspect",
+					"outcome":  "transitioned",
+					"findings": "dmesg shows OOM-killer event",
+				},
+			},
+			"remediation": map[string]any{
+				"run_id":   "plr_r1",
+				"playbook": "pbs_k8s_pod_crash_remediate",
+				"outcome":  "resolved",
+			},
+			"journeys": []map[string]any{
+				{"phase": "triage", "trace_id": "trace-t1"},
+				{"phase": "escalation:1", "trace_id": "trace-e1"},
+				{"phase": "remediation", "trace_id": "trace-r1"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_t1")
+	})
+
+	if !strings.Contains(out, "ESCALATION 1/1") {
+		t.Errorf("output missing ESCALATION section header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "pbs_sysadmin_docker_inspect") {
+		t.Errorf("output missing escalation hop's playbook, got:\n%s", out)
+	}
+	if !strings.Contains(out, "dmesg shows OOM-killer event") {
+		t.Errorf("output missing escalation hop's findings, got:\n%s", out)
+	}
+	if !strings.Contains(out, "REMEDIATION") || !strings.Contains(out, "pbs_k8s_pod_crash_remediate") {
+		t.Errorf("output missing REMEDIATION section for the terminal hop, got:\n%s", out)
+	}
+	if !strings.Contains(out, "intermediate escalation hop") {
+		t.Errorf("output missing escalation:1 phase description in JOURNEYS section, got:\n%s", out)
+	}
+}
+
 // ── postEvaluations primary_confidence ───────────────────────────────────
 
 // ── wordWrap ──────────────────────────────────────────────────────────────
@@ -1358,6 +1610,13 @@ func TestWordWrap(t *testing.T) {
 			10,
 			"  ",
 			"superlongwordthatexceedswidth",
+		},
+		{
+			"irregular whitespace within maxWidth is normalized",
+			"safe to      restart",
+			70,
+			"  ",
+			"safe to restart",
 		},
 	}
 	for _, tt := range tests {
@@ -2235,7 +2494,7 @@ func TestVaultHistory_ShowsAllVersions(t *testing.T) {
 			"playbook_id": "pb_v14", "version": "1.4",
 			"is_active": false, "source": "generated",
 			"origin_trace": "plr_abc123",
-			"created_at": "2026-06-01T00:00:00Z", "name": "Conn Remediate",
+			"created_at":   "2026-06-01T00:00:00Z", "name": "Conn Remediate",
 		},
 	})
 	defer srv.Close()
@@ -2324,7 +2583,10 @@ func TestVaultHistory_SendsAuth(t *testing.T) {
 // ── pct ───────────────────────────────────────────────────────────────────────
 
 func TestPct(t *testing.T) {
-	tests := []struct{ in float64; want string }{
+	tests := []struct {
+		in   float64
+		want string
+	}{
 		{0.0, "0%"},
 		{1.0, "100%"},
 		{0.5, "50%"},
@@ -2751,8 +3013,8 @@ func twoEvents() []journeyEvent {
 			},
 		},
 		{
-			EventID:   "evt_001",
-			EventType: "tool_execution",
+			EventID:       "evt_001",
+			EventType:     "tool_execution",
 			ToolExecution: &journeyToolExec{Name: "check_connection"},
 		},
 	}
@@ -2964,8 +3226,12 @@ func TestPrintReasoningTrace_MultipleToolsOneSummary(t *testing.T) {
 
 // ── vault cert-compare ────────────────────────────────────────────────────
 
-func stableEntry() *certCompareEntry  { return &certCompareEntry{isStable: true, passRate: 1.0, nRuns: 3} }
-func unstableEntry() *certCompareEntry { return &certCompareEntry{isStable: false, passRate: 0.3, nRuns: 3} }
+func stableEntry() *certCompareEntry {
+	return &certCompareEntry{isStable: true, passRate: 1.0, nRuns: 3}
+}
+func unstableEntry() *certCompareEntry {
+	return &certCompareEntry{isStable: false, passRate: 0.3, nRuns: 3}
+}
 
 func TestChangeLabel(t *testing.T) {
 	tests := []struct {
@@ -3026,8 +3292,8 @@ func TestShortModelName(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"claude-sonnet-4-5", "sonnet-4-5"},
 		{"claude-opus-4-8", "opus-4-8"},
-		{"sonnet-4-5", "sonnet-4-5"},   // already short — returned as-is
-		{"claude", "claude"},           // single token
+		{"sonnet-4-5", "sonnet-4-5"}, // already short — returned as-is
+		{"claude", "claude"},         // single token
 	}
 	for _, tt := range tests {
 		if got := shortModelName(tt.in); got != tt.want {
@@ -3126,10 +3392,11 @@ func TestFetchAllStabilityCerts_SendsAuth(t *testing.T) {
 // multi-model cert dataset for cert-compare tests.
 //
 // Dataset:
-//   db-lock-contention  sonnet-4-5=STABLE  sonnet-4-6=UNSTABLE  → REGRESSION
-//   db-max-connections  sonnet-4-5=UNSTABLE sonnet-4-6=STABLE   → IMPROVEMENT
-//   db-vacuum-needed    sonnet-4-5=STABLE  sonnet-4-6=STABLE    → unchanged
-//   db-wal-disk-full    sonnet-4-5=STABLE  (no sonnet-4-6 cert) → NOT RUN YET
+//
+//	db-lock-contention  sonnet-4-5=STABLE  sonnet-4-6=UNSTABLE  → REGRESSION
+//	db-max-connections  sonnet-4-5=UNSTABLE sonnet-4-6=STABLE   → IMPROVEMENT
+//	db-vacuum-needed    sonnet-4-5=STABLE  sonnet-4-6=STABLE    → unchanged
+//	db-wal-disk-full    sonnet-4-5=STABLE  (no sonnet-4-6 cert) → NOT RUN YET
 func newCertCompareServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3275,11 +3542,11 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
 	attr := &attributionSummary{
-		PrimaryAttribution:     "connection-pool-saturation",
-		AttributionConsistent:  true,
+		PrimaryAttribution:      "connection-pool-saturation",
+		AttributionConsistent:   true,
 		AttributionDistribution: map[string]int{"connection-pool-saturation": 3},
-		JudgeSpread:            0.08,
-		TaxonomyVersion:        "1.0",
+		JudgeSpread:             0.08,
+		TaxonomyVersion:         "1.0",
 	}
 	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, attr)
 

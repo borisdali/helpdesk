@@ -308,8 +308,15 @@ works with the agents that are reachable.
 | `get_endpoints` | Verify backend pod IPs for a service |
 | `get_events` | Get events sorted by time, filter by type/resource |
 | `get_pod_logs` | Retrieve pod logs with tail/previous support |
+| `read_pod_file` | Read a file from inside a pod's container (e.g. on-disk logs when `get_pod_logs` is empty) |
 | `describe_pod` | Detailed pod info (conditions, events) |
+| `get_pod_resources` | CPU/memory requests, limits, and live usage per container |
 | `get_nodes` | List cluster nodes with status |
+| `get_node_status` | Node conditions (MemoryPressure, DiskPressure, PIDPressure, Ready), allocatable vs capacity |
+| `delete_pod` | Delete a pod so its controller reschedules it — **destructive** |
+| `restart_deployment` | Rolling restart of all pods in a deployment — **destructive** |
+| `scale_deployment` | Change replica count, including to 0 — **destructive** |
+| `debug_node_dmesg` | Pull the kernel ring buffer from a worker node via a short-lived, auto-cleaned-up debug pod — **write** |
 
 ### 6.3 SysAdmin Agent (default :1103)
 

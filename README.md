@@ -19,8 +19,8 @@ Three things set aiHelpDesk apart from a general-purpose AI assistant:
 **1. Agents that act, not just advise.**
 The governed actuation arm consists of the formal [tool registry](docs/TOOL_REGISTRY.md), [fleet runner](docs/FLEET.md), [playbooks](docs/PLAYBOOKS.md), [policy engine](docs/AIGOVERNANCE.md#3-policy-engine), [blast-radius guards](docs/AIGOVERNANCE.md#5-guardrails). The actuation arm executes remediation steps on your real infrastructure under a tamper-proof [audit trail](docs/AUDIT.md). Every tool call is logged, every [destructive action](docs/MUTATION_TOOLS.md) requires [human approval](docs/INFORMED_CONSENT.md) and the governance framework enforces limits that can't be bypassed at runtime. This is Google's ["Safety Trifecta"](https://pub.towardsai.net/google-just-published-the-blueprint-heres-what-s-already-built-7055588c0ae4) (transparency, real-time risk evaluation, progressive authorization) as a running system, not a design doc.
 
-**2. Institutional memory that compounds.**
-Every resolved incident automatically proposes a playbook draft. Every successful `faulttest` remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md), which is aiHelpDesk's library of fault→remedy pairings, grows richer with every [incident](docs/INCIDENTS.md). The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking.
+**2. Institutional memory that compounds — and applies itself.**
+Every resolved incident automatically proposes a playbook draft. Every successful `faulttest` remediation auto-saves a draft. Human operators review and activate. The [Vault](docs/VAULT.md), which is aiHelpDesk's library of fault→remedy pairings, grows richer with every [incident](docs/INCIDENTS.md). The next time the same failure occurs, the agent handles it faster and with higher confidence because someone already did the hard thinking. That knowledge doesn't wait for someone to name the right playbook, either: a free-text query is matched against the same encoded symptoms and routed automatically, see the [automatic routing and playbook selection](docs/API.md#automatic-routing-and-playbook-selection). The remaining piece is triggering that same match from a raw monitoring signal instead of a query someone had to type, coming shortly, tracked as an open item in [here](docs/FOR_WHOM.md#3-is-the-next-step-a-general-purpose-database-agent).
 
 **3. Stability certs with attribution — not just pass/fail.**
 Before a [playbook](docs/PLAYBOOKS.md) enters live rotation it is certified across [three stability dimensions](docs/ATTRIBUTION_CERTS.md): _outcome_ (did it pass?), _conclusion_ (did the agent reach the same diagnosis every run?) and _evaluation_ (did the judge agree with itself?). `STABLE(7) attr=oom-kill (7/7)` is a different claim from "it passed." It proves the agent doesn't just get the _right answer_. It gets it for the _right reason_, [consistently](https://itnext.io/trust-has-three-dimensions-demand-from-your-ai-sre-vendor-to-show-a-cert-with-all-three-0f361a443807).
@@ -128,7 +128,9 @@ aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two gu
 ## Gateway REST API
 
 ```bash
-# Query the system
+# Query the system — omit "agent" to let the gateway auto-route the request
+# (keyword match against playbook symptoms, then LLM routing); see API.md
+# for the full three-tier selection flow.
 curl -X POST http://localhost:8080/api/v1/query \
   -H "Content-Type: application/json" \
   -d '{"agent": "database", "message": "What is the server uptime?"}'

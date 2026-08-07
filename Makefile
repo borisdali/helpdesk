@@ -162,7 +162,7 @@ faulttest:
 		up -d --wait
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
-	go test -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose \
@@ -179,7 +179,72 @@ faulttest-nocache:
 		up -d --wait
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
-	go test --count=1 -tags faulttest -timeout 1000s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test --count=1 -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+	@echo "Stopping test infrastructure..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		down -v
+
+# ---------------------------------------------------------------------------
+# Fast fault suite: everything except k8s-node-memory-pressure, which alone
+# needs up to ~25 minutes on a real node (it waits for an actual kubelet
+# eviction event — see testing/catalog/failures.yaml). Use this for routine
+# iteration; use faulttest/faulttest-nocache for full-suite correctness runs,
+# or faulttest-memory-pressure to exercise just the slow one in isolation.
+# ---------------------------------------------------------------------------
+faulttest-fast:
+	@echo "Starting test infrastructure (primary + replica)..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		up -d --wait
+	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
+	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
+	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
+	go test -tags faulttest -timeout 1200s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+	@echo "Stopping test infrastructure..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		down -v
+
+# Target to force a fresh run by bypassing the Go test cache
+faulttest-fast-nocache:
+	@echo "Starting test infrastructure (primary + replica)..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		up -d --wait
+	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
+	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
+	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
+	go test --count=1 -tags faulttest -timeout 1200s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+	@echo "Stopping test infrastructure..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		down -v
+
+# ---------------------------------------------------------------------------
+# k8s-node-memory-pressure in isolation — the slow fault excluded above.
+# Requires the target K8s cluster to have memory-based eviction-hard
+# configured (minikube disables this by default — see the fault's own
+# `prerequisites` text in testing/catalog/failures.yaml for the fix).
+# ---------------------------------------------------------------------------
+faulttest-memory-pressure:
+	@echo "Starting test infrastructure (primary + replica)..."
+	docker compose \
+		-f testing/docker/docker-compose.yaml \
+		-f testing/docker/docker-compose.repl.yaml \
+		up -d --wait
+	@echo "Running k8s-node-memory-pressure..."
+	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
+	FAULTTEST_IDS="k8s-node-memory-pressure" \
+	go test --count=1 -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose \
@@ -223,7 +288,7 @@ faulttest-gateway:
 	FAULTTEST_GATE_ESCALATION=true \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
-	go test -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # Target to force a fresh run by bypassing the Go test cache
@@ -249,7 +314,7 @@ faulttest-gateway-nocache:
 	FAULTTEST_GATE_ESCALATION=true \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
-	go test --count=1 -tags faulttest -timeout 1800s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test --count=1 -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------

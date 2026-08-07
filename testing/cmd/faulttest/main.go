@@ -139,11 +139,12 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.SysadminAgentURL, "sysadmin-agent", "", "Sysadmin agent A2A URL")
 	fs.StringVar(&cfg.SysadminAPIKey, "sysadmin-api-key", os.Getenv("FAULTTEST_SYSADMIN_API_KEY"), "Bearer token for sysadmin agent /tool/ endpoint (required when HELPDESK_USERS_FILE is set on the sysadmin agent)")
 	fs.StringVar(&cfg.OrchestratorURL, "orchestrator", "", "Orchestrator agent A2A URL")
-	fs.StringVar(&cfg.KubeContext, "context", "", "Kubernetes context")
+	fs.StringVar(&cfg.KubeContext, "context", os.Getenv("FAULTTEST_KUBE_CONTEXT"), "Kubernetes context")
 
-	var categories, ids string
+	var categories, ids, excludeIDs string
 	fs.StringVar(&categories, "categories", "", "Comma-separated categories to test (database,kubernetes,compound)")
 	fs.StringVar(&ids, "ids", "", "Comma-separated failure IDs to test")
+	fs.StringVar(&excludeIDs, "exclude-ids", "", "Comma-separated failure IDs to skip (denylist, applied after --categories/--ids)")
 
 	// External PG mode.
 	fs.BoolVar(&cfg.External, "external", false, "Only run external_compat faults using libpq (no Docker/OS access needed)")
@@ -215,6 +216,9 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	}
 	if ids != "" {
 		cfg.FailureIDs = strings.Split(ids, ",")
+	}
+	if excludeIDs != "" {
+		cfg.ExcludeIDs = strings.Split(excludeIDs, ",")
 	}
 
 	// Auto-detect filesystem mode: if the catalog file exists on disk, use it.
@@ -437,6 +441,15 @@ func cmdRun(args []string) {
 					Error:       fmt.Sprintf("injection failed: %v", err),
 				})
 				cfg.ConnStr = origConn
+				// Tear down whatever the failed injection already created —
+				// an injection can fail partway through (e.g. a resource was
+				// created, then a later step in the same script failed) and
+				// without this, that resource is silently stranded. Confirmed
+				// live: a failed k8s-node-memory-pressure injection left a
+				// noisy-neighbor pod running on the cluster for 36+ minutes.
+				if tdErr := injector.Teardown(ctx, f); tdErr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", tdErr)
+				}
 				break // abort remaining reps for this fault
 			}
 

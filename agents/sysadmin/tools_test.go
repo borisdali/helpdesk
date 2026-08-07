@@ -478,10 +478,10 @@ func TestReadPgLogFile_K8s(t *testing.T) {
 	withK8sInfra(t)
 	old := cmdRunner
 	cmdRunner = &multiMockRunner{responses: []mockResponse{
-		{output: "pg-prod-db-0\n", err: nil},                               // kubectl get pod
-		{output: "postgresql-2026-04-05.log\n", err: nil},                  // kubectl exec ls
-		{output: "pg-prod-db-0\n", err: nil},                               // kubectl get pod (for tail)
-		{output: pgLogContent, err: nil},                                    // kubectl exec tail
+		{output: "pg-prod-db-0\n", err: nil},              // kubectl get pod
+		{output: "postgresql-2026-04-05.log\n", err: nil}, // kubectl exec ls
+		{output: "pg-prod-db-0\n", err: nil},              // kubectl get pod (for tail)
+		{output: pgLogContent, err: nil},                  // kubectl exec tail
 	}}
 	defer func() { cmdRunner = old }()
 
@@ -606,6 +606,131 @@ func TestCheckMemory_K8s(t *testing.T) {
 	}
 	if result.Output == "" {
 		t.Error("Output is empty")
+	}
+}
+
+// TestCheckHost_K8s_Running verifies the fix for a real bug: before this,
+// checkHostImpl had no Kubernetes branch at all — containerRuntimeBin
+// returns "" for a K8s-resolved host (indistinguishable from systemd, since
+// resolveHost never populates Runtime on the K8s path), so a K8s target
+// silently fell into the systemd branch with an empty SystemdUnit instead of
+// ever revealing it was Kubernetes-managed. Runtime="kubectl" is the
+// discriminator playbooks/sysadmin-docker-inspect.yaml's guidance now checks
+// first to decide whether to escalate to the K8s agent.
+func TestCheckHost_K8s_Running(t *testing.T) {
+	withK8sInfra(t)
+	podJSON := `{
+		"status": {
+			"phase": "Running",
+			"containerStatuses": [
+				{"ready": true, "restartCount": 0, "state": {}, "lastState": {}}
+			]
+		}
+	}`
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0", err: nil}, // kubectl get pod (selector -> name)
+		{output: podJSON, err: nil},        // kubectl get pod <name> -o json
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkHostImpl (k8s): %v", err)
+	}
+	if result.Runtime != "kubectl" {
+		t.Errorf("Runtime = %q, want %q", result.Runtime, "kubectl")
+	}
+	if result.Status != "running" {
+		t.Errorf("Status = %q, want %q", result.Status, "running")
+	}
+	if !strings.Contains(result.Details, "pg-prod-db-0") {
+		t.Errorf("Details = %q, want it to mention the pod name", result.Details)
+	}
+}
+
+// TestCheckHost_K8s_CrashLoopBackOff verifies the restarting/CrashLoopBackOff
+// branch — the scenario a chain hop from pbs_sysadmin_docker_inspect would
+// actually hit for a genuinely crashing pod.
+func TestCheckHost_K8s_CrashLoopBackOff(t *testing.T) {
+	withK8sInfra(t)
+	podJSON := `{
+		"status": {
+			"phase": "Running",
+			"containerStatuses": [
+				{"ready": false, "restartCount": 4, "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+				 "lastState": {"terminated": {"reason": "Error", "exitCode": 1}}}
+			]
+		}
+	}`
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0", err: nil},
+		{output: podJSON, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkHostImpl (k8s): %v", err)
+	}
+	if result.Status != "restarting" {
+		t.Errorf("Status = %q, want %q", result.Status, "restarting")
+	}
+	if !strings.Contains(result.Details, "restart_count=4") {
+		t.Errorf("Details = %q, want it to mention restart_count=4", result.Details)
+	}
+	if !strings.Contains(result.Details, "last_termination_exitcode=1") {
+		t.Errorf("Details = %q, want it to mention last_termination_exitcode=1", result.Details)
+	}
+}
+
+// TestCheckHost_K8s_CleanShutdown verifies the exit_code=0/Completed scenario
+// — the actual signature db-wal-disk-full-k8s produces (PANIC + SIGQUIT,
+// clean emergency shutdown), relevant to the live 3-hop escalation chain.
+func TestCheckHost_K8s_CleanShutdown(t *testing.T) {
+	withK8sInfra(t)
+	podJSON := `{
+		"status": {
+			"phase": "Running",
+			"containerStatuses": [
+				{"ready": true, "restartCount": 1, "state": {},
+				 "lastState": {"terminated": {"reason": "Completed", "exitCode": 0}}}
+			]
+		}
+	}`
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "pg-prod-db-0", err: nil},
+		{output: podJSON, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("checkHostImpl (k8s): %v", err)
+	}
+	if result.Runtime != "kubectl" {
+		t.Errorf("Runtime = %q, want %q", result.Runtime, "kubectl")
+	}
+	if !strings.Contains(result.Details, "last_termination_reason=Completed") {
+		t.Errorf("Details = %q, want it to mention last_termination_reason=Completed", result.Details)
+	}
+	if !strings.Contains(result.Details, "last_termination_exitcode=0") {
+		t.Errorf("Details = %q, want it to mention last_termination_exitcode=0", result.Details)
+	}
+}
+
+// TestCheckHost_K8s_NoPodFound verifies check_host surfaces a clear error
+// (not a panic or a misleading "systemd" result) when the pod selector
+// matches nothing.
+func TestCheckHost_K8s_NoPodFound(t *testing.T) {
+	withK8sInfra(t)
+	defer withMockRunner("", nil)() // kubectl get pod returns empty
+
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "prod_db"})
+	if err == nil {
+		t.Fatal("expected error when no pod found for selector")
 	}
 }
 
@@ -817,9 +942,9 @@ func TestConnStrPort(t *testing.T) {
 		{"postgres://localhost:5432/mydb", "5432"},
 		{"58989", "58989"},
 		{"5432", "5432"},
-		{"prod_db", ""},            // plain server ID — no port
-		{"host=localhost", ""},     // no port field
-		{"localhost", ""},          // no port
+		{"prod_db", ""},        // plain server ID — no port
+		{"host=localhost", ""}, // no port field
+		{"localhost", ""},      // no port
 	}
 	for _, tc := range cases {
 		got := connStrPort(tc.input)
@@ -903,8 +1028,8 @@ func TestContainerRuntimeBin(t *testing.T) {
 	}{
 		{"docker", "docker", false},
 		{"podman", "podman", false},
-		{"", "", false},       // systemd path — empty string, no error
-		{"lxc", "", true},     // unknown runtime
+		{"", "", false},   // systemd path — empty string, no error
+		{"lxc", "", true}, // unknown runtime
 	}
 	for _, tc := range cases {
 		h := resolvedHost{Runtime: tc.runtime}

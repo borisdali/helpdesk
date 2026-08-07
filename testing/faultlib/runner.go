@@ -132,6 +132,20 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
 	}
+	// Kubernetes-category faults have no connection_string concept at the
+	// triage level — the target is the namespace/node named in the prompt
+	// text, not a DB connection. --conn is sometimes still supplied for
+	// these faults (e.g. so a remediation playbook's verify_sql can reach a
+	// real database), but threading it into the TRIAGE request as
+	// connection_string is wrong: the gateway resolves it against
+	// infrastructure.json and, if it happens to match an unrelated
+	// Docker/host-hosted entry, injects a "context mentions pod but this
+	// server is docker-hosted" consistency warning into the prompt that
+	// derails the K8s agent into refusing the investigation entirely (a
+	// real, reproduced failure mode — not hypothetical).
+	if f.Category == "kubernetes" {
+		connStr = ""
+	}
 
 	slog.Info("sending prompt to agent via playbook",
 		"failure", f.ID,

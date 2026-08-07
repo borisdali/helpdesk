@@ -90,7 +90,7 @@ const (
 
 // Alternative represents an agent that was considered but not chosen.
 type Alternative struct {
-	Agent          string `json:"agent"`
+	Agent           string `json:"agent"`
 	RejectedBecause string `json:"rejected_because"`
 }
 
@@ -102,6 +102,9 @@ type Decision struct {
 	UserIntent             string          `json:"user_intent"`
 	ReasoningChain         []string        `json:"reasoning_chain"`
 	AlternativesConsidered []Alternative   `json:"alternatives_considered"`
+	// PlaybookSeriesID is set when the router auto-selected an existing
+	// triage playbook for this query instead of proxying directly to the agent.
+	PlaybookSeriesID string `json:"playbook_series_id,omitempty"`
 }
 
 // Session identifies the user session context.
@@ -164,17 +167,17 @@ type Outcome struct {
 // PolicyDecision captures the outcome of a policy evaluation.
 // Emitted by PolicyEnforcer before every tool execution, regardless of outcome.
 type PolicyDecision struct {
-	ResourceType string   `json:"resource_type"`          // "database", "kubernetes"
-	ResourceName string   `json:"resource_name"`          // db name, namespace, etc.
-	Action       string   `json:"action"`                 // "read", "write", "destructive"
-	Tags         []string `json:"tags,omitempty"`         // resource tags used for matching
-	Effect       string   `json:"effect"`                 // "allow", "deny", "require_approval"
-	PolicyName   string   `json:"policy_name"`            // which policy matched
-	RuleIndex    int      `json:"rule_index,omitempty"`   // index of the matched rule within the policy
-	Message      string   `json:"message,omitempty"`      // denial or approval message from the policy rule
-	Note         string   `json:"note,omitempty"`         // diagnostic context (e.g. why tags are missing)
-	DryRun       bool     `json:"dry_run,omitempty"`      // true when policy is in dry-run mode
-	PostExecution bool    `json:"post_execution,omitempty"` // true for post-execution blast-radius checks
+	ResourceType  string   `json:"resource_type"`            // "database", "kubernetes"
+	ResourceName  string   `json:"resource_name"`            // db name, namespace, etc.
+	Action        string   `json:"action"`                   // "read", "write", "destructive"
+	Tags          []string `json:"tags,omitempty"`           // resource tags used for matching
+	Effect        string   `json:"effect"`                   // "allow", "deny", "require_approval"
+	PolicyName    string   `json:"policy_name"`              // which policy matched
+	RuleIndex     int      `json:"rule_index,omitempty"`     // index of the matched rule within the policy
+	Message       string   `json:"message,omitempty"`        // denial or approval message from the policy rule
+	Note          string   `json:"note,omitempty"`           // diagnostic context (e.g. why tags are missing)
+	DryRun        bool     `json:"dry_run,omitempty"`        // true when policy is in dry-run mode
+	PostExecution bool     `json:"post_execution,omitempty"` // true for post-execution blast-radius checks
 
 	// Explainability fields — populated by agentutil.PolicyEnforcer when using engine.Explain().
 	// Trace is the JSON-serialised policy.DecisionTrace (stored as raw JSON to avoid import cycles).
@@ -284,8 +287,8 @@ type RollbackExecution struct {
 // module is disabled or misconfigured in fix mode (HELPDESK_OPERATING_MODE=fix).
 type GovernanceViolation struct {
 	OperatingMode string `json:"operating_mode"` // "fix"
-	Module        string `json:"module"`          // "audit", "policy_engine", "guardrails", etc.
-	Severity      string `json:"severity"`        // "fatal" or "warning"
+	Module        string `json:"module"`         // "audit", "policy_engine", "guardrails", etc.
+	Severity      string `json:"severity"`       // "fatal" or "warning"
 	Description   string `json:"description"`
 	Remediation   string `json:"remediation,omitempty"`
 }
@@ -314,14 +317,14 @@ type Event struct {
 	Purpose     string                      `json:"purpose,omitempty"`
 	PurposeNote string                      `json:"purpose_note,omitempty"`
 
-	Session  Session   `json:"session"`
-	Input    Input     `json:"input"`
-	Output   *Output   `json:"output,omitempty"`
-	Tool                *ToolExecution       `json:"tool,omitempty"`
-	Approval            *Approval            `json:"approval,omitempty"`
-	Decision            *Decision            `json:"decision,omitempty"`
-	PolicyDecision      *PolicyDecision      `json:"policy_decision,omitempty"`
-	AgentReasoning      *AgentReasoning      `json:"agent_reasoning,omitempty"`
+	Session                Session                 `json:"session"`
+	Input                  Input                   `json:"input"`
+	Output                 *Output                 `json:"output,omitempty"`
+	Tool                   *ToolExecution          `json:"tool,omitempty"`
+	Approval               *Approval               `json:"approval,omitempty"`
+	Decision               *Decision               `json:"decision,omitempty"`
+	PolicyDecision         *PolicyDecision         `json:"policy_decision,omitempty"`
+	AgentReasoning         *AgentReasoning         `json:"agent_reasoning,omitempty"`
 	GovernanceViolation    *GovernanceViolation    `json:"governance_violation,omitempty"`
 	DelegationVerification *DelegationVerification `json:"delegation_verification,omitempty"`
 	Outcome                *Outcome                `json:"outcome,omitempty"`

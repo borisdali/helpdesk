@@ -1728,19 +1728,78 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 		t.Errorf("gate.reason = %q, want %q", gate["reason"], gateReason)
 	}
 
+	// ── escalations vs remediation classification ──────────────────────────
+	//
+	// The playbook catalog draws a hard line between diagnostic series (only
+	// ever reached via ESCALATE_TO) and remediation series (only ever reached
+	// via TRANSITION_TO) — see playbooks/database-restart-triage.yaml and
+	// playbooks/sysadmin-docker-inspect.yaml. This lets us assert the
+	// classification is correct regardless of which path the LLM actually
+	// takes at runtime (direct transition, or escalate-then-transition).
+	//
+	// This is a regression test for the original bug: any successor run used
+	// to be labeled "remediation" unconditionally, so an ESCALATE_TO hop into
+	// pbs_sysadmin_docker_inspect would have wrongly appeared as remediation
+	// instead of escalations[].
+	diagnosticSeries := map[string]bool{
+		"pbs_db_restart_triage":       true,
+		"pbs_sysadmin_docker_inspect": true,
+	}
+	remediationSeries := map[string]bool{
+		"pbs_db_config_recovery": true,
+		"pbs_db_pitr_recovery":   true,
+		"pbs_db_restart_action":  true,
+		"pbs_wal_disk_full":      true,
+	}
+
+	escalations, _ := narrative["escalations"].([]any)
+	escalationRunIDs := make(map[string]bool, len(escalations))
+	for i, item := range escalations {
+		hop, _ := item.(map[string]any)
+		if hop == nil {
+			t.Errorf("escalations[%d] is not an object: %v", i, item)
+			continue
+		}
+		hopRunID, _ := hop["run_id"].(string)
+		hopPlaybook, _ := hop["playbook"].(string)
+		if hopRunID == "" {
+			t.Errorf("escalations[%d].run_id is empty", i)
+		}
+		if hopPlaybook == "" {
+			t.Errorf("escalations[%d].playbook is empty", i)
+		} else if !diagnosticSeries[hopPlaybook] {
+			t.Errorf("escalations[%d].playbook = %q, want a diagnostic series (reached via ESCALATE_TO), not a remediation series", i, hopPlaybook)
+		}
+		escalationRunIDs[hopRunID] = true
+		t.Logf("escalation hop[%d]: run_id=%s playbook=%s outcome=%s",
+			i, hopRunID, hopPlaybook, hop["outcome"])
+	}
+
 	// ── remediation chapter ───────────────────────────────────────────────
 	remediation, _ := narrative["remediation"].(map[string]any)
 	if remediation == nil {
-		t.Log("remediation chapter not present (may not have chained in time) — gate + triage verified")
+		t.Log("remediation chapter not present (may not have chained in time, or diagnosis never transitioned) — gate + triage verified")
 	} else {
-		if remediation["run_id"] == "" {
+		remRunID, _ := remediation["run_id"].(string)
+		remPlaybook, _ := remediation["playbook"].(string)
+		if remRunID == "" {
 			t.Error("remediation.run_id is empty")
 		}
-		if remediation["playbook"] == "" {
+		if remPlaybook == "" {
 			t.Error("remediation.playbook is empty")
+		} else {
+			if diagnosticSeries[remPlaybook] {
+				t.Errorf("remediation.playbook = %q is a diagnostic series (only reachable via ESCALATE_TO) — this hop should be in escalations[], not remediation", remPlaybook)
+			}
+			if !remediationSeries[remPlaybook] {
+				t.Logf("remediation.playbook = %q is not in the known remediation series list %v — catalog may have changed, verify", remPlaybook, remediationSeries)
+			}
+		}
+		if escalationRunIDs[remRunID] {
+			t.Errorf("remediation.run_id = %q also appears in escalations[] — hop counted in both chapters", remRunID)
 		}
 		t.Logf("remediation chapter: run_id=%s playbook=%s outcome=%s",
-			remediation["run_id"], remediation["playbook"], remediation["outcome"])
+			remRunID, remPlaybook, remediation["outcome"])
 	}
 
 	// ── feedback chapter ──────────────────────────────────────────────────

@@ -18,18 +18,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/a2aproject/a2a-go/a2a"
 )
 
 const (
 	auditdAddr  = "http://localhost:19901"
 	auditdAddr2 = "http://localhost:19902" // for policy-enabled instance (HELPDESK_POLICY_ENABLED=true)
 	auditdAddr3 = "http://localhost:19903" // for default-config instance (HELPDESK_POLICY_FILE set, HELPDESK_POLICY_ENABLED absent)
+	gatewayAddr = "http://localhost:19910" // real gateway pointed at the primary auditd instance
 )
 
 // auditdBin is the path to the compiled auditd binary, set in TestMain.
@@ -37,6 +41,7 @@ var (
 	auditdBin  string
 	auditorBin string
 	secbotBin  string
+	gatewayBin string
 )
 
 func TestMain(m *testing.M) {
@@ -52,6 +57,7 @@ func TestMain(m *testing.M) {
 		"helpdesk/cmd/auditd":  &auditdBin,
 		"helpdesk/cmd/auditor": &auditorBin,
 		"helpdesk/cmd/secbot":  &secbotBin,
+		"helpdesk/cmd/gateway": &gatewayBin,
 	}
 	for pkg, dest := range bins {
 		bin := filepath.Join(tmpDir, filepath.Base(pkg))
@@ -83,10 +89,78 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
+	// Start a real gateway pointed at the primary auditd instance, so
+	// incident-narrative tests exercise the actual HTTP → gateway → auditd
+	// path instead of a mocked auditd. Gateway requires HELPDESK_AGENT_URLS
+	// to resolve at startup (agent discovery) even though these tests never
+	// call any agent-backed endpoint, so it's pointed at a throwaway stub
+	// that satisfies discovery.Discover's two probes and is closed as soon
+	// as discovery succeeds.
+	stubAgent := newStubAgentServer()
+	gwProc := exec.Command(gatewayBin)
+	// TestIntegration_GatewayQuery_UnmatchedQuery_FallsThroughToLLMRouting
+	// depends on this gateway process having NO LLM configured, so that
+	// routeWithLLM fails immediately with 503 rather than actually routing.
+	// Appending os.Environ() inherits the parent shell's full environment —
+	// if the developer running `go test`/`make integration` happens to have
+	// HELPDESK_MODEL_VENDOR/HELPDESK_API_KEY exported (common while
+	// dogfooding this same product live), the LLM would be unexpectedly
+	// configured and the test's distinguishing signal breaks. Strip the LLM
+	// config vars explicitly rather than relying on their ambient absence —
+	// appending "KEY=" overrides after os.Environ() is not a safe substitute,
+	// since exec.Cmd does not guarantee "last duplicate wins" behavior.
+	gwProc.Env = append(envWithout(os.Environ(), "HELPDESK_MODEL_VENDOR", "HELPDESK_MODEL_NAME", "HELPDESK_API_KEY"),
+		"HELPDESK_GATEWAY_ADDR=localhost:19910",
+		"HELPDESK_AGENT_URLS="+stubAgent.URL,
+		"HELPDESK_DISCOVERY_TIMEOUT=5s",
+		"HELPDESK_AUDIT_URL="+auditdAddr,
+	)
+	gwProc.Stderr = os.Stderr
+	if err := gwProc.Start(); err != nil {
+		proc.Process.Kill()
+		fmt.Fprintln(os.Stderr, "SKIP: failed to start gateway:", err)
+		os.Exit(0)
+	}
+	gwReady := waitForReady(gatewayAddr+"/health", 15*time.Second)
+	stubAgent.Close() // discovery only happens once, at gateway startup
+	if !gwReady {
+		gwProc.Process.Kill()
+		proc.Process.Kill()
+		fmt.Fprintln(os.Stderr, "SKIP: gateway did not become ready within 15s")
+		os.Exit(0)
+	}
+
 	code := m.Run()
+	gwProc.Process.Kill()
+	gwProc.Wait()
 	proc.Process.Kill()
 	proc.Wait()
 	os.Exit(code)
+}
+
+// newStubAgentServer returns a minimal HTTP server satisfying
+// discovery.Discover's two probes (agent-card + schemas), just enough for
+// gateway's startup discovery to succeed immediately. The gateway process
+// only needs this once, at startup; it is not used by any test in this
+// package since none of them exercise agent-backed tool endpoints.
+func newStubAgentServer() *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(a2a.AgentCard{ //nolint:errcheck
+			Name:        "stub-agent",
+			Description: "stub agent for gateway discovery in integration tests",
+			URL:         "http://should-be-overridden/invoke",
+			Skills: []a2a.AgentSkill{
+				{ID: "stub-skill", Name: "stub", Description: "stub skill"},
+			},
+		})
+	})
+	mux.HandleFunc("/schemas", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{}")) //nolint:errcheck
+	})
+	return httptest.NewServer(mux)
 }
 
 // startAuditdWithPolicy starts a second auditd on auditdAddr2 with the given
@@ -119,6 +193,25 @@ func startAuditdWithPolicy(t *testing.T, policyPath string) {
 	if !waitForReady(auditdAddr2+"/health", 10*time.Second) {
 		t.Fatal("policy auditd did not become ready within 10s")
 	}
+}
+
+// envWithout returns env with any entries for the given keys removed —
+// used to guarantee a subprocess does NOT inherit specific ambient
+// environment variables from the parent shell, regardless of what else is
+// appended afterward.
+func envWithout(env []string, keys ...string) []string {
+	strip := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		strip[k] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !strip[name] {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // waitForReady polls url until it returns 200 or timeout elapses.

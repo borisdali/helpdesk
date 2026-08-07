@@ -27,6 +27,13 @@ also see how often this playbook has been right before. And that makes all the d
                     └──────────────┬───────────────┘
                                    ▼
                     ┌──────────────────────────────┐
+                    │   PLAYBOOK SELECTION         │
+                    │   keyword match, else LLM    │
+                    │   routes query or alert to   │
+                    │   the right encoded playbook │
+                    └──────────────┬───────────────┘
+                                   ▼
+                    ┌──────────────────────────────┐
               ┌────▶│   AGENT DIAGNOSIS            │
               │     │   hypothesis + confidence    │
               │     └──────────────┬───────────────┘
@@ -75,7 +82,8 @@ Rendered version, same loop (GitHub renders this natively):
 
 ```mermaid
 flowchart TD
-    A["Incident / Alert fires<br/>trigger_context captured — Right IX"] --> B["Agent Diagnosis<br/>hypothesis + confidence"]
+    A["Incident / Alert fires<br/>trigger_context captured — Right IX"] --> S["Playbook selection<br/>keyword match, else LLM routing"]
+    S --> B["Agent Diagnosis<br/>hypothesis + confidence"]
     B --> C["Consent Gate<br/>action + reasoning + blast radius — Right I"]
     C -->|approved| D[Execution]
     C -->|denied| G["Denial recorded — Right V<br/>not erased, not overridden"]
@@ -96,22 +104,31 @@ flowchart TD
    the alert text, the threshold that fired — is stored on the run record, not just
    passed to the agent. You can always compare what monitoring reported to what
    aiHelpDesk diagnosed.
-2. **Agent diagnosis.** The agent forms a root-cause hypothesis with a confidence level,
+2. **Playbook selection.** A keyword pre-filter matches the incoming text against every
+   entry-point playbook's `symptoms` — plain YAML you wrote and can inspect (Right VII).
+   A strong match selects the playbook directly, no LLM call at all; otherwise an LLM
+   routing call picks it. Either way, which playbook fired and why is itself an audited
+   decision (Right III), not a black box. See [automatic routing and playbook
+   selection](API.md#automatic-routing-and-playbook-selection). Today this stage is
+   reached by a free-text query — closing the loop from a *raw* monitoring webhook
+   straight into this stage, with no human retyping the alert as a query, is tracked as
+   an open item in [who this is for](FOR_WHOM.md#3-is-the-next-step-a-general-purpose-database-agent).
+3. **Agent diagnosis.** The agent forms a root-cause hypothesis with a confidence level,
    using the active Playbook's guidance.
-3. **Consent gate — Right I (Informed Consent).** Nothing executes until the action,
+4. **Consent gate — Right I (Informed Consent).** Nothing executes until the action,
    the reasoning and the blast radius have been reviewed. This is the step that reads as
    a liability disclosure in isolation — which is exactly why it should never appear
    without the next two stages next to it.
-4. **Approved → execution → outcome recorded — Right III (Full Audit Trail).** Every
+5. **Approved → execution → outcome recorded — Right III (Full Audit Trail).** Every
    tool call, every approval, the full reasoning chain: hash-chained, tamper-evident.
-5. **Denied → denial recorded — Right V (The Right to Refuse).** A denial is a
+6. **Denied → denial recorded — Right V (The Right to Refuse).** A denial is a
    first-class outcome, not an error. It is permanently recorded alongside the reason —
    not erased, not overridden after the fact.
-6. **Vault / calibration updates — Right IV (The Grade) and Right II (Second Opinion).**
+7. **Vault / calibration updates — Right IV (The Grade) and Right II (Second Opinion).**
    The outcome feeds the playbook's track record. Diagnosis accuracy, when feedback is
    submitted, is checked independently rather than taken on the word of a single model
    run.
-7. **Judge reviews proposed improvements → playbook version bumps — Right VI (The Right
+8. **Judge reviews proposed improvements → playbook version bumps — Right VI (The Right
    to Override).** Once enough runs accumulate, `vault suggest-update` proposes a
    revision; an independent LLM judge reviews it; a human decides. No draft activates
    without that decision.
@@ -220,3 +237,5 @@ section.
 | [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | The judge review → version bump stage of the loop |
 | [SECOND_OPINION.md](SECOND_OPINION.md) | The independent-check layers behind Right II |
 | [DEMO.md](../deploy/docker-compose/DEMO.md) | How to run the demo referenced above |
+| [API.md](API.md#automatic-routing-and-playbook-selection) | The playbook-selection stage: keyword pre-filter, LLM routing fallback |
+| [FOR_WHOM.md](FOR_WHOM.md#3-is-the-next-step-a-general-purpose-database-agent) | Roadmap, including the open monitoring-intake item that would trigger selection from a raw alert |

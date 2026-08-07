@@ -68,6 +68,7 @@ The table below lists just the initial set of aiHelpDesk mutations, their revers
 | `exec_insert` | **Yes** | `INSERT … RETURNING` captures inserted PKs → DELETE |
 | `delete_pod` | **Partial** | Controller recreates the pod automatically; informational note only |
 | `restart_deployment` | **No** | Restart already happened; image rollback is a separate out-of-band operation |
+| `debug_node_dmesg` | **N/A** | Self-cleaning diagnostic action — the debug pod it creates is deleted automatically before the tool returns; no persistent state change to roll back |
 | `terminate_connection` | **No** | Connection is already gone; `get_session_info` pre-flight surfaced the rollback cost before approval |
 | `terminate_idle_connections` | **No** | Same as above |
 | `cancel_query` | **No** | Query already cancelled; pre-flight warning is sufficient |

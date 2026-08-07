@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.6"
+version: "1.7"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -10,9 +10,11 @@ approval_mode: manual
 transitions_to:
   - pbs_db_restart_action
   - pbs_wal_disk_full
-# Cross-domain escalation: returning context to the DB agent.
+# Cross-domain escalation: returning context to the DB agent, or forward to
+# the K8s agent when check_host reveals the target is Kubernetes-managed.
 escalates_to:
   - pbs_db_restart_triage
+  - pbs_k8s_pod_crash_triage
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -42,7 +44,25 @@ guidance: |
   Describe the recommended action for operator approval and stop.
 
   Step 1 — Container state:
-  Call check_host with the connection_string (target). Read these fields carefully:
+  Call check_host with the connection_string (target). Read the `runtime`
+  field FIRST, before anything else in the result:
+  - runtime=kubectl → this target is Kubernetes-managed, NOT a Docker/Podman
+    container. Your docker/podman tools (get_host_logs in container mode,
+    check_memory, check_disk, restart_container) do not apply — the workload
+    runs in a pod on a cluster, not on this host. Do NOT proceed to Step 2
+    below. State the pod status from check_host's `details` field (phase,
+    restart_count, last_termination_reason, last_termination_exitcode) as
+    your FINDINGS, then emit exactly:
+      ESCALATE_TO: pbs_k8s_pod_crash_triage
+    The K8s agent has the tools (get_pods, describe_pod, get_pod_logs,
+    read_pod_file) to fully diagnose a Kubernetes pod crash — its exit-code
+    and OOM semantics are not the same as Docker's, so do NOT reuse the
+    exitcode=/oomkilled= reasoning below to interpret them. Do not guess or
+    perform further diagnosis yourself.
+  - runtime=docker or runtime=podman → proceed with the container inspection
+    steps below, unchanged.
+
+  Read these fields carefully (docker/podman targets only):
   - exitcode=0  → container was stopped CLEANLY (user, orchestrator, or graceful shutdown).
                   This is NOT a crash. Do not speculate about OOM or disk unless logs
                   provide direct evidence.
@@ -82,6 +102,10 @@ guidance: |
   - Recommended action and why it is safe (or not safe) to proceed
 
   Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
+  - check_host runtime=kubectl (target is Kubernetes-managed, not docker/podman):
+    ESCALATE_TO: pbs_k8s_pod_crash_triage
+    (checked FIRST, before any docker/podman-specific rule below — a
+    Kubernetes target never falls into the docker rules that follow)
   - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/disk signals:
     TRANSITION_TO: pbs_db_restart_action
     (the restart playbook will perform and confirm the restart)
