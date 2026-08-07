@@ -2,7 +2,7 @@
 
 The raw sample commands and deliberations presented below complement this blog post: 
 
-- **[Asking Your User to Click OK isn't Trust. Stop Apologizing for the Approval Gate](...)**
+- **[Asking Your User to Click OK isn't Trust. Stop Apologizing for the Approval Gate](https://levelup.gitconnected.com/asking-user-to-click-ok-isnt-trust-stop-apologizing-for-the-ai-approval-gate-2c9d57fb04ab)**
   How aiHelpDesk turned a liability disclosure into a safety net and what happened when we tried to fake the proof and failed.
 
 If you are new to aiHelpDesk, start with aiHelpDesk innovative concept of the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifyiable on a live system. Your system.
