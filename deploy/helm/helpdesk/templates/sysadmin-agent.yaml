@@ -17,6 +17,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: sysadmin-agent
     spec:
+      {{- if .Values.agents.sysadmin.rbac.create }}
+      serviceAccountName: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+      {{- end }}
       containers:
         - name: sysadmin-agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -126,3 +129,49 @@ spec:
   selector:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: sysadmin-agent
+{{- if .Values.agents.sysadmin.rbac.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sysadmin-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sysadmin-agent
+rules:
+  # Read-only, pod-scoped: enough for check_host to detect and inspect a
+  # Kubernetes-managed target (phase, restart count, last termination) and
+  # for the on-disk log fallback to exec/read inside the pod. Deliberately
+  # narrower than the k8s agent's ClusterRole — this agent never manages
+  # deployments/jobs/nodes, only ever inspects a single pod it was pointed at.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sysadmin-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "helpdesk.fullname" . }}-sysadmin-agent
+    namespace: {{ .Release.Namespace }}
+{{- end }}

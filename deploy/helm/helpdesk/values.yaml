@@ -81,6 +81,13 @@ agents:
     # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
     auditAPIKeySecret: ""
     auditAPIKeyKey: "api-key"
+    rbac:
+      # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so
+      # check_host can detect and inspect Kubernetes-managed targets
+      # (runtime=kubectl) via in-cluster kubectl. Read-only, pod-scoped —
+      # narrower than the k8s agent's ClusterRole, since this agent only
+      # ever inspects a single pod, never manages deployments/jobs/nodes.
+      create: true
 
   incident:
     replicas: 1
@@ -221,7 +228,14 @@ orchestrator:
 #     k8s_clusters:
 #       prod:
 #         name: "Production Cluster"
-#         context: "prod-cluster"
+#         # Leave context empty ("") for clusters where aiHelpDesk's agents
+#         # run in-cluster (the normal case for this chart) — kubectl
+#         # auto-detects the API server and credentials from the pod's own
+#         # ServiceAccount, and there is no local kubeconfig with named
+#         # contexts inside the container. Only set a real context value
+#         # here if an agent reaches this cluster via an out-of-cluster
+#         # kubeconfig (e.g. a host-based deployment, not this Helm chart).
+#         context: ""
 #     vms: {}
 infrastructure: {}
 
