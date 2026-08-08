@@ -1255,6 +1255,108 @@ func TestTargetMatches_SubsetMismatch(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted verifies the fix for the
+// documented "not persisted" limitation (docs/MUTATION_TOOLS.md §5.6): when
+// checkTargetScope detects drift for a playbook run, handlePlaybookRunAsAgent must
+// now record a durable delegation_verification event (previously the drift only
+// ever appeared in this run's own HTTP response, with no queryable trace afterward).
+func TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted(t *testing.T) {
+	agentSrv, card := mockA2AServerWithText(t, agentNameDB, "investigation complete")
+	_ = agentSrv
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	intended := "test-pg"
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			intended: {Name: "Test Postgres", ConnectionString: "host=localhost port=35432 dbname=postgres"},
+		},
+	}
+
+	// Auditd: serves a tool_execution event whose connection_string differs from
+	// the intended target — this is what both checkTargetScope AND
+	// proxyToAgentWithTool's own buildDelegationVerification will see (both query
+	// the same event_type=tool_execution for the trace); agent_reasoning and
+	// policy_decision fetches return empty (nothing narrated, nothing denied).
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("event_type") == "tool_execution" {
+			json.NewEncoder(w).Encode([]audit.Event{ //nolint:errcheck
+				{
+					EventType: audit.EventTypeToolExecution,
+					Tool: &audit.ToolExecution{
+						Name:       "list_databases",
+						Parameters: map[string]any{"connection_string": "pg-cluster-minikube"},
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]audit.Event{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		infra:    cfg,
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_drift01",
+		SeriesID:      "pbs_db_restart_triage",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Step 1: run check_connection.",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	req := PlaybookRunRequest{ConnectionString: intended, Context: "connection refused"}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/playbooks/pb_drift01/run", nil)
+	w := httptest.NewRecorder()
+
+	gw.handlePlaybookRunAsAgent(w, r, pb, req, "plr_drift01", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var driftEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification &&
+			e.DelegationVerification != nil && len(e.DelegationVerification.TargetDrift) > 0 {
+			driftEvent = e
+			break
+		}
+	}
+	if driftEvent == nil {
+		t.Fatalf("no delegation_verification event with TargetDrift populated was recorded; got %d total events", len(events))
+	}
+	if driftEvent.TraceID == "" {
+		t.Error("TraceID is empty — event will not attach to the run's journey")
+	}
+	if driftEvent.Session.ID != driftEvent.TraceID {
+		t.Errorf("Session.ID = %q, want to match TraceID %q", driftEvent.Session.ID, driftEvent.TraceID)
+	}
+	if len(driftEvent.DelegationVerification.TargetDrift) != 1 || driftEvent.DelegationVerification.TargetDrift[0] != "pg-cluster-minikube" {
+		t.Errorf("TargetDrift = %v, want [pg-cluster-minikube]", driftEvent.DelegationVerification.TargetDrift)
+	}
+	if driftEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch = true, want false: this event records drift, not fabrication — a real tool call happened")
+	}
+	if !strings.HasPrefix(driftEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", driftEvent.EventID)
+	}
+}
+
 // ---- checkTargetScope tests ----
 
 func TestCheckTargetScope_NoAuditURL(t *testing.T) {

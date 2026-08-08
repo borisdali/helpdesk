@@ -38,6 +38,7 @@ databases or your infra.
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
 5. [Delegation Verification](#5-delegation-verification-zero-trust-in-agent-outcome)
    - [Target-Scope Drift Detection (5.6)](#56-target-scope-drift-detection-checktargetscope)
+   - [Narrated-But-Unconfirmed Tool Calls (5.7)](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -819,8 +820,8 @@ This prevents the sub-agent from re-asking for confirmation in a loop (see
 | **Independent** | Queries auditd directly, not the agent's text |
 | **Persistent** | The verification itself is an auditable `delegation_verification` event |
 | **Queryable** | `GET /v1/journeys?outcome=unverified_claim` surfaces all incidents |
-| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
-| **Non-invasive** | Read delegations are not subject to the mismatch check |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches; `narrated_not_confirmed` distinguishes the narration-based mismatch (§5.7) from the write/destructive-absence one — no join to the delegation event needed |
+| **Read-covered** | Read delegations are exempt from the write/destructive-absence check (there is no expected tool class to be absent), but are covered by the narrated-but-unconfirmed check (§5.7) — a model that narrates calling a tool it never invoked is caught regardless of action class |
 
 ### 5.5 Limitations
 
@@ -831,9 +832,11 @@ This prevents the sub-agent from re-asking for confirmation in a loop (see
   a genuine execution may appear as a mismatch. The implementation retries
   once after 200 ms to reduce this. A user who retries will get a clean
   second verification.
-- Only `destructive` and `write` delegations trigger the mismatch check.
-  `read` delegations are verified (the event is recorded) but never flagged
-  as `unverified_claim`.
+- Only `destructive` and `write` delegations trigger the *write/destructive-absence*
+  mismatch check specifically — a read delegation with no tool call at all is not,
+  by itself, suspicious (many legitimate reads conclude from context without
+  needing a tool). Reads are covered by a separate, narrower check instead: see
+  [§5.7](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage).
 
 For the investigation workflow and root-cause guide, see
 [JOURNEYS.md — §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection).
@@ -888,15 +891,23 @@ queried was fully captured, automatically, in the same API call — no
 manual comparison of tool logs against the model's prose was needed to
 catch it.
 
-**Limitation — not persisted.** Unlike §5's `delegation_verification`,
-`target_drift` is not written to the audit store and does not elevate a
-journey's `outcome`. It exists only in the extra fields of the triggering
-run's own HTTP response (`extra["target_drift"]`). There is currently no
-`GET /v1/journeys?outcome=...` equivalent for it — a drifted run that
-nobody happens to inspect the raw response of leaves no queryable trace.
-Promoting it to a persisted audit event with journey-outcome integration,
-mirroring `unverified_claim`, is a known follow-up (tracked, not yet
-scheduled).
+**Persisted, like `delegation_verification`.** When drift is found,
+`handlePlaybookRunAsAgent` records a `delegation_verification` event with
+`target_drift` populated (`TraceID`/`Session.ID` set to the run's trace so it
+attaches to the journey), independent of whatever verification event
+§5's own check already recorded for the same hop — the two are orthogonal
+signals (a real tool call, at the wrong target, is not the same problem as no
+tool call at all), so a hop can produce either, both, or neither. The stored
+event's `outcome_status` is `target_drift_detected`, tied at the same
+priority (9) as `unverified_claim` in the outcome-elevation table — both
+represent "this agent's output can't be trusted as-is" for different reasons,
+not different severities. `JourneySummary.has_target_drift` (mirroring
+`has_mismatch`) is computed independently of that priority tie, so a trace
+with both a mismatch and drift on different hops surfaces both booleans
+correctly regardless of which outcome string wins as the displayed `Outcome`.
+`GET /v1/journeys?outcome=target_drift_detected` now surfaces every drifted
+run — the ephemeral `extra["target_drift"]` response field is unchanged and
+still present for immediate callers.
 
 **Test coverage**: `cmd/gateway/playbook_run_test.go` —
 `TestCheckTargetScope_NoDrift`, `TestCheckTargetScope_Drift`,
@@ -904,7 +915,77 @@ scheduled).
 `TestCheckTargetScope_ResolvedViaInfraConfig`,
 `TestCheckTargetScope_ResolvedPlusUnintendedServer`,
 `TestCheckTargetScope_FullConnStringMatchesShortName`,
-`TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`.
+`TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`,
+`TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted` (persistence).
+`internal/audit/store_test.go` — `TestQueryJourneys_HasTargetDrift`,
+`TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie`,
+`TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied`.
+
+---
+
+### 5.7 Narrated-But-Unconfirmed Tool Calls (Read-Action Coverage)
+
+§5.4 noted reads are exempt from the write/destructive-absence mismatch
+check — there's no expected tool class to be absent for a read. But that
+left a real gap: a model can narrate calling a tool and describe its
+"result" without ever actually invoking it, and for a read delegation
+nothing caught this. This was found live, not hypothetically — inspecting
+the raw audit trail (`GET /v1/events?trace_id=...`) for a real triage hop
+showed the agent's `agent_reasoning` events naming a tool (`read_pg_log`) it
+clearly intended to call and narrated a result for, with **zero matching
+`tool_execution` event anywhere in the trace**. Reads are the bulk of actual
+triage/diagnosis work, so this was the larger gap in practice, not a
+theoretical edge case.
+
+**The check**: `buildDelegationVerification` (`internal/audit/delegate_tool.go`)
+now additionally fetches `agent_reasoning` events for the trace and collects
+every tool name in their `tool_calls` field (structured `FunctionCall` data,
+not text-scanned — the model merely mentioning a tool name in prose cannot
+trigger this). Any name with no matching `tool_execution` event is
+narrated-but-unconfirmed. This check is **unconditional on `action_class`** —
+orthogonal to, and independent of, the write/destructive-absence switch — so
+it covers read, write, and destructive delegations alike.
+
+**Suppression — not every narrated-but-unconfirmed call is fabrication.**
+Two common, legitimate cases produce the same signature: a policy-denied tool
+call (the model tried, was correctly denied, and reported that) and a
+hallucinated or unregistered tool name — both skip `ToolAuditor.RecordToolCall`
+entirely, same as real fabrication would. Before flagging a mismatch, the
+check fetches `policy_decision` events for the trace; if any has
+`effect=deny`, the narration check is suppressed for that hop entirely
+(coarse-grained — any denial in the hop suppresses, not matched per tool name,
+trading a small risk of under-reporting for a much lower false-positive rate
+on a brand-new check).
+
+**Severity, distinct from the write/destructive case.** `NarratedNotConfirmed`
+sets `Mismatch = true` and elevates the journey outcome to `unverified_claim`
+the same as the write/destructive check, but `cmd/auditor/main.go`'s
+`checkFabricationMismatch` tiers the security-alert severity: the existing
+write/destructive-absence case stays `CRITICAL` (forwarded to the incident
+webhook, unchanged), while a mismatch caused *only* by narration fires a
+lower `WARNING`-level `narrated_tool_not_confirmed` alert instead — kept off
+the incident-webhook path until this new check's false-positive rate is
+observed on real traffic. When both causes fire on the same event, the
+existing `CRITICAL` alert wins and no separate `WARNING` is also emitted.
+
+**Interaction with manual-hold destructive delegations.** `proxyToAgentWithTool`
+already suppresses the write/destructive-absence mismatch when
+`approval_mode=manual` (the agent is expected to propose, not execute). That
+suppression does **not** extend to narration mismatches — a narrated
+Tool call unrelated to the pending destructive action is still a genuine
+fabrication signal, and manual-hold destructive delegations don't explain it.
+
+**Test coverage**: `internal/audit/delegate_tool_test.go` —
+`TestBuildDelegationVerification_MismatchFromNarration`,
+`_NarrationConfirmed_NoMismatch`, `_SuppressedByPolicyDenial`,
+`_NarrationMismatch_UnconditionalOnActionClass`,
+`_ReadDelegation_NeverMismatchFromToolAbsence`;
+`TestFormatVerificationBlock_NarratedNotConfirmed`.
+`cmd/gateway/gateway_test.go` —
+`TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch`.
+`cmd/auditor/auditor_test.go` —
+`TestCheckFabricationMismatch_NarrationOnly_EmitsWarningNotCritical`,
+`_WriteDestructiveAbsence_StaysCriticalEvenWithNarration`.
 
 ---
 

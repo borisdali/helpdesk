@@ -635,6 +635,35 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				"trace_id", primary.traceID,
 				"intended", req.ConnectionString,
 				"actual", drift)
+			// Persist as a durable, queryable audit event (previously only visible in
+			// this response's target_drift field) — independent of whatever
+			// delegation_verification event proxyToAgentWithTool already recorded for
+			// this hop; TargetDrift and Mismatch are orthogonal signals, so a second
+			// event is expected, not a duplicate (safe: delegation_verification events
+			// don't contribute to event_count/tools_used, and Mismatch stays
+			// zero-valued here so this never double-fires the CRITICAL fabrication
+			// alert). ActionRead is a static default — target-scope drift is almost
+			// always on read/diagnostic tools, and nothing branches on ActionClass for
+			// TargetDrift specifically.
+			if g.auditor != nil {
+				driftEvent := &audit.Event{
+					EventID:   "gv_" + uuid.New().String()[:8],
+					Timestamp: time.Now().UTC(),
+					EventType: audit.EventTypeDelegationVerification,
+					TraceID:   primary.traceID,
+					Session: audit.Session{
+						ID: primary.traceID,
+					},
+					DelegationVerification: &audit.DelegationVerification{
+						Agent:       primary.agentName,
+						ActionClass: audit.ActionRead,
+						TargetDrift: drift,
+					},
+				}
+				if err := g.auditor.RecordEvent(r.Context(), driftEvent); err != nil {
+					slog.Warn("playbook run: failed to record target drift event", "trace_id", primary.traceID, "err", err)
+				}
+			}
 		}
 	}
 

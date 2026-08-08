@@ -1620,9 +1620,14 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
 		// When approval_mode=manual the agent is expected to propose destructive
 		// actions in text without executing them — no tool call will appear in the
-		// audit trail. Treat this as expected, not as fabrication.
+		// audit trail. Treat this as expected, not as fabrication. This suppression
+		// only applies to the write/destructive-absence check — a narrated-but-unconfirmed
+		// tool call (verif.NarratedNotConfirmed) is a different, orthogonal signal that
+		// manual-hold destructive delegations don't explain, so it must survive even
+		// when manualHold would otherwise apply.
 		ac, _ := r.Context().Value(ctxKeyApprovalSession).(approvalContext)
-		manualHold := ac.mode == "manual" && actionClass == audit.ActionDestructive
+		narrationMismatch := len(verif.NarratedNotConfirmed) > 0
+		manualHold := ac.mode == "manual" && actionClass == audit.ActionDestructive && !narrationMismatch
 		if verif.Mismatch && !manualHold {
 			slog.Warn("gateway: fabrication risk — agent returned success but audit trail has no matching tool executions",
 				"agent", agentName, "trace_id", traceID, "action_class", actionClass)

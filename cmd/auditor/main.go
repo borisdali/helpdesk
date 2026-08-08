@@ -1373,17 +1373,48 @@ func (a *Auditor) checkFabricationMismatch(event *audit.Event) {
 	if event.EventType != audit.EventTypeDelegationVerification {
 		return
 	}
-	if event.DelegationVerification == nil || !event.DelegationVerification.Mismatch {
+	dv := event.DelegationVerification
+	if dv == nil || !dv.Mismatch {
 		return
 	}
-	agent := event.DelegationVerification.Agent
-	actionClass := string(event.DelegationVerification.ActionClass)
-	a.recordSecurityAlert("fabrication_mismatch", AlertCritical,
-		"FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
-		event,
-		"agent", agent,
-		"action_class", actionClass,
-		"trace_id", event.TraceID)
+	agent := dv.Agent
+	actionClass := string(dv.ActionClass)
+
+	// Distinguish the two independent causes buildDelegationVerification can set
+	// Mismatch for: the original write/destructive-absence check (re-derived here from
+	// its own switch logic, since only the resulting slices are visible on this event),
+	// vs. a narrated-but-unconfirmed tool call. The latter is a brand-new check with
+	// known false-positive vectors (see internal/audit/delegate_tool.go's
+	// hasPolicyDenial suppression) — keep it off the CRITICAL/incident-webhook path
+	// until its false-positive rate is observed on real traffic, without weakening
+	// the existing write/destructive alerting at all.
+	writeOrDestructiveMismatch := false
+	switch dv.ActionClass {
+	case audit.ActionDestructive:
+		writeOrDestructiveMismatch = len(dv.DestructiveConfirmed) == 0
+	case audit.ActionWrite:
+		writeOrDestructiveMismatch = len(dv.WriteConfirmed) == 0 && len(dv.DestructiveConfirmed) == 0
+	}
+
+	if writeOrDestructiveMismatch {
+		a.recordSecurityAlert("fabrication_mismatch", AlertCritical,
+			"FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
+			event,
+			"agent", agent,
+			"action_class", actionClass,
+			"trace_id", event.TraceID)
+		return
+	}
+
+	if len(dv.NarratedNotConfirmed) > 0 {
+		a.recordSecurityAlert("narrated_tool_not_confirmed", AlertWarning,
+			"UNVERIFIED — agent's response describes calling a tool with no matching execution in the audit trail",
+			event,
+			"agent", agent,
+			"action_class", actionClass,
+			"tools", strings.Join(dv.NarratedNotConfirmed, ", "),
+			"trace_id", event.TraceID)
+	}
 }
 
 // recordSecurityAlert records a security alert and optionally sends to incident webhook.

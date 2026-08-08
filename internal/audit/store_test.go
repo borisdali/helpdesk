@@ -2248,6 +2248,201 @@ func TestQueryJourneys_HasMismatch(t *testing.T) {
 	}
 }
 
+func TestQueryJourneys_HasTargetDrift(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_target_drift_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Journey A: a delegation_verification event with TargetDrift populated —
+	// a real tool call happened (Mismatch stays false), just against the wrong target.
+	eventsA := []*Event{
+		{
+			EventID:   "gwr_drift_a",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_drift_a",
+			Session:   Session{ID: "tr_drift_a"},
+			Input:     Input{UserQuery: "investigate connection refused"},
+		},
+		{
+			EventID:   "gv_drift_a",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_drift_a",
+			Session:   Session{ID: "tr_drift_a"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+				TargetDrift: []string{"host=localhost port=15432 dbname=testdb"},
+			},
+		},
+	}
+
+	// Journey B: clean verification, no drift.
+	eventsB := []*Event{
+		{
+			EventID:   "gwr_drift_b",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_nodrift_b",
+			Session:   Session{ID: "tr_nodrift_b"},
+			Input:     Input{UserQuery: "show active connections"},
+		},
+		{
+			EventID:   "gv_drift_b",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_nodrift_b",
+			Session:   Session{ID: "tr_nodrift_b"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+			},
+		},
+	}
+
+	for _, e := range append(eventsA, eventsB...) {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	byTrace := make(map[string]JourneySummary, len(journeys))
+	for _, j := range journeys {
+		byTrace[j.TraceID] = j
+	}
+
+	driftJourney := byTrace["tr_drift_a"]
+	if !driftJourney.HasTargetDrift {
+		t.Error("tr_drift_a: expected HasTargetDrift=true")
+	}
+	if driftJourney.Outcome != "target_drift_detected" {
+		t.Errorf("tr_drift_a: Outcome = %q, want %q", driftJourney.Outcome, "target_drift_detected")
+	}
+	if driftJourney.HasMismatch {
+		t.Error("tr_drift_a: expected HasMismatch=false — target drift is a real tool call against the wrong target, not a fabrication")
+	}
+
+	cleanJourney := byTrace["tr_nodrift_b"]
+	if cleanJourney.HasTargetDrift {
+		t.Error("tr_nodrift_b: expected HasTargetDrift=false")
+	}
+}
+
+// TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie verifies that
+// even though "unverified_claim" and "target_drift_detected" are tied at
+// outcomePriority 9 — so only one wins as the displayed Outcome string when both
+// occur in the same trace — HasMismatch and HasTargetDrift are each independently
+// reliable, so neither signal is lost to the tie.
+func TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_tie_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Two delegation_verification events on the same trace — one hop drifted target,
+	// a later hop had a genuine narrated-but-unconfirmed mismatch. Whichever the
+	// aggregation displays as Outcome, both booleans must independently be true.
+	events := []*Event{
+		{
+			EventID:   "gwr_tie",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_tie",
+			Session:   Session{ID: "tr_tie"},
+			Input:     Input{UserQuery: "investigate connection refused"},
+		},
+		{
+			EventID:   "gv_tie_drift",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_tie",
+			Session:   Session{ID: "tr_tie"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				TargetDrift: []string{"host=localhost port=15432 dbname=testdb"},
+			},
+		},
+		{
+			EventID:   "gv_tie_mismatch",
+			Timestamp: base.Add(2 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_tie",
+			Session:   Session{ID: "tr_tie"},
+			DelegationVerification: &DelegationVerification{
+				Agent:                "sysadmin_agent",
+				ActionClass:          ActionRead,
+				Mismatch:             true,
+				NarratedNotConfirmed: []string{"check_host"},
+			},
+		},
+	}
+
+	for _, e := range events {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	if len(journeys) != 1 {
+		t.Fatalf("QueryJourneys() = %d, want 1", len(journeys))
+	}
+
+	j := journeys[0]
+	if !j.HasMismatch {
+		t.Error("expected HasMismatch=true regardless of which outcome string won the priority tie")
+	}
+	if !j.HasTargetDrift {
+		t.Error("expected HasTargetDrift=true regardless of which outcome string won the priority tie")
+	}
+	if j.Outcome != "unverified_claim" && j.Outcome != "target_drift_detected" {
+		t.Errorf("Outcome = %q, want one of unverified_claim/target_drift_detected (tied at priority 9)", j.Outcome)
+	}
+}
+
+func TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied(t *testing.T) {
+	a := outcomePriority("unverified_claim")
+	b := outcomePriority("target_drift_detected")
+	if a != b {
+		t.Errorf("outcomePriority(unverified_claim)=%d, outcomePriority(target_drift_detected)=%d — want tied", a, b)
+	}
+	if a != 9 {
+		t.Errorf("outcomePriority(unverified_claim) = %d, want 9", a)
+	}
+}
+
 func TestStore_Query_EventTypes_MultiType(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})

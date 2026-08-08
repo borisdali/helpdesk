@@ -9,8 +9,11 @@ import (
 	"time"
 )
 
-// serveFakeEvents returns an httptest.Server that responds to
-// GET /v1/events with the given events JSON-encoded.
+// serveFakeEvents returns an httptest.Server that responds to GET /v1/events with
+// the subset of the given events matching the request's event_type query param —
+// mirroring the real auditd server's filtering, since buildDelegationVerification
+// now issues separate fetches for tool_execution, agent_reasoning, and
+// policy_decision events and each fetch must only see events of its own type.
 func serveFakeEvents(t *testing.T, events []Event) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -18,8 +21,15 @@ func serveFakeEvents(t *testing.T, events []Event) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
+		wantType := EventType(r.URL.Query().Get("event_type"))
+		var filtered []Event
+		for _, ev := range events {
+			if wantType == "" || ev.EventType == wantType {
+				filtered = append(filtered, ev)
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(events) //nolint:errcheck
+		json.NewEncoder(w).Encode(filtered) //nolint:errcheck
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -62,14 +72,104 @@ func TestBuildDelegationVerification_Confirmed(t *testing.T) {
 	}
 }
 
-func TestBuildDelegationVerification_ReadDelegation_NeverMismatch(t *testing.T) {
-	// A read delegation with no tools called is never a mismatch.
+func TestBuildDelegationVerification_ReadDelegation_NeverMismatchFromToolAbsence(t *testing.T) {
+	// A read delegation with no tools called, and no agent_reasoning claiming
+	// otherwise, is never a mismatch — the write/destructive-absence check never
+	// applies to reads, and there's nothing narrated to be unconfirmed.
 	srv := serveFakeEvents(t, []Event{})
 
 	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del3", "postgres_database_agent")
 
 	if v.Mismatch {
-		t.Error("Mismatch = true, want false: read delegations are never a mismatch")
+		t.Error("Mismatch = true, want false: no tools called and nothing narrated")
+	}
+}
+
+func TestBuildDelegationVerification_MismatchFromNarration(t *testing.T) {
+	// A read delegation where the agent's own reasoning names a tool it never
+	// actually called (no matching tool_execution event), and no policy denial
+	// explains the absence — this is the live-discovered gap: previously invisible
+	// on reads since Mismatch was only ever computed for write/destructive.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			Reasoning: "Let me check the logs", ToolCalls: []string{"read_pg_log"},
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del7", "postgres_database_agent")
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: narrated tool call with no matching execution and no policy denial")
+	}
+	if len(v.NarratedNotConfirmed) != 1 || v.NarratedNotConfirmed[0] != "read_pg_log" {
+		t.Errorf("NarratedNotConfirmed = %v, want [read_pg_log]", v.NarratedNotConfirmed)
+	}
+}
+
+func TestBuildDelegationVerification_NarrationConfirmed_NoMismatch(t *testing.T) {
+	// The narrated tool call DID produce a matching tool_execution event — no mismatch.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "read_pg_log"}},
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			ToolCalls: []string{"read_pg_log"},
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del8", "postgres_database_agent")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: narrated tool call was actually confirmed")
+	}
+	if len(v.NarratedNotConfirmed) != 0 {
+		t.Errorf("NarratedNotConfirmed = %v, want empty", v.NarratedNotConfirmed)
+	}
+}
+
+func TestBuildDelegationVerification_SuppressedByPolicyDenial(t *testing.T) {
+	// The narrated tool call has no matching tool_execution event, but a policy
+	// denial in the same trace explains why — this is policy working correctly,
+	// not fabrication, so it must NOT be flagged as a mismatch.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			ToolCalls: []string{"get_nodes"},
+		}},
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "read", Message: "purpose required",
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del9", "k8s_agent")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: policy denial explains the narrated-but-unconfirmed call")
+	}
+	if len(v.NarratedNotConfirmed) != 0 {
+		t.Errorf("NarratedNotConfirmed = %v, want empty when suppressed by policy denial", v.NarratedNotConfirmed)
+	}
+}
+
+func TestBuildDelegationVerification_NarrationMismatch_UnconditionalOnActionClass(t *testing.T) {
+	// The narration check fires regardless of ActionClass — including destructive,
+	// where it's additive to (not a replacement for) the existing write/destructive
+	// check. Here the destructive tool WAS confirmed (no write/destructive mismatch),
+	// but a separate narrated tool was not — still a mismatch, via narration alone.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			ToolCalls: []string{"terminate_connection", "get_session_info"},
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del10", "postgres_database_agent")
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: get_session_info was narrated but never executed")
+	}
+	if len(v.DestructiveConfirmed) != 1 {
+		t.Errorf("DestructiveConfirmed = %v, want [terminate_connection] — the write/destructive check should still pass independently", v.DestructiveConfirmed)
+	}
+	if len(v.NarratedNotConfirmed) != 1 || v.NarratedNotConfirmed[0] != "get_session_info" {
+		t.Errorf("NarratedNotConfirmed = %v, want [get_session_info]", v.NarratedNotConfirmed)
 	}
 }
 
@@ -194,6 +294,28 @@ func TestBuildDelegationVerification_Exported(t *testing.T) {
 	}
 	if len(v.DestructiveConfirmed) != 1 || v.DestructiveConfirmed[0] != "terminate_connection" {
 		t.Errorf("DestructiveConfirmed = %v, want [terminate_connection]", v.DestructiveConfirmed)
+	}
+}
+
+func TestFormatVerificationBlock_NarratedNotConfirmed(t *testing.T) {
+	v := &DelegationVerification{
+		DelegationEventID:    "evt_nar",
+		Agent:                "postgres_database_agent",
+		ActionClass:          ActionRead,
+		ToolsConfirmed:       nil,
+		Mismatch:             true,
+		NarratedNotConfirmed: []string{"read_pg_log"},
+	}
+	block := formatVerificationBlock(v)
+
+	if !strings.Contains(block, "NARRATED BUT NOT CONFIRMED") {
+		t.Errorf("block missing narration-specific signal: %s", block)
+	}
+	if !strings.Contains(block, "read_pg_log") {
+		t.Errorf("block missing the unconfirmed tool name: %s", block)
+	}
+	if strings.Contains(block, "MISMATCH:") {
+		t.Errorf("narration case should use its own distinct signal, not the write/destructive MISMATCH wording: %s", block)
 	}
 }
 

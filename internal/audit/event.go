@@ -42,10 +42,19 @@ const (
 	// EventTypeDelegationVerification is emitted by DelegateTool after every
 	// sub-agent call. It records which tools the sub-agent actually executed
 	// (from the audit trail), independent of the agent's text response.
-	// When Mismatch is true — a destructive or write delegation produced no
-	// confirmed tool execution of that class or stronger — the journey outcome
-	// is set to "unverified_claim". The ActionClass field distinguishes write
-	// mismatches from destructive mismatches without joining to the delegation event.
+	// When Mismatch is true — either a destructive or write delegation produced no
+	// confirmed tool execution of that class or stronger, OR (regardless of action
+	// class, including read) the model's own reasoning named a tool call that never
+	// produced a matching tool_execution event and no policy denial explains the
+	// absence — the journey outcome is set to "unverified_claim". The ActionClass
+	// field distinguishes write mismatches from destructive mismatches without
+	// joining to the delegation event; NarratedNotConfirmed distinguishes the
+	// narration-based mismatch from the write/destructive-absence one.
+	// When TargetDrift is non-empty — a tool call in this hop used a different
+	// connection_string than the playbook run was invoked with — the journey
+	// outcome is set to "target_drift_detected" instead (see checkTargetScope in
+	// cmd/gateway/playbooks.go); this is independent of Mismatch and may appear on
+	// its own event for the same hop.
 	// Like verification_outcome, these events do NOT contribute to tools_used
 	// or event_count in journey aggregation.
 	EventTypeDelegationVerification EventType = "delegation_verification"
@@ -258,11 +267,28 @@ type DelegationVerification struct {
 	// DestructiveConfirmed is the subset of ToolsConfirmed whose ActionClass is Destructive.
 	DestructiveConfirmed []string `json:"destructive_confirmed"`
 	// Mismatch is true when the delegation was classified as destructive or write but
-	// the audit trail contains no confirmed tool execution of that class or stronger.
+	// the audit trail contains no confirmed tool execution of that class or stronger,
+	// OR when NarratedNotConfirmed is non-empty (see below) — the two causes are
+	// distinguished by which of DestructiveConfirmed/WriteConfirmed/NarratedNotConfirmed
+	// is populated, not by a separate flag.
 	Mismatch bool `json:"mismatch"`
 	// MismatchReason explains why a potential mismatch was downgraded to non-alerting
 	// (e.g. approval_mode=manual means no execution is expected).
 	MismatchReason string `json:"mismatch_reason,omitempty"`
+	// NarratedNotConfirmed lists tool names the model's own reasoning (agent_reasoning
+	// events' ToolCalls) said it invoked, but which produced no matching tool_execution
+	// event anywhere in the trace, and which no policy_decision deny event explains.
+	// Computed regardless of ActionClass — unlike the write/destructive check above,
+	// this catches fabricated-or-narrated tool use on read delegations too, which are
+	// the bulk of actual triage/diagnosis work.
+	NarratedNotConfirmed []string `json:"narrated_not_confirmed,omitempty"`
+	// TargetDrift lists connection strings a tool call in this hop actually used that
+	// differ from the connection_string the playbook run was invoked with. Populated
+	// by checkTargetScope (cmd/gateway/playbooks.go), independent of Mismatch — a
+	// real tool call can execute cleanly (no Mismatch) while still targeting the wrong
+	// server. May be recorded on its own event, separate from the event this hop's
+	// write/destructive/narration verification produced.
+	TargetDrift []string `json:"target_drift,omitempty"`
 }
 
 // RollbackExecution is set on rollback_initiated, rollback_executed, and

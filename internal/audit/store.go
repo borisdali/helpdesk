@@ -28,7 +28,7 @@ const sqliteTimeFormat = "2006-01-02T15:04:05.000000000Z"
 // Store persists audit events to SQLite or PostgreSQL and notifies listeners.
 type Store struct {
 	db         *sql.DB
-	isPostgres bool   // true when connected to PostgreSQL
+	isPostgres bool // true when connected to PostgreSQL
 	socketPath string
 	listeners  []net.Conn
 	mu         sync.RWMutex
@@ -327,11 +327,21 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			outcomeStatus = event.PolicyDecision.Effect
 		}
 	} else if event.DelegationVerification != nil {
-		// Surface mismatch as "unverified_claim" so QueryJourneys can elevate the
-		// journey outcome. Clean verifications are recorded as "verified".
-		if event.DelegationVerification.Mismatch {
+		// Surface target-scope drift and fabrication mismatch as distinct outcome
+		// strings so QueryJourneys can elevate the journey outcome — checked in this
+		// order since a single event's TargetDrift and Mismatch are independent
+		// signals (see checkTargetScope in cmd/gateway/playbooks.go), but the stored
+		// outcome_status column holds only one value per event. A trace where both
+		// signals fire (on the same or different hops) is still fully discoverable
+		// either way, via the independent HasMismatch/HasTargetDrift booleans on the
+		// journey summary rather than this single string. Clean verifications are
+		// recorded as "verified".
+		switch {
+		case len(event.DelegationVerification.TargetDrift) > 0:
+			outcomeStatus = "target_drift_detected"
+		case event.DelegationVerification.Mismatch:
 			outcomeStatus = "unverified_claim"
-		} else {
+		default:
 			outcomeStatus = "verified"
 		}
 	}
@@ -541,10 +551,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 
 // QueryOptions specifies filters for querying events.
 type QueryOptions struct {
-	EventID        string         // filter by exact event ID (returns at most one event)
+	EventID        string // filter by exact event ID (returns at most one event)
 	SessionID      string
 	EventType      EventType
-	EventTypes     []EventType    // filter by multiple event types (OR); ignored when EventType is set
+	EventTypes     []EventType // filter by multiple event types (OR); ignored when EventType is set
 	Agent          string
 	Since          time.Time
 	MinConfidence  float64
@@ -561,19 +571,19 @@ type QueryOptions struct {
 
 // JourneyOptions specifies filters for QueryJourneys.
 type JourneyOptions struct {
-	UserID          string        // optional; empty = all users
-	Purpose         string        // optional; filter by declared purpose (e.g. "diagnostic")
-	From            time.Time     // inclusive lower bound on timestamp
-	Until           time.Time     // exclusive upper bound on timestamp
-	Limit           int           // max journeys returned; default 50
-	Since           time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
-	Category        string        // filter by decision_category (e.g. "database", "kubernetes")
-	Outcome         string        // filter by computed journey outcome (post-aggregation)
-	HasRetries      bool          // only journeys with retry_count > 0 (post-aggregation)
-	TraceID         string        // filter by exact trace ID; returns at most one journey
-	TraceIDPrefix   string        // filter by trace ID prefix (e.g. "plan_" for planner journeys)
-	Origin          string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
-	IncidentOnly    bool          // only journeys linked to a playbook_run (incident_run_id != "")
+	UserID        string        // optional; empty = all users
+	Purpose       string        // optional; filter by declared purpose (e.g. "diagnostic")
+	From          time.Time     // inclusive lower bound on timestamp
+	Until         time.Time     // exclusive upper bound on timestamp
+	Limit         int           // max journeys returned; default 50
+	Since         time.Duration // if non-zero, overrides From = time.Now().Add(-Since)
+	Category      string        // filter by decision_category (e.g. "database", "kubernetes")
+	Outcome       string        // filter by computed journey outcome (post-aggregation)
+	HasRetries    bool          // only journeys with retry_count > 0 (post-aggregation)
+	TraceID       string        // filter by exact trace ID; returns at most one journey
+	TraceIDPrefix string        // filter by trace ID prefix (e.g. "plan_" for planner journeys)
+	Origin        string        // filter by dispatch origin (e.g. "agent", "gateway"); post-aggregation
+	IncidentOnly  bool          // only journeys linked to a playbook_run (incident_run_id != "")
 }
 
 // DelegationSummary captures one orchestrator-to-sub-agent delegation turn:
@@ -617,6 +627,14 @@ type JourneySummary struct {
 	// has Mismatch=true — meaning an agent returned success but no matching tool
 	// executions appeared in the audit trail (possible LLM fabrication).
 	HasMismatch bool `json:"has_mismatch,omitempty"`
+	// HasTargetDrift is true when any delegation_verification event for this journey
+	// has a non-empty TargetDrift — meaning a tool call in this journey used a
+	// different connection_string than the run was invoked with. Computed
+	// independently of which outcome string (outcomePriority) wins for the trace,
+	// mirroring HasMismatch, so a trace with both a mismatch and target drift on
+	// different hops is still discoverable via either boolean regardless of the tie
+	// at priority 9 between "unverified_claim" and "target_drift_detected".
+	HasTargetDrift bool `json:"has_target_drift,omitempty"`
 	// IncidentRunID is the plr_* playbook run ID for journeys associated with an
 	// incident run. Empty for ad-hoc or non-incident journeys.
 	IncidentRunID string `json:"incident_run_id,omitempty"`
@@ -744,6 +762,7 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 		retryCount         int  // number of tool_retry events in this trace
 		sawRequireApproval bool // true if a require_approval policy decision was seen
 		hasMismatch        bool // true when any delegation_verification event has mismatch=true
+		hasTargetDrift     bool // true when any delegation_verification event has target_drift_detected outcome
 	}
 
 	// Preserve the order returned by step 1.
@@ -754,11 +773,11 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 
 	for rows2.Next() {
 		var (
-			traceID, eventType                                           string
-			userID, userQuery, sessionAgent, agent, decisionCategory    sql.NullString
-			toolName, outcomeStatus, approvalStatus                     sql.NullString
-			ts                                                           string
-			purposeCol, purposeNoteCol, originCol                       sql.NullString
+			traceID, eventType                                       string
+			userID, userQuery, sessionAgent, agent, decisionCategory sql.NullString
+			toolName, outcomeStatus, approvalStatus                  sql.NullString
+			ts                                                       string
+			purposeCol, purposeNoteCol, originCol                    sql.NullString
 		)
 		if err := rows2.Scan(&traceID, &eventType, &userID, &userQuery, &sessionAgent, &agent,
 			&decisionCategory, &toolName, &outcomeStatus, &approvalStatus, &ts,
@@ -790,6 +809,14 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if eventType == string(EventTypeDelegationVerification) &&
 				outcomeStatus.Valid && outcomeStatus.String == "unverified_claim" {
 				d.hasMismatch = true
+			}
+			// Track target-scope drift: "target_drift_detected" is the outcome
+			// stored for delegation_verification events where TargetDrift is
+			// non-empty — independent of hasMismatch above (see the tie at
+			// outcomePriority 9), so checked separately rather than as an else-if.
+			if eventType == string(EventTypeDelegationVerification) &&
+				outcomeStatus.Valid && outcomeStatus.String == "target_drift_detected" {
+				d.hasTargetDrift = true
 			}
 			continue
 		}
@@ -922,23 +949,24 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.outcome = "approved"
 		}
 		summaries = append(summaries, JourneySummary{
-			TraceID:     id,
-			StartedAt:   d.startedAt,
-			EndedAt:     d.endedAt,
-			DurationMs:  durationMs,
-			UserID:      d.userID,
-			UserQuery:   d.userQuery,
-			Purpose:     d.purpose,
-			PurposeNote: d.purposeNote,
-			Agent:       d.agent,
-			Category:    d.category,
-			Delegations: d.delegations,
-			ToolsUsed:   tools,
-			Outcome:     d.outcome,
-			EventCount:  d.count,
-			RetryCount:  d.retryCount,
-			Origin:      d.origin,
-			HasMismatch: d.hasMismatch,
+			TraceID:        id,
+			StartedAt:      d.startedAt,
+			EndedAt:        d.endedAt,
+			DurationMs:     durationMs,
+			UserID:         d.userID,
+			UserQuery:      d.userQuery,
+			Purpose:        d.purpose,
+			PurposeNote:    d.purposeNote,
+			Agent:          d.agent,
+			Category:       d.category,
+			Delegations:    d.delegations,
+			ToolsUsed:      tools,
+			Outcome:        d.outcome,
+			EventCount:     d.count,
+			RetryCount:     d.retryCount,
+			Origin:         d.origin,
+			HasMismatch:    d.hasMismatch,
+			HasTargetDrift: d.hasTargetDrift,
 		})
 	}
 
@@ -1010,21 +1038,42 @@ func (s *Store) GetTraceIDByRunID(ctx context.Context, runID string) (string, er
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //
-//	unverified_claim(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
+//	unverified_claim(9) = target_drift_detected(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
 //	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > verified(0.5) > unknown(0)
+//
+// unverified_claim and target_drift_detected are deliberately tied, not ranked —
+// both represent "this agent's output can't be trusted as-is" for different reasons
+// (no evidence at all, vs. evidence pointing at the wrong target), not different
+// severities. The tie is safe because HasMismatch/HasTargetDrift on JourneySummary
+// are computed independently of which outcome string wins this priority comparison,
+// so a trace where both fire is still fully discoverable via either boolean even
+// though only one outcome string is displayed.
 func outcomePriority(o string) int {
 	switch o {
-	case "unverified_claim":    return 9
-	case "error":               return 8
-	case "denied":              return 7
-	case "escalation_required": return 6
-	case "verified_failed":     return 5
-	case "verified_warning":    return 4
-	case "approved":            return 3
-	case "verified_ok":         return 2
-	case "success":             return 1
-	case "verified":            return 0 // clean verification doesn't override a real outcome
-	default:                    return 0
+	case "unverified_claim":
+		return 9
+	case "target_drift_detected":
+		return 9
+	case "error":
+		return 8
+	case "denied":
+		return 7
+	case "escalation_required":
+		return 6
+	case "verified_failed":
+		return 5
+	case "verified_warning":
+		return 4
+	case "approved":
+		return 3
+	case "verified_ok":
+		return 2
+	case "success":
+		return 1
+	case "verified":
+		return 0 // clean verification doesn't override a real outcome
+	default:
+		return 0
 	}
 }
 
