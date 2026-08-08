@@ -4442,7 +4442,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			case j.Phase == "triage+remediation":
 				desc = "full session: diagnosis through fix"
 			case strings.HasPrefix(j.Phase, "escalation:"):
-				desc = "intermediate escalation hop — further diagnosis, not yet resolved"
+				desc = escalationHopDesc(j.Phase, n.Escalations)
 			}
 			fmt.Printf("  %-22s %s\n", label+":", j.TraceID)
 			if desc != "" {
@@ -4453,6 +4453,41 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		fmt.Printf("  → vault journeys %s\n", n.Journeys[0].TraceID)
 	}
 	fmt.Println()
+}
+
+// escalationHopDesc returns the JOURNEYS description for an "escalation:N"
+// phase, reflecting what actually happened at that specific hop rather than
+// a single generic label for every escalation phase. phase may carry a
+// "+"-joined suffix (e.g. "escalation:1+remediation", when a hop's trace_id
+// also serves as the next phase — see buildJourneyRefs in
+// cmd/gateway/incident_narrative.go); only the leading "escalation:N" token
+// is used to resolve the index. Falls back to the old generic wording when
+// the index can't be resolved (out of range, unparsable, or Escalations
+// wasn't populated) rather than printing nothing.
+func escalationHopDesc(phase string, escalations []narrativeEscalationHop) string {
+	const fallback = "intermediate escalation hop — further diagnosis, not yet resolved"
+
+	token := strings.SplitN(phase, "+", 2)[0]
+	numStr := strings.TrimPrefix(token, "escalation:")
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n < 1 || n > len(escalations) {
+		return fallback
+	}
+	hop := escalations[n-1]
+
+	switch hop.Outcome {
+	case "escalated":
+		if hop.EscalatedTo != "" {
+			return fmt.Sprintf("intermediate hop — escalated further to %s", hop.EscalatedTo)
+		}
+		return fallback
+	case "transitioned":
+		return "terminal escalation hop — handed off to remediation"
+	case "resolved":
+		return "terminal escalation hop — investigation concluded here"
+	default:
+		return fallback
+	}
 }
 
 // wordWrap wraps text at maxWidth characters, indenting continuation lines with indent.

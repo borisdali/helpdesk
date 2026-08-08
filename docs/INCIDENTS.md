@@ -245,6 +245,30 @@ curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
 ```
 
+### Running against a Helm-deployed installation (no local build)
+
+Both commands above assume `faulttest` is already built locally. If you're inspecting a Helm-deployed installation and don't have (or don't want) a local Go toolchain, run `vault incidents` from the release image itself as a one-shot pod — no source checkout needed. `faulttest` ships in the same image as the agents (see `Dockerfile`, `BIN_PKGS` in the `Makefile`):
+
+```bash
+GWKEY=$(kubectl -n helpdesk-system get secret gateway-api-key -o jsonpath='{.data.api-key}' | base64 -d)
+
+kubectl run vault-incidents \
+  --image=ghcr.io/borisdali/helpdesk:v0.23.0-1b42561 \
+  --image-pull-policy=Never \
+  --restart=Never \
+  --namespace=helpdesk-system \
+  --env="HELPDESK_CLIENT_API_KEY=$GWKEY" \
+  --attach --rm -i \
+  -- faulttest vault incidents plr_264f28fc --gateway http://helpdesk-gateway:8080
+```
+
+Notes:
+
+- **Image tag must match what's actually loaded on the node** — `--image-pull-policy=Never` fails with `ErrImageNeverPull` against a tag that isn't present locally (e.g. minikube's `image load` cache). Check with `minikube image ls | grep helpdesk` (or the equivalent for your cluster) rather than assuming a bare version tag like `v0.23.0` is what's loaded; it's commonly the full build tag (`v0.23.0-<short-sha>`).
+- **`--env` instead of an `--api-key` flag** — `faulttest`'s `--api-key` flag already falls back to `HELPDESK_CLIENT_API_KEY` from the environment (`os.Getenv` default in `testing/cmd/faulttest/vault.go`), so setting it via `--env` on the pod is enough; no need to pass `--api-key` explicitly. `--gateway` has no such fallback and must always be passed as a flag.
+- **`--attach --rm -i`** — `kubectl run --restart=Never` without `-i`/`--attach` creates the pod and returns immediately without streaming output; you'd otherwise have to separately `kubectl logs` it. `--rm` deletes the pod automatically once the command exits, so nothing lingers as `Completed`.
+- The gateway's own client-facing key is the `gateway-api-key` Secret in the same namespace (see the `HELPDESK_CLIENT_API_KEY` env var on the `helpdesk-gateway` Deployment) — same key `GET /api/v1/incidents/{runID}` and the raw `curl` example above require via `Authorization: Bearer`.
+
 The response assembles triage, gate, remediation, evaluation scores, and all operator feedback into a single chronological view:
 
 ```

@@ -1552,8 +1552,101 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	if !strings.Contains(out, "REMEDIATION") || !strings.Contains(out, "pbs_k8s_pod_crash_remediate") {
 		t.Errorf("output missing REMEDIATION section for the terminal hop, got:\n%s", out)
 	}
-	if !strings.Contains(out, "intermediate escalation hop") {
-		t.Errorf("output missing escalation:1 phase description in JOURNEYS section, got:\n%s", out)
+	if !strings.Contains(out, "terminal escalation hop — handed off to remediation") {
+		t.Errorf("output missing escalation:1 phase description in JOURNEYS section for outcome=transitioned, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions guards against
+// the bug where every "escalation:N" phase got the same static "not yet
+// resolved" label regardless of that hop's actual outcome — including the
+// terminal hop of the chain, contradicting its own "Outcome: resolved" line
+// printed just above it. Modeled on a real 3-hop run (DB → sysadmin → K8s)
+// where escalation:1 truly is intermediate (escalated again) and
+// escalation:2 is the terminal hop (resolved, no further hand-off).
+func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_t1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_t1",
+				"playbook": "pbs_db_restart_triage",
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":       "plr_e1",
+					"playbook":     "pbs_sysadmin_docker_inspect",
+					"outcome":      "escalated",
+					"escalated_to": "pbs_k8s_pod_crash_triage",
+					"findings":     "runtime=kubectl detected",
+				},
+				{
+					"run_id":   "plr_e2",
+					"playbook": "pbs_k8s_pod_crash_triage",
+					"outcome":  "resolved",
+					"findings": "no port-forward configured",
+				},
+			},
+			"journeys": []map[string]any{
+				{"phase": "triage", "trace_id": "trace-t1"},
+				{"phase": "escalation:1", "trace_id": "trace-e1"},
+				{"phase": "escalation:2", "trace_id": "trace-e2"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_t1")
+	})
+
+	if !strings.Contains(out, "intermediate hop — escalated further to pbs_k8s_pod_crash_triage") {
+		t.Errorf("output missing escalation:1's intermediate-hop description, got:\n%s", out)
+	}
+	if !strings.Contains(out, "terminal escalation hop — investigation concluded here") {
+		t.Errorf("output missing escalation:2's terminal-hop description, got:\n%s", out)
+	}
+	// The bug this test guards against: both hops printed as the same
+	// generic "not yet resolved" text.
+	if strings.Count(out, "not yet resolved") != 0 {
+		t.Errorf("escalation:2 (terminal, resolved) incorrectly still labeled as 'not yet resolved', got:\n%s", out)
+	}
+}
+
+// ── escalationHopDesc ─────────────────────────────────────────────────────
+
+func TestEscalationHopDesc(t *testing.T) {
+	escalations := []narrativeEscalationHop{
+		{Outcome: "escalated", EscalatedTo: "pbs_k8s_pod_crash_triage"},
+		{Outcome: "escalated", EscalatedTo: ""},
+		{Outcome: "transitioned"},
+		{Outcome: "resolved"},
+		{Outcome: "some_future_outcome"},
+	}
+
+	tests := []struct {
+		name  string
+		phase string
+		want  string
+	}{
+		{"escalated with target", "escalation:1", "intermediate hop — escalated further to pbs_k8s_pod_crash_triage"},
+		{"escalated without target falls back", "escalation:2", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"transitioned is terminal, handed to remediation", "escalation:3", "terminal escalation hop — handed off to remediation"},
+		{"resolved is terminal, investigation concluded", "escalation:4", "terminal escalation hop — investigation concluded here"},
+		{"unknown outcome falls back", "escalation:5", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"index out of range falls back", "escalation:6", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"unparsable index falls back", "escalation:abc", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"merged phase suffix still resolves index 1", "escalation:1+remediation", "intermediate hop — escalated further to pbs_k8s_pod_crash_triage"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escalationHopDesc(tt.phase, escalations)
+			if got != tt.want {
+				t.Errorf("escalationHopDesc(%q) = %q, want %q", tt.phase, got, tt.want)
+			}
+		})
 	}
 }
 

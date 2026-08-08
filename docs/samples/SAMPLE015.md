@@ -4,7 +4,7 @@ The raw sample commands and deliberations presented below complement these two b
 
 - **[The Hand-Off Tax, Part 1: What a 3-Hop Escalation Chain Actually Buys You?](https://levelup.gitconnected.com/the-hand-off-tax-part-1-what-a-3-hop-escalation-chain-actually-buys-you-d708f4912d4c)**
   Cross-team incidents don’t cost you time because the fix is hard. They cost you time because of the hand-offs, the routing, the re-explaining, the “let me loop in platform folks.” Here’s how we cut that out of the loop and what happened when we made the system prove it live to us
-- **[The Hand-Off Tax, Part 2: We Turned Off the Playbooks and Watched](...)**
+- **[The Hand-Off Tax, Part 2: We Turned Off the Playbooks and Watched](https://itnext.io/the-hand-off-tax-part-2-we-turned-off-the-playbooks-and-watched-fade1e510391)**
   Welcome back, Crystal Ball! Same fault, same model, same tools, same connection string used by the guided playbook. And yet, wrong diagnosis and the structural safety net that saved the day.
 
 If you are new to aiHelpDesk, start with aiHelpDesk innovative concept of the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifyiable on a live system. Your system.
@@ -512,4 +512,136 @@ null
 
 [boris@ ~/helpdesk]$ grep -o '"target_drift"[^]]*]' /tmp/helpdesk-crystalball-response4.json
 "target_drift":["host=host.docker.internal port=15432 dbname=testdb user=postgres password=***","host=localhost port=15432 dbname=testdb user=postgres password=***"]
+```
+
+
+
+## `vault incidents` and other tooling updated to N-hop escalation narrative
+
+```
+[boris@ ~/helpdesk]$ kubectl run vault-incidents \
+>     --image=ghcr.io/borisdali/helpdesk:v0.23.0-1b42561 \
+>     --image-pull-policy=Never \
+>     --restart=Never \
+>     --namespace=helpdesk-system \
+>     --env="HELPDESK_CLIENT_API_KEY=$GWKEY" \
+>     --attach --rm -i \
+>     -- faulttest vault incidents plr_42968c7e --gateway http://helpdesk-gateway:8080
+If you don't see a command prompt, try pressing enter.
+
+════════════════════════════════════════════════════════════
+INCIDENT plr_42968c7e
+Started: 2026-08-07 23:18 UTC   Duration: 77s
+Operator: alice@example.com
+════════════════════════════════════════════════════════════
+
+── TRIAGE
+Playbook:  pbs_db_restart_triage
+Findings:  The PostgreSQL pod (pg-cluster-minkube-1) is running and ready to
+           accept connections on internal port 5432; however, no external access
+           tunnel (port-forward or LoadBalancer) is configured on 127.0.0.1:5433,
+           causing connection refused. Operator must establish port-forward:
+           kubectl -n db port-forward pg-cluster-minkube-1 5433:5432
+
+Hypotheses:
+  [PRIMARY  100%] Connection refused due to database process not listening on 127.0.0.1:5433 (either process stopped, not started, or port configuration mismatch)
+                  Evidence: "Users are getting connection refused errors"
+  [REJECTED 95%] No port-forward or external service on 127.0.0.1:5433
+                 Evidence: "listening on IPv4 address \\\"0.0.0.0\\\", port 5432\" (pod internally); all Kubernetes services are ClusterIP on port 5432, not exposed on 5433; connection to 127.0.0.1:5433 returns \"connection refused"
+  [REJECTED 60%] Kubernetes pod is running but database process inside is not responsive or has crashed
+                 Evidence: "phase=Running restart_count=1 last_termination_exitcode=0"
+  [REJECTED 40%] Pod network or port-forwarding connectivity is broken, preventing access to the running database
+                 Rejected: Cannot diagnose network-layer issues with host-level Docker/Podman tools against a Kubernetes pod
+  [REJECTED 30%] Network or firewall blocking access to port 5433
+                 Rejected: Connection refused specifically indicates the port is not accepting connections; network-level blocking would manifest differently
+  [REJECTED  5%] Database process crashed after pod restart
+                 Rejected: Current pod logs show "database system is ready to accept connections" at 22:08:14, and PostgreSQL is performing checkpoints every 5 minutes — process is healthy and operational
+
+── ESCALATION 1/2
+Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
+Escalated to: pbs_k8s_pod_crash_triage
+Findings:  Target at 127.0.0.1:5433 is a Kubernetes pod (pg-cluster-minkube-1) in
+           Running phase with a clean prior termination; pod restart count is 1
+           (previously restarted). Connection refused likely indicates database
+           process failure inside the pod or network misconfiguration —
+           requires Kubernetes-level triage with pod logs and process inspection.
+
+Hypotheses:
+  [PRIMARY  60%] Kubernetes pod is running but database process inside is not responsive or has crashed
+  [REJECTED 40%] Pod network or port-forwarding connectivity is broken, preventing access to the running database
+
+── ESCALATION 2/2
+Playbook:  pbs_k8s_pod_crash_triage   Outcome: resolved
+Findings:  The PostgreSQL pod (pg-cluster-minkube-1) is running and ready to
+           accept connections on internal port 5432; however, no external access
+           tunnel (port-forward or LoadBalancer) is configured on 127.0.0.1:5433,
+           causing connection refused. Operator must establish port-forward:
+           kubectl -n db port-forward pg-cluster-minkube-1 5433:5432
+
+Hypotheses:
+  [PRIMARY  95%] No port-forward or external service on 127.0.0.1:5433
+  [REJECTED  5%] Database process crashed after pod restart
+
+── JOURNEYS
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_7122554b-10c
+                         reasoning chain, hypothesis building
+  escalation:1:          tr_e6b392d0-68d
+                         intermediate escalation hop — further diagnosis, not yet resolved
+  escalation:2:          tr_2aa73676-1b9
+                         terminal escalation hop — investigation concluded here
+
+  → vault journeys tr_7122554b-10c
+
+pod "vault-incidents" deleted
+```
+
+Full 3-hop narrative streamed to a terminal and the pod cleaning itself up when it's done. 
+That gives us a clean, repeatable way to inspect any plr_* incident going forward without a local Go toolchain.
+
+And the corresponding (doubly-linked) Journey:
+
+```
+[boris@ ~/helpdesk]$ kubectl run vault-incidents \
+>     --image=ghcr.io/borisdali/helpdesk:v0.23.0-1b42561 \
+>     --image-pull-policy=Never \
+>     --restart=Never \
+>     --namespace=helpdesk-system \
+>     --env="HELPDESK_CLIENT_API_KEY=$GWKEY" \
+>     --attach --rm -i \
+>     -- faulttest vault journeys tr_7122554b-10c --gateway http://helpdesk-gateway:8080
+
+If you don't see a command prompt, try pressing enter.
+
+JOURNEY  tr_7122554b-10c
+──────────────────────────────────────────────────────────────────────
+  Started:           2026-08-07 23:18:41 UTC
+  Ended:             2026-08-07 23:19:00 UTC
+  Duration:          19.2s
+  Agent:             postgres_database_agent
+  Category:          incident
+  Outcome:           success
+  Events:            5
+
+QUERY
+──────────────────────────────────────────────────────────────────────
+  Call check_connection with connection_string="host=127.0.0.1
+  port=5433 dbname=testdb user=postgres password=testpass
+  sslmode=disable" and begin diagnosing why it is unavailable. Do
+  not ask which database — the target is "host=127.0.0.1 port=5433
+  dbname=testdb user=postgres password=testpass sslmode=disable".
+  ...
+
+DELEGATIONS
+──────────────────────────────────────────────────────────────────────
+  1. playbook escalation from pbs_db_restart_triage
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────
+  Run ID:            plr_42968c7e
+
+  → vault incidents plr_42968c7e
+
+pod "vault-journey" deleted
 ```
