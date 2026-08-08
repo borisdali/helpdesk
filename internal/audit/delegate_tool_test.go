@@ -35,6 +35,185 @@ func serveFakeEvents(t *testing.T, events []Event) *httptest.Server {
 	return srv
 }
 
+// ── narratedToolsNotConfirmed / hasPolicyDenial (direct, isolated) ─────────
+
+func TestNarratedToolsNotConfirmed(t *testing.T) {
+	tests := []struct {
+		name      string
+		reasoning []Event
+		confirmed []string
+		want      []string
+	}{
+		{
+			name: "narrated tool with no matching confirmed name",
+			reasoning: []Event{
+				{AgentReasoning: &AgentReasoning{ToolCalls: []string{"read_pg_log"}}},
+			},
+			confirmed: nil,
+			want:      []string{"read_pg_log"},
+		},
+		{
+			name: "narrated tool that was confirmed — not returned",
+			reasoning: []Event{
+				{AgentReasoning: &AgentReasoning{ToolCalls: []string{"read_pg_log"}}},
+			},
+			confirmed: []string{"read_pg_log"},
+			want:      nil,
+		},
+		{
+			name:      "no agent_reasoning events at all",
+			reasoning: nil,
+			confirmed: nil,
+			want:      nil,
+		},
+		{
+			name: "events with nil AgentReasoning are skipped, not a panic",
+			reasoning: []Event{
+				{EventType: EventTypeAgentReasoning, AgentReasoning: nil},
+			},
+			confirmed: nil,
+			want:      nil,
+		},
+		{
+			name: "duplicate tool names across events are deduplicated",
+			reasoning: []Event{
+				{AgentReasoning: &AgentReasoning{ToolCalls: []string{"read_pg_log"}}},
+				{AgentReasoning: &AgentReasoning{ToolCalls: []string{"read_pg_log"}}},
+			},
+			confirmed: nil,
+			want:      []string{"read_pg_log"},
+		},
+		{
+			name: "empty-string tool names are ignored",
+			reasoning: []Event{
+				{AgentReasoning: &AgentReasoning{ToolCalls: []string{""}}},
+			},
+			confirmed: nil,
+			want:      nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := narratedToolsNotConfirmed(tt.reasoning, tt.confirmed)
+			if len(got) != len(tt.want) {
+				t.Fatalf("narratedToolsNotConfirmed() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("narratedToolsNotConfirmed()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestHasPolicyDenial(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []Event
+		want   bool
+	}{
+		{"no events", nil, false},
+		{
+			"deny effect present",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny"}}},
+			true,
+		},
+		{
+			"only allow effects",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "allow"}}},
+			false,
+		},
+		{
+			"only require_approval effects — not a denial",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "require_approval"}}},
+			false,
+		},
+		{
+			"nil PolicyDecision is skipped, not a panic",
+			[]Event{{PolicyDecision: nil}},
+			false,
+		},
+		{
+			"deny among multiple events",
+			[]Event{
+				{PolicyDecision: &PolicyDecision{Effect: "allow"}},
+				{PolicyDecision: &PolicyDecision{Effect: "deny"}},
+			},
+			true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPolicyDenial(tt.events); got != tt.want {
+				t.Errorf("hasPolicyDenial() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFetchEventsByType_RetryBehavior guards the intentional latency-avoiding
+// design decision: fetchToolExecutionEvents retries once after 200ms (async
+// write propagation from RemoteStore is a real concern for tool_execution
+// events specifically), while fetchAgentReasoningEvents and
+// fetchPolicyDecisionEvents make a single attempt only — reasoning/policy
+// events are written earlier in the request lifecycle, so retrying them too
+// would silently double the worst-case latency added to every delegation for
+// no real benefit. A regression here (e.g. someone "fixing" all three to
+// retry uniformly) would not be caught by any behavioral test, only by
+// counting requests directly, which is what this test does.
+func TestFetchEventsByType_RetryBehavior(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]Event{}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	callCount = 0
+	fetchToolExecutionEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 1 {
+		t.Errorf("fetchToolExecutionEvents on empty (non-error) response made %d calls, want 1 (retry only triggers on error/decode-failure, not empty results)", callCount)
+	}
+
+	callCount = 0
+	fetchAgentReasoningEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 1 {
+		t.Errorf("fetchAgentReasoningEvents made %d calls, want exactly 1 (no retry by design)", callCount)
+	}
+
+	callCount = 0
+	fetchPolicyDecisionEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 1 {
+		t.Errorf("fetchPolicyDecisionEvents made %d calls, want exactly 1 (no retry by design)", callCount)
+	}
+}
+
+// TestFetchEventsByType_RetryOnFailure confirms fetchToolExecutionEvents
+// actually does retry up to twice on failure (distinct from the no-retry
+// fetches above) — a server that always errors should be hit twice.
+func TestFetchEventsByType_RetryOnFailure(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("not json")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchToolExecutionEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 2 {
+		t.Errorf("fetchToolExecutionEvents on persistent decode failure made %d calls, want 2 (1 initial + 1 retry)", callCount)
+	}
+
+	callCount = 0
+	fetchAgentReasoningEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 1 {
+		t.Errorf("fetchAgentReasoningEvents on failure made %d calls, want 1 (no retry, even on failure — fails open)", callCount)
+	}
+}
+
 func TestBuildDelegationVerification_Mismatch(t *testing.T) {
 	// Audit trail contains only read tools — no destructive tool executed.
 	srv := serveFakeEvents(t, []Event{

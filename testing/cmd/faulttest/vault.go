@@ -2174,22 +2174,23 @@ func vaultIncidents(args []string) {
 
 // journeySummary mirrors audit.JourneySummary for JSON decoding.
 type journeySummary struct {
-	TraceID       string              `json:"trace_id"`
-	StartedAt     string              `json:"started_at"`
-	EndedAt       string              `json:"ended_at"`
-	DurationMs    int64               `json:"duration_ms"`
-	UserID        string              `json:"user_id,omitempty"`
-	UserQuery     string              `json:"user_query,omitempty"`
-	Agent         string              `json:"agent,omitempty"`
-	Category      string              `json:"category,omitempty"`
-	Delegations   []delegationSummary `json:"delegations,omitempty"`
-	ToolsUsed     []string            `json:"tools_used"`
-	Outcome       string              `json:"outcome,omitempty"`
-	EventCount    int                 `json:"event_count"`
-	RetryCount    int                 `json:"retry_count,omitempty"`
-	Origin        string              `json:"origin,omitempty"`
-	HasMismatch   bool                `json:"has_mismatch,omitempty"`
-	IncidentRunID string              `json:"incident_run_id,omitempty"`
+	TraceID        string              `json:"trace_id"`
+	StartedAt      string              `json:"started_at"`
+	EndedAt        string              `json:"ended_at"`
+	DurationMs     int64               `json:"duration_ms"`
+	UserID         string              `json:"user_id,omitempty"`
+	UserQuery      string              `json:"user_query,omitempty"`
+	Agent          string              `json:"agent,omitempty"`
+	Category       string              `json:"category,omitempty"`
+	Delegations    []delegationSummary `json:"delegations,omitempty"`
+	ToolsUsed      []string            `json:"tools_used"`
+	Outcome        string              `json:"outcome,omitempty"`
+	EventCount     int                 `json:"event_count"`
+	RetryCount     int                 `json:"retry_count,omitempty"`
+	Origin         string              `json:"origin,omitempty"`
+	HasMismatch    bool                `json:"has_mismatch,omitempty"`
+	HasTargetDrift bool                `json:"has_target_drift,omitempty"`
+	IncidentRunID  string              `json:"incident_run_id,omitempty"`
 }
 
 // delegationSummary mirrors audit.DelegationSummary.
@@ -2382,7 +2383,10 @@ func vaultJourney(args []string) {
 		}
 		mismatchFlag := ""
 		if j.HasMismatch {
-			mismatchFlag = " !"
+			mismatchFlag += " !"
+		}
+		if j.HasTargetDrift {
+			mismatchFlag += " D"
 		}
 
 		toolStr := strings.Join(j.ToolsUsed, ", ")
@@ -2412,6 +2416,7 @@ func vaultJourney(args []string) {
 
 	fmt.Println()
 	fmt.Println("  ! = fabrication mismatch (agent reported success but no tool call recorded)")
+	fmt.Println("  D = target-scope drift (a real tool call used a different connection_string than requested)")
 	fmt.Printf("\nTo drill into a trace:\n  faulttest vault journey <trace_id> --gateway %s\n", cfg.GatewayURL)
 }
 
@@ -2521,6 +2526,14 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		fmt.Println("  ! One or more delegations reported success but no matching tool")
 		fmt.Println("    execution was recorded in the audit trail.")
 		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
+	}
+
+	if j.HasTargetDrift {
+		sectionJ("TARGET DRIFT WARNING")
+		fmt.Println("  D A real tool call in this journey used a different connection_string")
+		fmt.Println("    than the run was invoked with. The tool call itself is genuine —")
+		fmt.Println("    HasMismatch may be false — but any diagnosis built on it reflects")
+		fmt.Println("    the wrong server. Review which target the agent actually queried.")
 	}
 
 	if j.IncidentRunID != "" {

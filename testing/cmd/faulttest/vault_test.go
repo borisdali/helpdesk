@@ -1615,6 +1615,72 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 	}
 }
 
+// ── printJourneyDetail: HasTargetDrift / HasMismatch rendering ────────────
+
+// TestPrintJourneyDetail_TargetDriftWarning guards against the gap found
+// during a coverage review: journeySummary (this package's own mirror of
+// audit.JourneySummary) didn't know about has_target_drift at all, so a
+// journey with real target-scope drift rendered as fully clean in this exact
+// CLI — the same tool used throughout this session to inspect journeys.
+func TestPrintJourneyDetail_TargetDriftWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":         "tr_drift1",
+				"started_at":       time.Now().UTC().Format(time.RFC3339),
+				"outcome":          "target_drift_detected",
+				"has_mismatch":     false,
+				"has_target_drift": true,
+				"tools_used":       []string{"check_connection"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_drift1", false)
+	})
+
+	if !strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Errorf("output missing TARGET DRIFT WARNING section for has_target_drift=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "FABRICATION WARNING") {
+		t.Errorf("output should not show FABRICATION WARNING when has_mismatch=false, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_MismatchWarning_NoDriftWarning is the inverse case —
+// confirms the two warning sections are independently gated, not accidentally
+// coupled by the fix above.
+func TestPrintJourneyDetail_MismatchWarning_NoDriftWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":         "tr_mismatch1",
+				"started_at":       time.Now().UTC().Format(time.RFC3339),
+				"outcome":          "unverified_claim",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+				"tools_used":       []string{},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_mismatch1", false)
+	})
+
+	if !strings.Contains(out, "FABRICATION WARNING") {
+		t.Errorf("output missing FABRICATION WARNING section for has_mismatch=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Errorf("output should not show TARGET DRIFT WARNING when has_target_drift=false, got:\n%s", out)
+	}
+}
+
 // ── escalationHopDesc ─────────────────────────────────────────────────────
 
 func TestEscalationHopDesc(t *testing.T) {

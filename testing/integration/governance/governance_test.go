@@ -1146,6 +1146,60 @@ func TestIntegration_DelegationVerification_MismatchSurfacesInJourneys(t *testin
 	}
 }
 
+// TestIntegration_TargetDrift_SurfacesInJourneys verifies, against a real auditd
+// binary, that a delegation_verification event with TargetDrift populated (not
+// Mismatch — a real tool call happened, just against the wrong target) elevates
+// the journey outcome to "target_drift_detected" and is independently queryable
+// via ?outcome=target_drift_detected, with has_target_drift=true and
+// has_mismatch=false distinguishing it from the fabrication case.
+func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
+	traceID := fmt.Sprintf("dv-drift-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	anchorResult := post(t, auditdAddr, "/v1/events", anchor)
+	anchorID, _ := anchorResult["event_id"].(string)
+
+	driftEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"delegation_event_id": anchorID,
+			"agent":               "postgres_database_agent",
+			"action_class":        "read",
+			"tools_confirmed":     []string{"check_connection"},
+			"mismatch":            false,
+			"target_drift":        []string{"host=localhost port=15432 dbname=testdb"},
+		},
+	}
+	post(t, auditdAddr, "/v1/events", driftEvent)
+
+	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=target_drift_detected")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "target_drift_detected" {
+			t.Errorf("journey outcome = %q, want target_drift_detected", j["outcome"])
+		}
+		if hasDrift, _ := j["has_target_drift"].(bool); !hasDrift {
+			t.Error("journey has_target_drift = false, want true")
+		}
+		if hasMismatch, _ := j["has_mismatch"].(bool); hasMismatch {
+			t.Error("journey has_mismatch = true, want false — this is drift (real tool call, wrong target), not fabrication")
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in outcome=target_drift_detected results", traceID)
+	}
+}
+
 // TestIntegration_VerifyTrace_QueryContract validates the server-side contract
 // that client.VerifyTrace depends on: tool_execution events must be queryable
 // by trace_id + since, with action_class at the top level and tool.name nested.
