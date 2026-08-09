@@ -185,11 +185,11 @@ See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for de
 | **Independent** | Queries auditd directly, not the agent's text |
 | **Persistent** | The verification is itself an auditable event |
 | **Queryable** | All unverified-claim incidents are surfaced via journeys API (`has_mismatch: true`) |
-| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches — no join to the delegation event needed |
-| **Non-invasive** | Read delegations are verified but never flagged as mismatch |
-| **Observable** | Four independent signals fire on every mismatch — see below |
+| **Distinguishable** | `action_class` on the verification event identifies write vs destructive mismatches; `narrated_not_confirmed` distinguishes a narration-based mismatch from a write/destructive-absence one — no join to the delegation event needed |
+| **Read-covered** | Read delegations are exempt from the write/destructive-*absence* check (no expected tool class to be missing), but are still covered by a separate check: if the model's own reasoning names a tool it never actually invoked, that's flagged as a mismatch regardless of action class — see "Narrated-but-unconfirmed tool calls" below |
+| **Observable** | Independent signals fire on every mismatch, severity-tiered — see below |
 
-**Mismatch surfacing — four concurrent signals:**
+**Mismatch surfacing — concurrent signals, severity-tiered:**
 
 When `mismatch=true` is detected the following fire simultaneously, so
 that operators, dashboards, and automated incident pipelines all receive
@@ -199,9 +199,22 @@ the signal through the channel they already watch:
 |--------|---------|---------|
 | `has_mismatch: true` on the journey | `GET /v1/journeys` (audit trail) | Persistent; survives restarts; filterable with `jq '[.[] \| select(.has_mismatch)]'` |
 | `outcome: unverified_claim` on the journey | `GET /v1/journeys?outcome=unverified_claim` | Highest-priority outcome; allows filter-by-outcome queries |
+| `has_mismatch`/`trace_id` on the incident narrative chapter | `GET /api/v1/incidents/{runID}` | Surfaced inline on the TRIAGE/ESCALATION/REMEDIATION chapter that owns the flagged trace — no separate Journey lookup needed; `vault incidents` prints it as an inline `⚠ unverified` line |
 | `X-Audit-Mismatch: true` response header | HTTP response to the API caller | Zero-latency; client SDKs can react without polling |
 | `gateway_fabrication_mismatches_total` counter | `GET /metrics` (Prometheus) | Scrape and alert with `increase(...[5m]) > 0` |
-| `fabrication_mismatch` CRITICAL incident | auditor `--incident-webhook` | POSTs JSON payload; integrates with PagerDuty, Slack, SIEM |
+| `fabrication_mismatch` CRITICAL incident, **or** `narrated_tool_not_confirmed` WARNING | auditor `--incident-webhook` | **Only CRITICAL is forwarded to the incident webhook.** The original write/destructive-absence case stays CRITICAL; a mismatch caused *only* by a narrated-but-unconfirmed tool call fires the lower WARNING severity instead and is not forwarded — kept off the incident-webhook path until that newer check's false-positive rate is known on real traffic. |
+
+**Narrated-but-unconfirmed tool calls** (closes the read-action gap above): independently of the
+write/destructive-absence check, every delegation's `agent_reasoning` events are checked for tool
+names the model's own reasoning says it invoked. Any name with no matching `tool_execution`
+event — and no `policy_decision` deny event explaining the absence (a legitimate denial isn't
+fabrication) — sets `mismatch=true` too. See [MUTATION_TOOLS.md §5.7](MUTATION_TOOLS.md#57-narrated-but-unconfirmed-tool-calls-read-action-coverage).
+
+**Target-scope drift** is a related but distinct signal: a tool call that genuinely executed, just
+against a different `connection_string` than the run was invoked with. Independent of `mismatch` —
+a real, confirmed tool call can still target the wrong server. Surfaces as `has_target_drift`/
+`outcome: target_drift_detected` everywhere `has_mismatch`/`unverified_claim` do above, including
+inline on the incident narrative. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope).
 
 All five signals carry the `trace_id` so any one of them can anchor a
 drill-down into the full event detail:

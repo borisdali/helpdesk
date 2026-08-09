@@ -231,16 +231,27 @@ response — this is the authoritative record of what the sub-agent actually did
 |-------|-------------|
 | `delegation_event_id` | `event_id` of the corresponding `delegation_decision` event |
 | `agent` | Name of the sub-agent that was delegated to |
+| `action_class` | The delegation's classified action (`read`/`write`/`destructive`) |
 | `tools_confirmed` | Tool names that appear in the audit trail for this trace since the delegation started |
-| `destructive_confirmed` | Subset of `tools_confirmed` that are classified as `destructive` |
-| `mismatch` | `true` when the delegation was classified as `destructive` but no destructive tool execution is in the trail — strong signal of LLM fabrication |
+| `write_confirmed` | Subset of `tools_confirmed` classified as `write` |
+| `destructive_confirmed` | Subset of `tools_confirmed` classified as `destructive` |
+| `mismatch` | `true` when either (a) the delegation was `write`/`destructive` but no tool of that class or stronger is in the trail, or (b) — regardless of `action_class`, including `read` — the model's own reasoning named a tool it never actually invoked (see `narrated_not_confirmed`) and no policy denial explains the absence |
+| `narrated_not_confirmed` | Tool names the model's own reasoning (`agent_reasoning` events' `tool_calls`) claimed to invoke, with no matching `tool_execution` event anywhere in the trace. Empty when `mismatch` is the write/destructive-absence kind instead. See [MUTATION_TOOLS.md §5.7](MUTATION_TOOLS.md#57-narrated-but-unconfirmed-tool-calls-read-action-coverage) |
+| `target_drift` | Connection strings a tool call in this hop actually used that differ from the run's intended target. Independent of `mismatch` — a real, confirmed tool call can still target the wrong server. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) |
 
-When `mismatch=true`, four signals fire simultaneously:
+When `mismatch=true`, these signals fire simultaneously:
 - The journey `outcome` is elevated to `unverified_claim`
 - The journey object gains `has_mismatch: true`
+- The corresponding incident-narrative chapter (`GET /api/v1/incidents/{runID}` — TRIAGE/ESCALATION/REMEDIATION) gains `has_mismatch: true` inline, so a reader doesn't need a separate Journey lookup to see it; `vault incidents` prints an inline `⚠ unverified` line
 - The gateway sets `X-Audit-Mismatch: true` on the HTTP response
-- The auditor fires a `fabrication_mismatch` CRITICAL incident to `--incident-webhook`
 - The `gateway_fabrication_mismatches_total` Prometheus counter is incremented
+- The auditor fires a security alert — **`fabrication_mismatch` at CRITICAL** (forwarded to `--incident-webhook`) when caused by the write/destructive-absence case; **`narrated_tool_not_confirmed` at WARNING** (not forwarded to the webhook) when caused only by `narrated_not_confirmed` — kept off the CRITICAL/webhook path until that newer check's false-positive rate is known on real traffic
+
+When `target_drift` is non-empty (independent of `mismatch`), the journey `outcome` is instead
+`target_drift_detected` (tied at the same priority as `unverified_claim` — both mean "don't trust
+this output as-is," for different reasons) and `has_target_drift: true` appears on the journey and
+the owning incident-narrative chapter, same channels as above minus the auditor alert (target drift
+is not a fabrication signal, so it doesn't feed `checkFabricationMismatch`).
 
 The orchestrator prompt instructs the LLM to report mismatches to the user and
 **not** claim success.

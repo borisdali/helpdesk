@@ -477,6 +477,29 @@ Remediation:   0.88 (LLM judge)
 
 The `Score` line matches the `SCORE` column in `vault incidents <series-id>` — it is the `overall_score` from `run_evaluation` (`diagnosis_score × 0.6 + remediation_score × 0.4`). The `Diagnosis` line shows the raw component scores before weighting.
 
+**Verification warnings appear inline, when present.** If a chapter's underlying tool calls
+weren't fully verified — the agent narrated calling a tool that never actually executed, or a real
+tool call targeted a different server than requested — an inline warning line prints right under
+that chapter's `Findings`, so it's visible without a separate `vault journey <trace_id>` lookup
+(the example above is a fully clean run, so neither warning appears there):
+
+```
+── TRIAGE ──────────────────────────────────────────────────
+Playbook:  pbs_db_restart_triage
+Findings:  Connection refused; no infra entry for this target
+           ⚠ unverified — no matching tool execution in the audit trail
+
+── ESCALATION 1/1 ───────────────────────────────────────────
+Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
+Findings:  check_host runtime=kubectl — target is Kubernetes-managed
+           ⚠ target drift — a tool call used a different connection string
+```
+
+Absence of either line can mean either "verified clean" or "no Journey data exists for this
+chapter's trace" (fail-open by design) — not a positive attestation either way. See
+[MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
+and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
+
 The `[auto_judge]` tag on a feedback line means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`), not by a human operator. Human-submitted feedback carries no tag. Both sources are counted equally in `vault accuracy` and `vault calibration`.
 
 The deep-dive assembles data from `GET /api/v1/incidents/{runID}` on the gateway, which joins triage, gate, remediation, eval scores and all four feedback slots into a single timeline view.
