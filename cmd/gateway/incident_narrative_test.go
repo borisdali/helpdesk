@@ -299,6 +299,82 @@ func TestHandleGetIncident_VerificationFlags_SharedTraceDedup(t *testing.T) {
 	}
 }
 
+// TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent verifies
+// that Triage, an Escalation hop, AND Remediation each surface their OWN
+// flag value from their OWN distinct trace — closing a gap the shared-trace
+// dedup test doesn't: that test gives Triage and Remediation the *same*
+// trace/flag data (by design, to test the cache), so it can't prove
+// Remediation is wired to its own independent journey lookup rather than
+// accidentally inheriting Triage's.
+func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:       "plr_indep01",
+		SeriesID:    "pbs_db_restart_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		StartedAt:   time.Now().UTC(),
+		TraceID:     "tr_indep_triage",
+	}
+	escalation := &audit.PlaybookRun{
+		RunID:          "plr_indep02",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_db_restart_action",
+		PriorRunID:     "plr_indep01",
+		TraceID:        "tr_indep_escalation",
+		StartedAt:      time.Now().UTC(),
+	}
+	remediation := &audit.PlaybookRun{
+		RunID:      "plr_indep03",
+		SeriesID:   "pbs_db_restart_action",
+		Outcome:    audit.OutcomeResolved,
+		PriorRunID: "plr_indep02",
+		TraceID:    "tr_indep_remediation",
+		StartedAt:  time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_indep01": escalation,
+			"plr_indep02": remediation,
+		},
+		journeyByTraceID: map[string]*audit.JourneySummary{
+			"tr_indep_triage":      {HasMismatch: true, HasTargetDrift: false},
+			"tr_indep_escalation":  {HasMismatch: false, HasTargetDrift: false},
+			"tr_indep_remediation": {HasMismatch: false, HasTargetDrift: true},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_indep01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !n.Triage.HasMismatch || n.Triage.HasTargetDrift {
+		t.Errorf("Triage flags = (mismatch=%v, drift=%v), want (true, false)", n.Triage.HasMismatch, n.Triage.HasTargetDrift)
+	}
+	if len(n.Escalations) != 1 {
+		t.Fatalf("escalations count = %d, want 1", len(n.Escalations))
+	}
+	if n.Escalations[0].HasMismatch || n.Escalations[0].HasTargetDrift {
+		t.Errorf("Escalation flags = (mismatch=%v, drift=%v), want (false, false)",
+			n.Escalations[0].HasMismatch, n.Escalations[0].HasTargetDrift)
+	}
+	if n.Remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if n.Remediation.HasMismatch || !n.Remediation.HasTargetDrift {
+		t.Errorf("Remediation flags = (mismatch=%v, drift=%v), want (false, true) — must come from its own trace, not Triage's",
+			n.Remediation.HasMismatch, n.Remediation.HasTargetDrift)
+	}
+}
+
 // TestHandleGetIncident_FeedbackSlice verifies that the handler returns multiple
 // feedback records as a slice. This was the v0.18 fix: the old code tried to
 // decode the {"feedback":[...]} envelope as a singular object, silently returning nil.

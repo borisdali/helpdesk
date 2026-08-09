@@ -1715,6 +1715,30 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if triage["playbook"] == "" {
 		t.Error("triage.playbook is empty")
 	}
+	// trace_id/has_mismatch/has_target_drift surface a real agent run's
+	// Journey-level verification signals inline on the chapter. A real,
+	// successfully-run triage playbook always gets a real trace_id (assigned
+	// by proxyToAgentWithTool on every agent-mode call) — assert it's present
+	// and non-empty, confirming the wiring works with an organically-produced
+	// trace from a real LLM run, not just the hand-fed traces in unit/integration
+	// tests. has_mismatch/has_target_drift are omitempty booleans — their
+	// *value* isn't deterministic here (depends on whether this real run
+	// happened to trip either check), so only assert they decode as bool when
+	// present, catching a malformed-value regression that map[string]any's
+	// permissive decode wouldn't otherwise fail on.
+	if traceID, _ := triage["trace_id"].(string); traceID == "" {
+		t.Error("triage.trace_id is empty — should always be set for a real agent-mode run")
+	}
+	if v, ok := triage["has_mismatch"]; ok {
+		if _, ok := v.(bool); !ok {
+			t.Errorf("triage.has_mismatch = %v (%T), want bool", v, v)
+		}
+	}
+	if v, ok := triage["has_target_drift"]; ok {
+		if _, ok := v.(bool); !ok {
+			t.Errorf("triage.has_target_drift = %v (%T), want bool", v, v)
+		}
+	}
 
 	// ── gate chapter ──────────────────────────────────────────────────────
 	gate, _ := narrative["gate"].(map[string]any)
@@ -1770,6 +1794,9 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 		} else if !diagnosticSeries[hopPlaybook] {
 			t.Errorf("escalations[%d].playbook = %q, want a diagnostic series (reached via ESCALATE_TO), not a remediation series", i, hopPlaybook)
 		}
+		if traceID, _ := hop["trace_id"].(string); traceID == "" {
+			t.Errorf("escalations[%d].trace_id is empty — should always be set for a real agent-mode run", i)
+		}
 		escalationRunIDs[hopRunID] = true
 		t.Logf("escalation hop[%d]: run_id=%s playbook=%s outcome=%s",
 			i, hopRunID, hopPlaybook, hop["outcome"])
@@ -1797,6 +1824,9 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 		}
 		if escalationRunIDs[remRunID] {
 			t.Errorf("remediation.run_id = %q also appears in escalations[] — hop counted in both chapters", remRunID)
+		}
+		if traceID, _ := remediation["trace_id"].(string); traceID == "" {
+			t.Error("remediation.trace_id is empty — should always be set for a real agent-mode run")
 		}
 		t.Logf("remediation chapter: run_id=%s playbook=%s outcome=%s",
 			remRunID, remPlaybook, remediation["outcome"])
@@ -1847,15 +1877,15 @@ func TestPlaybooks_EvaluationRoundtrip(t *testing.T) {
 	runID := fmt.Sprintf("plr_e2e_ev_%d", time.Now().UnixNano())
 
 	status, err := client.SubmitEvaluation(ctx, runID, map[string]any{
-		"failure_id":       "db-tx-lock-chain-blocker",
-		"failure_name":     "Transaction lock chain blocker",
-		"keyword_score":    1.0,
-		"tool_score":       0.8,
-		"diagnosis_score":  0.9,
+		"failure_id":        "db-tx-lock-chain-blocker",
+		"failure_name":      "Transaction lock chain blocker",
+		"keyword_score":     1.0,
+		"tool_score":        0.8,
+		"diagnosis_score":   0.9,
 		"remediation_score": 0.0,
-		"overall_score":    0.85,
-		"judge_used":       true,
-		"passed":           true,
+		"overall_score":     0.85,
+		"judge_used":        true,
+		"passed":            true,
 	})
 	if err != nil {
 		t.Fatalf("SubmitEvaluation: %v", err)

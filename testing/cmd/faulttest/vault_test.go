@@ -1608,6 +1608,48 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_VerificationFlags_RemediationChapter verifies the
+// Remediation chapter's inline warning specifically — the third of three
+// printFlags call sites in printIncidentJourney, previously untested (the
+// other two, Triage and an Escalation hop, are covered by
+// TestPrintIncidentJourney_VerificationFlags_InlineWarnings above).
+func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_remflag1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_remflag1",
+				"playbook": "pbs_db_restart_triage",
+			},
+			"remediation": map[string]any{
+				"run_id":           "plr_remflag2",
+				"playbook":         "pbs_db_restart_action",
+				"outcome":          "resolved",
+				"findings":         "container restarted",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_remflag1")
+	})
+
+	if !strings.Contains(out, "REMEDIATION") {
+		t.Fatalf("output missing REMEDIATION section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ unverified") {
+		t.Errorf("output missing inline unverified warning for remediation's has_mismatch=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output should not show target drift warning, has_target_drift is false, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean verifies no
 // warning lines print when both flags are false/absent — the fail-open case
 // must not produce spurious output.
