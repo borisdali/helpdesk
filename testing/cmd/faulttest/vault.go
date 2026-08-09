@@ -4177,6 +4177,8 @@ type narrativeEscalationHop struct {
 	DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
 	Steps            []narrativeStep      `json:"steps,omitempty"`
 	TraceID          string               `json:"trace_id,omitempty"`
+	HasMismatch      bool                 `json:"has_mismatch,omitempty"`
+	HasTargetDrift   bool                 `json:"has_target_drift,omitempty"`
 }
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
@@ -4192,6 +4194,9 @@ type incidentNarrative struct {
 		Playbook         string               `json:"playbook"`
 		Findings         string               `json:"findings,omitempty"`
 		DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+		TraceID          string               `json:"trace_id,omitempty"`
+		HasMismatch      bool                 `json:"has_mismatch,omitempty"`
+		HasTargetDrift   bool                 `json:"has_target_drift,omitempty"`
 	} `json:"triage"`
 	Gate *struct {
 		ApprovedBy     string    `json:"approved_by,omitempty"`
@@ -4203,12 +4208,15 @@ type incidentNarrative struct {
 	// strictly between Triage and the (optional) terminal Remediation.
 	Escalations []narrativeEscalationHop `json:"escalations,omitempty"`
 	Remediation *struct {
-		RunID      string          `json:"run_id"`
-		Playbook   string          `json:"playbook"`
-		Outcome    string          `json:"outcome"`
-		Findings   string          `json:"findings,omitempty"`
-		Transcript string          `json:"transcript,omitempty"`
-		Steps      []narrativeStep `json:"steps,omitempty"`
+		RunID          string          `json:"run_id"`
+		Playbook       string          `json:"playbook"`
+		Outcome        string          `json:"outcome"`
+		Findings       string          `json:"findings,omitempty"`
+		Transcript     string          `json:"transcript,omitempty"`
+		Steps          []narrativeStep `json:"steps,omitempty"`
+		TraceID        string          `json:"trace_id,omitempty"`
+		HasMismatch    bool            `json:"has_mismatch,omitempty"`
+		HasTargetDrift bool            `json:"has_target_drift,omitempty"`
 	} `json:"remediation,omitempty"`
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
@@ -4254,6 +4262,22 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	section := func(title string) {
 		fmt.Printf("\n── %-54s\n", title)
 	}
+	// printFlags surfaces this chapter's Journey-level verification signals
+	// inline, right under its Findings — previously a reader had to separately
+	// know to run `vault journey <trace_id>` to discover either of these; a
+	// confident-looking chapter gave no indication its underlying tool calls
+	// weren't fully verified. Absence of both lines can mean either "verified
+	// clean" or "no Journey data exists for this trace" (fail-open by design,
+	// same ambiguity already present at the Journey layer) — not a positive
+	// attestation either way.
+	printFlags := func(hasMismatch, hasTargetDrift bool) {
+		if hasMismatch {
+			fmt.Println("           ⚠ unverified — no matching tool execution in the audit trail")
+		}
+		if hasTargetDrift {
+			fmt.Println("           ⚠ target drift — a tool call used a different connection string")
+		}
+	}
 
 	fmt.Printf("\n%s\n", divider)
 	started := n.StartedAt.UTC().Format("2006-01-02 15:04 UTC")
@@ -4276,6 +4300,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	if n.Triage.Findings != "" {
 		fmt.Printf("Findings:  %s\n", wordWrap(n.Triage.Findings, 70, "           "))
 	}
+	printFlags(n.Triage.HasMismatch, n.Triage.HasTargetDrift)
 	if n.Triage.DiagnosticReport != nil && len(n.Triage.DiagnosticReport.Hypotheses) > 0 {
 		fmt.Println("\nHypotheses:")
 		for _, h := range n.Triage.DiagnosticReport.Hypotheses {
@@ -4342,6 +4367,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if hop.Findings != "" {
 			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
 		}
+		printFlags(hop.HasMismatch, hop.HasTargetDrift)
 		if hop.DiagnosticReport != nil && len(hop.DiagnosticReport.Hypotheses) > 0 {
 			fmt.Println("\nHypotheses:")
 			for _, h := range hop.DiagnosticReport.Hypotheses {
@@ -4372,6 +4398,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if n.Remediation.Findings != "" {
 			fmt.Printf("Plan:      %s\n", wordWrap(n.Remediation.Findings, 70, "           "))
 		}
+		printFlags(n.Remediation.HasMismatch, n.Remediation.HasTargetDrift)
 		if len(n.Remediation.Steps) > 0 {
 			stepNames := make([]string, 0, len(n.Remediation.Steps))
 			for _, s := range n.Remediation.Steps {

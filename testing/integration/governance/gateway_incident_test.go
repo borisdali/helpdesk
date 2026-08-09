@@ -291,3 +291,102 @@ func TestIntegration_GatewayIncident_FourHopTwoEscalations(t *testing.T) {
 	t.Logf("4-hop, 2-escalation chain OK: triage=%s escalation1=%s escalation2=%s remediation=%s",
 		triageRunID, sysadminRunID, k8sTriageRunID, remediationRunID)
 }
+
+// TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters seeds a
+// real 2-hop chain (triage → escalation) against the real auditd binary, with
+// a delegation_verification event carrying Mismatch=true on the triage hop's
+// trace and one carrying TargetDrift on the escalation hop's trace, then
+// verifies the real gateway's GET /api/v1/incidents/{runID} surfaces both
+// flags on their correct, distinct chapters — closing the gap where a
+// confident narrative gave no indication that a hop's Journey was flagged.
+//
+// Note: recordRun sets trace_id directly on the PlaybookRun row, but that
+// alone does not make the trace a discoverable Journey — QueryJourneys only
+// finds traces with an anchor event (delegation_decision, or gateway_request
+// without a tool_name). Each hop below gets its own anchor event posted
+// separately, exactly as TestIntegration_TargetDrift_SurfacesInJourneys does.
+func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testing.T) {
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	triageTrace := "trace-vflags-" + suffix + "-triage"
+	escalateTrace := "trace-vflags-" + suffix + "-escalate"
+
+	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
+		"outcome":          "escalated",
+		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"findings_summary": "connection refused",
+		"trace_id":         triageTrace,
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+		"prior_run_id":     triageRunID,
+		"outcome":          "resolved",
+		"findings_summary": "container healthy",
+		"trace_id":         escalateTrace,
+		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+	})
+
+	// Anchor + Mismatch=true on the triage trace.
+	triageAnchor := newEvent("vflags-session-"+suffix, "delegation_decision")
+	triageAnchor["trace_id"] = triageTrace
+	post(t, auditdAddr, "/v1/events", triageAnchor)
+	post(t, auditdAddr, "/v1/events", map[string]any{
+		"event_id":   fmt.Sprintf("gv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   triageTrace,
+		"session":    map[string]any{"id": "vflags-session-" + suffix},
+		"delegation_verification": map[string]any{
+			"agent":                  "postgres_database_agent",
+			"action_class":           "read",
+			"mismatch":               true,
+			"narrated_not_confirmed": []string{"read_pg_log"},
+		},
+	})
+
+	// Anchor + TargetDrift on the escalation trace.
+	escalateAnchor := newEvent("vflags-session-"+suffix, "delegation_decision")
+	escalateAnchor["trace_id"] = escalateTrace
+	post(t, auditdAddr, "/v1/events", escalateAnchor)
+	post(t, auditdAddr, "/v1/events", map[string]any{
+		"event_id":   fmt.Sprintf("gv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   escalateTrace,
+		"session":    map[string]any{"id": "vflags-session-" + suffix},
+		"delegation_verification": map[string]any{
+			"agent":        "sysadmin_agent",
+			"action_class": "read",
+			"target_drift": []string{"host=localhost port=15432 dbname=testdb"},
+		},
+	})
+
+	narrative := getIncidentFromGateway(t, triageRunID)
+
+	triage, _ := narrative["triage"].(map[string]any)
+	if triage == nil {
+		t.Fatal("narrative missing triage chapter")
+	}
+	if hasMismatch, _ := triage["has_mismatch"].(bool); !hasMismatch {
+		t.Errorf("triage.has_mismatch = %v, want true", triage["has_mismatch"])
+	}
+	if hasDrift, _ := triage["has_target_drift"].(bool); hasDrift {
+		t.Errorf("triage.has_target_drift = %v, want false (drift is on the escalation hop, not triage)", triage["has_target_drift"])
+	}
+
+	escalations, _ := narrative["escalations"].([]any)
+	if len(escalations) != 1 {
+		t.Fatalf("escalations count = %d, want 1; escalations=%v", len(escalations), escalations)
+	}
+	hop, _ := escalations[0].(map[string]any)
+	if hop == nil || hop["run_id"] != sysadminRunID {
+		t.Fatalf("escalations[0] = %v, want run_id=%s", hop, sysadminRunID)
+	}
+	if hasDrift, _ := hop["has_target_drift"].(bool); !hasDrift {
+		t.Errorf("escalations[0].has_target_drift = %v, want true", hop["has_target_drift"])
+	}
+	if hasMismatch, _ := hop["has_mismatch"].(bool); hasMismatch {
+		t.Errorf("escalations[0].has_mismatch = %v, want false (mismatch is on triage, not this hop)", hop["has_mismatch"])
+	}
+
+	t.Logf("verification flags surfaced correctly: triage.has_mismatch=true, escalation.has_target_drift=true")
+}

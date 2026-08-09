@@ -351,6 +351,50 @@ Each `trace_id` links to a Journey — the complete ordered record of every tool
 | `remediation` | Mutation tool calls, step approvals, blast-radius checks — the actions taken to fix the issue |
 | `triage+remediation` | A single trace covering both phases (the agent ran triage and remediation in the same session) |
 
+**Verification signals surface inline on each chapter.** `has_mismatch` (a
+delegation that claimed a tool ran but the audit trail shows no matching
+execution — see [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome))
+and `has_target_drift` (a tool call that genuinely executed, just against a
+different `connection_string` than the run was invoked with — see
+[MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope))
+are computed per-Journey but attached to the triage/escalation/remediation
+chapter that owns each trace, so you don't have to separately look up the
+Journey to know a chapter's tool calls weren't fully verified. `vault
+incidents <plr_*>` prints them inline, right under a chapter's Findings:
+
+```
+── TRIAGE
+Playbook:  pbs_db_restart_triage
+Findings:  Connection refused; no infra entry for this target
+           ⚠ unverified — no matching tool execution in the audit trail
+```
+
+The raw API carries the same fields on every chapter object
+(`trace_id`/`has_mismatch`/`has_target_drift` — see
+[API.md](API.md#get-apiv1incidentsrunid)):
+
+```bash
+curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq '{triage: {has_mismatch: .triage.has_mismatch, has_target_drift: .triage.has_target_drift}}'
+```
+
+**Absence of a warning is not a positive attestation.** Both flags default to
+`false` when no Journey data exists for a chapter's trace at all (a Journey is
+only discoverable when its trace has an anchor event — `delegation_decision`,
+or `gateway_request` without a tool name) — the same fail-open ambiguity that
+already exists at the Journey layer, just inherited here rather than newly
+introduced. An unflagged chapter means "verified clean, or nothing to verify
+against" — not "definitely checked and clean." If you need to distinguish
+those two cases for a specific trace, query the Journey directly:
+
+```bash
+curl -s "http://localhost:1199/v1/journeys?trace_id=tr_9a4f2b1e" \
+  | jq '.[0] | {has_mismatch, has_target_drift, event_count}'
+# event_count == 0 (or the whole array empty) means no Journey data exists —
+# distinct from a Journey that exists and is genuinely clean.
+```
+
 **Navigating from the incident to the Journey:**
 
 ```bash

@@ -274,15 +274,19 @@ curl -s http://localhost:8080/api/v1/incidents/plr_h1 \
 ```json
 {
   "triage": {"run_id": "plr_h1", "playbook": "pbs_db_restart_triage",
-             "findings": "Connection refused; no infra entry for this target"},
+             "findings": "Connection refused; no infra entry for this target",
+             "trace_id": "tr_h1", "has_mismatch": false, "has_target_drift": false},
   "escalations": [
     {"run_id": "plr_h2", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "escalated",
      "escalated_to": "pbs_k8s_pod_crash_triage",
-     "findings": "check_host runtime=kubectl — target is Kubernetes-managed, not Docker/Podman"},
+     "findings": "check_host runtime=kubectl — target is Kubernetes-managed, not Docker/Podman",
+     "trace_id": "tr_h2", "has_mismatch": false, "has_target_drift": true},
     {"run_id": "plr_h3", "playbook": "pbs_k8s_pod_crash_triage", "outcome": "transitioned",
-     "findings": "exitcode=0, reason=Completed — on-disk log shows PANIC + controlled shutdown (WAL disk full)"}
+     "findings": "exitcode=0, reason=Completed — on-disk log shows PANIC + controlled shutdown (WAL disk full)",
+     "trace_id": "tr_h3", "has_mismatch": false, "has_target_drift": false}
   ],
-  "remediation": {"run_id": "plr_h4", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"},
+  "remediation": {"run_id": "plr_h4", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved",
+                  "trace_id": "tr_h4", "has_mismatch": false, "has_target_drift": false},
   "journeys": [
     {"phase": "triage",       "trace_id": "tr_h1"},
     {"phase": "escalation:1", "trace_id": "tr_h2"},
@@ -298,6 +302,16 @@ the next playbook) or `"transitioned"` (handed off to remediation within the sam
 chain of any length maps cleanly to its audit trail — see
 `TestHandleGetIncident_FourHopTwoEscalations` (`cmd/gateway/incident_narrative_test.go`) for the
 full behavior this example is drawn from.
+
+`trace_id`/`has_mismatch`/`has_target_drift` on every chapter (triage, each escalation hop,
+remediation) surface that chapter's Journey-level verification signals inline — `has_mismatch`
+means the agent narrated or claimed a tool call with no matching `tool_execution` audit event;
+`has_target_drift` means a tool call genuinely executed, but against a different `connection_string`
+than the run was invoked with. Both default to `false` when absent, which can mean either "verified
+clean" or "no Journey data exists for this trace" (fail-open by design — a Journey is only
+discoverable when its trace has an anchor event). See
+[MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome) and
+[§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each flag.
 
 Returns `404` if the run ID is not found.
 

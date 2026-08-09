@@ -1557,6 +1557,84 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_VerificationFlags_InlineWarnings verifies that
+// has_mismatch/has_target_drift surface inline right under each chapter's
+// Findings — previously invisible in this exact CLI output, requiring a
+// separate `vault journey <trace_id>` lookup the user might not know to run.
+func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_flags1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":           "plr_flags1",
+				"playbook":         "pbs_db_restart_triage",
+				"findings":         "connection refused",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":           "plr_flags2",
+					"playbook":         "pbs_sysadmin_docker_inspect",
+					"outcome":          "resolved",
+					"findings":         "container healthy",
+					"has_mismatch":     false,
+					"has_target_drift": true,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_flags1")
+	})
+
+	if !strings.Contains(out, "⚠ unverified") {
+		t.Errorf("output missing inline unverified warning for triage's has_mismatch=true, got:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output missing inline target drift warning for escalation's has_target_drift=true, got:\n%s", out)
+	}
+	// The two warnings must appear on the *correct* chapter, not both on
+	// every chapter — count occurrences precisely rather than just presence.
+	if got := strings.Count(out, "⚠ unverified"); got != 1 {
+		t.Errorf("⚠ unverified appeared %d times, want exactly 1 (triage only)", got)
+	}
+	if got := strings.Count(out, "⚠ target drift"); got != 1 {
+		t.Errorf("⚠ target drift appeared %d times, want exactly 1 (escalation only)", got)
+	}
+}
+
+// TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean verifies no
+// warning lines print when both flags are false/absent — the fail-open case
+// must not produce spurious output.
+func TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_clean1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_clean1",
+				"playbook": "pbs_db_restart_triage",
+				"findings": "resolved cleanly",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_clean1")
+	})
+
+	if strings.Contains(out, "⚠") {
+		t.Errorf("output should contain no warning markers for a clean incident, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions guards against
 // the bug where every "escalation:N" phase got the same static "not yet
 // resolved" label regardless of that hop's actual outcome — including the
