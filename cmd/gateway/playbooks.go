@@ -311,6 +311,16 @@ type PlaybookRunRequest struct {
 	// Use "diagnostic", "remediation", "maintenance", etc.
 	Purpose     string `json:"purpose,omitempty"`
 	PurposeNote string `json:"purpose_note,omitempty"`
+
+	// SkipTrustGate bypasses trustNotYetEarnedForceGate — the check that
+	// otherwise forces a gate on any playbook that hasn't earned a stable+clean
+	// fault-stability cert for the gateway's configured diagnosis model. Exists
+	// specifically so faulttest's own --repeat calibration runs (which are
+	// trying to *establish* that cert in the first place) aren't gated waiting
+	// on a cert that can't exist yet — a real production incident should never
+	// set this. Not exposed as a general escape hatch: it does not affect
+	// lowConfidenceForceGate or objectiveEvidenceForceGate, only the trust gate.
+	SkipTrustGate bool `json:"skip_trust_gate,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -756,6 +766,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			}
 			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
 				gateReasons = append(gateReasons, "objective_evidence:"+reason)
+			}
+			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
+				gateReasons = append(gateReasons, "trust_not_earned")
 			}
 			if len(gateReasons) > 0 {
 				req.GateEscalation = true
@@ -1230,6 +1243,72 @@ func recordEvidenceWithoutEscalationWarning(extra map[string]any, auditURL, apiK
 	} else {
 		extra["evidence_warnings"] = []string{warn}
 	}
+}
+
+// fetchFaultStabilityCerts queries auditd for every fault-stability cert on
+// record for seriesID+model. Fails open (returns nil) on any error — same
+// convention as the other audit fetch helpers in this file — so an auditd
+// hiccup degrades to "can't verify" rather than blocking every run.
+func fetchFaultStabilityCerts(auditURL, apiKey, seriesID, model string) []*audit.FaultStabilityCert {
+	url := strings.TrimSuffix(auditURL, "/") + "/v1/fleet/fault-stability?series_id=" + seriesID + "&model=" + model
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+	var result struct {
+		Certs []*audit.FaultStabilityCert `json:"certs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil
+	}
+	return result.Certs
+}
+
+// trustNotYetEarnedForceGate returns true when seriesID has no fault-stability
+// cert on record for the gateway's configured diagnosis model
+// (g.diagnosisModel, from HELPDESK_MODEL_NAME) with both IsStable and IsClean
+// true — i.e. this playbook/model combination has not yet earned unattended
+// trust. Fails closed on an actual answer of "no cert" or "unearned cert":
+// never-faulttested is treated the same as explicitly unearned, not as a pass.
+// Fails OPEN (returns false — no gate) when the mechanism itself isn't
+// configured (g.diagnosisModel or g.auditURL empty) — a missing config is a
+// deployment/operator concern, not a per-playbook trust verdict, and this
+// distinction is also what keeps existing tests (which never call
+// SetDiagnosisModel) unaffected by this check.
+//
+// A series can map to multiple faults (e.g. one playbook tested against
+// several distinct fault scenarios) — ALL known certs for that series+model
+// must be stable+clean, not just one, matching "gated by default until
+// proven," not "gated until at least one good result exists."
+func (g *Gateway) trustNotYetEarnedForceGate(seriesID string) bool {
+	if g.diagnosisModel == "" || seriesID == "" || g.auditURL == "" {
+		return false
+	}
+	certs := fetchFaultStabilityCerts(g.auditURL, g.auditAPIKey, seriesID, g.diagnosisModel)
+	if len(certs) == 0 {
+		return true
+	}
+	for _, c := range certs {
+		if !c.IsStable || !c.IsClean {
+			return true
+		}
+	}
+	return false
 }
 
 // ProceedEscalationRequest is the request body for POST

@@ -65,6 +65,7 @@ type Gateway struct {
 	decisionNotifier *decisions.DecisionNotifier                              // nil = notifications disabled
 	gitWebhookCfg    GitWebhookConfig
 	entryPointCache  entryPointPlaybookCache // cached list for query-time playbook auto-selection
+	diagnosisModel   string                  // HELPDESK_MODEL_NAME, used by trustNotYetEarnedForceGate's cert lookup; empty = check disabled, not "fail closed"
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -164,6 +165,18 @@ func (g *Gateway) SetMetrics(m *GatewayMetrics) {
 // Intended for demo and LLM benchmark comparisons only — not for production use.
 func (g *Gateway) SetCrystalBall(enabled bool) {
 	g.crystalBall = enabled
+}
+
+// SetDiagnosisModel records which LLM model the gateway's fleet of diagnosing
+// agents is assumed to be running, for trustNotYetEarnedForceGate's
+// fault-stability cert lookup. Deliberately no fallback default here (unlike
+// the fleet planner's own model config) — an empty value means the check
+// cannot run and fails open, not that some default model is assumed to be
+// in use. Known limitation: assumes a single-model-per-deployment fleet; a
+// deployment that genuinely runs different models per agent isn't
+// represented by this single value.
+func (g *Gateway) SetDiagnosisModel(model string) {
+	g.diagnosisModel = model
 }
 
 // GatewayMetrics tracks gateway-level operational counters in Prometheus text format.

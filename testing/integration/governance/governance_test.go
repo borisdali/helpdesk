@@ -1257,6 +1257,73 @@ func TestIntegration_ObjectiveEvidence_RoundTrips(t *testing.T) {
 	}
 }
 
+// TestIntegration_FaultStabilityCert_CleanFields_RoundTrip confirms the new
+// CLEAN-axis columns (warning_count, is_clean) on fault_stability_cert
+// actually round-trip through a real auditd — new SQL columns added via the
+// idempotent migrate() pattern are exactly the kind of thing a mocked
+// gateway-package test can't catch (it never touches real SQL storage).
+// Also confirms GET .../fault-stability's series_id+model query filter
+// (used by the gateway's trustNotYetEarnedForceGate) actually works against
+// a real store, not just the in-memory scanCert path.
+func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
+	faultID := fmt.Sprintf("fs-clean-%d", time.Now().UnixNano())
+	seriesID := "pbs_fs_clean_test_triage"
+	model := "claude-sonnet-4-6"
+
+	cert := map[string]any{
+		"fault_id":           faultID,
+		"fault_name":         "Clean Fields Round-Trip Test",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             5,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"warning_count":      2,
+		"is_clean":           false,
+	}
+	post(t, auditdAddr, "/v1/fleet/fault-stability", cert)
+
+	got := get(t, auditdAddr, "/v1/fleet/fault-stability/"+faultID)
+	if wc, _ := got["warning_count"].(float64); wc != 2 {
+		t.Errorf("warning_count = %v, want 2", got["warning_count"])
+	}
+	if isClean, _ := got["is_clean"].(bool); isClean {
+		t.Error("is_clean = true, want false")
+	}
+
+	// series_id + model query filter — the exact contract
+	// trustNotYetEarnedForceGate depends on. handleList wraps results in
+	// {"certs": [...]}, unlike the bare-array shape getList expects (that's
+	// the vault.go fetch convention for this endpoint), so decode via get()
+	// and unwrap manually.
+	filteredResp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model="+model)
+	filteredCerts, _ := filteredResp["certs"].([]any)
+	found := false
+	for _, raw := range filteredCerts {
+		c, _ := raw.(map[string]any)
+		if c["fault_id"] == faultID {
+			found = true
+			if wc, _ := c["warning_count"].(float64); wc != 2 {
+				t.Errorf("filtered result warning_count = %v, want 2", c["warning_count"])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("cert for fault_id=%s not found in series_id+model filtered list (got %d certs)", faultID, len(filteredCerts))
+	}
+
+	// A different model must not see this cert — confirms the filter is
+	// actually scoping by model, not just series_id.
+	otherModelResp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model=claude-opus-4-8")
+	otherModelCerts, _ := otherModelResp["certs"].([]any)
+	for _, raw := range otherModelCerts {
+		c, _ := raw.(map[string]any)
+		if c["fault_id"] == faultID {
+			t.Error("cert unexpectedly returned for a different model — series_id+model filter is not scoping by model")
+		}
+	}
+}
+
 // TestIntegration_VerifyTrace_QueryContract validates the server-side contract
 // that client.VerifyTrace depends on: tool_execution events must be queryable
 // by trace_id + since, with action_class at the top level and tool.name nested.

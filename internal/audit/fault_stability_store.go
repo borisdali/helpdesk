@@ -32,6 +32,14 @@ type FaultStabilityCert struct {
 	AttributionDistribution map[string]int `json:"attribution_distribution,omitempty"`
 	JudgeSpread             float64        `json:"judge_spread,omitempty"`
 	TaxonomyVersion         string         `json:"taxonomy_version,omitempty"`
+
+	// CLEAN axis fields: rate of verified (code-derived, not self-reported)
+	// warning signals across the cert's N runs — see hasCleanWarning in
+	// testing/cmd/faulttest/evaluator.go for exactly which three signals count.
+	// A distinct axis from IsStable: a playbook can be perfectly stable while
+	// still consistently missing evidence it should have acted on.
+	WarningCount int  `json:"warning_count"`
+	IsClean      bool `json:"is_clean"`
 }
 
 // FaultStabilityStore persists and retrieves fault triage consistency certs.
@@ -71,6 +79,8 @@ CREATE TABLE IF NOT EXISTS fault_stability_cert (
     attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
     judge_spread              REAL    NOT NULL DEFAULT 0,
     taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (fault_id, diagnosis_model)
 )`)
 	return err
@@ -107,8 +117,11 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 		return fmt.Errorf("check PK columns: %w", err)
 	}
 	if pkCols >= 2 {
-		// Composite PK already in place — only need the additive attribution columns.
-		return s.addAttributionColumnsSQLite()
+		// Composite PK already in place — only need the additive columns.
+		if err := s.addAttributionColumnsSQLite(); err != nil {
+			return err
+		}
+		return s.addCleanColumnsSQLite()
 	}
 
 	// Ensure diagnosis_model column exists before migration (it was added in a prior release).
@@ -160,7 +173,10 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return s.addAttributionColumnsSQLite()
+	if err := s.addAttributionColumnsSQLite(); err != nil {
+		return err
+	}
+	return s.addCleanColumnsSQLite()
 }
 
 // addAttributionColumnsSQLite adds the v0.21.0 attribution columns to existing
@@ -174,6 +190,24 @@ func (s *FaultStabilityStore) addAttributionColumnsSQLite() error {
 		`ALTER TABLE fault_stability_cert ADD COLUMN taxonomy_version         TEXT    NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range attrCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
+				return fmt.Errorf("cert migrate: %s: %w", stmt, err)
+			}
+		}
+	}
+	return nil
+}
+
+// addCleanColumnsSQLite adds the CLEAN-axis columns to existing SQLite
+// databases. Duplicate-column errors are silently ignored, same as
+// addAttributionColumnsSQLite.
+func (s *FaultStabilityStore) addCleanColumnsSQLite() error {
+	cleanCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN warning_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN is_clean      INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range cleanCols {
 		if _, err := s.db.Exec(stmt); err != nil {
 			if !containsAny(err.Error(), "duplicate column", "already exists") {
 				return fmt.Errorf("cert migrate: %s: %w", stmt, err)
@@ -219,6 +253,17 @@ func (s *FaultStabilityStore) migratePostgres() error {
 			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
 		}
 	}
+
+	// CLEAN-axis columns.
+	cleanCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS warning_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS is_clean      INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range cleanCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
+		}
+	}
 	return nil
 }
 
@@ -244,11 +289,16 @@ func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCe
 			attrDistJSON = []byte("{}")
 		}
 	}
+	cleanInt := 0
+	if cert.IsClean {
+		cleanInt = 1
+	}
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 INSERT INTO fault_stability_cert
     (fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
-     primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version,
+     warning_count, is_clean)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     fault_name                = excluded.fault_name,
     playbook_series_id        = excluded.playbook_series_id,
@@ -262,12 +312,15 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     attribution_consistent    = excluded.attribution_consistent,
     attribution_distribution  = excluded.attribution_distribution,
     judge_spread              = excluded.judge_spread,
-    taxonomy_version          = excluded.taxonomy_version`),
+    taxonomy_version          = excluded.taxonomy_version,
+    warning_count             = excluded.warning_count,
+    is_clean                  = excluded.is_clean`),
 		cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
 		cert.NRuns, cert.PassRate, cert.ConfRangePP,
 		stableInt, cert.TestedAt.UTC().Format(time.RFC3339Nano),
 		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
 		cert.JudgeSpread, cert.TaxonomyVersion,
+		cert.WarningCount, cleanInt,
 	)
 	return err
 }
@@ -277,7 +330,7 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultID(ctx context.Context, faultID string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), faultID)
 	return scanCert(row)
 }
@@ -286,16 +339,36 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), 
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultAndModel(ctx context.Context, faultID, model string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean
 FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID, model)
 	return scanCert(row)
+}
+
+// GetBySeriesAndModel returns every stability cert for a given playbook
+// series + diagnosis model — a series can map to multiple faults (e.g. one
+// playbook tested against several distinct fault scenarios), so this returns
+// a slice, not a single cert. Used by the gateway's trust-gate check: a
+// playbook has "earned" unattended trust for a model only when every known
+// cert for that series+model is both IsStable and IsClean. An empty slice
+// means no cert has ever been recorded for this series+model — callers
+// should treat that the same as "not earned" (fail closed), not as "passing
+// vacuously."
+func (s *FaultStabilityStore) GetBySeriesAndModel(ctx context.Context, seriesID, model string) ([]*FaultStabilityCert, error) {
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean
+FROM fault_stability_cert WHERE playbook_series_id = ? AND diagnosis_model = ?`), seriesID, model)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCerts(rows)
 }
 
 // ListByFaultID returns all stability certs for a given fault, ordered most recent first.
 // When only one model has ever been used the slice has one element.
 func (s *FaultStabilityStore) ListByFaultID(ctx context.Context, faultID string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 	if err != nil {
 		return nil, err
@@ -307,7 +380,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 // ListAll returns all stability certs, ordered by fault_id then by tested_at desc.
 func (s *FaultStabilityStore) ListAll(ctx context.Context) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean
 FROM fault_stability_cert ORDER BY fault_id, tested_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list fault stability certs: %w", err)
@@ -327,17 +400,20 @@ func scanCert(s certScanner) (*FaultStabilityCert, error) {
 		attrConsistentInt int
 		attrDistJSON      string
 		testedStr         string
+		cleanInt          int
 	)
 	if err := s.Scan(
 		&cert.FaultID, &cert.FaultName, &cert.PlaybookSeriesID, &cert.JudgeModel, &cert.DiagnosisModel,
 		&cert.NRuns, &cert.PassRate, &cert.ConfRangePP, &stableInt, &testedStr,
 		&cert.PrimaryAttribution, &attrConsistentInt, &attrDistJSON,
 		&cert.JudgeSpread, &cert.TaxonomyVersion,
+		&cert.WarningCount, &cleanInt,
 	); err != nil {
 		return nil, err
 	}
 	cert.IsStable = stableInt != 0
 	cert.AttributionConsistent = attrConsistentInt != 0
+	cert.IsClean = cleanInt != 0
 	if attrDistJSON != "" && attrDistJSON != "{}" {
 		var dist map[string]int
 		if err := json.Unmarshal([]byte(attrDistJSON), &dist); err == nil {

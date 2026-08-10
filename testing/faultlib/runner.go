@@ -156,6 +156,11 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	)
 	reqBody := map[string]any{
 		"context": ResolvePrompt(f.Prompt, r.cfg),
+		// faulttest traffic is evaluation, never a real incident — and a
+		// --repeat calibration run is specifically trying to *establish* a
+		// fault-stability cert, so it can't be gated on one already existing.
+		// See trustNotYetEarnedForceGate (cmd/gateway/playbooks.go).
+		"skip_trust_gate": true,
 	}
 	if connStr != "" {
 		reqBody["connection_string"] = connStr

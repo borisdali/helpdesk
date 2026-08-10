@@ -14,6 +14,7 @@ A [stability cert](CONSISTENCY.md) records whether a [playbook's](PLAYBOOKS.md) 
 6. [Authoring root_cause_classes](#6-authoring-root_cause_classes)
 7. [Three suspects for any cert regression](#7-three-suspects-for-any-cert-regression)
 8. [Relationship to other quality signals](#8-relationship-to-other-quality-signals)
+9. [The CLEAN axis](#9-the-clean-axis)
 
 ---
 
@@ -264,7 +265,28 @@ No other variable should be in play: `faulttest run --repeat N` fixes the fault 
 | **[LLM-as-judge](LLM_AS_JUDGE.md)** | Is the diagnosis semantically correct on this specific run? | During faulttest runs (opt-in `--judge`) |
 | **[Vault calibration](VAULT.md#vault-calibration)** | When the agent says 90%, is it right 90% of the time? | After accumulating ≥10 runs with operator feedback |
 | **[Vault accuracy](VAULT.md#vault-accuracy)** | What fraction of diagnoses are confirmed correct by operators? | Continuously from production incidents and faulttest gateway runs |
+| **CLEAN axis** (§9) | Did any run trip a verified, code-derived warning signal? | After each certification run; also gates real-incident auto-chaining (v0.24.0) |
 
 **The dependency chain:** attribution consistency is a prerequisite for calibration to be meaningful at the class level. A fault where the agent alternates between two attributions produces two different confidence distributions. `vault calibration` will see a single mixed band and cannot distinguish miscalibration from attribution variance. Attribution consistency guarantees that the confidence band for a given class reflects a single, repeatable story — not a blend of two.
 
 Outcome stability (consistency cert) is still a prerequisite for attribution consistency to be reliable: a cert on an UNSTABLE playbook has high run-to-run variance in the response text, which makes the classifier results noisy. Certify STABLE first; then read the attribution columns.
+
+---
+
+## 9. The CLEAN axis
+
+Added in v0.24.0, alongside the [objective-evidence escalation gate](PLAYBOOKS.md#objective-evidence-gate). A fourth axis, distinct from the three in §1: a playbook can be perfectly `STABLE` (same outcome every run) and perfectly attribution-consistent (§1 "Conclusion") while still consistently missing real evidence it should have acted on. `IsStable` and `IsClean` are independent booleans on the same `fault_stability_cert` row — a cert can be any combination of the two.
+
+**What counts as a warning, and what deliberately doesn't.** `CLEAN` tracks exactly three signals, all *verified* (code-derived from real tool output), not self-reported:
+
+1. `gate_reason` containing `objective_evidence:*` — the gateway forced a gate based on real tool evidence (e.g. a K8s pod's actual restart count).
+2. `evidence_warnings` non-empty — a hop had real evidence but didn't escalate on it.
+3. A protocol-violation entry in `warnings` — the agent omitted the required `TRANSITION_TO`/`ESCALATE_TO` signal entirely.
+
+Two signals from the same table (`docs/PLAYBOOKS.md#warning-signals-reference`) are **deliberately excluded**: `gate_reason: "low_confidence"` and `confidence_warning`. Both are self-reported by the model, and both are already substantially what the existing **Evaluation** stability axis (§1) measures — judge/confidence variance across runs. Folding them into `CLEAN` too would double-count the same underlying signal under two different names. `CLEAN` exists specifically to surface what the other three axes structurally cannot see: real evidence, not the model's opinion of itself.
+
+`isClean()` is zero-tolerance (`WarningCount == 0`), not a percentage threshold like the outcome axis's 80% pass rate / 30pp confidence range. There's no natural noise floor to justify a threshold here — these are verified signals, not fuzzy self-reports, so any run that trips one is worth surfacing rather than averaging away. Revisit if real-world data shows this is too strict.
+
+**Gating real incidents.** This is the axis's second, larger purpose beyond reporting: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` forces a `pending_gate` (`gate_reason: "trust_not_earned"`) on any real playbook run whose series has no cert on record — for the gateway's configured diagnosis model — that is both `STABLE` and `CLEAN`. Fails closed: never having been `faulttest run --repeat N`-certified counts as "not earned," not as a pass, and **all** known certs for a series must clear both bars (a series can map to multiple faults; one bad one is enough to withhold trust). See [`PLAYBOOKS.md`'s warning signals reference](PLAYBOOKS.md#warning-signals-reference) for the full response-field contract, including how `skip_trust_gate` lets faulttest's own calibration runs bypass a check they're specifically trying to satisfy.
+
+**Known limitation, accepted for v1**: the gating lookup assumes a single-model-per-deployment fleet — it resolves "the current diagnosis model" from one gateway-wide `HELPDESK_MODEL_NAME` value, not per-agent. A deployment that deliberately runs different models on different agents isn't represented by this single value; the check fails open (no gate) rather than guessing, which means such a deployment currently gets no benefit from this axis until a real per-agent model-reporting mechanism is built.

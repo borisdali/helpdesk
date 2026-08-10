@@ -411,17 +411,18 @@ This never creates a Decision Hub entry — there is no next-hop candidate to ga
 
 ### Warning signals reference
 
-The playbook-run response can carry several distinct warning/signal fields. They come from different mechanisms and don't all mean the same thing — this table is the map:
+The playbook-run response can carry several distinct warning/signal fields. They come from different mechanisms and don't all mean the same thing. This table is the map:
 
 | Signal | Where it appears | Fires when | Self-reported or verified | Relationship to other signals |
 |---|---|---|---|---|
 | `gate_reason: "low_confidence"` | `pending_gate` response | Primary hypothesis `CONFIDENCE:` below 50% | Self-reported — the model writes this about its own diagnosis | Independently evaluated from objective evidence; combines with it via `+` (see below) |
 | `gate_reason: "objective_evidence:<signal>"` | `pending_gate` response | A tool call in the hop produced real, code-derived evidence (e.g. `get_pods` showing a nonzero restart count or `OOMKilled`) | Verified — read directly from structured tool output, independent of the model's text | Independently evaluated from low confidence; combines with it via `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"` |
+| `gate_reason: "trust_not_earned"` | `pending_gate` response | The playbook's series_id has no fault-stability cert on record for the gateway's configured diagnosis model (`HELPDESK_MODEL_NAME`) with both a `STABLE` and a `CLEAN` verdict — see [`ATTRIBUTION_CERTS.md`](ATTRIBUTION_CERTS.md) for what earns each. Fails closed: never having been `faulttest run --repeat N`-certified for this model counts as unearned, not as a pass. | Verified — a real query against the cert store, not a per-run signal at all | Independently evaluated; combines with the other two via `+`. Bypassed by `skip_trust_gate: true` on the request — set automatically by faulttest's own calibration runs, since they're the ones trying to *establish* the cert this check depends on; never set this for a real incident. |
 | `confidence_warning` | `pending_gate` response (any gate, requested or forced) | Primary hypothesis confidence below 70%, or a competing hypothesis scores above 70% of the primary | Self-reported | Advisory only — never forces a gate by itself; can appear alongside any `gate_reason` value, or none, whenever a gate fires for some other reason |
 | `evidence_warnings` | Normal (non-`pending_gate`) response | A hop has real objective evidence but emits neither `TRANSITION_TO` nor `ESCALATE_TO` | Verified | **Structurally mutually exclusive with `pending_gate`/`gate_reason`** — a hop with no escalation signal always terminates the chain right there, so a later hop's gate can never fire in the same response. Not just "by convention" — the chain loop's own exit condition makes this impossible, not merely undesigned-for. |
 | `warnings` (general array; includes a protocol-violation entry like `"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal..."`) | Any response | Various gateway-level advisories — e.g. `approval_mode` clamped due to insufficient roles, or a synthetic gate created because the agent never emitted a required handoff signal at all | Mixed — some entries are bookkeeping, not evidence-based | Pre-existing, general-purpose channel unrelated to the confidence/evidence gate mechanism specifically; do not confuse a protocol-violation entry here with `evidence_warnings` above — they are different fields for different failure modes |
 
-The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
+The triage run is recorded with `outcome: gate_pending`. The run ID is stable and can be used to retrieve the findings later via `GET /api/v1/fleet/playbook-runs/{run_id}` API call.
 
 ### Proceeding through the gate
 

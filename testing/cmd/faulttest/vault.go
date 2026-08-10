@@ -385,6 +385,8 @@ type stabilityInfo struct {
 	TestedAt              time.Time
 	PrimaryAttribution    string
 	AttributionConsistent bool
+	WarningCount          int
+	IsClean               bool
 	hasData               bool
 }
 
@@ -406,6 +408,8 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	AttributionDistribution map[string]int `json:"attribution_distribution"`
 	JudgeSpread             float64        `json:"judge_spread"`
 	TaxonomyVersion         string         `json:"taxonomy_version"`
+	WarningCount            int            `json:"warning_count"`
+	IsClean                 bool           `json:"is_clean"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -443,6 +447,8 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		AttributionDistribution map[string]int `json:"attribution_distribution"`
 		JudgeSpread             float64        `json:"judge_spread"`
 		TaxonomyVersion         string         `json:"taxonomy_version"`
+		WarningCount            int            `json:"warning_count"`
+		IsClean                 bool           `json:"is_clean"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -575,6 +581,8 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 			TestedAt              string `json:"tested_at"`
 			PrimaryAttribution    string `json:"primary_attribution"`
 			AttributionConsistent bool   `json:"attribution_consistent"`
+			WarningCount          int    `json:"warning_count"`
+			IsClean               bool   `json:"is_clean"`
 		} `json:"certs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -592,6 +600,8 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 			NRuns:                 c.NRuns,
 			PrimaryAttribution:    c.PrimaryAttribution,
 			AttributionConsistent: c.AttributionConsistent,
+			WarningCount:          c.WarningCount,
+			IsClean:               c.IsClean,
 			hasData:               true,
 		}
 		if c.TestedAt != "" {
@@ -775,6 +785,12 @@ func vaultList(args []string) {
 				label = "STABLE"
 			}
 			stableCol = fmt.Sprintf("%s(%d)", label, si.NRuns)
+			// Append a CLEAN indicator — a distinct axis from IsStable: a
+			// playbook can be perfectly stable while still consistently
+			// missing evidence it should have acted on.
+			if !si.IsClean {
+				stableCol += fmt.Sprintf(" ⚠%d/%d warnings", si.WarningCount, si.NRuns)
+			}
 			// Append attribution label when available.
 			if si.PrimaryAttribution != "" && si.PrimaryAttribution != "UNKNOWN" {
 				if si.AttributionConsistent {
@@ -1419,6 +1435,11 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	fmt.Printf("  Runs          : %d\n", cert.NRuns)
 	fmt.Printf("  Pass rate     : %.0f%%\n", cert.PassRate*100)
 	fmt.Printf("  Conf range    : %dpp  (primary hypothesis, passing runs only)\n", cert.ConfRangePP)
+	cleanVerdict := "yes"
+	if !cert.IsClean {
+		cleanVerdict = fmt.Sprintf("no  (%d/%d run(s) tripped a verified warning signal)", cert.WarningCount, cert.NRuns)
+	}
+	fmt.Printf("  Clean         : %s\n", cleanVerdict)
 	if cert.PlaybookSeriesID != "" {
 		fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
 	}
@@ -3170,7 +3191,7 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 // postStabilityCert posts a fault triage consistency certification to auditd
 // via the gateway. Silently skipped when --gateway is not set. Errors are
 // logged but never cause the run to fail.
-func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, attr *attributionSummary) {
+func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, cr CleanReport, attr *attributionSummary) {
 	if cfg.GatewayURL == "" {
 		return
 	}
@@ -3184,6 +3205,8 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"pass_rate":          sr.passRate(),
 		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),
 		"is_stable":          sr.isStable(),
+		"warning_count":      cr.WarningCount,
+		"is_clean":           cr.isClean(),
 	}
 	if attr != nil {
 		payload["primary_attribution"] = attr.PrimaryAttribution
@@ -3222,7 +3245,11 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 	if sr.isStable() {
 		verdict = "STABLE"
 	}
-	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "n_runs", sr.N)
+	cleanVerdict := "DIRTY"
+	if cr.isClean() {
+		cleanVerdict = "CLEAN"
+	}
+	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "clean", cleanVerdict, "warning_count", cr.WarningCount, "n_runs", sr.N)
 }
 
 // ── vault versions ────────────────────────────────────────────────────────────
@@ -3757,6 +3784,8 @@ type certCompareEntry struct {
 	attributionConsistent bool
 	taxonomyVersion       string
 	judgeSpread           float64
+	warningCount          int
+	isClean               bool
 }
 
 // vaultCertCompare compares stability certs for two diagnosis models.
@@ -3801,6 +3830,8 @@ func vaultCertCompare(args []string) {
 			attributionConsistent: c.AttributionConsistent,
 			taxonomyVersion:       c.TaxonomyVersion,
 			judgeSpread:           c.JudgeSpread,
+			warningCount:          c.WarningCount,
+			isClean:               c.IsClean,
 		}
 		if c.FaultName != "" {
 			names[c.FaultID] = c.FaultName
@@ -3920,6 +3951,23 @@ func vaultCertCompare(args []string) {
 				fmt.Printf("  attribution: %s → %s%s\n", oldAttr, newAttr, taxWarning)
 			}
 		}
+		// CLEAN comparison: flag when a model regresses from clean to dirty,
+		// or vice versa — a distinct axis from isStable, so this can fire
+		// independently of a pass-rate/attribution regression.
+		if r.oldCert != nil && r.newCert != nil && r.oldCert.isClean != r.newCert.isClean {
+			oldClean, newClean := "clean", "clean"
+			if !r.oldCert.isClean {
+				oldClean = fmt.Sprintf("dirty(%d/%d)", r.oldCert.warningCount, r.oldCert.nRuns)
+			}
+			if !r.newCert.isClean {
+				newClean = fmt.Sprintf("dirty(%d/%d)", r.newCert.warningCount, r.newCert.nRuns)
+			}
+			marker := "⚠"
+			if r.newCert.isClean {
+				marker = "✓"
+			}
+			fmt.Printf("  %s clean: %s → %s\n", marker, oldClean, newClean)
+		}
 	}
 
 	fmt.Println()
@@ -3961,6 +4009,8 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 	AttributionConsistent bool    `json:"attribution_consistent"`
 	TaxonomyVersion       string  `json:"taxonomy_version"`
 	JudgeSpread           float64 `json:"judge_spread"`
+	WarningCount          int     `json:"warning_count"`
+	IsClean               bool    `json:"is_clean"`
 }, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -3992,6 +4042,8 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 			AttributionConsistent bool    `json:"attribution_consistent"`
 			TaxonomyVersion       string  `json:"taxonomy_version"`
 			JudgeSpread           float64 `json:"judge_spread"`
+			WarningCount          int     `json:"warning_count"`
+			IsClean               bool    `json:"is_clean"`
 		} `json:"certs"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {

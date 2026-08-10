@@ -3324,6 +3324,174 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 	}
 }
 
+// ── trustNotYetEarnedForceGate ──────────────────────────────────────────────
+
+// serveFakeFaultStabilityCerts starts an httptest.Server that responds to
+// GET /v1/fleet/fault-stability with the given certs JSON-encoded, mirroring
+// the real {"certs": [...]} envelope auditd's handleList returns.
+func serveFakeFaultStabilityCerts(t *testing.T, certs []*audit.FaultStabilityCert) *httptest.Server {
+	t.Helper()
+	if certs == nil {
+		certs = []*audit.FaultStabilityCert{}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"certs": certs}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_NoDiagnosisModel(t *testing.T) {
+	// Mechanism not configured (diagnosisModel empty, the default for every
+	// gateway that never calls SetDiagnosisModel — i.e. every other test in
+	// this package) — must fail open regardless of what auditd would say.
+	// Server would say "not earned" (empty certs) if it were ever queried.
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL}
+	if g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-open (false) when diagnosisModel is unset")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_NoAuditURL(t *testing.T) {
+	g := &Gateway{diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-open (false) when auditURL is unset")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_EmptySeriesID(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("") {
+		t.Error("expected fail-open (false) when seriesID is empty")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsClosed_NoCertOnRecord(t *testing.T) {
+	// Mechanism IS configured, auditd genuinely has zero certs for this
+	// series+model — "never faulttested" must be treated as "not earned."
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-closed (true) when no cert is on record")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_Earned_AllCertsStableAndClean(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected earned (false) when every known cert is stable and clean")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_NotEarned_OneUnstable(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: false, IsClean: true},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected not earned (true) when even one known cert is unstable — conservative, not 'any good result passes'")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_NotEarned_OneDirty(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: false, WarningCount: 2},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected not earned (true) when even one known cert is dirty (IsClean=false)")
+	}
+}
+
+// TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook is an end-to-end
+// test through handlePlaybookRunAsAgent: a playbook with no fault-stability
+// cert on record must come back pending_gate with gate_reason="trust_not_earned",
+// even under approval_mode=force — consistent with how the existing two
+// force-gates already override force mode (they run before canAutoChain is
+// ever consulted).
+func TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_trust01",
+		SeriesID:      "pbs_trust_triage",
+		Name:          "Trust Gate Triage",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "HYPOTHESIS_1: clear root cause | CONFIDENCE: 0.95 | EVIDENCE: \"clean signal\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: resolved cleanly\nTRANSITION_TO: pbs_trust_remediate\n"
+
+	// mockGateAuditdPlaybook's default branch returns "[]" for any unmatched
+	// GET — including /v1/fleet/fault-stability — so this playbook has no
+	// cert on record, same as "never faulttested."
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	gw.SetDiagnosisModel("claude-sonnet-4-6")
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"test","approval_mode":"force"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — trust gate did not fire under force mode despite no earned cert", resp["status"])
+	}
+	if resp["gate_reason"] != "trust_not_earned" {
+		t.Errorf("gate_reason = %q, want trust_not_earned", resp["gate_reason"])
+	}
+}
+
+// TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet mirrors the
+// faulttest bootstrapping case: a calibration run explicitly sets
+// skip_trust_gate so it isn't gated waiting on a cert it's trying to
+// establish in the first place.
+func TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_trust02",
+		SeriesID:      "pbs_trust_triage2",
+		Name:          "Trust Gate Triage 2",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "HYPOTHESIS_1: clear root cause | CONFIDENCE: 0.95 | EVIDENCE: \"clean signal\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: resolved cleanly\n"
+	// No TRANSITION_TO/ESCALATE_TO — closes out on its own, same as a
+	// faulttest calibration run's final hop typically would.
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	gw.SetDiagnosisModel("claude-sonnet-4-6")
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"test","approval_mode":"force","skip_trust_gate":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but skip_trust_gate was set — trust gate should not have fired")
+	}
+}
+
 // ── recordEvidenceWithoutEscalationWarning ─────────────────────────────────
 
 func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {

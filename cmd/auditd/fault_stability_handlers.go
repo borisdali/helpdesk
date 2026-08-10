@@ -58,11 +58,24 @@ func (s *faultStabilityServer) handleGet(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(cert) //nolint:errcheck
 }
 
-// handleList handles GET /v1/fleet/fault-stability.
+// handleList handles GET /v1/fleet/fault-stability. When both series_id and
+// model query params are present, filters to certs for that playbook
+// series + diagnosis model (used by the gateway's trust-gate check — a
+// series can map to multiple faults, so this can return more than one cert).
+// Otherwise returns every cert, unfiltered.
 func (s *faultStabilityServer) handleList(w http.ResponseWriter, r *http.Request) {
-	certs, err := s.store.ListAll(r.Context())
+	seriesID := r.URL.Query().Get("series_id")
+	model := r.URL.Query().Get("model")
+
+	var certs []*audit.FaultStabilityCert
+	var err error
+	if seriesID != "" && model != "" {
+		certs, err = s.store.GetBySeriesAndModel(r.Context(), seriesID, model)
+	} else {
+		certs, err = s.store.ListAll(r.Context())
+	}
 	if err != nil {
-		slog.Error("failed to list fault stability certs", "err", err)
+		slog.Error("failed to list fault stability certs", "series_id", seriesID, "model", model, "err", err)
 		http.Error(w, "failed to list certs", http.StatusInternalServerError)
 		return
 	}

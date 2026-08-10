@@ -217,6 +217,7 @@ func main() {
 
 	gw.SetCrystalBall(crystalBall)
 	gw.SetAuthorizer(authzr)
+	gw.SetDiagnosisModel(os.Getenv("HELPDESK_MODEL_NAME"))
 
 	// Git webhook adapter config.
 	gw.gitWebhookCfg = GitWebhookConfig{

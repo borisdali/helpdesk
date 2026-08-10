@@ -3156,7 +3156,7 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 		N:           5,
 		PassCount:   4,
 	}
-	postStabilityCert(context.Background(), cfg, f, sr, nil)
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
 
 	if gotBody["fault_id"] != "db-max-connections" {
 		t.Errorf("fault_id = %v, want db-max-connections", gotBody["fault_id"])
@@ -3184,7 +3184,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 	if gotAuth != "Bearer tok-stability" {
 		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
 	}
@@ -3193,7 +3193,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
 	// Should not panic or dial anything when GatewayURL is empty.
 	cfg := &HarnessConfig{GatewayURL: ""}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 }
 
 func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
@@ -3204,7 +3204,7 @@ func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
 	// Should log a warning but not panic.
-	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, CleanReport{}, nil)
 }
 
 // ── wrapLines ────────────────────────────────────────────────────────────────
@@ -3827,7 +3827,7 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 		JudgeSpread:             0.08,
 		TaxonomyVersion:         "1.0",
 	}
-	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, attr)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, CleanReport{}, attr)
 
 	if gotBody["primary_attribution"] != "connection-pool-saturation" {
 		t.Errorf("primary_attribution = %v", gotBody["primary_attribution"])
@@ -3856,7 +3856,7 @@ func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
-	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, CleanReport{}, nil)
 
 	if _, ok := gotBody["primary_attribution"]; ok {
 		t.Error("primary_attribution should not be in payload when attr=nil")

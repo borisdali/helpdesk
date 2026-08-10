@@ -527,6 +527,13 @@ func cmdRun(args []string) {
 						fmt.Printf("  ⚠  EVIDENCE WARNING: %s\n", w)
 					}
 				}
+				// A pending_gate forced by real objective tool evidence (not the
+				// model's self-reported confidence) — see objectiveEvidenceForceGate
+				// in cmd/gateway/playbooks.go. Substring match since gate_reason can
+				// be a "+"-joined combination with low_confidence.
+				if strings.Contains(resp.GateReason, "objective_evidence:") {
+					evalResult.ObjectiveEvidenceGate = true
+				}
 
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.
@@ -687,6 +694,7 @@ func cmdRun(args []string) {
 
 		if repeatMode {
 			sr := buildStabilityReport(f, repResults)
+			cr := buildCleanReport(f, repResults)
 			var attrSummary *attributionSummary
 			if cfg.DiagnosisModel != "" && f.DiagnosisPlaybookSeriesID != "" {
 				classes, taxonomyVersion := fetchRootCauseClasses(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID)
@@ -697,10 +705,11 @@ func cmdRun(args []string) {
 				}
 			}
 			sr.Print(attrSummary)
+			cr.Print()
 			if cfg.DiagnosisModel == "" {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
-				postStabilityCert(ctx, cfg, f, sr, attrSummary)
+				postStabilityCert(ctx, cfg, f, sr, cr, attrSummary)
 			}
 		}
 

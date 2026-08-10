@@ -59,6 +59,12 @@ type EvalResult struct {
 	// not escalate or transition on — populated regardless of gate/pending_gate
 	// status, see testutil.AgentResponse.EvidenceWarnings.
 	EvidenceWarnings []string `json:"evidence_warnings,omitempty"`
+	// ObjectiveEvidenceGate is true when resp.GateReason contains
+	// "objective_evidence:" — the gateway forced a pending_gate based on real,
+	// code-derived tool evidence (not the model's self-reported confidence).
+	// Substring match, not equality: gate_reason can be a "+"-joined
+	// combination, e.g. "low_confidence+objective_evidence:pod_restarted".
+	ObjectiveEvidenceGate bool `json:"objective_evidence_gate,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -107,6 +113,18 @@ type HypothesisEntry struct {
 	Confidence     float64 `json:"confidence"`
 	IsPrimary      bool    `json:"is_primary"`
 	RejectedReason string  `json:"rejected_reason,omitempty"`
+}
+
+// hasCleanWarning returns true when this run tripped any of the three
+// verified (code-derived, not self-reported) warning signals: real objective
+// tool evidence the gateway had to force a gate over, real evidence the model
+// saw but didn't act on, or an outright protocol violation (omitted the
+// required TRANSITION_TO/ESCALATE_TO signal entirely). Used to compute the
+// CLEAN stability axis — deliberately excludes low_confidence/confidence_warning,
+// which are self-reported and already substantially captured by the existing
+// evaluation-stability axis (judge/confidence variance).
+func hasCleanWarning(er EvalResult) bool {
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.

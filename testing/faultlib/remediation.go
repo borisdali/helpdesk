@@ -214,7 +214,9 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID, name
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
 	}
-	reqBody := map[string]any{"connection_string": connStr}
+	// skip_trust_gate: faulttest traffic is evaluation, never a real incident —
+	// see the matching comment in faultlib/runner.go.
+	reqBody := map[string]any{"connection_string": connStr, "skip_trust_gate": true}
 	if namespace != "" {
 		reqBody["namespace"] = namespace
 	}
