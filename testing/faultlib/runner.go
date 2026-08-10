@@ -216,6 +216,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		RemediationPreview map[string]any `json:"remediation_preview,omitempty"`
 		DiagnosticReport   map[string]any `json:"diagnostic_report,omitempty"`
 		GateReason         string         `json:"gate_reason,omitempty"`
+		EvidenceWarnings   []string       `json:"evidence_warnings,omitempty"`
 		ChainedRunID       string         `json:"chained_run_id,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -242,6 +243,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		RemediationPreview: result.RemediationPreview,
 		DiagnosticReport:   result.DiagnosticReport,
 		GateReason:         result.GateReason,
+		EvidenceWarnings:   result.EvidenceWarnings,
 		ChainedRunID:       result.ChainedRunID,
 	}
 	if len(result.ToolCalls) > 0 {

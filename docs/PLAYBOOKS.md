@@ -23,6 +23,7 @@ See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk rec
 3. [Informed gate](#informed-gate)
    - [When to use it](#when-to-use-it)
    - [`pending_gate` response](#pending_gate-response)
+   - [Objective-evidence gate](#objective-evidence-gate)
    - [Proceeding through the gate](#proceeding-through-the-gate)
    - [Relationship to the two-playbook split](#relationship-to-the-two-playbook-split)
    - [faulttest flags](#faulttest-flags)
@@ -371,7 +372,39 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 }
 ```
 
-`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. `remediation_preview` describes the next playbook that would run after approval — its name, intent description, and default `approval_mode` — so operators know exactly what they are authorising before clicking approve. `diagnostic_report` contains the structured hypothesis breakdown from triage (populated when the agent emits `HYPOTHESIS_N:` lines; `null` otherwise — see [Structured diagnostic report](#structured-diagnostic-report)). The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **advisory and non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`. When confidence drops below 50%, the gateway **forces** a gate regardless of whether `gate_escalation=true` was set in the request, and sets `gate_reason: "low_confidence"` in the response. A coin-flip diagnosis must not auto-chain into destructive remediation.
+`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. `remediation_preview` describes the next playbook that would run after approval — its name, intent description, and default `approval_mode` — so operators know exactly what they are authorising before clicking approve. `diagnostic_report` contains the structured hypothesis breakdown from triage (populated when the agent emits `HYPOTHESIS_N:` lines; `null` otherwise — see [Structured diagnostic report](#structured-diagnostic-report)). The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **advisory and non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`. When confidence drops below 50%, the gateway **forces** a gate regardless of whether `gate_escalation=true` was set in the request, and sets `gate_reason: "low_confidence"` in the response. A coin-flip diagnosis must not auto-chain into destructive remediation. A second, independent force-gate exists alongside this one — see [Objective-evidence gate](#objective-evidence-gate) below.
+
+### Objective-evidence gate
+
+`gate_reason: "low_confidence"` is gated on the model's own self-reported `CONFIDENCE:` value — a real signal, but one the model writes about itself, not something independently checked. A second, deterministic force-gate exists specifically to close that gap: when a tool call in the hop produced **objective, code-derived evidence** the gateway can verify independently of anything the model says — currently, a Kubernetes pod's real restart count or `OOMKilled` state, read directly off the `get_pods` result before it is summarized for the LLM — the gateway forces a gate regardless of the model's stated confidence or `ESCALATE_TO`/`TRANSITION_TO` signal. `gate_reason` is set to `"objective_evidence:<signal>"`, e.g. `"objective_evidence:pod_restarted"` or `"objective_evidence:oom_killed"`:
+
+```json
+{
+  "run_id":            "plr_c4f1a9e2",
+  "status":            "pending_gate",
+  "gate_type":         "transition",
+  "findings":          "Pod recovered after a restart and is now healthy.",
+  "transition_target": "pbs_db_config_recovery",
+  "gate_reason":        "objective_evidence:pod_restarted"
+}
+```
+
+This scope is deliberately narrow today — only the K8s agent's `get_pods` tool populates it, since it is the only tool whose result already carries unambiguous structured evidence (a DB agent's uptime, by contrast, is free text and is not currently evidence for anything on its own). Extending this to other tools is a case-by-case decision, not a mechanical rollout — see the design note in the source (`cmd/gateway/playbooks.go`'s `objectiveEvidenceForceGate`) for the reasoning.
+
+**`evidence_warnings` — the non-gated counterpart.** The force-gate above only runs when the hop already emitted a `TRANSITION_TO`/`ESCALATE_TO` signal — a chain-loop precondition, not a design choice — so it cannot catch a hop that sees real evidence and emits *neither* signal, silently closing out. For that case, a normal (non-`pending_gate`) response instead carries an `evidence_warnings` array, independent of `status`:
+
+```json
+{
+  "run_id":    "plr_d7b3e5a1",
+  "status":    "resolved",
+  "findings":  "Pod is currently healthy.",
+  "evidence_warnings": [
+    "hop \"pbs_k8s_pod_crash_triage\" (agent k8s_agent) recorded objective evidence (oom_killed) but did not escalate or transition"
+  ]
+}
+```
+
+This never creates a Decision Hub entry — there is no next-hop candidate to gate approval for — it is purely a visible flag on the response you already receive, so it doesn't require a separate lookup to notice the discrepancy.
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
 

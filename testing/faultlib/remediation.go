@@ -49,19 +49,25 @@ type ApproveRunResponse struct {
 	RemediationPreview    map[string]any `json:"remediation_preview,omitempty"`
 	DiagnosticReport      map[string]any `json:"diagnostic_report,omitempty"`
 	// GateReason is "low_confidence" when the gate was forced by the gateway
-	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	// because the primary hypothesis confidence was below 50%, or
+	// "objective_evidence:<signal>" when forced by deterministic tool evidence.
+	// Empty otherwise.
 	GateReason string `json:"gate_reason,omitempty"`
+	// EvidenceWarnings lists hops with real objective tool evidence (e.g. a pod
+	// restart/OOM kill) that did not escalate or transition on their own —
+	// see testutil.AgentResponse.EvidenceWarnings for the full explanation.
+	EvidenceWarnings []string `json:"evidence_warnings,omitempty"`
 }
 
 // ProceedEscalationRequest is the request body for
 // POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 type ProceedEscalationRequest struct {
-	Resolution       string `json:"resolution"`                // "approved" | "denied"
+	Resolution       string `json:"resolution"` // "approved" | "denied"
 	ResolvedBy       string `json:"resolved_by,omitempty"`
-	ApprovalMode     string `json:"approval_mode,omitempty"`   // "manual"|"review"|"auto"|"session"|"force"
+	ApprovalMode     string `json:"approval_mode,omitempty"` // "manual"|"review"|"auto"|"session"|"force"
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"`
-	Reason           string `json:"reason,omitempty"`           // optional operator rationale
+	Reason           string `json:"reason,omitempty"` // optional operator rationale
 	// At-gate feedback — captured before remediation runs.
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
 	VerdictNotes   string `json:"verdict_notes,omitempty"`

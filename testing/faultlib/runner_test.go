@@ -185,7 +185,7 @@ func TestRunViaPlaybook_OmitsConnectionStringForKubernetesFaults(t *testing.T) {
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -215,7 +215,7 @@ func TestRunViaPlaybook_SendsConnectionStringForNonKubernetesFaults(t *testing.T
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -249,6 +249,38 @@ func TestRunViaPlaybook_RunIDPopulated(t *testing.T) {
 	}
 	if resp.RunID != "run_xyz789" {
 		t.Errorf("RunID = %q, want %q", resp.RunID, "run_xyz789")
+	}
+}
+
+// TestRunViaPlaybook_EvidenceWarningsPopulated confirms evidence_warnings
+// decodes from the gateway's raw JSON through runViaPlaybook's anonymous
+// struct into testutil.AgentResponse — this field is new (added alongside the
+// objective-evidence escalation gate) and, unlike gate_reason, was previously
+// undecoded anywhere in this package; a faulttest run that hit this field
+// would have silently dropped it.
+func TestRunViaPlaybook_EvidenceWarningsPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_k8s_pod_crash_triage", "pb_abc", map[string]any{
+		"text":              "result",
+		"run_id":            "run_evidence01",
+		"evidence_warnings": []string{`hop "pbs_k8s_pod_crash_triage" (agent k8s_agent) recorded objective evidence (pod_restarted) but did not escalate or transition`},
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "k8s-oomkilled", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if len(resp.EvidenceWarnings) != 1 {
+		t.Fatalf("EvidenceWarnings = %v, want exactly 1 entry", resp.EvidenceWarnings)
+	}
+	if !strings.Contains(resp.EvidenceWarnings[0], "pod_restarted") {
+		t.Errorf("EvidenceWarnings[0] = %q, want it to mention pod_restarted", resp.EvidenceWarnings[0])
 	}
 }
 
@@ -447,8 +479,8 @@ func TestCategoryToGatewayAgent(t *testing.T) {
 		want     string
 	}{
 		{"database", "database"},
-		{"kubernetes", "k8s"},   // gateway alias is "k8s", not "kubernetes"
-		{"host", "sysadmin"},    // gateway alias is "sysadmin"
+		{"kubernetes", "k8s"}, // gateway alias is "k8s", not "kubernetes"
+		{"host", "sysadmin"},  // gateway alias is "sysadmin"
 		{"compound", "database"},
 		{"unknown", "database"}, // default falls back to database
 	}
@@ -502,15 +534,15 @@ func TestRunViaPlaybook_GateEscalation_SendsRemediationSeriesID(t *testing.T) {
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok", "run_id": "plr_x"}) //nolint:errcheck
 	}))
 	defer srv.Close()
 
 	r := NewRunner(&HarnessConfig{
-		GatewayURL:    srv.URL,
-		GatewayAPIKey: "key",
-		ViaGateway:    true,
+		GatewayURL:     srv.URL,
+		GatewayAPIKey:  "key",
+		ViaGateway:     true,
 		GateEscalation: true,
 	})
 	f := Failure{
@@ -550,7 +582,7 @@ func TestRunViaPlaybook_GateEscalation_NoRemediationSeriesID_WhenPlaybookIDEmpty
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()

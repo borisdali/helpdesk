@@ -48,8 +48,16 @@ type AgentResponse struct {
 	// Populated when the triage playbook emits HYPOTHESIS_N: lines.
 	DiagnosticReport map[string]any
 	// GateReason is "low_confidence" when the gate was forced by the gateway
-	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	// because the primary hypothesis confidence was below 50%, or
+	// "objective_evidence:<signal>" when forced by deterministic tool evidence
+	// (e.g. a real K8s pod restart/OOM kill). Empty otherwise.
 	GateReason string
+	// EvidenceWarnings lists hops where the gateway recorded objective, code-derived
+	// tool evidence (e.g. a real pod restart/OOM kill) but the model's own output did
+	// not escalate or transition to another playbook — set independent of Status;
+	// populated on both pending_gate and normal responses, since there is no
+	// next-hop candidate to gate approval for in this case. Empty otherwise.
+	EvidenceWarnings []string
 	// ChainedRunID is the run ID of the auto-chained follow-on playbook when
 	// the gateway completed a TRANSITION_TO/ESCALATE_TO chain inline (force or
 	// auto approval mode). Non-empty means the gateway already ran remediation —

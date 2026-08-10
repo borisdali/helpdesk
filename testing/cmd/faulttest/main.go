@@ -517,6 +517,17 @@ func cmdRun(args []string) {
 					}
 				}
 
+				// Real, code-derived tool evidence (e.g. a K8s pod restart/OOM kill)
+				// that the agent's own output didn't escalate or transition on.
+				// Populated regardless of Status — surface it here so it's visible
+				// even on a run that never reaches the pending_gate branch below.
+				if len(resp.EvidenceWarnings) > 0 {
+					evalResult.EvidenceWarnings = resp.EvidenceWarnings
+					for _, w := range resp.EvidenceWarnings {
+						fmt.Printf("  ⚠  EVIDENCE WARNING: %s\n", w)
+					}
+				}
+
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.
 				if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {

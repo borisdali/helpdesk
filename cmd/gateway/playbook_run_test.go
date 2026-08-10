@@ -1814,12 +1814,31 @@ type mockChainAuditd struct {
 	mu        sync.Mutex
 	nextRunID int
 	patches   map[string]map[string]any
+
+	// evidenceSkipCalls/evidenceSignal let tests inject a real objective_evidence
+	// event starting from the Nth /v1/events?event_type=objective_evidence query
+	// (0-indexed) — used to distinguish which hop's fetch should see evidence,
+	// since each hop's trace_id is generated dynamically and unknown in advance.
+	// Zero value (evidenceSignal == "") preserves the original always-empty
+	// behavior for every existing caller of newMockChainAuditd.
+	evidenceSkipCalls int
+	evidenceSignal    string
+	eventsCallCount   int
 }
 
 func (m *mockChainAuditd) patchFor(runID string) map[string]any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.patches[runID]
+}
+
+// runCount returns how many playbook runs have been created (one POST .../runs
+// call per run) — used to assert a chain stopped at the expected hop count
+// rather than continuing further than it should have.
+func (m *mockChainAuditd) runCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nextRunID
 }
 
 func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries map[string]*audit.Playbook) *mockChainAuditd {
@@ -1863,6 +1882,20 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 			m.patches[runID] = body
 			m.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence" && m.evidenceSignal != "":
+			m.mu.Lock()
+			callIdx := m.eventsCallCount
+			m.eventsCallCount++
+			m.mu.Unlock()
+			if callIdx < m.evidenceSkipCalls {
+				w.Write([]byte("[]")) //nolint:errcheck
+				return
+			}
+			evidenceData, _ := json.Marshal([]audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: m.evidenceSignal}},
+			})
+			w.Write(evidenceData) //nolint:errcheck
 		default:
 			// Prior-findings lookups, delegation-verification event queries, etc.
 			w.Write([]byte("[]")) //nolint:errcheck
@@ -2124,6 +2157,154 @@ func TestHandlePlaybookRun_AutoChain_IsTransitionFraming(t *testing.T) {
 	}
 	if strings.Contains(remediatePrompt, "verify it with your own domain-specific tools") {
 		t.Error("remediate (transition hop) prompt should NOT tell the agent to verify with its own tools — it's the same agent continuing")
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate verifies that
+// objectiveEvidenceForceGate fires for a SECOND hop in a real multi-hop chain,
+// not just the primary/first hop — the in-loop gate is re-evaluated on every
+// loop iteration using `prev`, which only holds the primary's data on the
+// first iteration. Hop1 (triage) escalates cleanly (no evidence on its own
+// fetch); hop2 (sysadmin) both emits its own TRANSITION_TO AND has real
+// objective evidence, so hop3 must never be reached — the gate must intercept
+// using hop2's own trace/evidence, mirroring
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate but one hop deeper.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain_triage", SeriesID: "pbs_oevchain_triage",
+		Name: "OEV Chain Triage", ExecutionMode: "agent", AgentName: "oev_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain_sysadmin", SeriesID: "pbs_oevchain_sysadmin",
+		Name: "OEV Chain Sysadmin", ExecutionMode: "agent", AgentName: "oev_sysadmin_agent", IsActive: true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID: "pb_oevchain_remediate", SeriesID: "pbs_oevchain_remediate",
+		Name: "OEV Chain Remediate", ExecutionMode: "agent", AgentName: "oev_remediate_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_oevchain_sysadmin":  pbSysadmin,
+			"pbs_oevchain_remediate": pbRemediate,
+		})
+	// Skip 1 call: hop1's own evidence fetch sees no evidence, so it does not
+	// get gated on its own and chainEscalation actually runs. Every call from
+	// the 2nd onward (hop2's fetch) sees real evidence.
+	auditSrv.evidenceSkipCalls = 1
+	auditSrv.evidenceSignal = "pod_restarted"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "oev_sysadmin_agent",
+		"HYPOTHESIS_1: pod recovered after restart | CONFIDENCE: 0.90 | EVIDENCE: \"restart_count=2\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod recovered\nTRANSITION_TO: pbs_oevchain_remediate\n")
+	_, remediateCard := mockA2AServerWithText(t, "oev_remediate_agent", "FINDINGS: should never be reached\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev_db_agent":        dbCard,
+		"oev_sysadmin_agent":  sysadminCard,
+		"oev_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — chained-hop objective-evidence gate did not fire; body: %s", resp["status"], rec.Body.String())
+	}
+	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_oevchain_remediate" {
+		t.Errorf("transition_target = %q, want pbs_oevchain_remediate — must reflect hop2's own signal, not hop1's", resp["transition_target"])
+	}
+	// Only 2 runs should have been created (hop1 + hop2) — the gate must stop
+	// the chain before hop3 (remediate) is ever invoked.
+	if got := auditSrv.runCount(); got != 2 {
+		t.Errorf("runCount() = %d, want 2 — remediate agent should never have been invoked, the chain must stop at the gate", got)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning
+// verifies the standalone-warning path for a SECOND hop: hop1 (triage)
+// escalates cleanly with no evidence; hop2 (sysadmin) has real objective
+// evidence but emits no further TRANSITION_TO/ESCALATE_TO. The chain must
+// complete normally (no pending_gate — there is no next-hop to gate approval
+// for), and extra["evidence_warnings"] set by recordEvidenceWithoutEscalationWarning's
+// *chained call site (not just its primary call site) must appear on the
+// final response.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain2_triage", SeriesID: "pbs_oevchain2_triage",
+		Name: "OEV Chain2 Triage", ExecutionMode: "agent", AgentName: "oev2_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain2_sysadmin", SeriesID: "pbs_oevchain2_sysadmin",
+		Name: "OEV Chain2 Sysadmin", ExecutionMode: "agent", AgentName: "oev2_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain2_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_oevchain2_sysadmin": pbSysadmin})
+	auditSrv.evidenceSkipCalls = 1 // hop1's own fetch sees no evidence
+	auditSrv.evidenceSignal = "oom_killed"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev2_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain2_sysadmin\n")
+	// No TRANSITION_TO/ESCALATE_TO — hop2 silently closes out despite evidence.
+	_, sysadminCard := mockA2AServerWithText(t, "oev2_sysadmin_agent",
+		"HYPOTHESIS_1: pod is healthy now | CONFIDENCE: 0.95 | EVIDENCE: \"status=Running\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod healthy; no action needed\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev2_db_agent":       dbCard,
+		"oev2_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but hop2 has no escalation target — should not re-route into the gate flow")
+	}
+	warnings, ok := resp["evidence_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one evidence_warnings entry from hop2's chained call site, got %v — body: %s", resp["evidence_warnings"], rec.Body.String())
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "oom_killed") || !strings.Contains(warnStr, "pbs_oevchain2_sysadmin") {
+		t.Errorf("evidence_warnings[0] = %q, want it to mention oom_killed and the sysadmin hop's own series_id", warnStr)
+	}
+	if resp["chained_run_id"] == nil || resp["chained_run_id"] == "" {
+		t.Error("expected a chained_run_id — hop2 must have actually run via chainEscalation, not been skipped")
 	}
 }
 
