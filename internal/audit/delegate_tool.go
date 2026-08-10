@@ -504,6 +504,18 @@ func fetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time
 	return fetchEventsByType(auditURL, apiKey, traceID, "policy_decision", since, false)
 }
 
+// FetchObjectiveEvidenceEvents queries auditd for objective_evidence events in
+// the given trace — used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go)
+// to force a human-reviewed gate based on deterministic, code-derived tool
+// evidence rather than the model's self-reported confidence. No retry, same
+// reasoning as fetchAgentReasoningEvents/fetchPolicyDecisionEvents — these are
+// recorded by the agent synchronously during its own tool call, not subject to
+// the async write-propagation lag that motivates the tool_execution retry.
+// Exported so the gateway can use it, mirroring FetchToolExecutionEvents above.
+func FetchObjectiveEvidenceEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "objective_evidence", since, false)
+}
+
 // fetchEventsByType queries auditd for events of a single type in the given trace
 // after a start time. When retry is true, retries once after 200 ms to absorb async
 // write propagation; when false, a single attempt is made and failures fail open

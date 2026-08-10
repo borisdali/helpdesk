@@ -1200,6 +1200,63 @@ func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
 	}
 }
 
+// TestIntegration_ObjectiveEvidence_RoundTrips confirms the new
+// objective_evidence event type actually round-trips through a real auditd —
+// unlike the target_drift test above, this exercises genuinely new
+// serialization code (ObjectiveEvidence struct + EventTypeObjectiveEvidence),
+// not just a new value on an existing event shape. The gateway-package tests
+// (cmd/gateway) mock auditd's HTTP responses entirely, so they cannot catch a
+// real marshal/unmarshal or SQL storage bug in this new path — only a real
+// binary can. Mirrors the FetchObjectiveEvidenceEvents query contract
+// (cmd/gateway/playbooks.go's objectiveEvidenceForceGate) that the gateway
+// actually relies on: GET /v1/events?event_type=objective_evidence&trace_id=...
+func TestIntegration_ObjectiveEvidence_RoundTrips(t *testing.T) {
+	traceID := fmt.Sprintf("oev-%d", time.Now().UnixNano())
+	sessionID := "oev-session-" + traceID
+
+	evidenceEvent := map[string]any{
+		"event_id":   fmt.Sprintf("oev-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "objective_evidence",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"objective_evidence": map[string]any{
+			"agent":    "k8s_agent",
+			"tool":     "get_pods",
+			"resource": "pg-cluster-minkube-1",
+			"signal":   "pod_restarted",
+			"detail":   "pod pg-cluster-minkube-1 restarted 2 time(s)",
+		},
+	}
+	post(t, auditdAddr, "/v1/events", evidenceEvent)
+
+	events := getList(t, auditdAddr, "/v1/events?event_type=objective_evidence&trace_id="+traceID)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event for trace_id=%s, got %d", traceID, len(events))
+	}
+	ev, ok := events[0]["objective_evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("objective_evidence field missing or wrong shape: %v", events[0])
+	}
+	if ev["signal"] != "pod_restarted" {
+		t.Errorf("signal = %v, want pod_restarted", ev["signal"])
+	}
+	if ev["resource"] != "pg-cluster-minkube-1" {
+		t.Errorf("resource = %v, want pg-cluster-minkube-1", ev["resource"])
+	}
+	if ev["tool"] != "get_pods" {
+		t.Errorf("tool = %v, want get_pods", ev["tool"])
+	}
+
+	// A different event_type filter must not see this event (confirms the
+	// query is actually filtering by event_type, not just returning everything
+	// for the trace_id).
+	filtered := getList(t, auditdAddr, "/v1/events?event_type=agent_reasoning&trace_id="+traceID)
+	if len(filtered) != 0 {
+		t.Errorf("expected 0 agent_reasoning events for a trace that only has an objective_evidence event, got %d", len(filtered))
+	}
+}
+
 // TestIntegration_VerifyTrace_QueryContract validates the server-side contract
 // that client.VerifyTrace depends on: tool_execution events must be queryable
 // by trace_id + since, with action_class at the top level and tool.name nested.

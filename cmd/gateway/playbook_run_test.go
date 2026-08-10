@@ -3075,6 +3075,144 @@ func TestLowConfidenceForceGate(t *testing.T) {
 	}
 }
 
+// ── objectiveEvidenceForceGate ─────────────────────────────────────────────
+
+func TestObjectiveEvidenceForceGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		events     []audit.Event
+		wantFire   bool
+		wantReason string
+	}{
+		{
+			name:     "no events — no gate",
+			events:   nil,
+			wantFire: false,
+		},
+		{
+			name: "event with nil ObjectiveEvidence — no gate",
+			events: []audit.Event{
+				{EventType: audit.EventTypeObjectiveEvidence},
+			},
+			wantFire: false,
+		},
+		{
+			name: "event with empty Signal — no gate",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}},
+			},
+			wantFire: false,
+		},
+		{
+			name: "real pod_restarted signal — gate fires",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+			},
+			wantFire:   true,
+			wantReason: "pod_restarted",
+		},
+		{
+			name: "real oom_killed signal — gate fires",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+			},
+			wantFire:   true,
+			wantReason: "oom_killed",
+		},
+		{
+			name: "unrelated events mixed in — first real signal wins",
+			events: []audit.Event{
+				{EventType: audit.EventTypePolicyDecision},
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}}, // empty signal, skipped
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+			},
+			wantFire:   true,
+			wantReason: "pod_restarted",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fire, reason := objectiveEvidenceForceGate(tc.events)
+			if fire != tc.wantFire {
+				t.Errorf("objectiveEvidenceForceGate() fire = %v, want %v", fire, tc.wantFire)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("objectiveEvidenceForceGate() reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// ── recordEvidenceWithoutEscalationWarning ─────────────────────────────────
+
+func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
+	t.Run("hop escalated — no-op regardless of evidence", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when hop escalated, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("hop transitioned — no-op regardless of evidence", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_recovery"}
+		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when hop transitioned, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("no escalation, no evidence — no-op", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, nil)
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1"}
+		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when no evidence recorded, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("no escalation, real evidence — warning appended", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", playbookSeriesID: "pbs_k8s_pod_crash_triage", agentName: "k8s_agent"}
+		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		warnings, ok := extra["evidence_warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one evidence_warnings entry, got %v", extra["evidence_warnings"])
+		}
+		if !strings.Contains(warnings[0], "pbs_k8s_pod_crash_triage") || !strings.Contains(warnings[0], "k8s_agent") || !strings.Contains(warnings[0], "pod_restarted") {
+			t.Errorf("warning missing expected context: %q", warnings[0])
+		}
+	})
+
+	t.Run("second hop appends to existing warnings — accumulates, does not overwrite", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+		})
+		extra := map[string]any{"evidence_warnings": []string{"prior hop warning"}}
+		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_docker_inspect", agentName: "sysadmin_agent"}
+		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		warnings, ok := extra["evidence_warnings"].([]string)
+		if !ok || len(warnings) != 2 {
+			t.Fatalf("expected two accumulated evidence_warnings entries, got %v", extra["evidence_warnings"])
+		}
+		if warnings[0] != "prior hop warning" {
+			t.Errorf("first warning should be preserved unchanged, got %q", warnings[0])
+		}
+	})
+}
+
 // TestHandlePlaybookRun_LowConfidence_ForcedGate verifies that when a triage
 // agent emits a low-confidence primary hypothesis (< 0.50), the gateway fires
 // a gate even without gate_escalation=true in the request, and sets
@@ -3121,6 +3259,135 @@ func TestHandlePlaybookRun_LowConfidence_ForcedGate(t *testing.T) {
 	}
 	if resp["transition_target"] != "pbs_vacuum_remediate" {
 		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+}
+
+// mockGateAuditdPlaybookWithEvidence is mockGateAuditdPlaybook plus a real
+// objective_evidence event served for GET /v1/events?event_type=objective_evidence
+// — used to test objectiveEvidenceForceGate / recordEvidenceWithoutEscalationWarning
+// without needing a real K8s agent to actually run get_pods.
+func mockGateAuditdPlaybookWithEvidence(t *testing.T, pb *audit.Playbook, signal string) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	evidenceData, _ := json.Marshal([]audit.Event{
+		{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Resource: "pg-cluster-minkube-1", Signal: signal}},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence":
+			w.Write(evidenceData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_evidence01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate verifies that a hop with a
+// real objective_evidence event (e.g. a pod restart) forces a pending_gate even
+// with high self-reported confidence and no gate_escalation flag from the
+// caller — objectiveEvidenceForceGate must fire independent of, and in addition
+// to, lowConfidenceForceGate.
+func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_db_restart_triage01",
+		SeriesID:      "pbs_db_restart_triage",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Check connection and pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// High confidence (0.85, well above the 0.50 low-confidence threshold) —
+	// isolates objective evidence as the reason the gate fires.
+	agentText := "Pod recovered after a restart and is now healthy.\n\n" +
+		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod recovered; no further action needed\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	// Deliberately omit gate_escalation — the objective-evidence gate must
+	// fire on its own, same as the low-confidence gate does.
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate — objective-evidence gate did not fire despite high confidence", resp["status"])
+	}
+	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_db_config_recovery" {
+		t.Errorf("transition_target = %q, want pbs_db_config_recovery", resp["transition_target"])
+	}
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning verifies
+// the complementary case objectiveEvidenceForceGate cannot catch on its own: a
+// hop with real objective evidence that emits no TRANSITION_TO/ESCALATE_TO at
+// all. There is no next-hop to gate approval for, so the response must not
+// become pending_gate — instead recordEvidenceWithoutEscalationWarning must
+// surface the discrepancy via extra["evidence_warnings"].
+func TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_k8s_pod_crash_triage01",
+		SeriesID:      "pbs_k8s_pod_crash_triage",
+		Name:          "K8s Pod Crash Triage",
+		Guidance:      "Check pod status and restart history.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// No TRANSITION_TO/ESCALATE_TO line — the model silently closes out
+	// despite the pod having real restart evidence (served by the mock below).
+	agentText := "Pod is currently healthy.\n\n" +
+		"HYPOTHESIS_1: transient issue, now resolved | CONFIDENCE: 0.90 | EVIDENCE: \"status=Running\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod healthy; no action needed\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "oom_killed")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but there is no escalation target — should not re-route into the gate flow")
+	}
+	warnings, ok := resp["evidence_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one evidence_warnings entry, got %v", resp["evidence_warnings"])
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "oom_killed") {
+		t.Errorf("evidence_warnings[0] = %q, want it to mention oom_killed", warnStr)
 	}
 }
 

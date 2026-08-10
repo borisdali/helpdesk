@@ -313,10 +313,37 @@ func (ta *ToolAuditor) RecordAgentReasoning(ctx context.Context, reasoning strin
 	}
 }
 
+// RecordObjectiveEvidence records a deterministic, code-derived distress
+// signal extracted from a tool's raw structured result. Call this from the
+// agent's tool implementation immediately after building the tool's return
+// value, before it is formatted as text for the LLM — the whole point is to
+// capture the signal from the untruncated, structured result, independent of
+// what the model later says about it. See EventTypeObjectiveEvidence.
+func (ta *ToolAuditor) RecordObjectiveEvidence(ctx context.Context, ev ObjectiveEvidence) {
+	if ta.auditor == nil || ev.Signal == "" {
+		return
+	}
+	if ev.Agent == "" {
+		ev.Agent = ta.agentName
+	}
+
+	event := &Event{
+		EventID:           "oev_" + uuid.New().String()[:8],
+		Timestamp:         time.Now().UTC(),
+		EventType:         EventTypeObjectiveEvidence,
+		TraceID:           ta.getTraceID(),
+		Session:           Session{ID: ta.sessionID},
+		ObjectiveEvidence: &ev,
+	}
+
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record objective evidence event", "tool", ev.Tool, "signal", ev.Signal, "err", err)
+	}
+}
+
 func outcomeStatus(errMsg string) string {
 	if errMsg != "" {
 		return "error"
 	}
 	return "success"
 }
-

@@ -82,6 +82,18 @@ const (
 	// EventTypeRollbackVerified is emitted after the post-rollback verification
 	// loop confirms the resource returned to the expected pre-mutation state.
 	EventTypeRollbackVerified EventType = "rollback_verified"
+	// EventTypeObjectiveEvidence is emitted by an agent immediately after a tool
+	// call, when the tool's raw structured result (not the LLM's narrative text)
+	// contains a deterministic, code-derived distress signal — e.g. a Kubernetes
+	// pod's real restart count or OOMKilled state, read directly off the
+	// client-go object before it is ever summarized for the LLM or truncated for
+	// the audit trail. Unlike DiagnosticHypothesis.Confidence (self-reported by
+	// the model), this is independently verifiable: the same tool output would
+	// produce the same signal regardless of what the model concludes from it.
+	// Used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go) to force a
+	// human-reviewed gate even when the model's own ESCALATE_TO/confidence would
+	// otherwise let a hop close out silently.
+	EventTypeObjectiveEvidence EventType = "objective_evidence"
 )
 
 // RequestCategory classifies the type of user request.
@@ -291,6 +303,28 @@ type DelegationVerification struct {
 	TargetDrift []string `json:"target_drift,omitempty"`
 }
 
+// ObjectiveEvidence captures a deterministic, code-derived signal extracted
+// from a tool's raw structured result — independent of anything the LLM says
+// about it. Recorded by the agent immediately after the tool call, before the
+// result is truncated/summarized for the audit trail or handed to the LLM as
+// text. See EventTypeObjectiveEvidence for the rationale.
+type ObjectiveEvidence struct {
+	// Agent is the agent process that recorded this evidence (e.g. "k8s_agent").
+	Agent string `json:"agent,omitempty"`
+	// Tool is the tool name that produced this evidence (e.g. "get_pods").
+	Tool string `json:"tool"`
+	// Resource identifies the specific resource this evidence is about
+	// (e.g. a pod name), when applicable.
+	Resource string `json:"resource,omitempty"`
+	// Signal is a short, stable machine-readable identifier for the distress
+	// condition (e.g. "pod_restarted", "oom_killed"). objectiveEvidenceForceGate
+	// matches on this field, not on Detail.
+	Signal string `json:"signal"`
+	// Detail is a short human-readable description for operators reading the
+	// audit trail directly.
+	Detail string `json:"detail,omitempty"`
+}
+
 // RollbackExecution is set on rollback_initiated, rollback_executed, and
 // rollback_verified events. It links the rollback to the original mutation
 // and carries the plan and outcome.
@@ -355,6 +389,7 @@ type Event struct {
 	DelegationVerification *DelegationVerification `json:"delegation_verification,omitempty"`
 	Outcome                *Outcome                `json:"outcome,omitempty"`
 	RollbackExecution      *RollbackExecution      `json:"rollback_execution,omitempty"`
+	ObjectiveEvidence      *ObjectiveEvidence      `json:"objective_evidence,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

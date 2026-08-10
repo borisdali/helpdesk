@@ -699,6 +699,8 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		DiagnosticReport: primary.diagReport,
 	}}
 
+	recordEvidenceWithoutEscalationWarning(extra, g.auditURL, g.auditAPIKey, primary)
+
 	const maxChainDepth = 5
 	prev := primary
 	for len(chain) < maxChainDepth && (prev.escalatedTo != "" || prev.transitionTo != "") {
@@ -739,6 +741,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if !req.GateEscalation && lowConfidenceForceGate(prev.diagReport) {
 			req.GateEscalation = true
 			extra["gate_reason"] = "low_confidence"
+		}
+
+		// Forced gate: objective, code-derived tool evidence (e.g. a real pod
+		// restart/OOM kill) must not be silently closed out by a confident model
+		// conclusion — independent of and in addition to the confidence gate
+		// above, since a model can report high confidence regardless of what the
+		// evidence actually shows.
+		if !req.GateEscalation {
+			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
+				req.GateEscalation = true
+				extra["gate_reason"] = "objective_evidence:" + reason
+			}
 		}
 
 		// Informed gate: operator reviews findings at the phase boundary before
@@ -834,6 +848,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if chained == nil {
 			break
 		}
+		recordEvidenceWithoutEscalationWarning(extra, g.auditURL, g.auditAPIKey, *chained)
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -1160,6 +1175,53 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 		}
 	}
 	return true // primary hypothesis not marked — treat as uncertain
+}
+
+// objectiveEvidenceForceGate returns true, with a short reason string, when
+// any objective_evidence event was recorded for this hop — a deterministic,
+// code-derived distress signal (e.g. a real pod restart or OOM kill) read
+// directly from a tool's structured result, independent of what the model's
+// own text concludes about it. Unlike lowConfidenceForceGate, this does not
+// depend on the model self-reporting anything: the same tool evidence
+// produces the same gate regardless of the model's stated ESCALATE_TO or
+// CONFIDENCE. Returns false, "" when no such events were recorded — deliberately
+// scoped today to whichever tools populate objective_evidence (currently only
+// the K8s agent's get_pods; see the plan's "generic plumbing, narrow rollout"
+// scoping note before extending this to other tools).
+func objectiveEvidenceForceGate(events []audit.Event) (bool, string) {
+	for _, ev := range events {
+		if ev.ObjectiveEvidence != nil && ev.ObjectiveEvidence.Signal != "" {
+			return true, ev.ObjectiveEvidence.Signal
+		}
+	}
+	return false, ""
+}
+
+// recordEvidenceWithoutEscalationWarning appends a short note to
+// extra["evidence_warnings"] when hop recorded objective, code-derived tool
+// evidence (e.g. a real pod restart/OOM kill) but its own model output did not
+// escalate or transition to another playbook. This catches the case
+// objectiveEvidenceForceGate cannot on its own: that gate only runs on chain-loop
+// iterations where a hop already decided to escalate, so a hop that silently
+// closes out despite real evidence never reaches it. Unlike the gate, this does
+// not re-route the response into pending_gate — there is no next-hop candidate
+// to gate approval for — it only surfaces the discrepancy for the operator to
+// see in the response they already get back.
+func recordEvidenceWithoutEscalationWarning(extra map[string]any, auditURL, apiKey string, hop agentRunResult) {
+	if hop.escalatedTo != "" || hop.transitionTo != "" {
+		return
+	}
+	fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart))
+	if !fire {
+		return
+	}
+	warn := fmt.Sprintf("hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
+		hop.playbookSeriesID, hop.agentName, reason)
+	if existing, ok := extra["evidence_warnings"].([]string); ok {
+		extra["evidence_warnings"] = append(existing, warn)
+	} else {
+		extra["evidence_warnings"] = []string{warn}
+	}
 }
 
 // ProceedEscalationRequest is the request body for POST
