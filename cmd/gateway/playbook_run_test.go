@@ -3523,6 +3523,58 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason is
+// a regression test for a real bug found via manual verification: the
+// low-confidence and objective-evidence force-gate checks used to each guard
+// themselves on `!req.GateEscalation`, so whichever ran first silently
+// prevented the other from ever being evaluated — a hop with BOTH a
+// low-confidence diagnosis AND real tool evidence only ever reported
+// gate_reason: "low_confidence", hiding the fact that independently-verified
+// evidence also existed. Both conditions must now be evaluated unconditionally
+// and combined into a single "+"-joined gate_reason.
+func TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_combined_triage01",
+		SeriesID:      "pbs_combined_triage",
+		Name:          "Combined Signal Triage",
+		Guidance:      "Check pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Low confidence (0.35, below the 0.50 threshold) on a hop that ALSO has
+	// real objective evidence served by the mock.
+	agentText := "Uncertain diagnosis; pod recently restarted but root cause unclear.\n\n" +
+		"HYPOTHESIS_1: transient issue, may have resolved | CONFIDENCE: 0.35 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod state uncertain\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+	gateReason, _ := resp["gate_reason"].(string)
+	if !strings.Contains(gateReason, "low_confidence") {
+		t.Errorf("gate_reason = %q, want it to mention low_confidence", gateReason)
+	}
+	if !strings.Contains(gateReason, "objective_evidence:pod_restarted") {
+		t.Errorf("gate_reason = %q, want it to also mention objective_evidence:pod_restarted — both signals must survive, not just whichever fired first", gateReason)
+	}
+}
+
 // TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning verifies
 // the complementary case objectiveEvidenceForceGate cannot catch on its own: a
 // hop with real objective evidence that emits no TRANSITION_TO/ESCALATE_TO at

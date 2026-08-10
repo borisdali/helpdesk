@@ -736,22 +736,30 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
-		// Forced gate: low-confidence triage must not auto-chain into destructive
-		// remediation regardless of the caller's gate_escalation flag.
-		if !req.GateEscalation && lowConfidenceForceGate(prev.diagReport) {
-			req.GateEscalation = true
-			extra["gate_reason"] = "low_confidence"
-		}
-
-		// Forced gate: objective, code-derived tool evidence (e.g. a real pod
-		// restart/OOM kill) must not be silently closed out by a confident model
-		// conclusion — independent of and in addition to the confidence gate
-		// above, since a model can report high confidence regardless of what the
-		// evidence actually shows.
+		// Forced gate: low-confidence triage and/or real objective evidence must
+		// not silently auto-chain into remediation, regardless of the caller's
+		// gate_escalation flag. Both checks always run — neither short-circuits
+		// the other — so an operator reviewing the gate sees every applicable
+		// reason, not just whichever one happened to be checked first. These are
+		// complementary signals (one self-reported by the model, one
+		// independently verified from tool output), not alternatives: a model
+		// reporting high confidence doesn't make real tool evidence go away, and
+		// a low-confidence hop can still have zero objective evidence behind it.
+		// An earlier version of this code checked `if !req.GateEscalation` on
+		// each force-gate independently, which meant a hop with both low
+		// confidence AND real evidence only ever reported "low_confidence" —
+		// the evidence check was silently skipped once the first one fired.
 		if !req.GateEscalation {
+			var gateReasons []string
+			if lowConfidenceForceGate(prev.diagReport) {
+				gateReasons = append(gateReasons, "low_confidence")
+			}
 			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
+				gateReasons = append(gateReasons, "objective_evidence:"+reason)
+			}
+			if len(gateReasons) > 0 {
 				req.GateEscalation = true
-				extra["gate_reason"] = "objective_evidence:" + reason
+				extra["gate_reason"] = strings.Join(gateReasons, "+")
 			}
 		}
 

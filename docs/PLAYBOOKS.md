@@ -24,6 +24,7 @@ See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk rec
    - [When to use it](#when-to-use-it)
    - [`pending_gate` response](#pending_gate-response)
    - [Objective-evidence gate](#objective-evidence-gate)
+   - [Warning signals reference](#warning-signals-reference)
    - [Proceeding through the gate](#proceeding-through-the-gate)
    - [Relationship to the two-playbook split](#relationship-to-the-two-playbook-split)
    - [faulttest flags](#faulttest-flags)
@@ -391,6 +392,8 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 
 This scope is deliberately narrow today — only the K8s agent's `get_pods` tool populates it, since it is the only tool whose result already carries unambiguous structured evidence (a DB agent's uptime, by contrast, is free text and is not currently evidence for anything on its own). Extending this to other tools is a case-by-case decision, not a mechanical rollout — see the design note in the source (`cmd/gateway/playbooks.go`'s `objectiveEvidenceForceGate`) for the reasoning.
 
+Low confidence and objective evidence are independently evaluated — a hop can trip either, both, or neither. When both apply, `gate_reason` joins them with `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"`, so an operator reviewing the gate always sees every applicable reason rather than just whichever check happened to run first.
+
 **`evidence_warnings` — the non-gated counterpart.** The force-gate above only runs when the hop already emitted a `TRANSITION_TO`/`ESCALATE_TO` signal — a chain-loop precondition, not a design choice — so it cannot catch a hop that sees real evidence and emits *neither* signal, silently closing out. For that case, a normal (non-`pending_gate`) response instead carries an `evidence_warnings` array, independent of `status`:
 
 ```json
@@ -405,6 +408,18 @@ This scope is deliberately narrow today — only the K8s agent's `get_pods` tool
 ```
 
 This never creates a Decision Hub entry — there is no next-hop candidate to gate approval for — it is purely a visible flag on the response you already receive, so it doesn't require a separate lookup to notice the discrepancy.
+
+### Warning signals reference
+
+The playbook-run response can carry several distinct warning/signal fields. They come from different mechanisms and don't all mean the same thing — this table is the map:
+
+| Signal | Where it appears | Fires when | Self-reported or verified | Relationship to other signals |
+|---|---|---|---|---|
+| `gate_reason: "low_confidence"` | `pending_gate` response | Primary hypothesis `CONFIDENCE:` below 50% | Self-reported — the model writes this about its own diagnosis | Independently evaluated from objective evidence; combines with it via `+` (see below) |
+| `gate_reason: "objective_evidence:<signal>"` | `pending_gate` response | A tool call in the hop produced real, code-derived evidence (e.g. `get_pods` showing a nonzero restart count or `OOMKilled`) | Verified — read directly from structured tool output, independent of the model's text | Independently evaluated from low confidence; combines with it via `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"` |
+| `confidence_warning` | `pending_gate` response (any gate, requested or forced) | Primary hypothesis confidence below 70%, or a competing hypothesis scores above 70% of the primary | Self-reported | Advisory only — never forces a gate by itself; can appear alongside any `gate_reason` value, or none, whenever a gate fires for some other reason |
+| `evidence_warnings` | Normal (non-`pending_gate`) response | A hop has real objective evidence but emits neither `TRANSITION_TO` nor `ESCALATE_TO` | Verified | **Structurally mutually exclusive with `pending_gate`/`gate_reason`** — a hop with no escalation signal always terminates the chain right there, so a later hop's gate can never fire in the same response. Not just "by convention" — the chain loop's own exit condition makes this impossible, not merely undesigned-for. |
+| `warnings` (general array; includes a protocol-violation entry like `"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal..."`) | Any response | Various gateway-level advisories — e.g. `approval_mode` clamped due to insufficient roles, or a synthetic gate created because the agent never emitted a required handoff signal at all | Mixed — some entries are bookkeeping, not evidence-based | Pre-existing, general-purpose channel unrelated to the confidence/evidence gate mechanism specifically; do not confuse a protocol-violation entry here with `evidence_warnings` above — they are different fields for different failure modes |
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable — you can use `GET /api/v1/fleet/playbook-runs/{run_id}` to retrieve findings later.
 
