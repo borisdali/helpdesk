@@ -321,6 +321,53 @@ The auditd service and the gateway's own HTTP listener do not use
 
 The informed gate is a phase-boundary checkpoint between a triage playbook and its remediation counterpart. Where the existing horizontal escalation mechanism chains one agent to another mid-diagnosis, the informed gate pauses at the **vertical handoff** — triage is fully complete, and the operator reviews the findings before the remediation playbook is invoked. Authorization happens after evidence is seen, not before.
 
+### Decision flow
+
+Everything below happens inside a single function, `handlePlaybookRunAsAgent` (`cmd/gateway/playbooks.go`), once per hop, in a loop that re-enters at the top each time a hop auto-chains into the next one. The response you get back from `/run` is whatever this flow was doing when it last stopped looping — reading the raw JSON without the flow in mind is easy to misread (we did, more than once, while building this).
+
+```mermaid
+flowchart TD
+    Start(["Hop completes.<br/>Model's raw text is parsed for<br/>TRANSITION_TO: / ESCALATE_TO: / FINDINGS:"]) --> Signal{"Did the hop emit<br/>TRANSITION_TO or ESCALATE_TO?"}
+
+    Signal -- "No — neither line present<br/>(or explicit value 'none')" --> Gap
+
+    Signal -- Yes --> Terminal{"ESCALATE_TO is a<br/>terminal token?<br/>(e.g. requires_operator_approval)"}
+    Terminal -- Yes --> SuggestedA[["Response returns.<br/>suggested_next set.<br/>NOT gated, chain stops here."]]
+    Terminal -- No --> Monitor{"FINDINGS contains<br/>recommended=monitor or<br/>recommended=no_changes_needed ?"}
+
+    Monitor -- Yes --> Resolved[["Response returns.<br/>outcome: resolved.<br/>Signal is discarded — nothing to gate."]]
+    Monitor -- No --> AlreadyGated{"Was gate_escalation:true<br/>already set on the request?"}
+
+    AlreadyGated -- No --> ForceGates{"Do any force-gates fire?<br/>low_confidence (CONFIDENCE < 50%)<br/>objective_evidence (verified tool evidence)<br/>trust_not_earned (no STABLE+CLEAN cert)"}
+    ForceGates -- "Yes, one or more" --> SetReason["gate_escalation forced true.<br/>gate_reason = reasons joined with '+'"]
+    SetReason --> NowGated
+    ForceGates -- No --> NowGated{"gate_escalation<br/>true now?"}
+    AlreadyGated -- Yes --> NowGated
+
+    NowGated -- Yes --> Informed[["INFORMED GATE.<br/>status: pending_gate<br/>gate_type + escalation_target/transition_target<br/>+ gate_reason if force-gated<br/>Decision Hub notified. Chain stops here."]]
+    NowGated -- No --> CanChain{"canAutoChain?<br/>(target playbook's approval_mode<br/>permits unattended chaining)"}
+
+    CanChain -- No --> SuggestedB[["Response returns.<br/>suggested_next set.<br/>NOT gated, chain stops here."]]
+    CanChain -- Yes --> ChainNext["Next playbook runs as the new hop.<br/>Appended to chain[]."]
+    ChainNext -.->|loop back| Signal
+
+    Gap{"gate_escalation:true AND<br/>remediation_series_id set on<br/>the ORIGINAL request?"}
+    Gap -- No --> Silent[["⚠️ SILENT EXIT.<br/>outcome: resolved/unknown, chain stops.<br/>NONE of the three force-gates above ran —<br/>they live inside the loop this hop never entered.<br/>No gate, no warning, no cert-relevant signal recorded."]]
+    Gap -- Yes --> MonitorB{"FINDINGS contains<br/>recommended=monitor?"}
+    MonitorB -- Yes --> Resolved
+    MonitorB -- No --> Fallback[["FALLBACK GATE (protocol-violation path).<br/>status: pending_gate, gate_type: transition<br/>transition_target: the request's own remediation_series_id<br/>warnings += 'triage agent omitted required<br/>TRANSITION_TO/ESCALATE_TO signal...'<br/>Decision Hub notified."]]
+
+    style Silent fill:#3a1414,stroke:#c0392b,stroke-width:2px,color:#fff
+    style Informed fill:#14301a,stroke:#27ae60,stroke-width:1px
+    style Fallback fill:#14301a,stroke:#27ae60,stroke-width:1px
+```
+
+Two things this diagram makes explicit that are easy to miss from the response JSON alone:
+
+1. **The loop only runs at all if the hop emitted a signal.** `findingsRecommendMonitor`'s escape hatch and all three force-gates (`low_confidence`, `objective_evidence`, `trust_not_earned`) live *inside* that loop. A hop that ends without either `TRANSITION_TO` or `ESCALATE_TO` never reaches any of them — not just the fallback-gate's protocol-violation warning, but the low-confidence gate, the objective-evidence gate, and the trust gate too. An agent that reliably stays silent on the handoff signal bypasses every one of these safety mechanisms, not just the newest one.
+2. **The fallback gate is not a general safety net** — it only fires when the *original caller* passed both `gate_escalation: true` and `remediation_series_id`. Without both, a signal-less hop is the silent-exit path (top right, red) with no gate, no warning array entry, and nothing written that a `CLEAN` cert computation could ever see.
+3. **`.text` in any response is always the post-parse cleaned text** — `TRANSITION_TO:`/`ESCALATE_TO:`/`FINDINGS:` lines are stripped out once parsed, regardless of which exit path above was taken. Grepping `.text` for those tokens will never find them, even when the model did emit them; look at the structured fields (`gate_type`, `escalation_target`/`transition_target`, `chain`) instead.
+
 ### When to use it
 
 Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook. The gate fires after the triage agent completes and emits its `TRANSITION_TO:` or `ESCALATE_TO:` signal. If neither signal is present (the agent resolved the issue directly), `gate_escalation` is a no-op and the normal response is returned. If the `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`, the gate is also skipped — nothing needs operator action. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
@@ -420,7 +467,7 @@ The playbook-run response can carry several distinct warning/signal fields. They
 | `gate_reason: "trust_not_earned"` | `pending_gate` response | The playbook's series_id has no fault-stability cert on record for the gateway's configured diagnosis model (`HELPDESK_MODEL_NAME`) with both a `STABLE` and a `CLEAN` verdict — see [`ATTRIBUTION_CERTS.md`](ATTRIBUTION_CERTS.md) for what earns each. Fails closed: never having been `faulttest run --repeat N`-certified for this model counts as unearned, not as a pass. | Verified — a real query against the cert store, not a per-run signal at all | Independently evaluated; combines with the other two via `+`. Bypassed by `skip_trust_gate: true` on the request — set automatically by faulttest's own calibration runs, since they're the ones trying to *establish* the cert this check depends on; never set this for a real incident. |
 | `confidence_warning` | `pending_gate` response (any gate, requested or forced) | Primary hypothesis confidence below 70%, or a competing hypothesis scores above 70% of the primary | Self-reported | Advisory only — never forces a gate by itself; can appear alongside any `gate_reason` value, or none, whenever a gate fires for some other reason |
 | `evidence_warnings` | Normal (non-`pending_gate`) response | A hop has real objective evidence but emits neither `TRANSITION_TO` nor `ESCALATE_TO` | Verified | **Structurally mutually exclusive with `pending_gate`/`gate_reason`** — a hop with no escalation signal always terminates the chain right there, so a later hop's gate can never fire in the same response. Not just "by convention" — the chain loop's own exit condition makes this impossible, not merely undesigned-for. |
-| `warnings` (general array; includes a protocol-violation entry like `"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal..."`) | Any response | Various gateway-level advisories — e.g. `approval_mode` clamped due to insufficient roles, or a synthetic gate created because the agent never emitted a required handoff signal at all | Mixed — some entries are bookkeeping, not evidence-based | Pre-existing, general-purpose channel unrelated to the confidence/evidence gate mechanism specifically; do not confuse a protocol-violation entry here with `evidence_warnings` above — they are different fields for different failure modes |
+| `warnings` (general array; includes a protocol-violation entry like `"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal..."`) | Any response | Various gateway-level advisories — e.g. `approval_mode` clamped due to insufficient roles, or a synthetic gate created because the agent never emitted a required handoff signal at all | Mixed — some entries are bookkeeping, not evidence-based | Pre-existing, general-purpose channel unrelated to the confidence/evidence gate mechanism specifically; do not confuse a protocol-violation entry here with `evidence_warnings` above — they are different fields for different failure modes. Also don't confuse this with [`CONSISTENCY.md`'s own `protocol_violations` tracking](CONSISTENCY.md#4-stable-vs-unstable-the-criteria) — same phrase, different mechanism: this is a live per-request fallback gate (see [Decision flow](#decision-flow) above); that one aggregates across a `faulttest run --repeat N` calibration batch to compute a stability score, and only fires when the fallback-gate's own preconditions (`gate_escalation`+`remediation_series_id` set, no signal emitted) are met on a calibration run. |
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable and can be used to retrieve the findings later via `GET /api/v1/fleet/playbook-runs/{run_id}` API call.
 

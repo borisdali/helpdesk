@@ -207,6 +207,14 @@ Protocol violations (agent omitted required `TRANSITION_TO`/`ESCALATE_TO` signal
 separately in `protocol_violations` on the stability report and cap that run's score at 75% —
 which typically causes a FAIL, contributing to a lower pass rate.
 
+This is a certification-time signal, computed by aggregating a `faulttest run --repeat N`
+calibration batch — not the same mechanism as the live gateway's own protocol-violation
+fallback gate, which fires per real request (see [`PLAYBOOKS.md`'s Decision flow
+diagram](PLAYBOOKS.md#decision-flow)). Both use the same phrase for the same underlying
+agent behavior (omitting a required handoff signal), but one scores a batch of controlled
+test runs after the fact; the other manufactures a `pending_gate` on a single live request,
+and only when that request already set `gate_escalation`+`remediation_series_id`.
+
 ---
 
 ## 5. Running a certification
