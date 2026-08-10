@@ -284,6 +284,43 @@ func TestRunViaPlaybook_EvidenceWarningsPopulated(t *testing.T) {
 	}
 }
 
+// TestRunViaPlaybook_SendsSkipTrustGate is a regression guard for a real
+// bootstrapping requirement: faulttest traffic must always set
+// skip_trust_gate=true, unconditionally, on every playbook-run request — not
+// just --repeat calibration runs. If this field were ever silently dropped
+// by a refactor, faulttest's own calibration runs would start getting gated
+// by cmd/gateway/playbooks.go's trustNotYetEarnedForceGate — the exact check
+// they exist to establish a cert for in the first place — and nothing would
+// fail loudly; calibration runs would just stop completing.
+func TestRunViaPlaybook_SendsSkipTrustGate(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_abc"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-lock", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_lock_chain_triage",
+	}
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if gotBody["skip_trust_gate"] != true {
+		t.Errorf("skip_trust_gate = %v, want true", gotBody["skip_trust_gate"])
+	}
+}
+
 // ── X-User propagation ────────────────────────────────────────────────────────
 
 func TestRunViaPlaybook_SendsXUser(t *testing.T) {

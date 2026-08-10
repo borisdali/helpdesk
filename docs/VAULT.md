@@ -310,10 +310,11 @@ The per-version breakdown is the primary learning signal: it shows whether step 
 | `STABLE(N) Xd` | STABLE but cert is X days old — shown after 14 days as an age reminder |
 | `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
 | `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
+| `STABLE(N)  ⚠2/5 warnings` | Outcome-stable but dirty on the CLEAN axis: 2 of 5 runs tripped a verified, code-derived warning signal (independent of `attr=` — both can appear together) |
 | `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
 | `—` | No certification run has been posted for this fault |
 
-The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md).
+The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md). The `⚠N/M warnings` suffix, and how it gates real (non-faulttest) incidents by default, is documented in [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
 
 The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
 
@@ -367,6 +368,7 @@ Triage consistency
   Runs          : 5
   Pass rate     : 100%
   Conf range    : 5pp  (primary hypothesis, passing runs only)
+  Clean         : yes
   Playbook      : pbs_lock_chain_triage
   Diagnosis model: claude-sonnet-4-6
   Judge model   : claude-haiku-4-5-20251001

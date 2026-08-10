@@ -3086,6 +3086,31 @@ func TestFetchStabilityCert_Found(t *testing.T) {
 	}
 }
 
+func TestFetchStabilityCert_CleanFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":      "k8s-oomkilled",
+			"n_runs":        5,
+			"is_stable":     true,
+			"warning_count": 2,
+			"is_clean":      false,
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchStabilityCert(srv.URL, "", "k8s-oomkilled")
+	if got == nil {
+		t.Fatal("expected cert, got nil")
+	}
+	if got.WarningCount != 2 {
+		t.Errorf("WarningCount = %d, want 2", got.WarningCount)
+	}
+	if got.IsClean {
+		t.Error("IsClean = true, want false")
+	}
+}
+
 func TestFetchStabilityCert_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -3847,6 +3872,56 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 	}
 }
 
+func TestPostStabilityCert_CleanPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	// Non-zero-value CleanReport — the existing payload tests all pass
+	// CleanReport{} (the Go zero value), which would still "pass" even if
+	// the warning_count/is_clean wiring in postStabilityCert were silently
+	// broken. Use a report with a real warning to actually exercise it.
+	cr := buildCleanReport(Failure{ID: "k8s-oomkilled"}, []EvalResult{
+		{Passed: true},
+		{Passed: true, ProtocolViolation: true},
+		{Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "k8s-oomkilled"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	if gotBody["warning_count"] != float64(1) {
+		t.Errorf("warning_count = %v, want 1", gotBody["warning_count"])
+	}
+	if gotBody["is_clean"] != false {
+		t.Errorf("is_clean = %v, want false", gotBody["is_clean"])
+	}
+}
+
+func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cr := buildCleanReport(Failure{ID: "db-lock-contention"}, []EvalResult{
+		{Passed: true}, {Passed: true}, {Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	if gotBody["warning_count"] != float64(0) {
+		t.Errorf("warning_count = %v, want 0", gotBody["warning_count"])
+	}
+	if gotBody["is_clean"] != true {
+		t.Errorf("is_clean = %v, want true — must be the real boolean true, not just absent/zero-value", gotBody["is_clean"])
+	}
+}
+
 func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4214,5 +4289,159 @@ func TestVaultList_NoAttributionWhenEmpty(t *testing.T) {
 
 	if strings.Contains(out, "attr=") {
 		t.Errorf("expected no attr= in output when primary_attribution is empty:\n%s", out)
+	}
+}
+
+// ── v0.24.0: vault list CLEAN axis display tests ──────────────────────────
+
+func TestVaultList_CleanWarningShown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/fleet/fault-stability" {
+			fmt.Fprint(w, `{"certs":[{"fault_id":"db-max-connections","n_runs":5,"is_stable":true,"warning_count":2,"is_clean":false}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if !strings.Contains(out, "⚠2/5 warnings") {
+		t.Errorf("expected ⚠2/5 warnings in vault list output:\n%s", out)
+	}
+}
+
+func TestVaultList_NoCleanWarningWhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/fleet/fault-stability" {
+			fmt.Fprint(w, `{"certs":[{"fault_id":"db-lock-contention","n_runs":5,"is_stable":true,"warning_count":0,"is_clean":true}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if strings.Contains(out, "warnings") {
+		t.Errorf("expected no warnings suffix in output when cert is clean:\n%s", out)
+	}
+}
+
+// ── v0.24.0: printFaultStabilityCert CLEAN line tests ─────────────────────
+
+func TestPrintFaultStabilityCert_ShowsCleanLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":      "k8s-oomkilled",
+			"fault_name":    "OOMKilled",
+			"n_runs":        5,
+			"is_stable":     true,
+			"warning_count": 2,
+			"is_clean":      false,
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "Clean         : no  (2/5 run(s) tripped a verified warning signal)") {
+		t.Errorf("expected dirty Clean line in output:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsCleanLine_WhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":      "db-lock-contention",
+			"n_runs":        5,
+			"is_stable":     true,
+			"warning_count": 0,
+			"is_clean":      true,
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "db-lock-contention", "")
+	})
+
+	if !strings.Contains(out, "Clean         : yes") {
+		t.Errorf("expected clean Clean line in output:\n%s", out)
+	}
+}
+
+// ── v0.24.0: vaultCertCompare CLEAN regression tests ───────────────────────
+
+func TestVaultCertCompare_CleanRegression(t *testing.T) {
+	// Dedicated fixture, not the shared newCertCompareServer dataset — avoids
+	// any risk of changing which fault_id triggers which existing
+	// REGRESSION/IMPROVEMENT/unchanged category in the other cert-compare
+	// tests. Both models STABLE (no pass-rate regression), but the model
+	// went from clean to dirty — the CLEAN axis must catch this on its own.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-5","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":true,"warning_count":0},
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-6","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":false,"warning_count":2}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "⚠ clean: clean → dirty(2/5)") {
+		t.Errorf("expected CLEAN regression line in output:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_CleanImprovement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-5","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":false,"warning_count":3},
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-6","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":true,"warning_count":0}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "✓ clean: dirty(3/5) → clean") {
+		t.Errorf("expected CLEAN improvement line in output:\n%s", out)
 	}
 }

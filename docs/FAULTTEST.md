@@ -577,7 +577,7 @@ faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|sugge
 
 The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
 
-`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)`, `UNSTABLE(N)`, or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and is documented in full in [CONSISTENCY.md](CONSISTENCY.md).
+`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)` or `UNSTABLE(N)` (optionally suffixed with an attribution `attr=<class>` label and/or a `⚠N/M warnings` CLEAN-axis flag), or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and every column value is documented in full in [CONSISTENCY.md §7.1](CONSISTENCY.md#71-vault-list--stable-column).
 
 #### vault list
 

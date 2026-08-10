@@ -12,6 +12,12 @@ Consistency is measured differently: it is a *pre-production gate*, a
 certification you run before a playbook enters the live rotation and re-run whenever the
 model or playbook changes significantly.
 
+As of v0.24.0, this is no longer only operator discipline: the gateway itself enforces it for
+real (non-faulttest) incidents. A playbook whose series has no `STABLE`+`CLEAN` cert on record
+for the current model is gated by default (`gate_reason: "trust_not_earned"`) rather than
+auto-chaining — see [PLAYBOOKS.md's warning signals reference](PLAYBOOKS.md#warning-signals-reference)
+and [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+
 This page describes the Consistency Certification system: what it certifies, how it works
 mechanically, how it relates to the other quality signals in the flywheel and how to run
 it on each deployment platform.
@@ -24,6 +30,7 @@ it on each deployment platform.
 2. [Where certification fits in the flywheel](#2-where-certification-fits-in-the-flywheel)
 3. [What a stability cert contains](#3-what-a-stability-cert-contains)
    - [Attribution fields (v0.21.0)](#attribution-fields-v0210)
+   - [CLEAN axis fields (v0.24.0)](#clean-axis-fields-v0240)
 4. [STABLE vs. UNSTABLE: the criteria](#4-stable-vs-unstable-the-criteria)
 5. [Running a certification](#5-running-a-certification)
    - [From source (make recertify)](#51-from-source-make-recertify)
@@ -159,6 +166,17 @@ Five additional columns capture conclusion stability — whether the agent reach
 These fields are populated when `HELPDESK_API_KEY` is available at cert time and the triage playbook has `root_cause_classes` defined. When absent, the cert behaves identically to pre-v0.21.0.
 
 Stability certs are stored with a composite primary key of `(fault_id, diagnosis_model)`. This means running the consistency suite against two different models produces two independent cert records — neither overwrites the other. `vault accuracy` and `vault versions` show model-annotated certs so you can compare stability across model generations side by side. When you upgrade the diagnosis model, re-running the consistency suite against the new model creates new cert rows without touching the existing ones.
+
+### CLEAN axis fields (v0.24.0)
+
+Two additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which three signals count and which two are deliberately excluded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `warning_count` | int | Number of the cert's N runs that tripped a verified warning signal |
+| `is_clean` | bool | `true` only when `warning_count == 0` — zero-tolerance, no percentage threshold |
+
+`is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires both `is_stable` and `is_clean` across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended.
 
 ---
 
@@ -461,10 +479,11 @@ db-table-bloat                 pbs_vacuum_triage          2026-06-01   PASS    9
 | `STABLE(N) Xd` | STABLE but cert is X days old (shown after 14 days as an age reminder) |
 | `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
 | `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
+| `STABLE(N)  ⚠2/5 warnings` | Outcome-stable but dirty on the CLEAN axis: 2 of the cert's 5 runs tripped a verified warning signal. See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis). |
 | `UNSTABLE(N)` | Certified UNSTABLE in the last N runs — playbook needs attention |
 | `—` | No certification run has been posted for this fault |
 
-The `attr=` label appears only when the playbook's `root_cause_classes` field is populated and the attribution API key is available during certification. When absent, output is identical to pre-v0.21.0.
+The `attr=` label appears only when the playbook's `root_cause_classes` field is populated and the attribution API key is available during certification. When absent, output is identical to pre-v0.21.0. The `⚠N/M warnings` suffix appears whenever `is_clean=false`; it can appear alongside or independent of the `attr=` label — the two axes are unrelated.
 
 ### 7.2 `vault accuracy` — full cert detail
 
@@ -487,6 +506,7 @@ Triage consistency
   Runs          : 5
   Pass rate     : 80%
   Conf range    : 5pp  (primary hypothesis, passing runs only)
+  Clean         : yes
   Playbook      : pbs_lock_chain_triage
   Diagnosis model: claude-sonnet-4-6
   Judge model   : claude-haiku-4-5-20251001
@@ -541,6 +561,7 @@ are complementary, not redundant.
 | **[LLM-as-judge](LLM_AS_JUDGE.md)** | Is the diagnosis semantically correct on this specific run? | During faulttest runs (opt-in `--judge`) |
 | **[Vault calibration](VAULT.md#vault-calibration)** | When the agent says 90%, is it right 90% of the time? | After accumulating ≥10 runs with operator feedback |
 | **[Vault accuracy](VAULT.md#vault-accuracy)** | What fraction of diagnoses are confirmed correct by operators? | Continuously from production incidents and faulttest gateway runs |
+| **[CLEAN axis](ATTRIBUTION_CERTS.md#9-the-clean-axis)** | Did any run trip a verified, code-derived warning signal? | After each certification run; also gates real-incident auto-chaining (v0.24.0) |
 
 **The dependency chain:** consistency certification is a prerequisite for calibration to be
 meaningful. A playbook that is UNSTABLE contributes noisy data to the calibration curve — the
