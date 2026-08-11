@@ -1,10 +1,10 @@
 # aiHelpDesk Playbook
 
-A **Playbook** is not a traditional runbook. A runbook is static. A fixed sequence of steps written once and executed literally, assuming a known environment. A Playbook in aiHelpDesk encodes strategic **intent** and expert **knowledge**: what class of problem this is, what symptoms indicate it, what the planner should prioritise, and when to escalate. The fleet planner reads that intent and expertise, examines the current tool catalog and live infrastructure state, and generates the actual execution steps fresh each time. The same Playbook handles a connection exhaustion fault differently on a bare-metal host than on a Kubernetes cluster, because the available tools differ. This is what "never a stale script" means in practice.
+A **Playbook** is not a traditional runbook. A runbook is static. A fixed sequence of steps written once and executed literally, assuming a known environment. A Playbook in aiHelpDesk encodes strategic **intent** and expert **knowledge**: what class of problem this is, what symptoms indicate it, what the planner should prioritise and when to escalate. The fleet planner reads that intent and expertise, examines the current tool catalog and live infrastructure state and generates the actual execution steps fresh each time. The same Playbook handles a connection exhaustion fault differently on a bare-metal host than on a Kubernetes cluster, because the available tools differ. This is what "never a stale script" means in practice.
 
 Playbooks are the system's universal remediation artifact. When the orchestrator diagnoses a fault — real or injected — it selects a Playbook and hands it to the fleet planner for execution. When `faulttest` validates an agent's remediation capability, it does so against a Playbook. When the Vault synthesises institutional knowledge from a resolved incident, the output is a Playbook. They are the connective tissue between diagnosis and action across every execution path in aiHelpDesk.
 
-System Playbooks ship with aiHelpDesk and cover the most common database triage scenarios out of the box. You can author custom Playbooks from scratch, import and convert your existing static runbooks (Markdown, plain text, YAML, Rundeck, Ansible), or let aiHelpDesk synthesise them automatically from resolved incident traces via the [Vault](VAULT.md).
+System Playbooks ship with aiHelpDesk and cover the most common database triage scenarios out of the box. You can author custom Playbooks from scratch, import and convert your existing static runbooks (Markdown, plain text, YAML, Rundeck, Ansible) or let aiHelpDesk synthesise them automatically from resolved incident traces via the [Vault](VAULT.md).
 
 See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk recommends making use of the Playbook feature.
 
@@ -21,9 +21,11 @@ See Playbook [operational best practices](PLAYBOOK_OPS.md) on how aiHelpDesk rec
    - [How it works](#how-it-works)
    - [Production setup](#production-setup)
 3. [Informed gate](#informed-gate)
+   - [Decision flow](#decision-flow)
    - [When to use it](#when-to-use-it)
    - [`pending_gate` response](#pending_gate-response)
    - [Objective-evidence gate](#objective-evidence-gate)
+   - [Signal-less hops](#signal-less-hops)
    - [Warning signals reference](#warning-signals-reference)
    - [Proceeding through the gate](#proceeding-through-the-gate)
    - [Relationship to the two-playbook split](#relationship-to-the-two-playbook-split)
@@ -100,7 +102,7 @@ Every Playbook carries two classes of fields:
 | `description` | Passed verbatim to the fleet planner as the plan intent |
 | `target_hints` | Tag names or server name patterns to narrow target resolution |
 
-**Knowledge fields** — enrich authoring, selection, and execution:
+**Knowledge fields** — enrich authoring, selection and execution:
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -114,7 +116,7 @@ Every Playbook carries two classes of fields:
 | `agent_name` | string | Overrides the default agent for this Playbook (e.g. `"sysadmin"` for host-level operations). Affects which agent is dispatched when this Playbook is run or chained to. |
 | `approval_mode` | string | Default `approval_mode` for standalone runs (`""` / `"manual"` / `"session"` / `"auto"`). Also acts as a **chaining gate**: playbooks with `approval_mode: ""` or `"manual"` can never be auto-chained — callers always receive `suggested_next` for them regardless of requester mode. Only `"session"` and `"auto"` are eligible for auto-chaining. |
 
-The `guidance` field is the most important knowledge field. It is injected into the planner prompt as a `## Playbook Guidance` section whenever the Playbook is run. Use it for expert heuristics, prioritisation notes, tool sequencing hints, and common misdiagnosis warnings. It does not appear in ad-hoc `/fleet/plan` calls.
+The `guidance` field is the most important knowledge field. It is injected into the planner prompt as a `## Playbook Guidance` section whenever the Playbook is run. Use it for expert heuristics, prioritisation notes, tool sequencing hints and common misdiagnosis warnings. It does not appear in ad-hoc `/fleet/plan` calls.
 
 ### Versioning
 
@@ -125,7 +127,7 @@ Each Playbook belongs to a **series** identified by `series_id` (a stable `pbs_`
 | `series_id` | Stable identifier shared across all versions of the same Playbook (auto-generated as `pbs_<uuid[:8]>` if omitted on create) |
 | `is_active` | `true` for the version that runs when the Playbook is invoked |
 | `is_system` | `true` for Playbooks shipped with aiHelpDesk (read-only via API) |
-| `source` | `system` (shipped), `imported` (import endpoint), or `manual` (API-created) |
+| `source` | `system` (shipped), `imported` (import endpoint) or `manual` (API-created) |
 
 When you create a Playbook without specifying a `series_id`, a new series is started and the Playbook is immediately active. When you supply an existing `series_id`, the new version is **inactive by default** — you promote it explicitly via the activate endpoint. This lets you author and review a new version before it takes effect.
 
@@ -150,28 +152,28 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 | `pbs_wal_disk_full` | WAL Disk Full — Recovery | capacity | sysadmin | `check_host`, `get_host_logs`, `check_disk`, `get_pg_settings` |
 | `pbs_wal_stale_slot` | WAL Accumulation — Stale Replication Slot | capacity | database | `get_pg_settings`, `get_replication_status`, `get_active_connections` |
 
-The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`) covers performance degradation caused by misconfigured checkpoint or background-writer parameters. It is not a database-down scenario — the database stays available — but write latency degrades due to periodic I/O bursts. The canonical symptom is a PostgreSQL `LOG: checkpoints are occurring too frequently` warning accompanied by `maxwritten_clean > 0` in `pg_stat_bgwriter` (bgwriter hitting its per-round page limit) and elevated `buffers_backend` (regular backends forced to flush dirty pages themselves). The five-step guidance leads the agent from log confirmation through counter interpretation, parameter identification (`max_wal_size`, `bgwriter_lru_maxpages`, `checkpoint_completion_target`), safe `ALTER SYSTEM SET + pg_reload_conf()` recommendations presented to the operator for approval, and a post-change verification using `get_bgwriter_stats`. Escalation triggers include `buffers_backend_fsync > 0` (backends doing their own fsyncs — a severe condition requiring immediate I/O capacity review) and `checkpoint_sync_time > 30s`. This Playbook also demonstrates the Crystal Ball gap clearly: the PostgreSQL `HINT: Consider increasing max_wal_size` in the log is a shortcut that `bgwriter_lru_maxpages=2` makes misleading — an unguided agent typically follows the hint and misses the root cause, while the Playbook's systematic counter analysis surfaces it.
+The **Checkpoint & bgwriter Triage** Playbook (`pbs_checkpoint_bgwriter_triage`) covers performance degradation caused by misconfigured checkpoint or background-writer parameters. It is not a database-down scenario — the database stays available — but write latency degrades due to periodic I/O bursts. The canonical symptom is a PostgreSQL `LOG: checkpoints are occurring too frequently` warning accompanied by `maxwritten_clean > 0` in `pg_stat_bgwriter` (bgwriter hitting its per-round page limit) and elevated `buffers_backend` (regular backends forced to flush dirty pages themselves). The five-step guidance leads the agent from log confirmation through counter interpretation, parameter identification (`max_wal_size`, `bgwriter_lru_maxpages`, `checkpoint_completion_target`), safe `ALTER SYSTEM SET + pg_reload_conf()` recommendations presented to the operator for approval and a post-change verification using `get_bgwriter_stats`. Escalation triggers include `buffers_backend_fsync > 0` (backends doing their own fsyncs — a severe condition requiring immediate I/O capacity review) and `checkpoint_sync_time > 30s`. This Playbook also demonstrates the Crystal Ball gap clearly: the PostgreSQL `HINT: Consider increasing max_wal_size` in the log is a shortcut that `bgwriter_lru_maxpages=2` makes misleading — an unguided agent typically follows the hint and misses the root cause, while the Playbook's systematic counter analysis surfaces it.
 
 The **Transaction Lock Chain Triage** Playbook (`pbs_lock_chain_triage`) handles lock queues whose root holder is keeping an open transaction — either `idle in transaction` (paused after DML) or `active` while executing a long-running or sleeping statement such as `pg_sleep`. The canonical symptom is multiple sessions in `Lock` wait state against the same table, with the root blocker appearing dormant or slow in `pg_stat_activity`. The critical diagnostic rule the Playbook enforces: `cancel_query` (`pg_cancel_backend`) is **unreliable** for root blockers. If the root is idle-in-transaction, SIGINT is ignored entirely. If the root is active with `pg_sleep`, SIGINT interrupts the sleep and the function returns `true` — a false positive that looks like success but leaves the transaction and its locks intact (the session moves to `idle in transaction aborted`). The Playbook explicitly directs the agent to `terminate_connection` (`pg_terminate_backend`) on the root blocker, which sends SIGTERM and unconditionally closes the connection regardless of state. This Playbook is the reference case for the Crystal Ball gap in remediation: an unguided agent presents `cancel_query` as "Option 1 (Immediate)" and declares the problem resolved — while the Playbook-guided agent proceeds directly to terminate and the lock queue clears in under a second. When an operator is ready to act on the triage findings, the companion **`pbs_lock_chain_remediate`** Playbook executes the termination under step-by-step approval.
 
-The **Transaction Lock Chain — Terminate Root Blocker** Playbook (`pbs_lock_chain_remediate`) is the remediation counterpart to `pbs_lock_chain_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`), and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
+The **Transaction Lock Chain — Terminate Root Blocker** Playbook (`pbs_lock_chain_remediate`) is the remediation counterpart to `pbs_lock_chain_triage`. Where the triage Playbook runs autonomously (agent mode) to diagnose, this Playbook uses `execution_mode: agent_approve` to execute termination under explicit per-step operator approval. The LLM proposes one action at a time across a four-step sequence — map the full chain (`get_blocking_queries`), inspect the root AND each intermediate for `has_writes` (`get_session_info`), terminate the root only (`terminate_connection`) and verify the cascade cleared (`get_blocking_queries` again) — and the operator approves each step before it executes. A critical safety property: in a multi-level chain, terminating the root releases its lock and causes each intermediate session to complete and disconnect without `COMMIT`, rolling back its own open transaction as a side effect. If an intermediate has `has_writes=true`, that uncommitted work is silently discarded. The Playbook surfaces this cascade risk explicitly in the `reason` field of the termination step proposal, giving the operator full visibility before they approve. An unguided agent terminates without disclosing this. The Playbook has `approval_mode: manual` and is never auto-chained: the operator always invokes it explicitly after reviewing the triage findings. See [agent_approve execution mode](#agent_approve-execution-mode) below for the full lifecycle.
 
-The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed, or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
+The "Database Down" Playbooks form an escalating triage graph for Docker-hosted databases. Always begin with **Restart Triage** to classify the failure. For Kubernetes-hosted databases, if pod logs reveal a configuration error, proceed to **Configuration Recovery**; if they reveal data corruption, proceed to **Backup Restore & PITR**. For Docker-hosted databases where the DB agent cannot read container logs, the triage playbook escalates to **Docker Container Inspection** — the SysAdmin agent reads `docker inspect` output and container logs to determine whether the container stopped cleanly, crashed, was OOM-killed or hit a WAL disk full condition, then revises the root-cause hypothesis accordingly.
 
 - **Clean shutdown or OOM kill**: Inspection escalates to **Docker Container Restart** (`pbs_db_restart_action`), which performs the actual `restart_container` call and verifies connectivity.
-- **WAL disk full** (`PANIC: could not write to file "pg_wal/...": No space left on device` in logs): Inspection escalates to **WAL Disk Full — Recovery** (`pbs_wal_disk_full`), which diagnoses the root cause of WAL accumulation (archiving backlog, stale replication slot, or genuine growth) and guides safe cleanup before any restart attempt. Restarting without first freeing disk space will re-PANIC immediately.
+- **WAL disk full** (`PANIC: could not write to file "pg_wal/...": No space left on device` in logs): Inspection escalates to **WAL Disk Full — Recovery** (`pbs_wal_disk_full`), which diagnoses the root cause of WAL accumulation (archiving backlog, stale replication slot or genuine growth) and guides safe cleanup before any restart attempt. Restarting without first freeing disk space will re-PANIC immediately.
 
 The **WAL Accumulation — Stale Replication Slot** Playbook (`pbs_wal_stale_slot`) handles the complementary scenario where the database is still up but `pg_wal` is growing without bound. It differs from `pbs_wal_disk_full` in that the database is reachable — the agent works through a four-hypothesis elimination tree (archive failure → inactive slot → long transaction → write volume) rather than reading crash logs. Dropping the slot requires `approval_mode: manual` since it permanently removes the replica's reconnection point.
 
-`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot`, and `pbs_lock_chain_remediate` all have `approval_mode: manual`. In normal (`auto` or `session`) mode this means the operator always receives `suggested_next` and must invoke them explicitly. With `approval_mode: force` the gateway bypasses the playbook-level gate and chains through them automatically — use `force` only when you are deliberately authorising the full diagnosis-to-remediation path end-to-end.
+`pbs_db_restart_action`, `pbs_wal_disk_full`, `pbs_wal_stale_slot` and `pbs_lock_chain_remediate` all have `approval_mode: manual`. In normal (`auto` or `session`) mode this means the operator always receives `suggested_next` and must invoke them explicitly. With `approval_mode: force` the gateway bypasses the playbook-level gate and chains through them automatically — use `force` only when you are deliberately authorising the full diagnosis-to-remediation path end-to-end.
 
-Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics, and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file`, and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
+Because psql-based tools cannot reach a down database, all Playbooks targeting a completely unreachable database rely on K8s tools (`get_pod_logs`, `get_events`) or host tools (`check_host`, `get_host_logs`) for live diagnostics and on `get_saved_snapshots` to retrieve values captured in prior fleet-runner baselines — such as `data_directory`, `config_file`, `hba_file` and `log_directory` — without a live connection. The agent calls `get_saved_snapshots(tool_name="get_baseline", server_name=<target>)` to find these paths from the most recent recorded snapshot.
 
 For databases running on bare-metal hosts (no Kubernetes and no Docker), `get_pod_logs` is unavailable. In that case the agent will attempt `read_pg_log`, which reads the PostgreSQL log directly via `pg_read_file()` — but this too requires a live DB connection. When the database is completely down and unreachable, an operator must retrieve the log file manually (e.g. via SSH or a jump host) and upload it with `POST /api/v1/fleet/uploads`. The agent then reads it using `read_uploaded_file` with the returned `upload_id`. See [Operator file uploads](API.md#operator-file-uploads) in the API reference.
 
 All 21 triage playbooks (14 PostgreSQL, 6 Kubernetes, 1 host/Docker) ship with `root_cause_classes` populated at `version: "1.0"`. Remediation and recovery playbooks do not carry this field. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the taxonomy versioning rules.
 
-System Playbooks are **read-only**: `PUT` and `DELETE` return `400 Bad Request`. To customise one, run it as-is, or import and save your own version in the same series (the activate endpoint then lets you promote your version).
+System Playbooks are **read-only**: `PUT` and `DELETE` return `400 Bad Request`. To customise one, run it as-is or import and save your own version in the same series (the activate endpoint then lets you promote your version).
 
 Seeding is idempotent — restarting auditd never duplicates system Playbooks. When a newer version ships with an aiHelpDesk upgrade, it is inserted **and immediately activated** (the previous version is deactivated). See [Updating a System Playbook](#updating-a-system-playbook) below for the full procedure.
 
@@ -207,7 +209,7 @@ make build          # or: go build ./cmd/auditd
 
 **4. Restart auditd**
 
-On the next startup, `SeedSystemPlaybooks` will find no existing `(series_id, "1.3")` row, insert the new version as active, and deactivate `"1.2"`:
+On the next startup, `SeedSystemPlaybooks` will find no existing `(series_id, "1.3")` row, insert the new version as active and deactivate `"1.2"`:
 
 ```bash
 # Docker Compose (local dev)
@@ -319,7 +321,7 @@ The auditd service and the gateway's own HTTP listener do not use
 
 ## Informed gate
 
-The informed gate is a phase-boundary checkpoint between a triage playbook and its remediation counterpart. Where the existing horizontal escalation mechanism chains one agent to another mid-diagnosis, the informed gate pauses at the **vertical handoff** — triage is fully complete, and the operator reviews the findings before the remediation playbook is invoked. Authorization happens after evidence is seen, not before.
+The informed gate is a phase-boundary checkpoint between a triage playbook and its remediation counterpart. Where the existing horizontal escalation mechanism chains one agent to another mid-diagnosis, the informed gate pauses at the **vertical handoff** — triage is fully complete and the operator reviews the findings before the remediation playbook is invoked. Authorization happens after evidence is seen, not before.
 
 ### Decision flow
 
@@ -366,12 +368,12 @@ flowchart TD
 Three things this diagram makes explicit that are easy to miss from the response JSON alone:
 
 1. **The loop only runs at all if the hop emitted a signal.** `findingsRecommendMonitor`'s escape hatch and all three in-loop force-gates (`low_confidence`, `objective_evidence`, `trust_not_earned`) live *inside* that loop. A hop that ends without either `TRANSITION_TO` or `ESCALATE_TO` never reaches any of them. `recordSignalLessWarnings` (green box, left branch) is what closes that gap for two of the three — `objective_evidence` and `low_confidence` get signal-less-aware counterparts; `trust_not_earned` deliberately does not, since it's about trusting a *proposed handoff* and a signal-less hop has none to evaluate.
-2. **`protocol_violation` is unconditional, but gating into a specific remediation playbook is still opt-in.** A `PlaybookType == "triage"` hop that omits the signal line *entirely* always gets flagged (`warnings` + `protocol_violation: true` + a queryable `GET /v1/journeys?outcome=protocol_violation`) — no gate, since there's no target to gate into, and forcing one would stall an unattended run with nothing to approve. An explicit `ESCALATE_TO: none` is compliant and never flagged this way, even though it also takes the "No" edge above — the two are indistinguishable to the loop-entry check but not to `protocolViolation()`. The **fallback gate** below it is a separate, narrower mechanism: it only fires when the *original caller* passed both `gate_escalation: true` and `remediation_series_id`, in which case it manufactures a `pending_gate` using that series as the target.
+2. **`protocol_violation` is unconditional, but gating into a specific remediation playbook is still opt-in.** A `PlaybookType == "triage"` hop that omits the signal line *entirely* always gets flagged (`warnings` + `protocol_violation: true` + a queryable `GET /v1/journeys?outcome=protocol_violation`) — no gate, since there's no target to gate into and forcing one would stall an unattended run with nothing to approve. An explicit `ESCALATE_TO: none` is compliant and never flagged this way, even though it also takes the "No" edge above — the two are indistinguishable to the loop-entry check but not to `protocolViolation()`. The **fallback gate** below it is a separate, narrower mechanism: it only fires when the *original caller* passed both `gate_escalation: true` and `remediation_series_id`, in which case it manufactures a `pending_gate` using that series as the target.
 3. **`.text` in any response is always the post-parse cleaned text** — `TRANSITION_TO:`/`ESCALATE_TO:`/`FINDINGS:` lines are stripped out once parsed, regardless of which exit path above was taken. Grepping `.text` for those tokens will never find them, even when the model did emit them; look at the structured fields (`gate_type`, `escalation_target`/`transition_target`, `chain`, `protocol_violation`) instead.
 
 ### When to use it
 
-Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook. The gate fires after the triage agent completes and emits its `TRANSITION_TO:` or `ESCALATE_TO:` signal. If neither signal is present (the agent resolved the issue directly), `gate_escalation` is a no-op and the normal response is returned. If the `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`, the gate is also skipped — nothing needs operator action. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits, or return `suggested_next`).
+Pass `"gate_escalation": true` in the `/run` request body for any agent-mode triage playbook. The gate fires after the triage agent completes and emits its `TRANSITION_TO:` or `ESCALATE_TO:` signal. If neither signal is present (the agent resolved the issue directly), `gate_escalation` is a no-op and the normal response is returned. If the `FINDINGS:` line contains `recommended=monitor` or `recommended=no_changes_needed`, the gate is also skipped — nothing needs operator action. Without this flag, the existing behaviour applies (auto-chain if `approval_mode` permits or return `suggested_next`).
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_vacuum_triage/run \
@@ -413,7 +415,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
   "findings":             "Connection refused — Docker-level investigation needed.",
   "escalation_target":    "pbs_sysadmin_docker_inspect",
   "escalation_findings":  "Connection refused — Docker-level investigation needed.",
-  "remediation_preview":  { "series_id": "pbs_sysadmin_docker_inspect", "name": "Docker Container Inspect", "description": "Inspect the database container for OOM kills, crash loops, or misconfig.", "approval_mode": "manual" },
+  "remediation_preview":  { "series_id": "pbs_sysadmin_docker_inspect", "name": "Docker Container Inspect", "description": "Inspect the database container for OOM kills, crash loops or misconfig.", "approval_mode": "manual" },
   "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
   "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%.",
   "suggested_approval_mode": "manual",
@@ -421,7 +423,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 }
 ```
 
-`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. `remediation_preview` describes the next playbook that would run after approval — its name, intent description, and default `approval_mode` — so operators know exactly what they are authorising before clicking approve. `diagnostic_report` contains the structured hypothesis breakdown from triage (populated when the agent emits `HYPOTHESIS_N:` lines; `null` otherwise — see [Structured diagnostic report](#structured-diagnostic-report)). The `confidence_warning` field is populated when the primary hypothesis confidence is below 70%, or when a competing hypothesis scores more than 70% of the primary. It is **advisory and non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`. When confidence drops below 50%, the gateway **forces** a gate regardless of whether `gate_escalation=true` was set in the request, and sets `gate_reason: "low_confidence"` in the response. A coin-flip diagnosis must not auto-chain into destructive remediation. A second, independent force-gate exists alongside this one — see [Objective-evidence gate](#objective-evidence-gate) below.
+`gate_type` tells operators what kind of handoff this is: `"transition"` is a routine expected pipeline step; `"escalation"` is an out-of-scope cross-domain handoff that may warrant closer scrutiny. `remediation_preview` describes the next playbook that would run after approval — its name, intent description and default `approval_mode` — so operators know exactly what they are authorising before clicking approve. `diagnostic_report` contains the structured hypothesis breakdown from triage (populated when the agent emits `HYPOTHESIS_N:` lines; `null` otherwise — see [Structured diagnostic report](#structured-diagnostic-report)). The `confidence_warning` field is populated when the primary hypothesis confidence is below 70% or when a competing hypothesis scores more than 70% of the primary. It is **advisory and non-blocking** — the operator can still proceed — but when present, `suggested_approval_mode` is always `"manual"`. When confidence drops below 50%, the gateway **forces** a gate regardless of whether `gate_escalation=true` was set in the request and sets `gate_reason: "low_confidence"` in the response. A coin-flip diagnosis must not auto-chain into destructive remediation. A second, independent force-gate exists alongside this one — see [Objective-evidence gate](#objective-evidence-gate) below.
 
 ### Objective-evidence gate
 
@@ -440,7 +442,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 
 This scope is deliberately narrow today — only the K8s agent's `get_pods` tool populates it, since it is the only tool whose result already carries unambiguous structured evidence (a DB agent's uptime, by contrast, is free text and is not currently evidence for anything on its own). Extending this to other tools is a case-by-case decision, not a mechanical rollout — see the design note in the source (`cmd/gateway/playbooks.go`'s `objectiveEvidenceForceGate`) for the reasoning.
 
-Low confidence and objective evidence are independently evaluated — a hop can trip either, both, or neither. When both apply, `gate_reason` joins them with `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"`, so an operator reviewing the gate always sees every applicable reason rather than just whichever check happened to run first.
+Low confidence and objective evidence are independently evaluated — a hop can trip either, both or neither. When both apply, `gate_reason` joins them with `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"`, so an operator reviewing the gate always sees every applicable reason rather than just whichever check happened to run first.
 
 **`evidence_warnings` — the non-gated counterpart.** The force-gate above only runs when the hop already emitted a `TRANSITION_TO`/`ESCALATE_TO` signal — a chain-loop precondition, not a design choice — so it cannot catch a hop that sees real evidence and emits *neither* signal, silently closing out. For that case, a normal (non-`pending_gate`) response instead carries an `evidence_warnings` array, independent of `status`:
 
@@ -457,6 +459,78 @@ Low confidence and objective evidence are independently evaluated — a hop can 
 
 This never creates a Decision Hub entry — there is no next-hop candidate to gate approval for — it is purely a visible flag on the response you already receive, so it doesn't require a separate lookup to notice the discrepancy.
 
+### Signal-less hops
+
+A **signal-less hop** is a triage response that ends without emitting either `TRANSITION_TO:` or `ESCALATE_TO:` at all — not a line with value `"none"`, the line simply isn't there. This matters more than it sounds: per the [Decision flow](#decision-flow) diagram above, the chain loop only runs when a hop *has* a signal, so a signal-less hop skips every in-loop force-gate (`low_confidence`, `objective_evidence`, `trust_not_earned`) — an agent that reliably ends triage without emitting either signal would otherwise bypass every safety mechanism on this page, not just the protocol-violation warning below.
+
+Four independent things can happen on a signal-less hop and it's easy to conflate them:
+
+**1. `objective_evidence` → `evidence_warnings`.** Already covered above — see [Objective-evidence gate](#objective-evidence-gate)'s "`evidence_warnings` — the non-gated counterpart" section.
+
+**2. `protocol_violation` → `warnings` + a new Journey outcome.** For a `PlaybookType == "triage"` playbook (remediation and untyped playbooks are exempt — they're never expected to emit either signal), omitting the line entirely is treated as a genuine protocol violation:
+
+```json
+{
+  "run_id":             "plr_e9a2f6c1",
+  "status":             "resolved",
+  "findings":           "Could not connect to server; cause unclear.",
+  "protocol_violation": true,
+  "warnings": [
+    "hop \"pbs_db_restart_triage\" (agent postgres_database_agent) omitted required TRANSITION_TO/ESCALATE_TO signal"
+  ]
+}
+```
+
+No gate is forced — there's no next-hop target the model proposed and forcing one anyway would stall an unattended run with nothing to approve. Instead, the run's Journey is tagged `outcome: "protocol_violation"` (tied at priority 9 with `unverified_claim`/`target_drift_detected` — same "don't trust this output as-is" tier), independently queryable via `GET /v1/journeys?outcome=protocol_violation` or `has_protocol_violation` on the Journey object, even with nobody watching a Decision Hub live. It also negates the fault's CLEAN cert on the *next* `faulttest --repeat N` recalibration (see [`ATTRIBUTION_CERTS.md` §9](ATTRIBUTION_CERTS.md#9-the-clean-axis)) — live traffic never touches an existing cert directly, only a future deliberate recertification run does.
+
+An explicit `ESCALATE_TO: none` is compliant and never trips this, even though it also has no real target — the parser tracks whether the signal *line* was present at all (`SawSignalLine`), separate from whether it resolved to a real series ID.
+
+**3. `low_confidence` → `warnings` only, deliberately excluded from CLEAN.** Reuses the same 50% force-gate threshold as `gate_reason: "low_confidence"` above, but for a hop that never escalated:
+
+```json
+{
+  "run_id":    "plr_f3b8d1e7",
+  "status":    "resolved",
+  "findings":  "Uptime is 3 minutes; possible recent restart.",
+  "warnings": [
+    "hop \"pbs_db_restart_triage\" (agent postgres_database_agent) resolved with a low-confidence diagnosis but did not escalate or transition"
+  ]
+}
+```
+
+Visibility only — never gates (same reasoning as `protocol_violation`) and unlike it, **does not** feed the CLEAN cert. This is deliberate, not an oversight: it's self-reported by the model and already substantially what the Evaluation stability axis measures (judge/confidence variance); counting it here too would double-count the same signal under two names.
+
+**4. The fallback gate — opt-in and the only one of the four that actually gates.** Pass both `"gate_escalation": true` and `"remediation_series_id": "<series_id>"` on the *original* `/run` request and a signal-less hop manufactures a `pending_gate` using that series as the forced target — instead of just warning, it pauses for operator approval, since the caller has now supplied a target to gate *into* (which the other three mechanisms never have):
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_cache_miss_triage/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "connection_string":     "prod-primary",
+    "gate_escalation":       true,
+    "remediation_series_id": "pbs_cache_miss_remediate"
+  }'
+```
+
+```json
+{
+  "run_id":               "plr_a1c4e8b2",
+  "status":               "pending_gate",
+  "gate_type":             "transition",
+  "transition_target":    "pbs_cache_miss_remediate",
+  "escalation_findings":  "Cache hit ratio is 92.8%; sequential scans on test_large_table are the likely cause.",
+  "remediation_preview":  { "series_id": "pbs_cache_miss_remediate", "name": "Cache Miss Remediation", "...": "..." },
+  "protocol_violation":    true,
+  "warnings": [
+    "hop \"pbs_cache_miss_triage\" (agent postgres_database_agent) omitted required TRANSITION_TO/ESCALATE_TO signal"
+  ]
+}
+```
+
+Skipped when `FINDINGS:` recommends `monitor`/`no_changes_needed` — same escape hatch as the normal gate, nothing needs operator action either way. **Deduped against check 2 above**: when both fire on the same hop (as in the example — a `PlaybookType == "triage"` hop with `gate_escalation`+`remediation_series_id` both set), `warnings` gets exactly one protocol-violation entry, not two — the fallback gate only appends its own (differently-worded) message when check 2 didn't already cover the same fact, i.e. when `PlaybookType` isn't `"triage"`.
+
+**Where this shows up later, beyond the live response**: `vault journeys` marks a `P` flag (alongside the existing `!`/`D`) and prints a boxed "PROTOCOL VIOLATION WARNING" in `vault journey <trace_id>` detail view; `vault incidents`/`GET /api/v1/incidents/{runID}` surfaces an inline `⚠ protocol violation` line under whichever chapter's hop violated the protocol, no separate Journey lookup required; `vault accuracy <fault-id>`'s `Warning types:` line breaks down exactly which of the three unconditional signals (`objective_evidence`/`protocol_violation`, not `low_confidence` — see above) contributed to a cert's `warning_count`.
+
 ### Warning signals reference
 
 The playbook-run response can carry several distinct warning/signal fields. They come from different mechanisms and don't all mean the same thing. This table is the map:
@@ -466,11 +540,11 @@ The playbook-run response can carry several distinct warning/signal fields. They
 | `gate_reason: "low_confidence"` | `pending_gate` response | Primary hypothesis `CONFIDENCE:` below 50% | Self-reported — the model writes this about its own diagnosis | Independently evaluated from objective evidence; combines with it via `+` (see below) |
 | `gate_reason: "objective_evidence:<signal>"` | `pending_gate` response | A tool call in the hop produced real, code-derived evidence (e.g. `get_pods` showing a nonzero restart count or `OOMKilled`) | Verified — read directly from structured tool output, independent of the model's text | Independently evaluated from low confidence; combines with it via `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"` |
 | `gate_reason: "trust_not_earned"` | `pending_gate` response | The playbook's series_id has no fault-stability cert on record for the gateway's configured diagnosis model (`HELPDESK_MODEL_NAME`) with both a `STABLE` and a `CLEAN` verdict — see [`ATTRIBUTION_CERTS.md`](ATTRIBUTION_CERTS.md) for what earns each. Fails closed: never having been `faulttest run --repeat N`-certified for this model counts as unearned, not as a pass. | Verified — a real query against the cert store, not a per-run signal at all | Independently evaluated; combines with the other two via `+`. Bypassed by `skip_trust_gate: true` on the request — set automatically by faulttest's own calibration runs, since they're the ones trying to *establish* the cert this check depends on; never set this for a real incident. |
-| `confidence_warning` | `pending_gate` response (any gate, requested or forced) | Primary hypothesis confidence below 70%, or a competing hypothesis scores above 70% of the primary | Self-reported | Advisory only — never forces a gate by itself; can appear alongside any `gate_reason` value, or none, whenever a gate fires for some other reason |
+| `confidence_warning` | `pending_gate` response (any gate, requested or forced) | Primary hypothesis confidence below 70% or a competing hypothesis scores above 70% of the primary | Self-reported | Advisory only — never forces a gate by itself; can appear alongside any `gate_reason` value or none, whenever a gate fires for some other reason |
 | `evidence_warnings` | Normal (non-`pending_gate`) response | A hop has real objective evidence but emits neither `TRANSITION_TO` nor `ESCALATE_TO` | Verified | **Structurally mutually exclusive with `pending_gate`/`gate_reason`** — a hop with no escalation signal always terminates the chain right there, so a later hop's gate can never fire in the same response. Not just "by convention" — the chain loop's own exit condition makes this impossible, not merely undesigned-for. |
-| `protocol_violation: true` + a matching `warnings` entry (`"...omitted required TRANSITION_TO/ESCALATE_TO signal"`) | Normal (non-`pending_gate`) response | A `PlaybookType == "triage"` hop resolved without emitting `TRANSITION_TO`/`ESCALATE_TO` **at all** — not even an explicit `"none"` | Verified — the parser (`parseAgentEscalation`'s `SawSignalLine`) distinguishes an omitted signal line from an explicit `"none"`, which are otherwise indistinguishable once resolved to an empty string | Unconditional — evaluated on every signal-less hop, not gated behind `gate_escalation`/`remediation_series_id` (unlike the fallback-gate below). No gate is forced (there is no next-hop target to gate into, and forcing one would stall an unattended run with nothing to approve); instead the run's Journey gets a new `outcome: "protocol_violation"` (`GET /v1/journeys?outcome=protocol_violation`), tied at priority 9 with `unverified_claim`/`target_drift_detected` — same "don't trust this output as-is" tier, discoverable even with nobody watching a Decision Hub live. Also negates the fault's CLEAN cert on the next `faulttest --repeat N` recalibration (`hasCleanWarning` already detects this via the same message substring). |
+| `protocol_violation: true` + a matching `warnings` entry (`"...omitted required TRANSITION_TO/ESCALATE_TO signal"`) | Normal (non-`pending_gate`) response | A `PlaybookType == "triage"` hop resolved without emitting `TRANSITION_TO`/`ESCALATE_TO` **at all** — not even an explicit `"none"` | Verified — the parser (`parseAgentEscalation`'s `SawSignalLine`) distinguishes an omitted signal line from an explicit `"none"`, which are otherwise indistinguishable once resolved to an empty string | Unconditional — evaluated on every signal-less hop, not gated behind `gate_escalation`/`remediation_series_id` (unlike the fallback-gate below). No gate is forced (there is no next-hop target to gate into and forcing one would stall an unattended run with nothing to approve); instead the run's Journey gets a new `outcome: "protocol_violation"` (`GET /v1/journeys?outcome=protocol_violation`), tied at priority 9 with `unverified_claim`/`target_drift_detected` — same "don't trust this output as-is" tier, discoverable even with nobody watching a Decision Hub live. Also negates the fault's CLEAN cert on the next `faulttest --repeat N` recalibration (`hasCleanWarning` already detects this via the same message substring). |
 | a `warnings` entry (`"...resolved with a low-confidence diagnosis but did not escalate or transition"`) | Normal (non-`pending_gate`) response | A hop resolved with primary hypothesis confidence below 50% (same threshold as `gate_reason: "low_confidence"`) but emitted no signal | Self-reported | Unconditional, visibility-only — never forces a gate (same reasoning as `protocol_violation` above: no target to gate into) and **does not** feed the CLEAN cert, consistent with `gate_reason: "low_confidence"`'s existing exclusion (self-reported, already captured by the separate Evaluation stability axis — counting it here too would double-count the same signal). |
-| `warnings` (general array; also carries the pre-existing opt-in fallback-gate's protocol-violation entry, e.g. `"...gate created from remediation_series_id"`, and unrelated bookkeeping like `approval_mode` clamped due to insufficient roles) | Any response | Various gateway-level advisories, including the two new unconditional entries above | Mixed — some entries are bookkeeping, not evidence-based | The pre-existing fallback-gate entry only fires when `gate_escalation`+`remediation_series_id` are both set on the *original* request and manufactures a `pending_gate` using that series as the target — different from the two unconditional entries above, which fire regardless of request flags and never gate. Do not confuse any of this with [`CONSISTENCY.md`'s own `protocol_violations` tracking](CONSISTENCY.md#4-stable-vs-unstable-the-criteria) — same phrase, different mechanism: this is a live per-request signal (see [Decision flow](#decision-flow) above); that one aggregates across a `faulttest run --repeat N` calibration batch to compute a stability score. |
+| `warnings` (general array; also carries the pre-existing opt-in fallback-gate's protocol-violation entry, e.g. `"...gate created from remediation_series_id"` and unrelated bookkeeping like `approval_mode` clamped due to insufficient roles) | Any response | Various gateway-level advisories, including the two new unconditional entries above | Mixed — some entries are bookkeeping, not evidence-based | The pre-existing fallback-gate entry only fires when `gate_escalation`+`remediation_series_id` are both set on the *original* request and manufactures a `pending_gate` using that series as the target — different from the two unconditional entries above, which fire regardless of request flags and never gate. Do not confuse any of this with [`CONSISTENCY.md`'s own `protocol_violations` tracking](CONSISTENCY.md#4-stable-vs-unstable-the-criteria) — same phrase, different mechanism: this is a live per-request signal (see [Decision flow](#decision-flow) above); that one aggregates across a `faulttest run --repeat N` calibration batch to compute a stability score. |
 
 The triage run is recorded with `outcome: gate_pending`. The run ID is stable and can be used to retrieve the findings later via `GET /api/v1/fleet/playbook-runs/{run_id}` API call.
 
@@ -514,9 +588,9 @@ The `approval_mode` you choose at the gate applies to the remediation playbook o
 | `auto` | Auto-approve all steps |
 | `session` | Use a pre-created approval session token |
 
-When `resolution: "approved"`, the response is whatever the remediation playbook returns — `200` with findings for `execution_mode: agent`, or `202 pending_approval` for `execution_mode: agent_approve`. Standard approval loops apply from there.
+When `resolution: "approved"`, the response is whatever the remediation playbook returns — `200` with findings for `execution_mode: agent` or `202 pending_approval` for `execution_mode: agent_approve`. Standard approval loops apply from there.
 
-The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, optional reason, and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates. Once resolved, the `reason` is available at any time via `GET /api/v1/decisions/gate:{runID}` in the `extra.resolved_reason` field.
+The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, optional reason and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates. Once resolved, the `reason` is available at any time via `GET /api/v1/decisions/gate:{runID}` in the `extra.resolved_reason` field.
 
 ### Relationship to the two-playbook split
 
@@ -550,7 +624,7 @@ When a gate fires, the gateway can push a notification to a webhook or email. Co
 | `HELPDESK_DECISION_WEBHOOK_SECRET` | HMAC-SHA256 key for `X-Helpdesk-Signature` request signing |
 | `HELPDESK_BASE_URL` | Gateway public URL; used to build absolute resolve links in notifications |
 
-See [docs/DECISIONS.md](DECISIONS.md) for the full webhook payload shape, Slack detection, HMAC signing, and email configuration.
+See [docs/DECISIONS.md](DECISIONS.md) for the full webhook payload shape, Slack detection, HMAC signing and email configuration.
 
 ### Git opt-in
 
@@ -560,7 +634,7 @@ Operators can resolve a gate by merging a specially-named branch:
 approved/gate/{runID}   → approved
 ```
 
-Register `POST /api/v1/webhooks/git` as a webhook in your git provider and set `HELPDESK_GIT_WEBHOOK_SECRET`. Works with GitHub, GitLab, Gitea, and any provider that sends merge events. See [docs/DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in) for full setup.
+Register `POST /api/v1/webhooks/git` as a webhook in your git provider and set `HELPDESK_GIT_WEBHOOK_SECRET`. Works with GitHub, GitLab, Gitea and any provider that sends merge events. See [docs/DECISIONS.md — Git webhook adapter](DECISIONS.md#git-webhook-adapter-opt-in) for full setup.
 
 ---
 
@@ -572,7 +646,7 @@ The two gates are complementary: the informed gate controls whether remediation 
 
 ### When it fires
 
-The step-approval gate is active when a playbook runs in `execution_mode: agent_approve`. In that mode, the re-planning LLM proposes one action at a time. Each proposal is compared against the active policy. If the proposed action's class (`read`, `write`, or `destructive`) matches a policy rule with `effect: approve`, the gateway holds the action and returns HTTP 202 with `"status": "pending_approval"`.
+The step-approval gate is active when a playbook runs in `execution_mode: agent_approve`. In that mode, the re-planning LLM proposes one action at a time. Each proposal is compared against the active policy. If the proposed action's class (`read`, `write` or `destructive`) matches a policy rule with `effect: approve`, the gateway holds the action and returns HTTP 202 with `"status": "pending_approval"`.
 
 Read-class actions pass through automatically in `review` mode; write and destructive actions always require explicit approval. In `manual` mode every step — including reads — requires approval.
 
@@ -618,7 +692,7 @@ Or set `HELPDESK_APPROVAL_ENABLED=true` on the agent to make `review` the defaul
 ```
 
 `step.tool` — the exact tool that will run.
-`step.action_class` — `"read"`, `"write"`, or `"destructive"`. Destructive actions have no automatic rollback.
+`step.action_class` — `"read"`, `"write"` or `"destructive"`. Destructive actions have no automatic rollback.
 `step.reason` — the re-planner's explanation for why this step is needed at this point.
 `approval_id` — reference key for the Decision Hub and audit trail.
 
@@ -655,7 +729,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_c4d9e2f1/pr
   }'
 ```
 
-On `approved`, the gateway executes the tool call, records the result, and immediately returns the next `pending_approval` response (or `"status": "complete"` if the playbook is done). The loop continues until completion or denial.
+On `approved`, the gateway executes the tool call, records the result and immediately returns the next `pending_approval` response (or `"status": "complete"` if the playbook is done). The loop continues until completion or denial.
 
 On `denied`, the run stops. No further steps execute. The denial and reason are recorded in the audit trail and surfaced in the Decision Hub.
 
@@ -716,7 +790,7 @@ In faulttest, pass `--approval-mode force` and `--operator alice@example.com` (s
 
 ### Non-TTY environments
 
-In Kubernetes Jobs, CI pipelines, or Docker containers there is no terminal for interactive prompts. Pass `--emit-and-wait` to faulttest (or set `emit_and_wait: true` in the harness config) to switch to HTTP long-poll mode:
+In Kubernetes Jobs, CI pipelines or Docker containers there is no terminal for interactive prompts. Pass `--emit-and-wait` to faulttest (or set `emit_and_wait: true` in the harness config) to switch to HTTP long-poll mode:
 
 ```bash
 go run ./testing/cmd/faulttest run \
@@ -742,7 +816,7 @@ All Playbook endpoints are accessible via the Gateway on port 8080. The Gateway 
 GET /api/v1/fleet/playbooks
 ```
 
-Returns the active version of every Playbook (system and user), ordered by creation time.
+Returns the active version of every Playbook (system and user) ordered by creation time.
 
 ```bash
 curl http://localhost:8080/api/v1/fleet/playbooks | jq .playbooks
@@ -847,7 +921,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks \
   -d '{
     "series_id":   "pbs_a1b2c3d4",
     "name":        "weekly-staging-health",
-    "description": "Check connection health, table stats, and replication on all staging databases",
+    "description": "Check connection health, table stats and replication on all staging databases",
     "version":     "1.1",
     "guidance":    "Also run get_replication_status if the server has replicas.",
     "author":      "alice@example.com"
@@ -915,9 +989,9 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json
 ```
 
-**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms ranked hypotheses with confidence scores, backs out when evidence contradicts a hypothesis, and returns a structured diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms ranked hypotheses with confidence scores, backs out when evidence contradicts a hypothesis and returns a structured diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`.
 
-**`execution_mode: agent_approve`** — the gateway drives a step-by-step execution loop with per-step operator approval. The LLM proposes a single action at a time, the gateway surfaces it to the operator, and after the operator approves, the gateway executes the tool directly and re-plans based on the result. No action is executed without explicit approval. Returns `202 Accepted` with a `pending_approval` status rather than a final result. See [agent_approve execution mode](#agent_approve-execution-mode) below.
+**`execution_mode: agent_approve`** — the gateway drives a step-by-step execution loop with per-step operator approval. The LLM proposes a single action at a time, the gateway surfaces it to the operator and after the operator approves, the gateway executes the tool directly and re-plans based on the result. No action is executed without explicit approval. Returns `202 Accepted` with a `pending_approval` status rather than a final result. See [agent_approve execution mode](#agent_approve-execution-mode) below.
 
 Optional request body:
 
@@ -928,7 +1002,7 @@ Optional request body:
 | `context` | Free-form operator context (server name, symptoms, recent changes, relevant log lines) |
 | `context_id` | A2A session ID for multi-turn continuity within an existing session |
 | `prior_run_id` | `plr_*` run ID of a previous investigation to continue from (see [Continuity threading](#continuity-threading)) |
-| `approval_mode` | `auto`, `session`, `manual`, or `force` — controls tool-call gating and chaining eligibility (see [Approval modes](#approval-modes)) |
+| `approval_mode` | `auto`, `session`, `manual` or `force` — controls tool-call gating and chaining eligibility (see [Approval modes](#approval-modes)) |
 | `approval_session` | Required when `approval_mode=session`. The `aps_*` session ID from `POST /v1/approval/sessions` on auditd |
 | `trigger_context` | The original alert text or event description that initiated this run. Persisted on the run record and surfaced in the incident narrative under `Triggered by:`. Use this to thread the original PagerDuty/OpsGenie alert body into the audit trail. |
 
@@ -971,7 +1045,7 @@ See [FLEET.md](FLEET.md#natural-language-job-planner) for full fleet planner sem
 
 ## Run tracking
 
-Every call to `POST /run` writes a `PlaybookRun` record to auditd before routing to the fleet planner or database agent. This gives operators a complete audit trail of what was investigated, when, and with what outcome.
+Every call to `POST /run` writes a `PlaybookRun` record to auditd before routing to the fleet planner or database agent. This gives operators a complete audit trail of what was investigated, when and with what outcome.
 
 ### Run lifecycle
 
@@ -1012,7 +1086,7 @@ POST /proceed {resolution: "approved", step_index: N, resolved_by: "alice"}
 
 For agent-mode runs the Gateway parses the agent's structured response (see [Structured escalation signal](#structured-escalation-signal)) and calls `PATCH /playbook-runs/{runID}` automatically once the agent session completes. `findings_summary` and `escalated_to` are populated from the agent's output. Operators can always override via a manual PATCH.
 
-The Gateway records run start **synchronously** and run completion **asynchronously** (best-effort, 5 s timeout). If completion recording fails, the run remains at `outcome=unknown` — this is visible in `/stats` as the `abandoned` bucket if the operator patches it, or remains `unknown` until corrected.
+The Gateway records run start **synchronously** and run completion **asynchronously** (best-effort, 5 s timeout). If completion recording fails, the run remains at `outcome=unknown` — this is visible in `/stats` as the `abandoned` bucket if the operator patches it or remains `unknown` until corrected.
 
 ### Get a specific run
 
@@ -1126,7 +1200,7 @@ Returns `204 No Content` on success.
 GET /api/v1/fleet/playbook-runs/{runID}/events
 ```
 
-Returns the chain-of-thought audit events for a run in chronological order — agent reasoning, tool executions, and policy decisions. Events are sourced from the audit trail using the run's `trace_id`. Returns an empty array when `trace_id` is absent (fleet-mode runs, or runs predating chain-of-thought capture).
+Returns the chain-of-thought audit events for a run in chronological order — agent reasoning, tool executions and policy decisions. Events are sourced from the audit trail using the run's `trace_id`. Returns an empty array when `trace_id` is absent (fleet-mode runs or runs predating chain-of-thought capture).
 
 ```bash
 curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c/events \
@@ -1144,7 +1218,7 @@ Returns `404` if the run ID is not found.
 
 ### Operator feedback
 
-After an incident resolves, operators can record whether the agent's diagnosis was correct. This closes the accuracy measurement loop: the Vault knows the resolution rate (how often remediation succeeded), and feedback tells it the diagnosis rate (how often the root-cause hypothesis was right in the first place).
+After an incident resolves, operators can record whether the agent's diagnosis was correct. This closes the accuracy measurement loop: the Vault knows the resolution rate (how often remediation succeeded) and feedback tells it the diagnosis rate (how often the root-cause hypothesis was right in the first place).
 
 ```
 POST /api/v1/fleet/playbook-runs/{runID}/feedback
@@ -1191,7 +1265,7 @@ Accuracy aggregates (across all runs in a series with `verdict_correct` set for 
 
 **What accuracy measures**
 
-`accuracy_rate` in `PlaybookRunStats` answers one question: when the agent named a root cause, was it right? It is computed from `(triage, post_incident)` feedback rows that have an explicit `verdict_correct` value — either `true` or `false`. Runs with no feedback, or entries where `verdict_correct` is omitted, do not affect the rate.
+`accuracy_rate` in `PlaybookRunStats` answers one question: when the agent named a root cause, was it right? It is computed from `(triage, post_incident)` feedback rows that have an explicit `verdict_correct` value — either `true` or `false`. Runs with no feedback or entries where `verdict_correct` is omitted, do not affect the rate.
 
 This is entirely separate from `resolution_rate`, which measures whether the database recovered after remediation. The two signals are independent:
 
@@ -1208,7 +1282,7 @@ Two sources contribute `verdict_correct=false` entries for `(triage, post_incide
 
 1. **Explicit post-incident feedback** — submitted by an operator via `POST .../feedback` after reviewing the incident outcome. This is the primary signal and supports both `true` and `false` values with an optional free-text `verdict_notes`.
 
-2. **Gate denial auto-submission** — when an operator denies the gate via `POST .../proceed-escalation` with `resolution: "denied"`, the gateway automatically submits a `RunFeedback` entry with `feedback_type=triage`, `feedback_time=at_gate`, and `verdict_correct=false`. The denial `reason`, if provided, is stored as `verdict_notes`. This captures the implicit signal — an operator reviewing triage findings and deciding not to proceed is a reliable indicator that the diagnosis was unconvincing or wrong.
+2. **Gate denial auto-submission** — when an operator denies the gate via `POST .../proceed-escalation` with `resolution: "denied"`, the gateway automatically submits a `RunFeedback` entry with `feedback_type=triage`, `feedback_time=at_gate` and `verdict_correct=false`. The denial `reason`, if provided, is stored as `verdict_notes`. This captures the implicit signal — an operator reviewing triage findings and deciding not to proceed is a reliable indicator that the diagnosis was unconvincing or wrong.
 
    ```bash
    # This denial automatically records verdict_correct=false (triage/at_gate) for plr_a3f7c1b2
@@ -1302,7 +1376,7 @@ Returns `404` if no run with that ID exists.
 | `run_id` | string | Unique run identifier (`plr_` prefix) |
 | `playbook_id` | string | The specific Playbook version that was run |
 | `series_id` | string | Series the Playbook belongs to |
-| `execution_mode` | string | `fleet`, `agent`, or `agent_approve` |
+| `execution_mode` | string | `fleet`, `agent` or `agent_approve` |
 | `outcome` | string | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
 | `escalated_to` | string | Series ID of the follow-on Playbook (when `outcome=escalated`) |
 | `transitioned_to` | string | Series ID of the remediation Playbook (when `outcome=transitioned`) |
@@ -1313,14 +1387,14 @@ Returns `404` if no run with that ID exists.
 | `completed_at` | RFC3339 | When the run was patched with a final outcome |
 | `trace_id` | string | Audit trace ID linking this run to its chain-of-thought events. Use with `GET /api/v1/fleet/playbook-runs/{runID}/events` to retrieve the full reasoning trail. Empty for fleet-mode runs and runs predating this field. |
 | `agent_transcript` | string | Full text of the agent's response, including reasoning and evidence interpretation. Populated for agent-mode runs only. |
-| `prior_run_id` | string | `plr_*` run ID of the previous investigation this run continues. Set when the run was started with `prior_run_id` in the request body, or automatically when a gate is approved and the remediation playbook is chained. |
+| `prior_run_id` | string | `plr_*` run ID of the previous investigation this run continues. Set when the run was started with `prior_run_id` in the request body or automatically when a gate is approved and the remediation playbook is chained. |
 | `diagnostic_report` | object | Structured hypothesis report parsed from the agent's response. `null` when the agent did not emit `HYPOTHESIS_N:` lines. See [Structured diagnostic report](#structured-diagnostic-report). |
 
 ---
 
 ## Adaptive triage
 
-The three Database Down Playbooks form an adaptive triage system. Rather than following a fixed script, the agent gathers evidence, tests hypotheses, and navigates the escalation graph based on what it finds.
+The three Database Down Playbooks form an adaptive triage system. Rather than following a fixed script, the agent gathers evidence, tests hypotheses and navigates the escalation graph based on what it finds.
 
 ### Entry points
 
@@ -1341,7 +1415,7 @@ pbs_db_restart_triage  (entry_point: true)
         │
         ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
         │
-        └─ Docker-hosted DB, or hosting type unknown
+        └─ Docker-hosted DB or hosting type unknown
            (agent cannot read docker logs)
                                           → pbs_sysadmin_docker_inspect
                                               (sysadmin agent calls check_host,
@@ -1374,7 +1448,7 @@ The agent is prompted with the escalation paths at run time:
 
 > "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
 
-For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised, or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
+For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
 
 If instead `check_host` reports `runtime=kubectl`, the target is Kubernetes-managed rather than a plain Docker/Podman container — the sysadmin agent's docker-oriented tools (`get_host_logs` in container mode, `check_memory`, `restart_container`) do not apply, since the workload runs in a pod on a cluster, not on the host the sysadmin agent has shell access to. It escalates a third time, to `pbs_k8s_pod_crash_triage`, which has the Kubernetes-native tools (`get_pods`, `describe_pod`, `get_pod_logs`, `read_pod_file`) to diagnose the pod directly. That playbook's exit-code and OOM semantics are Kubernetes-specific and distinct from Docker's — the K8s agent does not reuse the sysadmin agent's `exitcode=`/`oomkilled=` reasoning to interpret them.
 
@@ -1407,7 +1481,7 @@ HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: 0.90 | EVIDENCE: "<verbatim quo
 HYPOTHESIS_2: <alternative> | CONFIDENCE: 0.20 | REJECTED: <one-sentence reason why this is not the root cause>
 ROOT_CAUSE: HYPOTHESIS_1
 FINDINGS: <one-sentence summary of the root cause and recommended action>
-ACTION_TAKEN: <what was done, or "none — escalation recommended">
+ACTION_TAKEN: <what was done or "none — escalation recommended">
 TRANSITION_TO: <series_id>   # same-domain triage→remediation; or
 ESCALATE_TO: <series_id>     # cross-domain escalation to a different agent
 ```
@@ -1450,7 +1524,7 @@ curl -s http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
 }
 ```
 
-The diagnostic report is available immediately after the agent session completes. If the agent's response does not contain any `HYPOTHESIS_N:` lines (older agent versions, or non-structured runs), `diagnostic_report` is `null`.
+The diagnostic report is available immediately after the agent session completes. If the agent's response does not contain any `HYPOTHESIS_N:` lines (older agent versions or non-structured runs), `diagnostic_report` is `null`.
 
 ### Structured escalation signal
 
@@ -1468,13 +1542,13 @@ FINDINGS: <one-sentence diagnosis and recommended action>
 ESCALATE_TO: <series_id>     # cross-domain: hand off to a different agent/domain
 ```
 
-**`TRANSITION_TO:`** is used when the triage playbook hands off to its remediation counterpart within the same problem domain — for example, `pbs_vacuum_triage` → `pbs_vacuum_remediate`, or `pbs_lock_chain_triage` → `pbs_lock_chain_remediate`. The two playbooks form a deliberate pair; the triage agent has done its job and the next step is the expected remediation.
+**`TRANSITION_TO:`** is used when the triage playbook hands off to its remediation counterpart within the same problem domain — for example, `pbs_vacuum_triage` → `pbs_vacuum_remediate` or `pbs_lock_chain_triage` → `pbs_lock_chain_remediate`. The two playbooks form a deliberate pair; the triage agent has done its job and the next step is the expected remediation.
 
 **`ESCALATE_TO:`** is used for true out-of-scope escalations — the diagnosis requires a different agent or domain entirely, such as a DB agent discovering a Docker-level problem and handing off to the SysAdmin agent (`ESCALATE_TO: pbs_sysadmin_docker_inspect`). These are genuinely unexpected handoffs.
 
 The Gateway strips these lines from the visible `text` returned to the operator, then uses them to:
 
-- Set `outcome=resolved` when only `FINDINGS:` is present, or when `FINDINGS:` contains `recommended=monitor` or `recommended=no_changes_needed` (nothing actionable found)
+- Set `outcome=resolved` when only `FINDINGS:` is present or when `FINDINGS:` contains `recommended=monitor` or `recommended=no_changes_needed` (nothing actionable found)
 - Set `outcome=transitioned` and `transitioned_to=<series_id>` when `TRANSITION_TO:` is present
 - Set `outcome=escalated` and `escalated_to=<series_id>` when `ESCALATE_TO:` is present
 - Populate `findings_summary` with the FINDINGS text
@@ -1488,7 +1562,7 @@ What happens next depends on **two conditions** that the Gateway checks before a
 
 | Requester `approval_mode` | Target playbook `approval_mode` | Gateway behaviour |
 |---|---|---|
-| `auto` | `session` or `auto` | **Auto-chains immediately** — the Gateway looks up the escalated Playbook, runs it as a second agent session, merges the two diagnostic reports, and returns the combined findings in a single response. No second API call needed. |
+| `auto` | `session` or `auto` | **Auto-chains immediately** — the Gateway looks up the escalated Playbook, runs it as a second agent session, merges the two diagnostic reports and returns the combined findings in a single response. No second API call needed. |
 | `auto` | `manual` or `""` | Returns `suggested_next` — the target playbook requires explicit operator invocation. |
 | `session` (with `escalation` in `allowed_classes`) | `session` or `auto` | Auto-chains — the session token covers cross-agent escalation and the target allows it. |
 | `session` (without `escalation`) | any | Returns `suggested_next`. |
@@ -1622,7 +1696,7 @@ A database entry in `infrastructure.json` can declare which roles are permitted 
 }
 ```
 
-With this configuration: a caller requesting `approval_mode: force` against `prod-primary` must hold the `dba_lead` or `oncall_senior` role. A caller without a matching role is silently **clamped** to the playbook's declared mode (typically `manual`) — the run proceeds, but without the requested override. The response `warnings` array records what was requested, what it was clamped to, and the caller's identity:
+With this configuration: a caller requesting `approval_mode: force` against `prod-primary` must hold the `dba_lead` or `oncall_senior` role. A caller without a matching role is silently **clamped** to the playbook's declared mode (typically `manual`) — the run proceeds, but without the requested override. The response `warnings` array records what was requested, what it was clamped to and the caller's identity:
 
 ```json
 {
@@ -1665,12 +1739,12 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_restart_triage/r
 curl -s -X DELETE http://localhost:1199/v1/approval/sessions/$SESSION
 ```
 
-**Session validation:** the gateway calls auditd to validate the session before proxying each write or destructive tool call. If the session is expired, revoked, or does not cover the tool's action class, the gateway returns `403` with:
+**Session validation:** the gateway calls auditd to validate the session before proxying each write or destructive tool call. If the session is expired, revoked or does not cover the tool's action class, the gateway returns `403` with:
 
 ```json
 {
   "error":  "approval_session_required",
-  "detail": "session missing, expired, or does not cover this action class"
+  "detail": "session missing, expired or does not cover this action class"
 }
 ```
 
@@ -1730,7 +1804,7 @@ fi
 
 ## agent_approve execution mode
 
-`agent_approve` is the third execution mode for Playbooks. Where `agent` mode lets the LLM run autonomously (gathering evidence and deciding actions without human gates), `agent_approve` puts the operator in the loop at every step: the gateway proposes one action, the operator approves or denies it, the gateway executes and re-plans, and the loop continues until done.
+`agent_approve` is the third execution mode for Playbooks. Where `agent` mode lets the LLM run autonomously (gathering evidence and deciding actions without human gates), `agent_approve` puts the operator in the loop at every step: the gateway proposes one action, the operator approves or denies it, the gateway executes and re-plans and the loop continues until done.
 
 Use `agent_approve` for Playbooks that perform **mutating** operations — process terminations, setting changes, restarts — where you want a human to confirm each individual tool call before it fires. Critically, the operator sees the proposed action and its stated reason *before* it executes — this is the only point in the system where cascade risks (e.g. "terminating this session will also roll back session B's uncommitted writes") are surfaced to a human before damage is done.
 
@@ -1748,7 +1822,7 @@ Concretely, on every `/proceed` call the gateway:
 
 This means the plan adapts to evidence as it arrives. A few concrete consequences:
 
-- **Step count is not fixed.** A lock-chain remediation against a 2-session chain produces fewer `get_session_info` steps than one against a 5-session chain — the LLM inspects every intermediate it discovers, and the chain depth is only known after `get_blocking_queries` returns.
+- **Step count is not fixed.** A lock-chain remediation against a 2-session chain produces fewer `get_session_info` steps than one against a 5-session chain — the LLM inspects every intermediate it discovers and the chain depth is only known after `get_blocking_queries` returns.
 - **State changes between steps are absorbed.** If a blocked session disconnects on its own between step 1 and step 3, the LLM sees the updated `get_blocking_queries` output and skips the now-unnecessary termination.
 - **The `reason` field is grounded in real data.** Cascade warnings ("terminating root will also roll back session 92621 with `has_writes=true`") are written after the LLM has actually inspected session 92621 — they are not boilerplate from the Playbook guidance.
 - **Failures truncate the plan.** If the LLM cannot produce a valid next step (parse error, empty tool, LLM error), the run is abandoned at the current step rather than continuing on a stale plan.
@@ -1930,7 +2004,7 @@ The loop completes without pausing. `force` chains through all playbooks includi
 
 ### Interactive approval (human-in-the-loop demo)
 
-`--approval-mode manual` turns the approval loop into a live terminal prompt. For each proposed step, `faulttest` prints the tool, its logical arguments (connection plumbing stripped), and the full reason field — then waits for `y/n` before sending `/proceed`:
+`--approval-mode manual` turns the approval loop into a live terminal prompt. For each proposed step, `faulttest` prints the tool, its logical arguments (connection plumbing stripped) and the full reason field — then waits for `y/n` before sending `/proceed`:
 
 ```bash
 go run ./testing/cmd/faulttest run \
@@ -1961,7 +2035,7 @@ The read-only steps (`get_blocking_queries`, `get_session_info`) appear first. T
 
 The `reason` field is what the Playbook guidance instructs the LLM to produce: before the operator sees a destructive action, they see exactly why it is being proposed and what side effects to expect. If the operator types `n`, `faulttest` sends `resolution: "denied"` to `/proceed` and the gateway marks the run abandoned — nothing is executed.
 
-This is the contrast with Crystal Ball mode: an unguided agent would either terminate silently (if running autonomously) or, as observed in testing, present `cancel_query` as "Option 1 (Immediate)" with an incorrect description of its effect. The guided `agent_approve` path surfaces the correct action, its reason, and its cascade risk — all before the operator commits.
+This is the contrast with Crystal Ball mode: an unguided agent would either terminate silently (if running autonomously) or, as observed in testing, present `cancel_query` as "Option 1 (Immediate)" with an incorrect description of its effect. The guided `agent_approve` path surfaces the correct action, its reason and its cascade risk — all before the operator commits.
 
 ### Step tracking
 
@@ -2044,7 +2118,7 @@ Response:
 GET /api/v1/fleet/playbook-runs/{runID}/pending-step
 ```
 
-Returns the single step currently awaiting approval (`status=proposed`). Returns `404` if no step is pending. Use this to poll for the next step after calling `/proceed`, or to resume an in-progress run after a gateway restart.
+Returns the single step currently awaiting approval (`status=proposed`). Returns `404` if no step is pending. Use this to poll for the next step after calling `/proceed` or to resume an in-progress run after a gateway restart.
 
 ### `PlaybookRunStep` object
 
@@ -2135,7 +2209,7 @@ POST /api/v1/fleet/playbooks/import
 | `rundeck` | Yes | Rundeck job definition XML/YAML — shell commands are translated into tool references |
 | `ansible` | Yes | Ansible playbook — tasks are translated into natural-language tool descriptions |
 
-LLM-backed formats require `HELPDESK_MODEL_VENDOR`, `HELPDESK_MODEL_NAME`, and `HELPDESK_API_KEY` to be configured on the Gateway. The `yaml` format never calls the LLM and works without any API key.
+LLM-backed formats require `HELPDESK_MODEL_VENDOR`, `HELPDESK_MODEL_NAME` and `HELPDESK_API_KEY` to be configured on the Gateway. The `yaml` format never calls the LLM and works without any API key.
 
 ### Response
 
@@ -2381,7 +2455,7 @@ This feeds the `accuracy_rate` for the `pbs_lock_chain_triage` series. Over many
 
 ### Step 6 — Incident narrative: the full picture
 
-A single call assembles the complete incident view — triage findings, gate decision, remediation outcome, and operator feedback — from the run records and audit events created in steps 1–5:
+A single call assembles the complete incident view — triage findings, gate decision, remediation outcome and operator feedback — from the run records and audit events created in steps 1–5:
 
 ```bash
 curl -s "$GW/api/v1/incidents/$RUN_ID" | jq .
@@ -2429,7 +2503,7 @@ curl -s "$GW/api/v1/incidents/$RUN_ID" | jq .
 
 ### Step 7 — Vault: the knowledge compounds
 
-This incident — its chain of thought, the operator's gate reason, the remediation steps, and the confirmed diagnosis — is now part of the Vault's institutional memory.
+This incident — its chain of thought, the operator's gate reason, the remediation steps and the confirmed diagnosis — is now part of the Vault's institutional memory.
 
 ```bash
 # Check accuracy for this playbook series after the feedback lands
@@ -2444,7 +2518,7 @@ Correct diagnoses:    22
 Accuracy rate:        95.7%
 ```
 
-The next operator who encounters a lock chain gets the same agent, the same Playbook guidance, and now a 95.7% confirmed accuracy rate behind the hypothesis it produces. The drift command (`faulttest vault drift`) will flag it if that rate starts to fall — for example, if a PostgreSQL upgrade changes lock behaviour and the existing hypotheses become less reliable. That is the signal to update the Playbook guidance.
+The next operator who encounters a lock chain gets the same agent, the same Playbook guidance and now a 95.7% confirmed accuracy rate behind the hypothesis it produces. The drift command (`faulttest vault drift`) will flag it if that rate starts to fall — for example, if a PostgreSQL upgrade changes lock behaviour and the existing hypotheses become less reliable. That is the signal to update the Playbook guidance.
 
 The complete incident trail — from triage chain-of-thought through gate reason through remediation steps through confirmed diagnosis — is retrievable at any time from the audit events and the incident narrative endpoint. Nothing is ephemeral.
 
@@ -2476,7 +2550,7 @@ The `description` is passed verbatim to the fleet planner as the job intent. Wri
 
 ```
 # Good: clear intent the planner can act on
-"description": "Investigate replication lag on all production replicas. Check WAL sender state, sent/replay LSN gaps, and replica disk usage."
+"description": "Investigate replication lag on all production replicas. Check WAL sender state, sent/replay LSN gaps and replica disk usage."
 
 # Weak: too vague to generate a useful plan
 "description": "Check replication"
@@ -2575,9 +2649,9 @@ Full field reference for the `Playbook` object returned by all endpoints:
 | `entry_point` | bool | `true` marks this as the preferred starting Playbook for its `problem_class`. Used by the planner to resolve "where do I start?" when multiple Playbooks could apply. Only one Playbook per problem class should have `entry_point=true`. |
 | `escalates_to` | []string | Series IDs (`pbs_*`) of Playbooks to consider next if this Playbook's hypothesis is disproven by the collected evidence. Injected into the agent prompt as escalation context. |
 | `requires_evidence` | []string | Log patterns or error signals expected to be present before this Playbook is selected. Expressed as case-insensitive substrings or regex fragments (e.g. `"FATAL.*invalid value for parameter"`). At run time the Gateway checks these patterns against the `context` field of the run request and emits `warnings` for any that are missing. Execution is never blocked — warnings are advisory only. |
-| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to an agent as an autonomous triage session; the agent collects evidence, forms hypotheses, and returns a structured diagnosis with recommended (not executed) remediation steps. `agent_approve` — the gateway drives a step-by-step loop: the LLM proposes one action at a time, the operator approves each step before it executes, the gateway executes via direct tool dispatch, and the LLM re-plans based on the result; returns `202 Accepted` with `pending_approval` status until the run completes. See [agent_approve execution mode](#agent_approve-execution-mode). |
+| `execution_mode` | string | `fleet` (default) — routes through the fleet planner and returns a `FleetPlanResponse`. `agent` — routes directly to an agent as an autonomous triage session; the agent collects evidence, forms hypotheses and returns a structured diagnosis with recommended (not executed) remediation steps. `agent_approve` — the gateway drives a step-by-step loop: the LLM proposes one action at a time, the operator approves each step before it executes, the gateway executes via direct tool dispatch and the LLM re-plans based on the result; returns `202 Accepted` with `pending_approval` status until the run completes. See [agent_approve execution mode](#agent_approve-execution-mode). |
 | `agent_name` | string | For `execution_mode: agent` and `agent_approve` Playbooks, the agent to route to. Defaults to the database agent (`database_agent`) if omitted. Use `sysadmin_agent` for Playbooks that require host-level diagnostics. |
-| `approval_mode` | string | Default approval mode for runs of this Playbook: `auto`, `session`, or `manual`. Can be overridden per run via the request body. Defaults to `""` which is treated as `manual` (safe default). For Playbooks that cross agent boundaries via auto-chaining, this also gates cross-agent escalation — see [Approval modes](#approval-modes). |
+| `approval_mode` | string | Default approval mode for runs of this Playbook: `auto`, `session` or `manual`. Can be overridden per run via the request body. Defaults to `""` which is treated as `manual` (safe default). For Playbooks that cross agent boundaries via auto-chaining, this also gates cross-agent escalation — see [Approval modes](#approval-modes). |
 | `root_cause_classes` | object | Attribution taxonomy for conclusion-stability certification. **Triage playbooks only.** Contains `version` (semver string, e.g. `"1.0"`) and `classes` (list of kebab-case root-cause labels, 3–6 entries). Omit for remediation playbooks. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md). |
 | `stats` | object | Inline run statistics for the Playbook's series. Populated by `GET /fleet/playbooks` (list); omitted when no runs have been recorded. See `PlaybookRunStats` below. Not persisted — computed on read. |
 | `created_at` | RFC3339 | Creation timestamp |

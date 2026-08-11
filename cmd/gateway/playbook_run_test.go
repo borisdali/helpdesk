@@ -4284,6 +4284,52 @@ func TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_GateEscalation_SyntheticGate_TriageType_NoDuplicateWarning
+// verifies the dedup: when the triage playbook has PlaybookType == "triage" (so
+// recordSignalLessWarnings' unconditional protocol_violation check ALSO fires,
+// unlike TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal above, whose
+// fixture leaves PlaybookType unset), the fallback gate's own warning message
+// must be suppressed rather than duplicating the one recordSignalLessWarnings
+// already added for the exact same underlying fact.
+func TestHandlePlaybookRun_GateEscalation_SyntheticGate_TriageType_NoDuplicateWarning(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage02",
+		SeriesID:      "pbs_cache_miss_triage2",
+		Name:          "Cache Miss Triage",
+		PlaybookType:  "triage",
+		Guidance:      "Check cache hit ratio and sequential scans.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// No TRANSITION_TO line — protocol violation, same as the test above.
+	agentText := "FINDINGS: cache_hit_ratio=0.928; blks_read=576; worst_table=test_large_table; recommended=add_index\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true,"remediation_series_id":"pbs_cache_miss_remediate"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("protocol_violation = %v, want true (PlaybookType is triage)", resp["protocol_violation"])
+	}
+	warnings, _ := resp["warnings"].([]any)
+	if len(warnings) != 1 {
+		t.Errorf("warnings should contain exactly 1 entry (deduped), got %d: %v", len(warnings), warnings)
+	}
+}
+
 // TestHandlePlaybookRun_GateEscalation_NoSignal_NoRemediationTarget verifies that
 // when gate_escalation=true but remediation_series_id is absent and the agent omits
 // TRANSITION_TO, no synthetic gate is created — the run completes normally.

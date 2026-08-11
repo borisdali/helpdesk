@@ -945,9 +945,16 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with
 		// TRANSITION_TO or ESCALATE_TO. A run that omits this signal is a bug.
-		existingWarnings, _ := extra["warnings"].([]string)
-		extra["warnings"] = append(existingWarnings,
-			"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal; gate created from remediation_series_id")
+		// Skipped when recordSignalLessWarnings already appended an equivalent,
+		// per-hop-attributed message for this exact same fact (extra["protocol_violation"]
+		// is only set when pb.PlaybookType == "triage" — for any other playbook
+		// type this fallback-gate message is still the only signal, so it must
+		// still be added).
+		if extra["protocol_violation"] != true {
+			existingWarnings, _ := extra["warnings"].([]string)
+			extra["warnings"] = append(existingWarnings,
+				"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal; gate created from remediation_series_id")
+		}
 		slog.Warn("playbook: triage protocol violation — agent omitted TRANSITION_TO/ESCALATE_TO",
 			"run_id", prev.runID, "remediation_series", req.RemediationSeriesID,
 			"confidence_warning", warn)
