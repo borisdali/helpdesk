@@ -2346,6 +2346,114 @@ func TestQueryJourneys_HasTargetDrift(t *testing.T) {
 	}
 }
 
+// TestQueryJourneys_HasProtocolViolation mirrors TestQueryJourneys_HasTargetDrift
+// exactly, for the new ProtocolViolation signal — verifies the real,
+// SQLite-backed round-trip: Record → outcomeStatus switch → QueryJourneys →
+// HasProtocolViolation/Outcome, not just the pure outcomePriority function.
+func TestQueryJourneys_HasProtocolViolation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_protocol_violation_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	eventsA := []*Event{
+		{
+			EventID:   "gwr_viol_a",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_viol_a",
+			Session:   Session{ID: "tr_viol_a"},
+			Input:     Input{UserQuery: "investigate connection refused"},
+		},
+		{
+			EventID:   "gv_viol_a",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_viol_a",
+			Session:   Session{ID: "tr_viol_a"},
+			DelegationVerification: &DelegationVerification{
+				Agent:             "postgres_database_agent",
+				ActionClass:       ActionRead,
+				ProtocolViolation: true,
+			},
+		},
+	}
+
+	eventsB := []*Event{
+		{
+			EventID:   "gwr_viol_b",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_noviol_b",
+			Session:   Session{ID: "tr_noviol_b"},
+			Input:     Input{UserQuery: "show active connections"},
+		},
+		{
+			EventID:   "gv_viol_b",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_noviol_b",
+			Session:   Session{ID: "tr_noviol_b"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+			},
+		},
+	}
+
+	for _, e := range append(eventsA, eventsB...) {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	byTrace := make(map[string]JourneySummary, len(journeys))
+	for _, j := range journeys {
+		byTrace[j.TraceID] = j
+	}
+
+	violJourney := byTrace["tr_viol_a"]
+	if !violJourney.HasProtocolViolation {
+		t.Error("tr_viol_a: expected HasProtocolViolation=true")
+	}
+	if violJourney.Outcome != "protocol_violation" {
+		t.Errorf("tr_viol_a: Outcome = %q, want %q", violJourney.Outcome, "protocol_violation")
+	}
+	if violJourney.HasMismatch || violJourney.HasTargetDrift {
+		t.Error("tr_viol_a: expected HasMismatch=false, HasTargetDrift=false — protocol violation is an independent signal")
+	}
+
+	cleanJourney := byTrace["tr_noviol_b"]
+	if cleanJourney.HasProtocolViolation {
+		t.Error("tr_noviol_b: expected HasProtocolViolation=false")
+	}
+
+	// GET /v1/journeys?outcome=protocol_violation must work — the generic
+	// outcome-filter path, exercised here at the store layer.
+	filtered, err := store.QueryJourneys(ctx, JourneyOptions{Outcome: "protocol_violation"})
+	if err != nil {
+		t.Fatalf("QueryJourneys with outcome filter: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].TraceID != "tr_viol_a" {
+		t.Errorf("QueryJourneys(outcome=protocol_violation) = %v, want exactly [tr_viol_a]", filtered)
+	}
+}
+
 // TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie verifies that
 // even though "unverified_claim" and "target_drift_detected" are tied at
 // outcomePriority 9 — so only one wins as the displayed Outcome string when both
@@ -2435,11 +2543,16 @@ func TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie(t *test
 func TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied(t *testing.T) {
 	a := outcomePriority("unverified_claim")
 	b := outcomePriority("target_drift_detected")
-	if a != b {
-		t.Errorf("outcomePriority(unverified_claim)=%d, outcomePriority(target_drift_detected)=%d — want tied", a, b)
+	c := outcomePriority("protocol_violation")
+	if a != b || b != c {
+		t.Errorf("outcomePriority(unverified_claim)=%d, outcomePriority(target_drift_detected)=%d, outcomePriority(protocol_violation)=%d — want all three tied", a, b, c)
 	}
 	if a != 9 {
 		t.Errorf("outcomePriority(unverified_claim) = %d, want 9", a)
+	}
+	// Adding the new tier-9 entry must not disturb the ordering below it.
+	if got := outcomePriority("error"); got != 8 {
+		t.Errorf("outcomePriority(error) = %d, want 8 (unchanged by the new tier-9 entry)", got)
 	}
 }
 

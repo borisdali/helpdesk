@@ -494,6 +494,7 @@ type agentRunResult struct {
 	outcome          string
 	escalatedTo      string // set when agent emits ESCALATE_TO (true out-of-scope escalation)
 	transitionTo     string // set when agent emits TRANSITION_TO (same-domain triage→remediation)
+	sawSignalLine    bool   // true iff a TRANSITION_TO:/ESCALATE_TO: line was present at all (see agentEscalation.SawSignalLine)
 	findings         string
 	diagReport       *audit.DiagnosticReport
 	runID            string
@@ -566,6 +567,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
+				res.sawSignalLine = esc.SawSignalLine
 				// Validate emitted next-playbook targets against the triage
 				// playbook's declared allow-lists. TRANSITION_TO is checked
 				// against transitions_to (same-domain follow-ons), ESCALATE_TO
@@ -709,7 +711,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		DiagnosticReport: primary.diagReport,
 	}}
 
-	recordEvidenceWithoutEscalationWarning(extra, g.auditURL, g.auditAPIKey, primary)
+	if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, pb, primary) {
+		g.recordProtocolViolationEvent(r.Context(), primary)
+	}
 
 	const maxChainDepth = 5
 	prev := primary
@@ -869,7 +873,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if chained == nil {
 			break
 		}
-		recordEvidenceWithoutEscalationWarning(extra, g.auditURL, g.auditAPIKey, *chained)
+		if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, nextPB, *chained) {
+			g.recordProtocolViolationEvent(r.Context(), *chained)
+		}
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -1218,30 +1224,120 @@ func objectiveEvidenceForceGate(events []audit.Event) (bool, string) {
 	return false, ""
 }
 
-// recordEvidenceWithoutEscalationWarning appends a short note to
-// extra["evidence_warnings"] when hop recorded objective, code-derived tool
-// evidence (e.g. a real pod restart/OOM kill) but its own model output did not
-// escalate or transition to another playbook. This catches the case
-// objectiveEvidenceForceGate cannot on its own: that gate only runs on chain-loop
-// iterations where a hop already decided to escalate, so a hop that silently
-// closes out despite real evidence never reaches it. Unlike the gate, this does
-// not re-route the response into pending_gate — there is no next-hop candidate
-// to gate approval for — it only surfaces the discrepancy for the operator to
-// see in the response they already get back.
-func recordEvidenceWithoutEscalationWarning(extra map[string]any, auditURL, apiKey string, hop agentRunResult) {
+// protocolViolation reports whether hop violated the triage response
+// protocol: PlaybookType=="triage" playbooks are contractually required to
+// end with an explicit TRANSITION_TO/ESCALATE_TO signal, even "none" — see
+// validatePlaybookProtocol in playbook_from_trace.go, the authoring-time
+// version of this same rule ("guidance: missing signal line — must end with
+// TRANSITION_TO: <series_id> or ESCALATE_TO: <target|none>"). Remediation and
+// untyped playbooks are exempt: validatePlaybookProtocol explicitly forbids
+// remediation playbooks from ever emitting either signal at all ("routing is
+// handled by the triage gate"), so applying this check to them would
+// false-positive on every completed remediation run.
+func protocolViolation(pbType string, hop agentRunResult) bool {
+	if pbType != "triage" {
+		return false
+	}
 	if hop.escalatedTo != "" || hop.transitionTo != "" {
-		return
+		return false
 	}
-	fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart))
-	if !fire {
-		return
-	}
-	warn := fmt.Sprintf("hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
-		hop.playbookSeriesID, hop.agentName, reason)
-	if existing, ok := extra["evidence_warnings"].([]string); ok {
-		extra["evidence_warnings"] = append(existing, warn)
+	return !hop.sawSignalLine
+}
+
+// appendWarning appends msg to the string slice stored at extra[key],
+// creating it if absent.
+func appendWarning(extra map[string]any, key, msg string) {
+	if existing, ok := extra[key].([]string); ok {
+		extra[key] = append(existing, msg)
 	} else {
-		extra["evidence_warnings"] = []string{warn}
+		extra[key] = []string{msg}
+	}
+}
+
+// recordSignalLessWarnings runs three independent, unconditional checks on
+// any hop that resolved without emitting TRANSITION_TO/ESCALATE_TO — a case
+// the in-loop force-gates never reach, since the chain loop itself only runs
+// when a hop has a signal to chain on. Each check surfaces a warning without
+// gating or blocking anything: there is no next-hop candidate to gate
+// approval for.
+//
+//   - objective_evidence: real, code-derived tool evidence (e.g. a pod
+//     restart/OOM kill) the hop saw but didn't act on.
+//   - protocol_violation: the triage response protocol itself was violated
+//     (see protocolViolation). Returns true so the caller can additionally
+//     persist a durable, queryable audit event (see checkTargetScope's
+//     analogous target-drift event for the established pattern) — this
+//     function only has auditURL/apiKey for reading existing events, not a
+//     *Gateway to write one.
+//   - low_confidence: reuses lowConfidenceForceGate's existing 50% threshold,
+//     no new number. Deliberately NOT counted toward the CLEAN cert (see
+//     hasCleanWarning in testing/cmd/faulttest) — self-reported, already
+//     captured by the separate Evaluation stability axis, same reason
+//     gate_reason:"low_confidence" is already excluded there.
+//
+// trust_not_earned is deliberately not included: it's about whether to trust
+// a *proposed handoff*, and a signal-less hop has no handoff to evaluate
+// trust for.
+func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb *audit.Playbook, hop agentRunResult) (protocolViolationFired bool) {
+	if hop.escalatedTo != "" || hop.transitionTo != "" {
+		return false
+	}
+
+	if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
+		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
+			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName, reason))
+	}
+
+	if protocolViolation(pb.PlaybookType, hop) {
+		extra["protocol_violation"] = true
+		// Substring "omitted required TRANSITION_TO" is deliberately kept
+		// compatible with testing/cmd/faulttest/main.go's existing detection
+		// (strings.Contains(w, "omitted required TRANSITION_TO")), so the
+		// CLEAN-cert computation picks this up with zero faulttest-side change.
+		appendWarning(extra, "warnings", fmt.Sprintf(
+			"hop %q (agent %s) omitted required TRANSITION_TO/ESCALATE_TO signal",
+			hop.playbookSeriesID, hop.agentName))
+		protocolViolationFired = true
+	}
+
+	if lowConfidenceForceGate(hop.diagReport) {
+		appendWarning(extra, "warnings", fmt.Sprintf(
+			"hop %q (agent %s) resolved with a low-confidence diagnosis but did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName))
+	}
+
+	return protocolViolationFired
+}
+
+// recordProtocolViolationEvent persists a durable, queryable
+// delegation_verification event for a hop that violated the triage response
+// protocol (see protocolViolation) — mirrors checkTargetScope's target-drift
+// event-emission block above exactly. This is what makes
+// GET /v1/journeys?outcome=protocol_violation work, and is the mechanism
+// that surfaces the violation even on a fully unattended run with nobody
+// watching a Decision Hub: no gate, no stall — the run completes normally,
+// but the violation stays independently discoverable via the Journey.
+func (g *Gateway) recordProtocolViolationEvent(ctx context.Context, hop agentRunResult) {
+	if g.auditor == nil {
+		return
+	}
+	event := &audit.Event{
+		EventID:   "gv_" + uuid.New().String()[:8],
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypeDelegationVerification,
+		TraceID:   hop.traceID,
+		Session: audit.Session{
+			ID: hop.traceID,
+		},
+		DelegationVerification: &audit.DelegationVerification{
+			Agent:             hop.agentName,
+			ActionClass:       audit.ActionRead,
+			ProtocolViolation: true,
+		},
+	}
+	if err := g.auditor.RecordEvent(ctx, event); err != nil {
+		slog.Warn("playbook run: failed to record protocol violation event", "trace_id", hop.traceID, "err", err)
 	}
 }
 
@@ -2300,10 +2396,15 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 
 // agentEscalation holds the structured signals parsed from an agent response.
 type agentEscalation struct {
-	EscalateTo   string // series_id for out-of-scope escalations (ESCALATE_TO signal)
-	TransitionTo string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
-	Findings     string // one-sentence diagnosis summary
-	CleanText    string // response text with signal lines removed
+	EscalateTo    string // series_id for out-of-scope escalations (ESCALATE_TO signal)
+	TransitionTo  string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	Findings      string // one-sentence diagnosis summary
+	CleanText     string // response text with signal lines removed
+	SawSignalLine bool   // true iff a TRANSITION_TO: or ESCALATE_TO: line was present at
+	// all, regardless of whether its value resolved to a real target, "none",
+	// or "" — lets callers distinguish "explicitly declined" (compliant) from
+	// "protocol violation: line omitted entirely" (both collapse to empty
+	// EscalateTo/TransitionTo otherwise).
 }
 
 // parseAgentEscalation scans the agent's response text for structured signal
@@ -2323,11 +2424,13 @@ func parseAgentEscalation(text string) agentEscalation {
 		// Normalise markdown bold: **FINDINGS:** → FINDINGS:
 		trimmed = strings.NewReplacer("**FINDINGS:**", "FINDINGS:", "**ESCALATE_TO:**", "ESCALATE_TO:").Replace(trimmed)
 		if strings.HasPrefix(trimmed, "TRANSITION_TO:") {
+			result.SawSignalLine = true
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "TRANSITION_TO:"))
 			if v != "none" && v != "" {
 				result.TransitionTo = v
 			}
 		} else if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
+			result.SawSignalLine = true
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
 			if v != "none" && v != "" {
 				result.EscalateTo = v

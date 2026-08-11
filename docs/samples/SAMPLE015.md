@@ -374,7 +374,7 @@ So runs 1 and 2 had a consistent omission where the model just never tried the r
 And it's a blatant lie. Way to go, Crystal Ball!
 
 
-## 2.2 Crystal Ball run#3:
+## 2.2 Crystal Ball run#4:
 
 To be sure, this is not the formal fault injection test we normally use, as it hasn't been retrofited for the N-hop escalation + translation yet. This is a direct API call to inject a faull through the /v1/fleet/playbooks/<pb_id>/run end point:
 

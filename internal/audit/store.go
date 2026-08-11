@@ -327,18 +327,22 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			outcomeStatus = event.PolicyDecision.Effect
 		}
 	} else if event.DelegationVerification != nil {
-		// Surface target-scope drift and fabrication mismatch as distinct outcome
-		// strings so QueryJourneys can elevate the journey outcome — checked in this
-		// order since a single event's TargetDrift and Mismatch are independent
-		// signals (see checkTargetScope in cmd/gateway/playbooks.go), but the stored
-		// outcome_status column holds only one value per event. A trace where both
-		// signals fire (on the same or different hops) is still fully discoverable
-		// either way, via the independent HasMismatch/HasTargetDrift booleans on the
-		// journey summary rather than this single string. Clean verifications are
+		// Surface target-scope drift, protocol violations, and fabrication mismatch
+		// as distinct outcome strings so QueryJourneys can elevate the journey
+		// outcome — checked in this order since a single event's TargetDrift,
+		// ProtocolViolation, and Mismatch are independent signals (see
+		// checkTargetScope/protocolViolation in cmd/gateway/playbooks.go), but the
+		// stored outcome_status column holds only one value per event. A trace
+		// where multiple signals fire (on the same or different hops) is still
+		// fully discoverable either way, via the independent
+		// HasMismatch/HasTargetDrift/HasProtocolViolation booleans on the journey
+		// summary rather than this single string. Clean verifications are
 		// recorded as "verified".
 		switch {
 		case len(event.DelegationVerification.TargetDrift) > 0:
 			outcomeStatus = "target_drift_detected"
+		case event.DelegationVerification.ProtocolViolation:
+			outcomeStatus = "protocol_violation"
 		case event.DelegationVerification.Mismatch:
 			outcomeStatus = "unverified_claim"
 		default:
@@ -635,6 +639,14 @@ type JourneySummary struct {
 	// different hops is still discoverable via either boolean regardless of the tie
 	// at priority 9 between "unverified_claim" and "target_drift_detected".
 	HasTargetDrift bool `json:"has_target_drift,omitempty"`
+	// HasProtocolViolation is true when any delegation_verification event for this
+	// journey has ProtocolViolation=true — meaning a triage-typed playbook's hop
+	// ended without emitting a required TRANSITION_TO/ESCALATE_TO signal at all.
+	// Computed independently of which outcome string (outcomePriority) wins for
+	// the trace, mirroring HasMismatch/HasTargetDrift, so a trace with multiple
+	// signals on different hops is still discoverable via any boolean regardless
+	// of the 3-way tie at priority 9.
+	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
 	// IncidentRunID is the plr_* playbook run ID for journeys associated with an
 	// incident run. Empty for ad-hoc or non-incident journeys.
 	IncidentRunID string `json:"incident_run_id,omitempty"`
@@ -745,24 +757,25 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 	defer rows2.Close()
 
 	type traceData struct {
-		startedAt          string
-		endedAt            string
-		userID             string
-		userQuery          string
-		purpose            string
-		purposeNote        string
-		agent              string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
-		category           string
-		tools              []string
-		delegations        []DelegationSummary
-		currentDelegIdx    int // index into delegations for the in-progress delegation; -1 = none
-		outcome            string
-		origin             string // dispatch path; taken from first tool_execution event
-		count              int
-		retryCount         int  // number of tool_retry events in this trace
-		sawRequireApproval bool // true if a require_approval policy decision was seen
-		hasMismatch        bool // true when any delegation_verification event has mismatch=true
-		hasTargetDrift     bool // true when any delegation_verification event has target_drift_detected outcome
+		startedAt            string
+		endedAt              string
+		userID               string
+		userQuery            string
+		purpose              string
+		purposeNote          string
+		agent                string // name of the owning agent (orchestrator name when session_agent is set, else sub-agent)
+		category             string
+		tools                []string
+		delegations          []DelegationSummary
+		currentDelegIdx      int // index into delegations for the in-progress delegation; -1 = none
+		outcome              string
+		origin               string // dispatch path; taken from first tool_execution event
+		count                int
+		retryCount           int  // number of tool_retry events in this trace
+		sawRequireApproval   bool // true if a require_approval policy decision was seen
+		hasMismatch          bool // true when any delegation_verification event has mismatch=true
+		hasTargetDrift       bool // true when any delegation_verification event has target_drift_detected outcome
+		hasProtocolViolation bool // true when any delegation_verification event has protocol_violation outcome
 	}
 
 	// Preserve the order returned by step 1.
@@ -817,6 +830,14 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			if eventType == string(EventTypeDelegationVerification) &&
 				outcomeStatus.Valid && outcomeStatus.String == "target_drift_detected" {
 				d.hasTargetDrift = true
+			}
+			// Track protocol violations: "protocol_violation" is the outcome stored
+			// for delegation_verification events where ProtocolViolation=true —
+			// independent of hasMismatch/hasTargetDrift above (see the 3-way tie at
+			// outcomePriority 9), so checked separately rather than as an else-if.
+			if eventType == string(EventTypeDelegationVerification) &&
+				outcomeStatus.Valid && outcomeStatus.String == "protocol_violation" {
+				d.hasProtocolViolation = true
 			}
 			continue
 		}
@@ -949,24 +970,25 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			d.outcome = "approved"
 		}
 		summaries = append(summaries, JourneySummary{
-			TraceID:        id,
-			StartedAt:      d.startedAt,
-			EndedAt:        d.endedAt,
-			DurationMs:     durationMs,
-			UserID:         d.userID,
-			UserQuery:      d.userQuery,
-			Purpose:        d.purpose,
-			PurposeNote:    d.purposeNote,
-			Agent:          d.agent,
-			Category:       d.category,
-			Delegations:    d.delegations,
-			ToolsUsed:      tools,
-			Outcome:        d.outcome,
-			EventCount:     d.count,
-			RetryCount:     d.retryCount,
-			Origin:         d.origin,
-			HasMismatch:    d.hasMismatch,
-			HasTargetDrift: d.hasTargetDrift,
+			TraceID:              id,
+			StartedAt:            d.startedAt,
+			EndedAt:              d.endedAt,
+			DurationMs:           durationMs,
+			UserID:               d.userID,
+			UserQuery:            d.userQuery,
+			Purpose:              d.purpose,
+			PurposeNote:          d.purposeNote,
+			Agent:                d.agent,
+			Category:             d.category,
+			Delegations:          d.delegations,
+			ToolsUsed:            tools,
+			Outcome:              d.outcome,
+			EventCount:           d.count,
+			RetryCount:           d.retryCount,
+			Origin:               d.origin,
+			HasMismatch:          d.hasMismatch,
+			HasTargetDrift:       d.hasTargetDrift,
+			HasProtocolViolation: d.hasProtocolViolation,
 		})
 	}
 
@@ -1038,21 +1060,25 @@ func (s *Store) GetTraceIDByRunID(ctx context.Context, runID string) (string, er
 // outcomePriority returns the severity rank for a journey outcome string.
 // Higher priority outcomes win when aggregating events within a trace.
 //
-//	unverified_claim(9) = target_drift_detected(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
+//	unverified_claim(9) = target_drift_detected(9) = protocol_violation(9) > error(8) > denied(7) > escalation_required(6) > verified_failed(5)
 //	> verified_warning(4) > approved(3) > verified_ok(2) > success(1) > verified(0.5) > unknown(0)
 //
-// unverified_claim and target_drift_detected are deliberately tied, not ranked —
-// both represent "this agent's output can't be trusted as-is" for different reasons
-// (no evidence at all, vs. evidence pointing at the wrong target), not different
-// severities. The tie is safe because HasMismatch/HasTargetDrift on JourneySummary
-// are computed independently of which outcome string wins this priority comparison,
-// so a trace where both fire is still fully discoverable via either boolean even
+// unverified_claim, target_drift_detected, and protocol_violation are deliberately
+// tied, not ranked — all three represent "this agent's output can't be trusted
+// as-is" for different reasons (no evidence at all, evidence pointing at the wrong
+// target, or the agent skipping the required response protocol entirely), not
+// different severities. The tie is safe because
+// HasMismatch/HasTargetDrift/HasProtocolViolation on JourneySummary are computed
+// independently of which outcome string wins this priority comparison, so a trace
+// where multiple fire is still fully discoverable via any of the booleans even
 // though only one outcome string is displayed.
 func outcomePriority(o string) int {
 	switch o {
 	case "unverified_claim":
 		return 9
 	case "target_drift_detected":
+		return 9
+	case "protocol_violation":
 		return 9
 	case "error":
 		return 8

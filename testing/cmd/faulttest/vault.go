@@ -410,6 +410,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	TaxonomyVersion         string         `json:"taxonomy_version"`
 	WarningCount            int            `json:"warning_count"`
 	IsClean                 bool           `json:"is_clean"`
+	WarningDistribution     map[string]int `json:"warning_distribution"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -449,6 +450,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		TaxonomyVersion         string         `json:"taxonomy_version"`
 		WarningCount            int            `json:"warning_count"`
 		IsClean                 bool           `json:"is_clean"`
+		WarningDistribution     map[string]int `json:"warning_distribution"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -1440,6 +1442,9 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 		cleanVerdict = fmt.Sprintf("no  (%d/%d run(s) tripped a verified warning signal)", cert.WarningCount, cert.NRuns)
 	}
 	fmt.Printf("  Clean         : %s\n", cleanVerdict)
+	if dist := warningDistributionString(cert.WarningDistribution); dist != "" {
+		fmt.Printf("  Warning types : %s\n", dist)
+	}
 	if cert.PlaybookSeriesID != "" {
 		fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
 	}
@@ -3207,6 +3212,9 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"is_stable":          sr.isStable(),
 		"warning_count":      cr.WarningCount,
 		"is_clean":           cr.isClean(),
+	}
+	if len(cr.WarningDistribution) > 0 {
+		payload["warning_distribution"] = cr.WarningDistribution
 	}
 	if attr != nil {
 		payload["primary_attribution"] = attr.PrimaryAttribution

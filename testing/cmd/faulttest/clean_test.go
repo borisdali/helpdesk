@@ -42,6 +42,14 @@ func TestBuildCleanReport_SomeWarnings(t *testing.T) {
 	if r.isClean() {
 		t.Error("should not be clean: 3/5 runs tripped a warning signal")
 	}
+	// EvidenceWarnings and ObjectiveEvidenceGate are two manifestations of the
+	// same underlying signal — both counted under "objective_evidence".
+	if r.WarningDistribution["objective_evidence"] != 2 {
+		t.Errorf("WarningDistribution[objective_evidence]: got %d, want 2", r.WarningDistribution["objective_evidence"])
+	}
+	if r.WarningDistribution["protocol_violation"] != 1 {
+		t.Errorf("WarningDistribution[protocol_violation]: got %d, want 1", r.WarningDistribution["protocol_violation"])
+	}
 }
 
 func TestBuildCleanReport_ZeroTolerance(t *testing.T) {
@@ -71,6 +79,53 @@ func TestBuildCleanReport_EmptyResults(t *testing.T) {
 	}
 	if !r.isClean() {
 		t.Error("zero runs should be vacuously clean (WarningCount == 0)")
+	}
+}
+
+func TestWarningTypesFor(t *testing.T) {
+	cases := []struct {
+		name string
+		er   EvalResult
+		want []string
+	}{
+		{"no signals", EvalResult{Passed: true}, nil},
+		{"evidence warnings present", EvalResult{EvidenceWarnings: []string{"x"}}, []string{"objective_evidence"}},
+		{"objective evidence gate", EvalResult{ObjectiveEvidenceGate: true}, []string{"objective_evidence"}},
+		{"both evidence manifestations — still one type", EvalResult{EvidenceWarnings: []string{"x"}, ObjectiveEvidenceGate: true}, []string{"objective_evidence"}},
+		{"protocol violation", EvalResult{ProtocolViolation: true}, []string{"protocol_violation"}},
+		{"both types on one run", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true}, []string{"objective_evidence", "protocol_violation"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := warningTypesFor(tc.er)
+			if len(got) != len(tc.want) {
+				t.Fatalf("warningTypesFor() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("warningTypesFor()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestWarningDistributionString(t *testing.T) {
+	cases := []struct {
+		name string
+		dist map[string]int
+		want string
+	}{
+		{"empty", nil, ""},
+		{"single type", map[string]int{"protocol_violation": 1}, "protocol_violation=1"},
+		{"sorted regardless of map iteration order", map[string]int{"protocol_violation": 1, "objective_evidence": 2}, "objective_evidence=2, protocol_violation=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := warningDistributionString(tc.dist); got != tc.want {
+				t.Errorf("warningDistributionString() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

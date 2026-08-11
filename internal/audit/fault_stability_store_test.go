@@ -704,6 +704,56 @@ func TestFaultStabilityCert_CleanFields_ZeroValueIsClean(t *testing.T) {
 	}
 }
 
+func TestFaultStabilityCert_WarningDistribution_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	dist := map[string]int{"objective_evidence": 1, "protocol_violation": 2}
+	cert := &FaultStabilityCert{
+		FaultID:             "k8s-crashloop",
+		DiagnosisModel:      "claude-haiku-4-5-20251001",
+		NRuns:               5,
+		WarningCount:        3,
+		IsClean:             false,
+		WarningDistribution: dist,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.WarningDistribution) != 2 || got.WarningDistribution["objective_evidence"] != 1 || got.WarningDistribution["protocol_violation"] != 2 {
+		t.Errorf("WarningDistribution: got %v, want %v", got.WarningDistribution, dist)
+	}
+}
+
+func TestFaultStabilityCert_WarningDistribution_Empty(t *testing.T) {
+	// Mirrors TestFaultStabilityCert_AttributionDistribution_Empty — a cert
+	// with no warnings at all must round-trip as a nil/empty map, not a
+	// literal "{}" string leaking into the Go value.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "db-auth-failure",
+		DiagnosisModel: "claude-haiku-4-5-20251001",
+		NRuns:          5,
+		IsClean:        true,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.WarningDistribution) != 0 {
+		t.Errorf("WarningDistribution: got %v, want empty", got.WarningDistribution)
+	}
+}
+
 // ── GetBySeriesAndModel ──────────────────────────────────────────────────────
 
 func TestGetBySeriesAndModel_MultipleFaultsSameSeries(t *testing.T) {

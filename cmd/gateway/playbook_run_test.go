@@ -233,6 +233,9 @@ func TestParseAgentEscalation_FullSignal(t *testing.T) {
 	if esc.EscalateTo != "pbs_pitr_recovery" {
 		t.Errorf("escalate_to = %q", esc.EscalateTo)
 	}
+	if !esc.SawSignalLine {
+		t.Error("SawSignalLine should be true when a real target is emitted")
+	}
 	if strings.Contains(esc.CleanText, "FINDINGS:") {
 		t.Error("CleanText should not contain FINDINGS: line")
 	}
@@ -265,6 +268,9 @@ func TestParseAgentEscalation_NoSignal(t *testing.T) {
 
 	if esc.Findings != "" || esc.EscalateTo != "" {
 		t.Errorf("expected empty signal, got findings=%q escalate_to=%q", esc.Findings, esc.EscalateTo)
+	}
+	if esc.SawSignalLine {
+		t.Error("SawSignalLine should be false — no TRANSITION_TO:/ESCALATE_TO: line was present at all (the protocol-violation case)")
 	}
 	if esc.CleanText != text {
 		t.Errorf("CleanText should equal original text when no signal present")
@@ -789,6 +795,9 @@ func TestParseAgentEscalation_EscalateToNone(t *testing.T) {
 	}
 	if esc.Findings != "Database is operational." {
 		t.Errorf("Findings = %q", esc.Findings)
+	}
+	if !esc.SawSignalLine {
+		t.Error("SawSignalLine should be true — an explicit ESCALATE_TO: none line IS the required signal, distinct from omitting the line entirely")
 	}
 }
 
@@ -3565,16 +3574,22 @@ func TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet(t *testing.T) {
 	}
 }
 
-// ── recordEvidenceWithoutEscalationWarning ─────────────────────────────────
+// ── recordSignalLessWarnings ────────────────────────────────────────────────
+// (formerly recordEvidenceWithoutEscalationWarning; these cases exercise only
+// the pre-existing objective_evidence check — untyped playbook (PlaybookType
+// unset) so protocolViolation never fires and pollutes these fixtures. See
+// TestRecordSignalLessWarnings_ProtocolViolation/_LowConfidence below for the
+// two checks added in this session.)
 
 func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
+	untyped := &audit.Playbook{}
 	t.Run("hop escalated — no-op regardless of evidence", func(t *testing.T) {
 		srv := serveFakeToolEvents(t, []audit.Event{
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 		})
 		extra := map[string]any{}
 		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_docker_inspect"}
-		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop escalated, got %v", extra["evidence_warnings"])
 		}
@@ -3586,7 +3601,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 		})
 		extra := map[string]any{}
 		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_recovery"}
-		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop transitioned, got %v", extra["evidence_warnings"])
 		}
@@ -3596,7 +3611,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 		srv := serveFakeToolEvents(t, nil)
 		extra := map[string]any{}
 		hop := agentRunResult{traceID: "tr_1"}
-		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when no evidence recorded, got %v", extra["evidence_warnings"])
 		}
@@ -3608,7 +3623,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 		})
 		extra := map[string]any{}
 		hop := agentRunResult{traceID: "tr_1", playbookSeriesID: "pbs_k8s_pod_crash_triage", agentName: "k8s_agent"}
-		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		warnings, ok := extra["evidence_warnings"].([]string)
 		if !ok || len(warnings) != 1 {
 			t.Fatalf("expected exactly one evidence_warnings entry, got %v", extra["evidence_warnings"])
@@ -3624,13 +3639,134 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 		})
 		extra := map[string]any{"evidence_warnings": []string{"prior hop warning"}}
 		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_docker_inspect", agentName: "sysadmin_agent"}
-		recordEvidenceWithoutEscalationWarning(extra, srv.URL, "", hop)
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		warnings, ok := extra["evidence_warnings"].([]string)
 		if !ok || len(warnings) != 2 {
 			t.Fatalf("expected two accumulated evidence_warnings entries, got %v", extra["evidence_warnings"])
 		}
 		if warnings[0] != "prior hop warning" {
 			t.Errorf("first warning should be preserved unchanged, got %q", warnings[0])
+		}
+	})
+}
+
+// TestRecordSignalLessWarnings_ProtocolViolation covers the new unconditional
+// protocol-violation check: a triage-typed playbook's hop that resolves
+// without a TRANSITION_TO/ESCALATE_TO line at all.
+func TestRecordSignalLessWarnings_ProtocolViolation(t *testing.T) {
+	triage := &audit.Playbook{PlaybookType: "triage"}
+	remediation := &audit.Playbook{PlaybookType: "remediation"}
+	srv := serveFakeToolEvents(t, nil)
+
+	t.Run("triage, no signal line — violation fires, event recorded", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", playbookSeriesID: "pbs_db_restart_triage", agentName: "postgres_database_agent"}
+		fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop)
+		if !fired {
+			t.Error("expected protocolViolationFired=true")
+		}
+		if extra["protocol_violation"] != true {
+			t.Errorf("extra[protocol_violation] = %v, want true", extra["protocol_violation"])
+		}
+		warnings, ok := extra["warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one warnings entry, got %v", extra["warnings"])
+		}
+		if !strings.Contains(warnings[0], "omitted required TRANSITION_TO") {
+			t.Errorf("warning text must stay substring-compatible with faulttest's ProtocolViolation detection, got %q", warnings[0])
+		}
+	})
+
+	t.Run("triage, explicit ESCALATE_TO: none — no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_2", sawSignalLine: true}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
+			t.Error("expected no protocol violation when SawSignalLine=true (explicit \"none\")")
+		}
+		if _, ok := extra["protocol_violation"]; ok {
+			t.Errorf("expected no protocol_violation key, got %v", extra["protocol_violation"])
+		}
+	})
+
+	t.Run("remediation playbook, no signal line — exempt, no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_3"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", remediation, hop); fired {
+			t.Error("expected no protocol violation on a remediation playbook — it must never emit a signal")
+		}
+	})
+
+	t.Run("untyped playbook, no signal line — exempt, no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_4"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", &audit.Playbook{}, hop); fired {
+			t.Error("expected no protocol violation on an untyped playbook")
+		}
+	})
+
+	t.Run("hop escalated — no-op regardless of playbook type", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
+			t.Error("expected no protocol violation when hop escalated")
+		}
+	})
+}
+
+// TestRecordSignalLessWarnings_LowConfidence covers the new unconditional
+// low-confidence-without-escalation warning — visibility only, never counted
+// toward the CLEAN cert (verified separately in faulttest tests).
+func TestRecordSignalLessWarnings_LowConfidence(t *testing.T) {
+	untyped := &audit.Playbook{}
+	srv := serveFakeToolEvents(t, nil)
+
+	t.Run("low confidence, no escalation — warning appended", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{
+			traceID:          "tr_1",
+			playbookSeriesID: "pbs_db_restart_triage",
+			agentName:        "postgres_database_agent",
+			diagReport: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.35},
+			}},
+		}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		warnings, ok := extra["warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one warnings entry, got %v", extra["warnings"])
+		}
+		if !strings.Contains(warnings[0], "low-confidence") {
+			t.Errorf("warning missing expected content: %q", warnings[0])
+		}
+		// Must not collide with either substring faulttest's ProtocolViolation
+		// detection checks for (testing/cmd/faulttest/main.go) — this is a
+		// deliberately distinct signal that must never cap the faulttest score
+		// the way a real protocol violation does.
+		if strings.Contains(warnings[0], "omitted required TRANSITION_TO") || strings.Contains(warnings[0], "ESCALATE_TO signal") {
+			t.Error("low_confidence warning text must not match either protocol_violation substring")
+		}
+	})
+
+	t.Run("high confidence, no escalation — no warning", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{
+			traceID: "tr_2",
+			diagReport: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.85},
+			}},
+		}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["warnings"]; ok {
+			t.Errorf("expected no warnings for high-confidence resolution, got %v", extra["warnings"])
+		}
+	})
+
+	t.Run("nil diagnostic report — no warning (pre-B1 playbooks unaffected)", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_3"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["warnings"]; ok {
+			t.Errorf("expected no warnings when diagReport is nil, got %v", extra["warnings"])
 		}
 	})
 }

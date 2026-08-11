@@ -301,6 +301,13 @@ type DelegationVerification struct {
 	// server. May be recorded on its own event, separate from the event this hop's
 	// write/destructive/narration verification produced.
 	TargetDrift []string `json:"target_drift,omitempty"`
+	// ProtocolViolation is true when a triage-typed playbook's hop ended
+	// without emitting a required TRANSITION_TO/ESCALATE_TO signal at all
+	// (not even an explicit "none") — computed by protocolViolation
+	// (cmd/gateway/playbooks.go), independent of Mismatch/TargetDrift. May be
+	// recorded on its own event, separate from the event this hop's
+	// write/destructive/narration verification produced.
+	ProtocolViolation bool `json:"protocol_violation,omitempty"`
 }
 
 // ObjectiveEvidence captures a deterministic, code-derived signal extracted

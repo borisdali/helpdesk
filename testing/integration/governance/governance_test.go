@@ -1200,6 +1200,63 @@ func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
 	}
 }
 
+// TestIntegration_ProtocolViolation_SurfacesInJourneys mirrors
+// TestIntegration_TargetDrift_SurfacesInJourneys exactly, for the new
+// ProtocolViolation signal (a triage-typed playbook's hop that resolved
+// without emitting TRANSITION_TO/ESCALATE_TO at all) — confirms the real,
+// SQLite-backed round-trip through a real auditd binary: event write →
+// outcomeStatus switch → QueryJourneys → HasProtocolViolation/Outcome. The
+// gateway-package tests (cmd/gateway) mock auditd's HTTP responses entirely,
+// so they cannot catch a real storage/query bug in this path — only a real
+// binary can.
+func TestIntegration_ProtocolViolation_SurfacesInJourneys(t *testing.T) {
+	traceID := fmt.Sprintf("dv-protoviol-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	post(t, auditdAddr, "/v1/events", anchor)
+
+	violationEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"agent":              "postgres_database_agent",
+			"action_class":       "read",
+			"mismatch":           false,
+			"protocol_violation": true,
+		},
+	}
+	post(t, auditdAddr, "/v1/events", violationEvent)
+
+	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=protocol_violation")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "protocol_violation" {
+			t.Errorf("journey outcome = %q, want protocol_violation", j["outcome"])
+		}
+		if hasViol, _ := j["has_protocol_violation"].(bool); !hasViol {
+			t.Error("journey has_protocol_violation = false, want true")
+		}
+		if hasDrift, _ := j["has_target_drift"].(bool); hasDrift {
+			t.Error("journey has_target_drift = true, want false — protocol violation is an independent signal")
+		}
+		if hasMismatch, _ := j["has_mismatch"].(bool); hasMismatch {
+			t.Error("journey has_mismatch = true, want false — protocol violation is an independent signal")
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in outcome=protocol_violation results", traceID)
+	}
+}
+
 // TestIntegration_ObjectiveEvidence_RoundTrips confirms the new
 // objective_evidence event type actually round-trips through a real auditd —
 // unlike the target_drift test above, this exercises genuinely new
