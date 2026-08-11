@@ -1,5 +1,7 @@
 # The Judgment Layer
 
+At aiHelpDesk we believe that good AI governance should preserve something technology cannot replace: responsible human judgment.
+
 aiHelpDesk's [design principles](PRINCIPLES.md#10-probabilism-is-bounded-measured-and-governed)
 describe three architectural layers:
 
@@ -21,7 +23,7 @@ incident traces and which the system is not designed to acquire on its own.
 
 This page defines what that class of decisions is, why it matters and what
 the workflow looks like when the human judgment layer has to override the AI's
-own improvement proposals.
+own improvement proposals, but feel free to also check [this post](https://levelup.gitconnected.com/ai-to-take-over-your-job-heres-what-happened-when-ai-sre-tried-to-improve-its-own-playbook-c7a6338fae37) for more color.
 
 ---
 

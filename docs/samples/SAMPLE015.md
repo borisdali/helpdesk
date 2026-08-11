@@ -7,11 +7,11 @@ The raw sample commands and deliberations presented below complement these two b
 - **[The Hand-Off Tax, Part 2: We Turned Off the Playbooks and Watched](https://itnext.io/the-hand-off-tax-part-2-we-turned-off-the-playbooks-and-watched-fade1e510391)**
   Welcome back, Crystal Ball! Same fault, same model, same tools, same connection string used by the guided playbook. And yet, wrong diagnosis and the structural safety net that saved the day.
 
-If you are new to aiHelpDesk, start with aiHelpDesk innovative concept of the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifyiable on a live system. Your system.
+If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
 
 Next, review another aiHelpDesk pioneering concept: the [Operational SRE/DBA Flywheel](../VAULT.md#the-operational-sredba-flywheel). 
 
-How do the former (rights/entitlements) map to latter (the flywheel, which is essentially a loop)? Chek out [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md).
+How do the former (rights/entitlements) map to the latter (the flywheel, which is essentially a loop)? Chek out [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md).
 
 Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this page](../../deploy/docker-compose/DEMO.md).
 
@@ -256,7 +256,7 @@ W00t!
 
 ## 2.0 Crystal Ball 
 
-The sequene of events to run the Crystal Ball is simple enough:
+The sequene of events for running Crystal Ball is simple enough:
 
 Start with the fresh run:
   - Restart the gateway with `HELPDESK_CRYSTAL_BALL=true`.
@@ -376,7 +376,7 @@ And it's a blatant lie. Way to go, Crystal Ball!
 
 ## 2.2 Crystal Ball run#4:
 
-To be sure, this is not the formal fault injection test we normally use, as it hasn't been retrofited for the N-hop escalation + translation yet. This is a direct API call to inject a faull through the /v1/fleet/playbooks/<pb_id>/run end point:
+To be sure, this is not the formal fault injection test we normally use, as it hasn't been retrofited for the N-hop escalation + translation yet. This is a direct API call to inject a faull through the `/v1/fleet/playbooks/<pb_id>/run` end point:
 
 ```
 [boris@ ~/helpdesk]$ date; time curl -s -X POST "http://localhost:8080/api/v1/fleet/playbooks/pb_72e16c1f/run" \
