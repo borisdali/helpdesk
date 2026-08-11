@@ -408,7 +408,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, startTraceID, req.PriorRunID, req.TriggerContext, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -1041,7 +1041,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1320,6 +1320,7 @@ type ProceedEscalationRequest struct {
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
 	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, forwarded to the remediation playbook (analogous to ConnectionString)
+	Purpose          string `json:"purpose,omitempty"`           // declared purpose, forwarded to the remediation playbook (analogous to ConnectionString); falls back to the triage run's own purpose when omitted
 	Reason           string `json:"reason,omitempty"`            // optional operator rationale
 	// At-gate feedback — captured before remediation runs, while the hypothesis
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
@@ -1433,14 +1434,26 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if namespace == "" {
 		namespace = run.Namespace
 	}
+	purpose := req.Purpose
+	if purpose == "" {
+		purpose = run.Purpose
+	}
 
 	remReq := PlaybookRunRequest{
 		ConnectionString: connStr,
 		Namespace:        namespace,
+		Purpose:          purpose,
 		PriorRunID:       runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
 		IsTransition:     isTransition,
+	}
+	// Bridge purpose into the header so proxyToAgentWithTool's policy checks see
+	// it on the chained hop — handlePlaybookRun does this for the initial /run
+	// request, but proceed-escalation dispatches directly to
+	// handlePlaybookRunApprove/handlePlaybookRunAsAgent, bypassing that bridge.
+	if purpose != "" && r.Header.Get("X-Purpose") == "" {
+		r.Header.Set("X-Purpose", purpose)
 	}
 	if remReq.ApprovalMode == "" {
 		remReq.ApprovalMode = nextPB.ApprovalMode
@@ -1458,7 +1471,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, remStartTraceID, runID, "", resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -1979,7 +1992,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, traceID, priorRunID, triggerContext, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -1990,6 +2003,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		ContextID:        contextID,
 		ConnectionString: connStr,
 		Namespace:        namespace,
+		Purpose:          purpose,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
 		TriggerContext:   triggerContext,

@@ -2899,6 +2899,66 @@ func TestHandleProceedEscalation_NamespaceFallsBackToTriageRun(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_PurposeFallsBackToTriageRun verifies the same
+// fallback behavior as TestHandleProceedEscalation_NamespaceFallsBackToTriageRun,
+// for purpose: when the operator's proceed-escalation request doesn't specify
+// a purpose, the chained remediation run must fall back to the one stored on
+// the triage run rather than starting the remediation playbook with no
+// purpose at all — an empty purpose can cause policy checks on the next hop
+// to deny an otherwise-legitimate tool call (e.g. K8s get_pods requiring an
+// explicit purpose in its allowed_purposes list).
+func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
+	var runStartBody string
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate_purpose01",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		FindingsSummary: "Pod is Kubernetes-managed; sysadmin investigation required.",
+		Purpose:         "diagnostic",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_sysadmin_rem01",
+		SeriesID:      "pbs_sysadmin_docker_inspect",
+		Name:          "Sysadmin — Docker Inspect",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	runData, _ := json.Marshal(run)
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			b, _ := io.ReadAll(r.Body)
+			runStartBody = string(b)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem_purpose01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	// No "purpose" field in the request body — must fall back to run.Purpose.
+	rec := postProceedEscalation(t, gw, "plr_gate_purpose01",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	// No A2A client → 502, confirming the agent chain path was reached.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(runStartBody, `"purpose":"diagnostic"`) {
+		t.Errorf("recordPlaybookRunStart body should carry purpose=diagnostic (fallback from the triage run), got: %s", runStartBody)
+	}
+}
+
 // --- gate_escalation intercept tests ---
 
 // mockA2AServerWithText starts a minimal JSON-RPC A2A server that returns responseText

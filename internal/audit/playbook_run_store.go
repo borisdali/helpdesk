@@ -24,25 +24,26 @@ const (
 
 // PlaybookRun records a single execution of a playbook.
 type PlaybookRun struct {
-	RunID            string             `json:"run_id"`
-	PlaybookID       string             `json:"playbook_id"`
-	SeriesID         string             `json:"series_id"`
-	ExecutionMode    string             `json:"execution_mode"`            // "fleet" | "agent"
-	Outcome          string             `json:"outcome"`                   // "resolved" | "escalated" | "abandoned" | "unknown"
-	EscalatedTo      string             `json:"escalated_to,omitempty"`    // series_id for true out-of-scope escalations (ESCALATE_TO)
-	TransitionedTo   string             `json:"transitioned_to,omitempty"` // series_id for same-domain triage→remediation transitions (TRANSITION_TO)
-	FindingsSummary  string             `json:"findings_summary,omitempty"` // agent summary at handoff
-	DiagnosticReport *DiagnosticReport  `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
-	ContextID        string             `json:"context_id,omitempty"`      // A2A session ID
-	ConnectionString string             `json:"connection_string,omitempty"` // target DB/service; forwarded to chained runs
-	Namespace        string             `json:"namespace,omitempty"`         // target K8s namespace; forwarded to chained runs, analogous to ConnectionString for non-DB agents
-	TraceID          string             `json:"trace_id,omitempty"`        // X-Trace-ID of the originating request; links to audit events
-	AgentTranscript  string             `json:"agent_transcript,omitempty"` // full agent response text — the chain-of-thought narrative
-	PriorRunID       string             `json:"prior_run_id,omitempty"`    // triage run_id that preceded this remediation run
-	TriggerContext   string             `json:"trigger_context,omitempty"` // original alert text or context that initiated the run
-	Operator         string             `json:"operator"`
-	StartedAt        time.Time          `json:"started_at"`
-	CompletedAt      time.Time          `json:"completed_at,omitempty"`
+	RunID            string            `json:"run_id"`
+	PlaybookID       string            `json:"playbook_id"`
+	SeriesID         string            `json:"series_id"`
+	ExecutionMode    string            `json:"execution_mode"`              // "fleet" | "agent"
+	Outcome          string            `json:"outcome"`                     // "resolved" | "escalated" | "abandoned" | "unknown"
+	EscalatedTo      string            `json:"escalated_to,omitempty"`      // series_id for true out-of-scope escalations (ESCALATE_TO)
+	TransitionedTo   string            `json:"transitioned_to,omitempty"`   // series_id for same-domain triage→remediation transitions (TRANSITION_TO)
+	FindingsSummary  string            `json:"findings_summary,omitempty"`  // agent summary at handoff
+	DiagnosticReport *DiagnosticReport `json:"diagnostic_report,omitempty"` // structured hypotheses when agent emits HYPOTHESIS_N: lines
+	ContextID        string            `json:"context_id,omitempty"`        // A2A session ID
+	ConnectionString string            `json:"connection_string,omitempty"` // target DB/service; forwarded to chained runs
+	Namespace        string            `json:"namespace,omitempty"`         // target K8s namespace; forwarded to chained runs, analogous to ConnectionString for non-DB agents
+	Purpose          string            `json:"purpose,omitempty"`           // declared purpose (diagnostic, remediation, ...); forwarded to chained runs, analogous to ConnectionString
+	TraceID          string            `json:"trace_id,omitempty"`          // X-Trace-ID of the originating request; links to audit events
+	AgentTranscript  string            `json:"agent_transcript,omitempty"`  // full agent response text — the chain-of-thought narrative
+	PriorRunID       string            `json:"prior_run_id,omitempty"`      // triage run_id that preceded this remediation run
+	TriggerContext   string            `json:"trigger_context,omitempty"`   // original alert text or context that initiated the run
+	Operator         string            `json:"operator"`
+	StartedAt        time.Time         `json:"started_at"`
+	CompletedAt      time.Time         `json:"completed_at,omitempty"`
 }
 
 // PlaybookRunStats summarises run history for a playbook series.
@@ -178,6 +179,7 @@ func (s *PlaybookRunStore) migrate() error {
 		{"prior_run_id", `ALTER TABLE playbook_runs ADD COLUMN prior_run_id TEXT NOT NULL DEFAULT ''`},
 		{"trigger_context", `ALTER TABLE playbook_runs ADD COLUMN trigger_context TEXT NOT NULL DEFAULT ''`},
 		{"namespace", `ALTER TABLE playbook_runs ADD COLUMN namespace TEXT NOT NULL DEFAULT ''`},
+		{"purpose", `ALTER TABLE playbook_runs ADD COLUMN purpose TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -217,12 +219,12 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 		`INSERT INTO playbook_runs
 		    (run_id, playbook_id, series_id, execution_mode, outcome,
 		     escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		     context_id, connection_string, namespace, trace_id, prior_run_id, trigger_context,
+		     context_id, connection_string, namespace, purpose, trace_id, prior_run_id, trigger_context,
 		     operator, started_at, completed_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.PlaybookID, r.SeriesID, r.ExecutionMode, outcome,
 		r.EscalatedTo, r.TransitionedTo, r.FindingsSummary, diagJSON,
-		r.ContextID, r.ConnectionString, r.Namespace, r.TraceID, r.PriorRunID, r.TriggerContext,
+		r.ContextID, r.ConnectionString, r.Namespace, r.Purpose, r.TraceID, r.PriorRunID, r.TriggerContext,
 		r.Operator,
 		r.StartedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(r.CompletedAt),
@@ -352,7 +354,7 @@ func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*Playb
 	row := s.db.QueryRowContext(ctx, `
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
@@ -367,7 +369,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
@@ -389,7 +391,7 @@ func (s *PlaybookRunStore) ListByPriorRunID(ctx context.Context, priorRunID stri
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE prior_run_id = ?
@@ -410,7 +412,7 @@ func (s *PlaybookRunStore) ListBySeriesID(ctx context.Context, seriesID string, 
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE series_id = ?
@@ -430,7 +432,7 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
-		       context_id, connection_string, namespace, trace_id, prior_run_id, agent_transcript,
+		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
 		       trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
@@ -465,7 +467,7 @@ func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
 		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON,
-		&r.ContextID, &r.ConnectionString, &r.Namespace, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
+		&r.ContextID, &r.ConnectionString, &r.Namespace, &r.Purpose, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
 		&r.TriggerContext, &r.Operator, &startedStr, &completedStr,
 	); err != nil {
 		return nil, err

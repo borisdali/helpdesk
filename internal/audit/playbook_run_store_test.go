@@ -57,6 +57,30 @@ func TestPlaybookRunStore_RecordAndList(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunStore_Purpose_RoundTrips(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	run := &PlaybookRun{
+		PlaybookID:    "pb_purpose01",
+		SeriesID:      "pbs_db_restart_triage",
+		ExecutionMode: "agent",
+		Purpose:       "diagnostic",
+		StartedAt:     time.Now().UTC(),
+	}
+	if err := s.Record(ctx, run); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.Purpose != "diagnostic" {
+		t.Errorf("Purpose = %q, want %q", got.Purpose, "diagnostic")
+	}
+}
+
 func TestPlaybookRunStore_Update(t *testing.T) {
 	s := newPlaybookRunStore(t)
 	ctx := context.Background()
