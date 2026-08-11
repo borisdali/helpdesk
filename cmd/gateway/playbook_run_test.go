@@ -2947,8 +2947,18 @@ func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
 
 	gw := makePlaybookRunGateway(auditSrv.URL, nil)
 	// No "purpose" field in the request body — must fall back to run.Purpose.
-	rec := postProceedEscalation(t, gw, "plr_gate_purpose01",
-		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+	// Dispatch inline (rather than via postProceedEscalation) so the test can
+	// inspect the request's headers after the call — proxyToAgentWithTool reads
+	// X-Purpose directly off this same *http.Request, so this is the actual
+	// mechanism the live bug was about, not just the recorded metadata body.
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/fleet/playbook-runs/plr_gate_purpose01/proceed-escalation",
+		strings.NewReader(`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
 
 	// No A2A client → 502, confirming the agent chain path was reached.
 	if rec.Code != http.StatusBadGateway {
@@ -2956,6 +2966,9 @@ func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
 	}
 	if !strings.Contains(runStartBody, `"purpose":"diagnostic"`) {
 		t.Errorf("recordPlaybookRunStart body should carry purpose=diagnostic (fallback from the triage run), got: %s", runStartBody)
+	}
+	if got := req.Header.Get("X-Purpose"); got != "diagnostic" {
+		t.Errorf("X-Purpose header = %q, want %q — proxyToAgentWithTool reads this directly for downstream policy checks", got, "diagnostic")
 	}
 }
 

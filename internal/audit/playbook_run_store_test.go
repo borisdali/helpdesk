@@ -81,6 +81,29 @@ func TestPlaybookRunStore_Purpose_RoundTrips(t *testing.T) {
 	}
 }
 
+// TestPlaybookRunStore_MigrateIsIdempotent verifies migrate()'s documented
+// claim that re-running it against an already-migrated database is a no-op,
+// not an error — every ALTER TABLE ADD COLUMN in the migrate() list (Purpose
+// included) depends on the "duplicate column"/"already exists" error being
+// correctly swallowed on the second call. No prior test constructed a second
+// PlaybookRunStore against the same DB, so this behavior was unverified for
+// all 9 migrated columns, not just the one added by this change.
+func TestPlaybookRunStore_MigrateIsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewStore(StoreConfig{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if _, err := NewPlaybookRunStore(store.DB(), false); err != nil {
+		t.Fatalf("first NewPlaybookRunStore: %v", err)
+	}
+	if _, err := NewPlaybookRunStore(store.DB(), false); err != nil {
+		t.Fatalf("second NewPlaybookRunStore (migrate should be idempotent): %v", err)
+	}
+}
+
 func TestPlaybookRunStore_Update(t *testing.T) {
 	s := newPlaybookRunStore(t)
 	ctx := context.Background()
