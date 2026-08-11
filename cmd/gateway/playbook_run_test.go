@@ -1914,6 +1914,140 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 	return m
 }
 
+// TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent proves the
+// signal-less-hop fix end-to-end through a real HTTP request — not just
+// recordSignalLessWarnings as a standalone function (already covered), and
+// not just the audit-store round-trip via a directly-crafted event (already
+// covered by TestQueryJourneys_HasProtocolViolation). makePlaybookRunGateway/
+// makeGateGateway never set gw.auditor, so recordProtocolViolationEvent's
+// nil-guard silently no-ops in every other end-to-end test in this file —
+// meaning nothing previously proved the actual call site inside
+// handlePlaybookRunAsAgent invokes it with the right hop data at all.
+func TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_protoviol01",
+		SeriesID:      "pbs_protoviol_triage",
+		Name:          "Protocol Violation Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "protoviol_agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+
+	// Deliberately no TRANSITION_TO:/ESCALATE_TO: line at all.
+	_, card := mockA2AServerWithText(t, "protoviol_agent",
+		"FINDINGS: could not connect to server; cause unclear.\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"protoviol_agent": client}
+	gw.auditor = audit.NewGatewayAuditor(ta)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("response protocol_violation = %v, want true", resp["protocol_violation"])
+	}
+	warnings, _ := resp["warnings"].([]any)
+	found := false
+	for _, w := range warnings {
+		if s, ok := w.(string); ok && strings.Contains(s, "omitted required TRANSITION_TO") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("response warnings should contain a protocol-violation entry, got %v", resp["warnings"])
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	var violEvent *audit.Event
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			violEvent = e
+			break
+		}
+	}
+	if violEvent == nil {
+		t.Fatal("no delegation_verification event with ProtocolViolation=true recorded — the real call site inside handlePlaybookRunAsAgent never invoked recordProtocolViolationEvent")
+	}
+	if violEvent.DelegationVerification.Agent != "protoviol_agent" {
+		t.Errorf("event Agent = %q, want protoviol_agent", violEvent.DelegationVerification.Agent)
+	}
+	if violEvent.TraceID == "" {
+		t.Error("event TraceID is empty")
+	}
+}
+
+// TestHandlePlaybookRun_ExplicitEscalateToNone_NoProtocolViolation is the
+// negative counterpart: an explicit "ESCALATE_TO: none" must NOT record a
+// protocol-violation event or set protocol_violation on the response — the
+// whole point of SawSignalLine is distinguishing this from the omitted-line
+// case above. Proven through the same real HTTP path, not just the parser
+// unit test, since the distinction has to survive all the way through
+// runAgentPlaybook → protocolViolation → recordSignalLessWarnings.
+func TestHandlePlaybookRun_ExplicitEscalateToNone_NoProtocolViolation(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_explicitnone01",
+		SeriesID:      "pbs_explicitnone_triage",
+		Name:          "Explicit None Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "explicitnone_agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+
+	_, card := mockA2AServerWithText(t, "explicitnone_agent",
+		"FINDINGS: all checks passed; nothing to do.\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"explicitnone_agent": client}
+	gw.auditor = audit.NewGatewayAuditor(ta)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if _, ok := resp["protocol_violation"]; ok {
+		t.Errorf("response should not have protocol_violation key, got %v", resp["protocol_violation"])
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			t.Fatal("no protocol-violation event should be recorded for an explicit ESCALATE_TO: none")
+		}
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal is a regression
 // test for a real bug found during live 3-hop escalation-chain verification:
 // the primary/entry-point run's OWN escalated_to/transitioned_to fields were
@@ -2314,6 +2448,93 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWar
 	}
 	if resp["chained_run_id"] == nil || resp["chained_run_id"] == "" {
 		t.Error("expected a chained_run_id — hop2 must have actually run via chainEscalation, not been skipped")
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ProtocolViolation mirrors
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning
+// exactly, for protocol_violation instead of objective_evidence — proves the
+// CHAINED-hop call site (playbooks.go's `if recordSignalLessWarnings(...)`
+// inside the loop, not just the primary-hop call site already covered by
+// TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent above) uses
+// hop2's own data, not hop1's, and that hop2's own audit event actually gets
+// recorded via g.recordProtocolViolationEvent — not just the response shape.
+func TestHandlePlaybookRun_ChainedHop_ProtocolViolation(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_pvchain_triage", SeriesID: "pbs_pvchain_triage",
+		Name: "PV Chain Triage", ExecutionMode: "agent", AgentName: "pv_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_pvchain_sysadmin", SeriesID: "pbs_pvchain_sysadmin",
+		Name: "PV Chain Sysadmin", PlaybookType: "triage", ExecutionMode: "agent", AgentName: "pv_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_pvchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_pvchain_sysadmin": pbSysadmin})
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.auditor = audit.NewGatewayAuditor(ta)
+	_, dbCard := mockA2AServerWithText(t, "pv_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_pvchain_sysadmin\n")
+	// No TRANSITION_TO/ESCALATE_TO at all — hop2 (a triage-typed playbook)
+	// silently closes out, a genuine protocol violation on ITS OWN response.
+	_, sysadminCard := mockA2AServerWithText(t, "pv_sysadmin_agent",
+		"FINDINGS: container looks fine; cause unclear.\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"pv_db_agent":       dbCard,
+		"pv_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but hop2 has no escalation target — should not re-route into the gate flow")
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("response protocol_violation = %v, want true (from hop2, not hop1)", resp["protocol_violation"])
+	}
+	warnings, ok := resp["warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one warnings entry from hop2's chained call site, got %v — body: %s", resp["warnings"], rec.Body.String())
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "pbs_pvchain_sysadmin") {
+		t.Errorf("warnings[0] = %q, want it to mention hop2's own series_id (pbs_pvchain_sysadmin), not hop1's", warnStr)
+	}
+	if strings.Contains(warnStr, "pbs_pvchain_triage") {
+		t.Errorf("warnings[0] = %q, must not attribute the violation to hop1 (which escalated cleanly)", warnStr)
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	var violEvent *audit.Event
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			violEvent = e
+			break
+		}
+	}
+	if violEvent == nil {
+		t.Fatal("no delegation_verification event with ProtocolViolation=true recorded for the chained hop")
+	}
+	if violEvent.DelegationVerification.Agent != "pv_sysadmin_agent" {
+		t.Errorf("event Agent = %q, want pv_sysadmin_agent (hop2's own agent, not hop1's)", violEvent.DelegationVerification.Agent)
 	}
 }
 

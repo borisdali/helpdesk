@@ -188,7 +188,7 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	mock := &mockIncidentAuditd{
 		triageRun: run,
 		journeyByTraceID: map[string]*audit.JourneySummary{
-			"tr_flag01": {TraceID: "tr_flag01", HasMismatch: true, HasTargetDrift: false},
+			"tr_flag01": {TraceID: "tr_flag01", HasMismatch: true, HasTargetDrift: false, HasProtocolViolation: true},
 		},
 	}
 	auditSrv := mock.server(t)
@@ -211,6 +211,9 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	}
 	if n.Triage.HasTargetDrift {
 		t.Error("Triage.HasTargetDrift = true, want false")
+	}
+	if !n.Triage.HasProtocolViolation {
+		t.Error("Triage.HasProtocolViolation = false, want true — should surface inline without a separate Journey lookup")
 	}
 }
 
@@ -240,9 +243,9 @@ func TestHandleGetIncident_VerificationFlags_NoJourneyData_FailsOpen(t *testing.
 	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if n.Triage.HasMismatch || n.Triage.HasTargetDrift {
-		t.Errorf("expected both flags false when no Journey data exists, got HasMismatch=%v HasTargetDrift=%v",
-			n.Triage.HasMismatch, n.Triage.HasTargetDrift)
+	if n.Triage.HasMismatch || n.Triage.HasTargetDrift || n.Triage.HasProtocolViolation {
+		t.Errorf("expected all three flags false when no Journey data exists, got HasMismatch=%v HasTargetDrift=%v HasProtocolViolation=%v",
+			n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
 	}
 }
 
@@ -339,9 +342,9 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 			"plr_indep02": remediation,
 		},
 		journeyByTraceID: map[string]*audit.JourneySummary{
-			"tr_indep_triage":      {HasMismatch: true, HasTargetDrift: false},
-			"tr_indep_escalation":  {HasMismatch: false, HasTargetDrift: false},
-			"tr_indep_remediation": {HasMismatch: false, HasTargetDrift: true},
+			"tr_indep_triage":      {HasMismatch: true, HasTargetDrift: false, HasProtocolViolation: false},
+			"tr_indep_escalation":  {HasMismatch: false, HasTargetDrift: false, HasProtocolViolation: true},
+			"tr_indep_remediation": {HasMismatch: false, HasTargetDrift: true, HasProtocolViolation: false},
 		},
 	}
 	auditSrv := mock.server(t)
@@ -356,22 +359,23 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 		t.Fatalf("decode: %v", err)
 	}
 
-	if !n.Triage.HasMismatch || n.Triage.HasTargetDrift {
-		t.Errorf("Triage flags = (mismatch=%v, drift=%v), want (true, false)", n.Triage.HasMismatch, n.Triage.HasTargetDrift)
+	if !n.Triage.HasMismatch || n.Triage.HasTargetDrift || n.Triage.HasProtocolViolation {
+		t.Errorf("Triage flags = (mismatch=%v, drift=%v, violation=%v), want (true, false, false)",
+			n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
 	}
 	if len(n.Escalations) != 1 {
 		t.Fatalf("escalations count = %d, want 1", len(n.Escalations))
 	}
-	if n.Escalations[0].HasMismatch || n.Escalations[0].HasTargetDrift {
-		t.Errorf("Escalation flags = (mismatch=%v, drift=%v), want (false, false)",
-			n.Escalations[0].HasMismatch, n.Escalations[0].HasTargetDrift)
+	if n.Escalations[0].HasMismatch || n.Escalations[0].HasTargetDrift || !n.Escalations[0].HasProtocolViolation {
+		t.Errorf("Escalation flags = (mismatch=%v, drift=%v, violation=%v), want (false, false, true) — must come from its own trace",
+			n.Escalations[0].HasMismatch, n.Escalations[0].HasTargetDrift, n.Escalations[0].HasProtocolViolation)
 	}
 	if n.Remediation == nil {
 		t.Fatal("narrative missing remediation chapter")
 	}
-	if n.Remediation.HasMismatch || !n.Remediation.HasTargetDrift {
-		t.Errorf("Remediation flags = (mismatch=%v, drift=%v), want (false, true) — must come from its own trace, not Triage's",
-			n.Remediation.HasMismatch, n.Remediation.HasTargetDrift)
+	if n.Remediation.HasMismatch || !n.Remediation.HasTargetDrift || n.Remediation.HasProtocolViolation {
+		t.Errorf("Remediation flags = (mismatch=%v, drift=%v, violation=%v), want (false, true, false) — must come from its own trace, not Triage's",
+			n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation)
 	}
 }
 

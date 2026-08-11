@@ -1650,6 +1650,39 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	}
 }
 
+// TestPrintIncidentJourney_VerificationFlags_ProtocolViolation verifies the
+// third inline warning marker (added alongside HasMismatch/HasTargetDrift)
+// appears on the correct chapter and is distinct from the other two.
+func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_pvflag1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":                 "plr_pvflag1",
+				"playbook":               "pbs_db_restart_triage",
+				"findings":               "could not connect; cause unclear",
+				"has_mismatch":           false,
+				"has_target_drift":       false,
+				"has_protocol_violation": true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_pvflag1")
+	})
+
+	if !strings.Contains(out, "⚠ protocol violation") {
+		t.Errorf("output missing inline protocol violation warning, got:\n%s", out)
+	}
+	if strings.Contains(out, "⚠ unverified") || strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output should not show the other two warnings, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean verifies no
 // warning lines print when both flags are false/absent — the fail-open case
 // must not produce spurious output.
@@ -3090,11 +3123,12 @@ func TestFetchStabilityCert_CleanFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"fault_id":      "k8s-oomkilled",
-			"n_runs":        5,
-			"is_stable":     true,
-			"warning_count": 2,
-			"is_clean":      false,
+			"fault_id":             "k8s-oomkilled",
+			"n_runs":               5,
+			"is_stable":            true,
+			"warning_count":        2,
+			"is_clean":             false,
+			"warning_distribution": map[string]int{"objective_evidence": 1, "protocol_violation": 1},
 		})
 	}))
 	defer srv.Close()
@@ -3108,6 +3142,9 @@ func TestFetchStabilityCert_CleanFields(t *testing.T) {
 	}
 	if got.IsClean {
 		t.Error("IsClean = true, want false")
+	}
+	if got.WarningDistribution["objective_evidence"] != 1 || got.WarningDistribution["protocol_violation"] != 1 {
+		t.Errorf("WarningDistribution = %v, want objective_evidence=1, protocol_violation=1", got.WarningDistribution)
 	}
 }
 
@@ -3898,6 +3935,13 @@ func TestPostStabilityCert_CleanPayload(t *testing.T) {
 	if gotBody["is_clean"] != false {
 		t.Errorf("is_clean = %v, want false", gotBody["is_clean"])
 	}
+	dist, ok := gotBody["warning_distribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("warning_distribution missing or wrong shape: %v", gotBody["warning_distribution"])
+	}
+	if dist["protocol_violation"] != float64(1) {
+		t.Errorf("warning_distribution[protocol_violation] = %v, want 1", dist["protocol_violation"])
+	}
 }
 
 func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
@@ -3919,6 +3963,9 @@ func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
 	}
 	if gotBody["is_clean"] != true {
 		t.Errorf("is_clean = %v, want true — must be the real boolean true, not just absent/zero-value", gotBody["is_clean"])
+	}
+	if _, ok := gotBody["warning_distribution"]; ok {
+		t.Errorf("warning_distribution should be omitted entirely when there are no warnings, got %v", gotBody["warning_distribution"])
 	}
 }
 
@@ -4378,6 +4425,33 @@ func TestPrintFaultStabilityCert_ShowsCleanLine_WhenClean(t *testing.T) {
 
 	if !strings.Contains(out, "Clean         : yes") {
 		t.Errorf("expected clean Clean line in output:\n%s", out)
+	}
+	if strings.Contains(out, "Warning types") {
+		t.Errorf("Warning types line should not appear when there's no distribution to show:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsWarningTypesLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":             "k8s-crashloop",
+			"fault_name":           "CrashLoopBackOff",
+			"n_runs":               5,
+			"is_stable":            true,
+			"warning_count":        2,
+			"is_clean":             false,
+			"warning_distribution": map[string]int{"objective_evidence": 1, "protocol_violation": 1},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-crashloop", "")
+	})
+
+	if !strings.Contains(out, "Warning types : objective_evidence=1, protocol_violation=1") {
+		t.Errorf("expected Warning types line in output:\n%s", out)
 	}
 }
 

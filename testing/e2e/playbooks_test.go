@@ -1715,17 +1715,17 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if triage["playbook"] == "" {
 		t.Error("triage.playbook is empty")
 	}
-	// trace_id/has_mismatch/has_target_drift surface a real agent run's
-	// Journey-level verification signals inline on the chapter. A real,
-	// successfully-run triage playbook always gets a real trace_id (assigned
-	// by proxyToAgentWithTool on every agent-mode call) — assert it's present
-	// and non-empty, confirming the wiring works with an organically-produced
-	// trace from a real LLM run, not just the hand-fed traces in unit/integration
-	// tests. has_mismatch/has_target_drift are omitempty booleans — their
-	// *value* isn't deterministic here (depends on whether this real run
-	// happened to trip either check), so only assert they decode as bool when
-	// present, catching a malformed-value regression that map[string]any's
-	// permissive decode wouldn't otherwise fail on.
+	// trace_id/has_mismatch/has_target_drift/has_protocol_violation surface a
+	// real agent run's Journey-level verification signals inline on the
+	// chapter. A real, successfully-run triage playbook always gets a real
+	// trace_id (assigned by proxyToAgentWithTool on every agent-mode call) —
+	// assert it's present and non-empty, confirming the wiring works with an
+	// organically-produced trace from a real LLM run, not just the hand-fed
+	// traces in unit/integration tests. The three Has* fields are omitempty
+	// booleans — their *value* isn't deterministic here (depends on whether
+	// this real run happened to trip any of them), so only assert they decode
+	// as bool when present, catching a malformed-value regression that
+	// map[string]any's permissive decode wouldn't otherwise fail on.
 	if traceID, _ := triage["trace_id"].(string); traceID == "" {
 		t.Error("triage.trace_id is empty — should always be set for a real agent-mode run")
 	}
@@ -1737,6 +1737,11 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if v, ok := triage["has_target_drift"]; ok {
 		if _, ok := v.(bool); !ok {
 			t.Errorf("triage.has_target_drift = %v (%T), want bool", v, v)
+		}
+	}
+	if v, ok := triage["has_protocol_violation"]; ok {
+		if _, ok := v.(bool); !ok {
+			t.Errorf("triage.has_protocol_violation = %v (%T), want bool", v, v)
 		}
 	}
 

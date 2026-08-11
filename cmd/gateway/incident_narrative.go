@@ -53,17 +53,18 @@ type TriageChapter struct {
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	Transcript       string                  `json:"transcript,omitempty"`
 	// TraceID identifies this chapter's Journey — the WHAT view behind this
-	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift below.
+	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation below.
 	TraceID string `json:"trace_id,omitempty"`
-	// HasMismatch/HasTargetDrift mirror the corresponding Journey's flags
-	// (GET /v1/journeys?trace_id=X) — surfaced inline here so a reader doesn't
-	// have to separately look up the Journey to know this chapter's tool
-	// calls weren't fully verified. Absent (false) can mean either "verified
-	// clean" or "no Journey data exists for this trace" (fail-open by design,
-	// same ambiguity already present at the Journey layer) — not a positive
-	// attestation either way.
-	HasMismatch    bool `json:"has_mismatch,omitempty"`
-	HasTargetDrift bool `json:"has_target_drift,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation mirror the corresponding
+	// Journey's flags (GET /v1/journeys?trace_id=X) — surfaced inline here so a
+	// reader doesn't have to separately look up the Journey to know this
+	// chapter's tool calls weren't fully verified. Absent (false) can mean
+	// either "verified clean" or "no Journey data exists for this trace"
+	// (fail-open by design, same ambiguity already present at the Journey
+	// layer) — not a positive attestation either way.
+	HasMismatch          bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
 }
 
 // GateChapter holds the operator approval decision.
@@ -83,10 +84,11 @@ type RemediationChapter struct {
 	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
 	Findings   string                   `json:"findings,omitempty"`
 	Transcript string                   `json:"transcript,omitempty"`
-	// TraceID/HasMismatch/HasTargetDrift — see TriageChapter's doc comment.
-	TraceID        string `json:"trace_id,omitempty"`
-	HasMismatch    bool   `json:"has_mismatch,omitempty"`
-	HasTargetDrift bool   `json:"has_target_drift,omitempty"`
+	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
+	TraceID              string `json:"trace_id,omitempty"`
+	HasMismatch          bool   `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool   `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
 }
 
 // EscalationHop is one intermediate playbook run reached via ESCALATE_TO,
@@ -106,9 +108,10 @@ type EscalationHop struct {
 	TraceID          string                   `json:"trace_id,omitempty"`
 	StartedAt        time.Time                `json:"started_at"`
 	CompletedAt      *time.Time               `json:"completed_at,omitempty"`
-	// HasMismatch/HasTargetDrift — see TriageChapter's doc comment.
-	HasMismatch    bool `json:"has_mismatch,omitempty"`
-	HasTargetDrift bool `json:"has_target_drift,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
+	HasMismatch          bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -167,6 +170,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	if js := lookupJourney(run.TraceID); js != nil {
 		narrative.Triage.HasMismatch = js.HasMismatch
 		narrative.Triage.HasTargetDrift = js.HasTargetDrift
+		narrative.Triage.HasProtocolViolation = js.HasProtocolViolation
 	}
 
 	// 2. Gate chapter — present when triage was an informed gate.
@@ -237,6 +241,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			if js := lookupJourney(hop.TraceID); js != nil {
 				rem.HasMismatch = js.HasMismatch
 				rem.HasTargetDrift = js.HasTargetDrift
+				rem.HasProtocolViolation = js.HasProtocolViolation
 			}
 			narrative.Remediation = rem
 			predecessor = hop
@@ -262,6 +267,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		if js := lookupJourney(hop.TraceID); js != nil {
 			eh.HasMismatch = js.HasMismatch
 			eh.HasTargetDrift = js.HasTargetDrift
+			eh.HasProtocolViolation = js.HasProtocolViolation
 		}
 		if !hop.CompletedAt.IsZero() {
 			t := hop.CompletedAt
