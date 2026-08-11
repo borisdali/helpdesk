@@ -358,9 +358,9 @@ flowchart TD
     MonitorB -- Yes --> Resolved
     MonitorB -- No --> Fallback[["FALLBACK GATE (opt-in only).<br/>status: pending_gate, gate_type: transition<br/>transition_target: the request's own remediation_series_id<br/>Decision Hub notified."]]
 
-    style Gap fill:#14301a,stroke:#27ae60,stroke-width:1px
-    style Informed fill:#14301a,stroke:#27ae60,stroke-width:1px
-    style Fallback fill:#14301a,stroke:#27ae60,stroke-width:1px
+    style Gap fill:#14301a,stroke:#27ae60,stroke-width:1px,color:#fff
+    style Informed fill:#14301a,stroke:#27ae60,stroke-width:1px,color:#fff
+    style Fallback fill:#14301a,stroke:#27ae60,stroke-width:1px,color:#fff
 ```
 
 Three things this diagram makes explicit that are easy to miss from the response JSON alone:
