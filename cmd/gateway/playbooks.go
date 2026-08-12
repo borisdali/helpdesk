@@ -642,6 +642,8 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 
 	appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart))
+	primaryMismatch, primaryNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart)
+	appendFabricationRisk(extra, primaryMismatch, primaryNarrated)
 
 	// Post-run target-scope check.
 	if req.ConnectionString != "" {
@@ -886,6 +888,8 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			g.recordProtocolViolationEvent(r.Context(), *chained)
 		}
 		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
+		chainedMismatch, chainedNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart)
+		appendFabricationRisk(extra, chainedMismatch, chainedNarrated)
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -3050,6 +3054,65 @@ func appendPolicyDenials(extra map[string]any, denials []PolicyDenialSummary) {
 	}
 	existing, _ := extra["policy_denials"].([]PolicyDenialSummary)
 	extra["policy_denials"] = append(existing, denials...)
+}
+
+// checkFabricationRisk returns the Mismatch/NarratedNotConfirmed fields from
+// any delegation_verification event recorded for traceID since the hop
+// started — the orthogonal counterpart to checkTargetScope's target_drift:
+// drift requires a real tool call against the wrong server, fabrication
+// requires the model to claim a tool call that never executed at all. Prior
+// to this, neither was visible on the live response — proxyToAgentWithTool
+// only set an X-Audit-Mismatch response header with no detail, which the
+// playbook-run path never read; the only way to see fabrication risk was to
+// query the audit trail directly. Multiple delegation_verification events
+// can exist for the same trace (target-drift and protocol-violation each
+// write their own with Mismatch always false and no NarratedNotConfirmed) —
+// aggregating across all of them is safe since only the genuine fabrication
+// check ever populates these two fields.
+func checkFabricationRisk(auditURL, apiKey, traceID string, since time.Time) (mismatch bool, narratedNotConfirmed []string) {
+	if auditURL == "" || traceID == "" {
+		return false, nil
+	}
+	events := audit.FetchDelegationVerificationEvents(auditURL, apiKey, traceID, since)
+	seen := map[string]bool{}
+	for _, ev := range events {
+		if ev.DelegationVerification == nil {
+			continue
+		}
+		if ev.DelegationVerification.Mismatch {
+			mismatch = true
+		}
+		for _, tool := range ev.DelegationVerification.NarratedNotConfirmed {
+			if !seen[tool] {
+				seen[tool] = true
+				narratedNotConfirmed = append(narratedNotConfirmed, tool)
+			}
+		}
+	}
+	return mismatch, narratedNotConfirmed
+}
+
+// appendFabricationRisk accumulates mismatch/narrated_not_confirmed into
+// extra across hops, mirroring appendPolicyDenials's accumulate pattern.
+func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfirmed []string) {
+	if mismatch {
+		extra["mismatch"] = true
+	}
+	if len(narratedNotConfirmed) == 0 {
+		return
+	}
+	existing, _ := extra["narrated_not_confirmed"].([]string)
+	seen := map[string]bool{}
+	for _, t := range existing {
+		seen[t] = true
+	}
+	for _, t := range narratedNotConfirmed {
+		if !seen[t] {
+			seen[t] = true
+			existing = append(existing, t)
+		}
+	}
+	extra["narrated_not_confirmed"] = existing
 }
 
 // targetMatches returns true when:

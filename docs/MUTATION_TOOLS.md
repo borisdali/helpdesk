@@ -40,6 +40,7 @@ databases or your infra.
    - [Target-Scope Drift Detection (5.6)](#56-target-scope-drift-detection-checktargetscope)
    - [Narrated-But-Unconfirmed Tool Calls (5.7)](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
    - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
+   - [Fabrication-Risk Visibility (5.9)](#59-fabrication-risk-visibility-checkfabricationrisk)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -1097,6 +1098,60 @@ the real HTTP path),
 both the primary and the auto-chained hop's separate `checkPolicyDenials`
 call sites fire and accumulate into the same response array, not just that
 `appendPolicyDenials` itself can accumulate in isolation).
+
+---
+
+### 5.9 Fabrication-Risk Visibility (`checkFabricationRisk`)
+
+§5.7's `Mismatch`/`NarratedNotConfirmed` fields — the actual fabrication
+signal — were computed on every playbook-run hop (`runAgentPlaybook` →
+`proxyToAgent` → `proxyToAgentWithTool` with `toolName=""`) and durably
+recorded on a `delegation_verification` event, but never reached the live
+response at all. The only trace was an `X-Audit-Mismatch: true` response
+header set by `proxyToAgentWithTool` — no detail, and never read by the
+playbook-run path (`handlePlaybookRunAsAgent` writes its own response via
+`extra`, entirely separate from that header). Found live during manual
+testing: a crystal-ball run against an unresolvable `connection_string`
+produced a `delegation_verification` event with `mismatch: true` and
+`narrated_not_confirmed: ["check_connection", "read_pg_log"]` — the model
+narrated calling both tools and described a result, but neither tool ever
+actually executed — yet the response JSON showed nothing to indicate this;
+confirming it required querying `audit_events` directly.
+
+This is the orthogonal counterpart to [target-scope drift](#56-target-scope-drift-detection-checktargetscope):
+drift requires a *real* tool call against the *wrong* server; fabrication
+requires the model to *claim* a tool call that never executed at all. A
+given hop can trip either, both, or neither — they are independent checks
+over independent evidence.
+
+**The check**: `checkFabricationRisk` (`cmd/gateway/playbooks.go`) fetches
+`delegation_verification` events for the hop's trace via the newly-exported
+`audit.FetchDelegationVerificationEvents` (mirroring
+`FetchPolicyDecisionEvents`/`FetchObjectiveEvidenceEvents`), and aggregates
+`Mismatch`/`NarratedNotConfirmed` across every returned event. Multiple
+`delegation_verification` events can exist for the same trace — drift
+(§5.6) and protocol-violation (`recordProtocolViolationEvent`) each write
+their own — but both always leave `Mismatch=false` and
+`NarratedNotConfirmed` empty, so aggregating across all of them is safe;
+only the genuine fabrication check ever populates these two fields. Called
+for both the primary hop and every auto-chained hop, accumulating into
+`extra["mismatch"]`/`extra["narrated_not_confirmed"]` across hops (same
+accumulate-don't-overwrite pattern as `policy_denials`/`warnings`).
+
+```json
+{
+  "mismatch": true,
+  "narrated_not_confirmed": ["check_connection", "read_pg_log"]
+}
+```
+
+**Test coverage**: `cmd/gateway/playbook_run_test.go` —
+`TestCheckFabricationRisk_NoAuditURL`, `_NoEvents`, `_Mismatch`,
+`_IgnoresDriftAndProtocolViolationEvents` (the multi-event-shape aggregation
+safety above),
+`TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops`,
+`TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse` (end-to-end
+through the real HTTP path).
 
 ---
 

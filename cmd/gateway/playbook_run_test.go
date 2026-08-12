@@ -1736,6 +1736,96 @@ func TestAppendPolicyDenials_AccumulatesAcrossCalls(t *testing.T) {
 	}
 }
 
+// ---- checkFabricationRisk tests ----
+
+func TestCheckFabricationRisk_NoAuditURL(t *testing.T) {
+	mismatch, narrated := checkFabricationRisk("", "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) with empty auditURL, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestCheckFabricationRisk_NoEvents(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) with no events, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestCheckFabricationRisk_Mismatch(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:                "postgres_database_agent",
+				Mismatch:             true,
+				NarratedNotConfirmed: []string{"check_connection", "read_pg_log"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if !mismatch {
+		t.Error("mismatch = false, want true")
+	}
+	if len(narrated) != 2 || narrated[0] != "check_connection" || narrated[1] != "read_pg_log" {
+		t.Errorf("narrated = %v, want [check_connection read_pg_log]", narrated)
+	}
+}
+
+// TestCheckFabricationRisk_IgnoresDriftAndProtocolViolationEvents proves the
+// aggregation doesn't false-positive on the other two delegation_verification
+// event shapes that can coexist for the same trace: checkTargetScope's
+// target-drift event and recordProtocolViolationEvent's — both always leave
+// Mismatch=false and NarratedNotConfirmed empty, so they must not contribute.
+func TestCheckFabricationRisk_IgnoresDriftAndProtocolViolationEvents(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: audit.ActionRead,
+				TargetDrift: []string{"pg-cluster-minikube"},
+			},
+		},
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:             "postgres_database_agent",
+				ActionClass:       audit.ActionRead,
+				ProtocolViolation: true,
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) — drift/protocol-violation events must not be mistaken for fabrication, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendFabricationRisk(extra, true, []string{"check_connection"})
+	appendFabricationRisk(extra, false, nil)
+	appendFabricationRisk(extra, false, []string{"check_connection", "read_pg_log"})
+
+	if extra["mismatch"] != true {
+		t.Errorf("mismatch = %v, want true (must not be cleared by a later false)", extra["mismatch"])
+	}
+	got, _ := extra["narrated_not_confirmed"].([]string)
+	want := []string{"check_connection", "read_pg_log"}
+	if len(got) != len(want) {
+		t.Fatalf("narrated_not_confirmed = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("narrated_not_confirmed[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // ---- buildServerTypeHint tests ----
 
 func TestBuildServerTypeHint_DockerServer(t *testing.T) {
@@ -2446,6 +2536,83 @@ func TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse(t *testing.T) {
 	}
 	if d["policy_name"] != "require-purpose" {
 		t.Errorf("policy_name = %v, want require-purpose", d["policy_name"])
+	}
+}
+
+// TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse proves
+// mismatch/narrated_not_confirmed reach the live response — previously the
+// only signal was an X-Audit-Mismatch response header carrying no detail,
+// which the playbook-run path never read at all; the only way to see
+// fabrication risk was to query the audit trail directly (found live: a
+// crystal-ball run against an unresolvable connection_string produced a
+// delegation_verification event with mismatch=true and
+// narrated_not_confirmed=["check_connection","read_pg_log"] that was
+// completely invisible on the response JSON).
+func TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_fabrication01",
+		SeriesID:      "pbs_fabrication_triage",
+		Name:          "Fabrication Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "fabrication_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pb)
+	mismatchEvent, _ := json.Marshal([]audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:                "fabrication_agent",
+				Mismatch:             true,
+				NarratedNotConfirmed: []string{"check_connection", "read_pg_log"},
+			},
+		},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_fabrication_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=delegation_verification"):
+			w.Write(mismatchEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	_, card := mockA2AServerWithText(t, "fabrication_agent",
+		"Connection succeeded and logs look clean.\nFINDINGS: no issue found\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"fabrication_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"host=127.0.0.1 port=5433 dbname=nope","context":"investigate"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["mismatch"] != true {
+		t.Errorf("mismatch = %v, want true", resp["mismatch"])
+	}
+	narrated, ok := resp["narrated_not_confirmed"].([]any)
+	if !ok || len(narrated) != 2 || narrated[0] != "check_connection" || narrated[1] != "read_pg_log" {
+		t.Errorf("narrated_not_confirmed = %v, want [check_connection read_pg_log]", resp["narrated_not_confirmed"])
 	}
 }
 

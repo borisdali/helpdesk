@@ -512,6 +512,19 @@ func FetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time
 	return fetchPolicyDecisionEvents(auditURL, apiKey, traceID, since)
 }
 
+// FetchDelegationVerificationEvents queries auditd for delegation_verification
+// events in the given trace — used by checkFabricationRisk (cmd/gateway/playbooks.go)
+// to surface Mismatch/NarratedNotConfirmed on the live response. These events are
+// otherwise only ever recorded durably (proxyToAgentWithTool sets the
+// X-Audit-Mismatch response header as a same-request side channel, but that
+// carries no detail and is never read by the playbook-run path at all — a
+// caller had no way to see fabrication risk short of querying the audit
+// trail directly). No retry, same reasoning as fetchAgentReasoningEvents/
+// fetchPolicyDecisionEvents.
+func FetchDelegationVerificationEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "delegation_verification", since, false)
+}
+
 // FetchObjectiveEvidenceEvents queries auditd for objective_evidence events in
 // the given trace — used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go)
 // to force a human-reviewed gate based on deterministic, code-derived tool
