@@ -1,11 +1,17 @@
 series_id: pbs_k8s_scale_to_zero_triage
 name: "K8s StatefulSet Scaled to Zero — Triage"
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: k8s_agent
 approval_mode: manual
+# Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
+# The gateway validates emitted TRANSITION_TO directives against this list and
+# coerces anything outside it to requires_operator_approval — preventing the
+# model from inventing playbook names. No cross-domain escalations declared.
+transitions_to:
+  - pbs_k8s_scale_to_zero_remediate
 problem_class: availability
 author: aiHelpDesk
 description: |
