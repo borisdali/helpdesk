@@ -922,12 +922,27 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Fallback gate: when gate_escalation=true with an explicit remediation target,
-	// always pause at the phase boundary even if the triage agent did not emit
-	// TRANSITION_TO. This guarantees the operator reviews triage findings before
-	// remediation runs, regardless of whether the agent signalled a transition.
+	// pause at the phase boundary if the triage agent omitted the required
+	// TRANSITION_TO/ESCALATE_TO signal entirely. This guarantees the operator
+	// reviews triage findings before remediation runs when the agent's response
+	// is genuinely ambiguous (no signal at all).
+	//
+	// !prev.sawSignalLine is required, not just an empty escalatedTo/transitionTo:
+	// an explicit "ESCALATE_TO: none" is a compliant, complete conclusion (the
+	// model investigated and found nothing to hand off) — SawSignalLine=true
+	// distinguishes it from a genuinely omitted line, exactly as protocolViolation()
+	// does. Before this check existed, an explicit "none" and a silently omitted
+	// signal were indistinguishable here, so a model that correctly concluded
+	// "nothing to do" still got a pending_gate manufactured against the caller's
+	// remediation_series_id — a target the model never mentioned — misrepresenting
+	// its own conclusion as an unresolved handoff. Found live: a wal-stale-slot
+	// triage run concluded "database healthy, false alarm" with ESCALATE_TO: none,
+	// but still surfaced transition_target: pbs_db_config_recovery and a
+	// misleading "protocol violation — agent omitted" log line.
 	if req.GateEscalation && req.RemediationSeriesID != "" &&
 		prev.escalatedTo == "" && prev.transitionTo == "" &&
 		finalOutcome != audit.OutcomeGatePending &&
+		!prev.sawSignalLine &&
 		!findingsRecommendMonitor(prev.findings) {
 		warn, suggestedMode := g.confidenceWarning(prev.diagReport)
 		extra["status"] = "pending_gate"

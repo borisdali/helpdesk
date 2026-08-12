@@ -4902,6 +4902,63 @@ func TestHandlePlaybookRun_GateEscalation_SyntheticGate_TriageType_NoDuplicateWa
 	}
 }
 
+// TestHandlePlaybookRun_GateEscalation_ExplicitNone_NoSyntheticGate is the
+// negative counterpart to TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal:
+// when the agent explicitly emits "ESCALATE_TO: none" (a compliant, complete
+// conclusion — SawSignalLine=true), the fallback gate must NOT fire, even
+// though escalatedTo/transitionTo are both empty exactly as in the omitted-
+// signal case. Found live: before this fix, a wal-stale-slot triage run that
+// concluded "database healthy, false alarm" with an explicit ESCALATE_TO: none
+// still got a pending_gate manufactured against the caller's
+// remediation_series_id (a target the model never mentioned), and logged a
+// factually wrong "agent omitted TRANSITION_TO/ESCALATE_TO" warning.
+func TestHandlePlaybookRun_GateEscalation_ExplicitNone_NoSyntheticGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage03",
+		SeriesID:      "pbs_cache_miss_triage3",
+		Name:          "Cache Miss Triage",
+		Guidance:      "Check cache hit ratio and sequential scans.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Explicit "none" — a compliant, complete conclusion, not an omission.
+	agentText := "Cache hit ratio is healthy; no action needed.\n\n" +
+		"HYPOTHESIS_1: cache performance is normal | CONFIDENCE: 0.95 | EVIDENCE: \"hit_ratio=0.99\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: cache is healthy; no issue found\n" +
+		"ESCALATE_TO: none\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true,"remediation_series_id":"pbs_cache_miss_remediate"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Errorf("status = pending_gate, want no gate — explicit ESCALATE_TO: none is a compliant conclusion, not a protocol violation; got body: %s", rec.Body.String())
+	}
+	if resp["transition_target"] != nil {
+		t.Errorf("transition_target = %v, want absent — the model never proposed a target", resp["transition_target"])
+	}
+	if resp["protocol_violation"] == true {
+		t.Error("protocol_violation = true, want unset — explicit none is compliant")
+	}
+	warnings, _ := resp["warnings"].([]any)
+	for _, w := range warnings {
+		if s, _ := w.(string); strings.Contains(s, "omitted") {
+			t.Errorf("warnings should not contain an 'omitted' entry for an explicit ESCALATE_TO: none, got: %v", warnings)
+		}
+	}
+}
+
 // TestHandlePlaybookRun_GateEscalation_NoSignal_NoRemediationTarget verifies that
 // when gate_escalation=true but remediation_series_id is absent and the agent omits
 // TRANSITION_TO, no synthetic gate is created — the run completes normally.
