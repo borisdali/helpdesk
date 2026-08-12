@@ -2308,6 +2308,38 @@ func TestResolveDatabaseInfo_PasswordEnv_ByName(t *testing.T) {
 	}
 }
 
+func TestResolveDatabaseInfo_ContainerNameAlias(t *testing.T) {
+	// "test-pg" is only the Docker container_name nested inside the "test-db"
+	// entry, not a top-level key — before this fix, resolveDatabaseInfo hard-
+	// rejected this input even though the infra config explicitly records the
+	// alias, relying on the model to silently substitute the canonical key
+	// from prompt context instead of resolving deterministically here.
+	defer withInfraConfig(&infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-db": {
+				Name:             "Test DB",
+				ConnectionString: "host=localhost port=35432 dbname=postgres",
+				ContainerName:    "test-pg",
+				Tags:             []string{"development", "chaos"},
+			},
+		},
+	})()
+
+	info, err := resolveDatabaseInfo("test-pg")
+	if err != nil {
+		t.Fatalf("resolveDatabaseInfo() error = %v, want nil", err)
+	}
+	if info.Name != "test-db" {
+		t.Errorf("resolveDatabaseInfo() Name = %q, want test-db (the canonical key, not the container alias)", info.Name)
+	}
+	if info.ConnectionStr != "host=localhost port=35432 dbname=postgres" {
+		t.Errorf("resolveDatabaseInfo() ConnectionStr = %q, want the test-db entry's connection string", info.ConnectionStr)
+	}
+	if len(info.Tags) != 2 || info.Tags[0] != "development" || info.Tags[1] != "chaos" {
+		t.Errorf("resolveDatabaseInfo() Tags = %v, want [development chaos]", info.Tags)
+	}
+}
+
 func TestResolveDatabaseInfo_PasswordEnv_Missing(t *testing.T) {
 	// password_env is set but env var absent → base connection string returned without error.
 	t.Setenv("TEST_DB_PW_MISSING", "")

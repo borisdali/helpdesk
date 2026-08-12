@@ -482,7 +482,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil, false, "")
 	}
 }
 
@@ -696,7 +696,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", "", primary.findings, primary.rawText, primary.traceID, nil, primary.sawSignalLine)
+				runID, primary.outcome, "", "", primary.findings, primary.rawText, primary.traceID, nil, primary.sawSignalLine, "")
 		}
 		return
 	}
@@ -1016,8 +1016,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	injectFields(w, primary.capture, extra)
 
 	if runID != "" {
+		gateReason, _ := extra["gate_reason"].(string)
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine, gateReason)
 	}
 }
 
@@ -1083,8 +1084,12 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
+		// gate_reason is always "" here: chainEscalation only completes for a
+		// hop that was greenlit to chain (i.e. NOT gated) — the in-loop
+		// force-gate that would set gate_reason breaks the loop instead of
+		// calling chainEscalation for that iteration.
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.rawText, chainRes.traceID, chainRes.diagReport, chainRes.sawSignalLine)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.rawText, chainRes.traceID, chainRes.diagReport, chainRes.sawSignalLine, "")
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -1518,7 +1523,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport, false)
+		// gate_reason passed through from run (not ""): Update's SQL sets the
+		// column unconditionally, so passing "" here would wipe the reason
+		// recorded when the run first entered gate_pending, right at the
+		// moment it becomes most useful to have queryable.
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport, false, run.GateReason)
 		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
@@ -1553,7 +1562,8 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false)
+	// gate_reason passed through from run — see the denied branch above for why.
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
 	// Store at-gate feedback when provided. Captured before remediation runs —
 	// a cleaner signal than post-incident feedback because the operator hasn't
@@ -2202,7 +2212,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 // agentTranscript is the full agent response text (chain of thought narrative); pass "" when not available.
 // traceID is the agent's trace ID (from response X-Trace-ID header); used to link audit events to the run.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport, sawSignalLine bool) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport, sawSignalLine bool, gateReason string) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
@@ -2221,6 +2231,9 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	}
 	if report != nil {
 		payload["diagnostic_report"] = report
+	}
+	if gateReason != "" {
+		payload["gate_reason"] = gateReason
 	}
 	body, _ := json.Marshal(payload)
 	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
@@ -2924,12 +2937,15 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 		return nil, nil
 	}
 
-	// Resolve short name to canonical connection string so that
-	// "test-pg" and "host=localhost port=35432 ..." are treated as the same server.
+	// Resolve short name to canonical connection string so that a short name
+	// (infra config key, display Name, or Docker/Podman container name — e.g.
+	// "test-pg" as the container for the "test-db" entry) and the full-form
+	// "host=localhost port=35432 ..." are treated as the same server.
 	resolved := intendedTarget
 	if cfg != nil {
 		for key, db := range cfg.DBServers {
-			if key == intendedTarget || db.Name == intendedTarget {
+			if key == intendedTarget || db.Name == intendedTarget ||
+				(db.ContainerName != "" && db.ContainerName == intendedTarget) {
 				resolved = db.ConnectionString
 				break
 			}
@@ -3125,7 +3141,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false, "")
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -3230,7 +3246,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -3278,7 +3294,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil, false, "")
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -3320,13 +3336,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, run.Namespace, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil, false, "")
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

@@ -40,6 +40,7 @@ type PlaybookRun struct {
 	TraceID          string            `json:"trace_id,omitempty"`          // X-Trace-ID of the originating request; links to audit events
 	AgentTranscript  string            `json:"agent_transcript,omitempty"`  // full RAW agent response text (before signal-line stripping) — the chain-of-thought narrative
 	SawSignalLine    bool              `json:"saw_signal_line,omitempty"`   // true iff the agent's raw response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of its resolved value — see agentEscalation.SawSignalLine in cmd/gateway
+	GateReason       string            `json:"gate_reason,omitempty"`       // "+"-joined force-gate reasons (low_confidence/objective_evidence:<signal>/trust_not_earned) when this run's outcome is gate_pending via the in-loop force-gate; empty for the fallback gate (no comparable reason) or a non-gated outcome
 	PriorRunID       string            `json:"prior_run_id,omitempty"`      // triage run_id that preceded this remediation run
 	TriggerContext   string            `json:"trigger_context,omitempty"`   // original alert text or context that initiated the run
 	Operator         string            `json:"operator"`
@@ -181,6 +182,7 @@ func (s *PlaybookRunStore) migrate() error {
 		{"namespace", `ALTER TABLE playbook_runs ADD COLUMN namespace TEXT NOT NULL DEFAULT ''`},
 		{"purpose", `ALTER TABLE playbook_runs ADD COLUMN purpose TEXT NOT NULL DEFAULT ''`},
 		{"saw_signal_line", `ALTER TABLE playbook_runs ADD COLUMN saw_signal_line INTEGER NOT NULL DEFAULT 0`},
+		{"gate_reason", `ALTER TABLE playbook_runs ADD COLUMN gate_reason TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -237,7 +239,7 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 // agent_transcript, and completed_at for an existing run. Used when the agent session concludes.
 // traceID, when non-empty, updates the run's trace_id (the agent's own X-Trace-ID from the
 // response — distinct from the request trace ID stored at run start).
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *DiagnosticReport, sawSignalLine bool) error {
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *DiagnosticReport, sawSignalLine bool, gateReason string) error {
 	diagJSON := marshalDiagnosticReport(report)
 	sawSignalLineInt := 0
 	if sawSignalLine {
@@ -246,10 +248,10 @@ func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalated
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
 		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?,
-		     diagnostic_report = ?, agent_transcript = ?, saw_signal_line = ?, completed_at = ?,
+		     diagnostic_report = ?, agent_transcript = ?, saw_signal_line = ?, gate_reason = ?, completed_at = ?,
 		     trace_id = CASE WHEN ? != '' THEN ? ELSE trace_id END
 		 WHERE run_id = ?`,
-		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript, sawSignalLineInt,
+		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript, sawSignalLineInt, gateReason,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
 		traceID, traceID,
 		runID,
@@ -360,7 +362,7 @@ func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*Playb
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       saw_signal_line, trigger_context, operator, started_at, completed_at
+		       saw_signal_line, gate_reason, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
 	return scanPlaybookRun(row)
@@ -375,7 +377,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       saw_signal_line, trigger_context, operator, started_at, completed_at
+		       saw_signal_line, gate_reason, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
 		ORDER BY started_at DESC
@@ -397,7 +399,7 @@ func (s *PlaybookRunStore) ListByPriorRunID(ctx context.Context, priorRunID stri
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       saw_signal_line, trigger_context, operator, started_at, completed_at
+		       saw_signal_line, gate_reason, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE prior_run_id = ?
 		ORDER BY started_at DESC
@@ -418,7 +420,7 @@ func (s *PlaybookRunStore) ListBySeriesID(ctx context.Context, seriesID string, 
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       saw_signal_line, trigger_context, operator, started_at, completed_at
+		       saw_signal_line, gate_reason, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE series_id = ?
 		ORDER BY started_at DESC
@@ -438,7 +440,7 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       saw_signal_line, trigger_context, operator, started_at, completed_at
+		       saw_signal_line, gate_reason, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
 		ORDER BY started_at DESC
@@ -474,7 +476,7 @@ func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
 		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON,
 		&r.ContextID, &r.ConnectionString, &r.Namespace, &r.Purpose, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
-		&sawSignalLineInt, &r.TriggerContext, &r.Operator, &startedStr, &completedStr,
+		&sawSignalLineInt, &r.GateReason, &r.TriggerContext, &r.Operator, &startedStr, &completedStr,
 	); err != nil {
 		return nil, err
 	}

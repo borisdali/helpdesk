@@ -861,9 +861,15 @@ for playbook runs. After an agent-mode playbook run completes, it:
 2. Reads the `connection_string` parameter off each tool call.
 3. Compares each one against the `connection_string` the playbook run
    was actually invoked with (`intendedTarget`), resolving short server
-   names (e.g. `"test-pg"`) to their canonical connection string via
-   infra config first, so a server referenced by name in the request and
-   by full DSN in the tool call isn't flagged as a false positive.
+   references to their canonical connection string via infra config
+   first, so a server referenced by name in the request and by full DSN
+   in the tool call isn't flagged as a false positive. Three forms
+   resolve: the infra config key, the `name` display field, and the
+   `container_name` alias (e.g. `"test-pg"` as the Docker container for
+   the `"test-db"` entry) — found live that the third form silently fell
+   through to "cannot resolve, skipping" before this was added, so a
+   request using the container name never got its drift checked at all,
+   not even a false negative on a real drift, just no check performed.
 4. Returns the distinct set of connection strings the agent used that
    don't match, sorted, as `target_drift` in the run's HTTP response —
    plus, additively, `target_drift_detail`: the same drift attributed to
@@ -938,6 +944,9 @@ never carried enough to answer "which tool, and to where."
 `TestCheckTargetScope_FullConnStringMatchesShortName`,
 `TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`,
 `TestCheckTargetScope_DetailAttributesToolCalls`,
+`TestCheckTargetScope_ResolvedViaContainerName` (short-name resolution via
+the `container_name` alias, e.g. `"test-pg"` for the `"test-db"` entry —
+previously fell through to "cannot resolve, skipping"),
 `TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted` (persistence — also
 asserts `TargetDriftDetail` on both the persisted event and the live
 `target_drift_detail` response field),

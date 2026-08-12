@@ -1508,6 +1508,45 @@ func TestCheckTargetScope_ResolvedViaInfraConfig(t *testing.T) {
 	}
 }
 
+func TestCheckTargetScope_ResolvedViaContainerName(t *testing.T) {
+	// "test-pg" is only the Docker container_name nested inside the "test-db"
+	// entry, not a top-level key or Name — before this fix, checkTargetScope
+	// could not resolve it at all and silently skipped the drift check
+	// entirely (found live: a real request using the container name as
+	// connection_string never got its drift checked).
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-db": {
+				Name:             "Test DB",
+				ConnectionString: "host=localhost port=35432 dbname=postgres",
+				ContainerName:    "test-pg",
+			},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"},
+			},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "list_databases",
+				Parameters: map[string]any{"connection_string": "pg-cluster-minikube"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
+		t.Errorf("expected [pg-cluster-minikube] (resolved via container_name, agent-added user= on the intended target allowed), got %v", drift)
+	}
+}
+
 func TestCheckTargetScope_ResolvedPlusUnintendedServer(t *testing.T) {
 	// Agent correctly uses the resolved form for the intended target, but also queries
 	// an unintended server. Only the unintended server should appear in drift.
@@ -3634,6 +3673,68 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_PreservesGateReason is a regression guard for a
+// real bug found during review: recordPlaybookRunComplete's Update SQL sets
+// gate_reason unconditionally (no COALESCE), so a resolve call that passed ""
+// instead of the run's existing GateReason would silently erase it the moment
+// an operator interacted with proceed-escalation — right when it becomes most
+// useful to have queryable. Covers both the denied and approved branches,
+// since each has its own recordPlaybookRunComplete call site.
+func TestHandleProceedEscalation_PreservesGateReason(t *testing.T) {
+	for _, resolution := range []string{"denied", "approved"} {
+		t.Run(resolution, func(t *testing.T) {
+			var patchBody string
+			run := &audit.PlaybookRun{
+				RunID:           "plr_gatereason_resolve01",
+				Outcome:         audit.OutcomeGatePending,
+				TransitionedTo:  "pbs_vacuum_remediate",
+				FindingsSummary: "Vacuum lag detected; manual vacuum needed.",
+				GateReason:      "objective_evidence:pod_restarted",
+			}
+			remedPB := &audit.Playbook{
+				PlaybookID:    "pb_vac_rem02",
+				SeriesID:      "pbs_vacuum_remediate",
+				Name:          "Vacuum & Bloat — Remediation",
+				ExecutionMode: "agent",
+				IsActive:      true,
+			}
+			runData, _ := json.Marshal(run)
+
+			auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+					w.Write(runData) //nolint:errcheck
+				case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+					b, _ := io.ReadAll(r.Body)
+					patchBody = string(b)
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+					json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+				case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem03"}) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(auditSrv.Close)
+
+			gw := makePlaybookRunGateway(auditSrv.URL, nil)
+			postProceedEscalation(t, gw, "plr_gatereason_resolve01",
+				fmt.Sprintf(`{"resolution":%q,"resolved_by":"ops-alice","approval_mode":"auto"}`, resolution))
+
+			var patch map[string]any
+			if err := json.Unmarshal([]byte(patchBody), &patch); err != nil {
+				t.Fatalf("PATCH body not valid JSON: %v — body: %s", err, patchBody)
+			}
+			if patch["gate_reason"] != "objective_evidence:pod_restarted" {
+				t.Errorf("PATCH gate_reason = %v, want objective_evidence:pod_restarted (must be preserved through resolve, not wiped)", patch["gate_reason"])
+			}
+		})
+	}
+}
+
 // TestHandleProceedEscalation_NamespaceFallsBackToTriageRun verifies the
 // informed-gate flow (used with --gate-escalation, distinct from faulttest's
 // default direct-remediation path already covered by
@@ -4686,6 +4787,104 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 	signals, ok := resp["objective_evidence_signals"].([]any)
 	if !ok || len(signals) != 1 || signals[0] != "pod_restarted" {
 		t.Errorf("objective_evidence_signals = %v, want [pod_restarted] — structured field must be populated at the force-gate call site, not just the gate_reason substring", resp["objective_evidence_signals"])
+	}
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted proves
+// gate_reason survives past the live HTTP response — previously it existed
+// only in the ephemeral extra map with no durable/queryable trace, so once a
+// caller discarded the response body (e.g. piping straight to `jq
+// '.policy_denials'`), gate_reason was permanently unrecoverable, even via
+// GET /api/v1/fleet/playbook-runs/{run_id} or direct SQL. Also proves the
+// value survives a subsequent gate resolution (proceed-escalation) rather
+// than being wiped — Update's SQL sets gate_reason unconditionally, so a
+// resolve call that didn't thread the existing value through would silently
+// erase it right when it becomes most useful to have.
+func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_db_restart_triage02",
+		SeriesID:      "pbs_db_restart_triage2",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Check connection and pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Pod recovered after a restart and is now healthy.\n\n" +
+		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod recovered; no further action needed\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	var patchBodies [][]byte
+	var mu sync.Mutex
+	pbData, _ := json.Marshal(pb)
+	evidenceData, _ := json.Marshal([]audit.Event{
+		{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Resource: "pg-cluster-minkube-1", Signal: "pod_restarted"}},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence":
+			w.Write(evidenceData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gatereason_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBodies = append(patchBodies, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+
+	// recordPlaybookRunComplete's PATCH is fire-and-forget — poll for it.
+	var completePatch map[string]any
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		bodies := append([][]byte(nil), patchBodies...)
+		mu.Unlock()
+		for _, b := range bodies {
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				continue
+			}
+			if _, ok := m["gate_reason"]; ok {
+				completePatch = m
+			}
+		}
+		if completePatch != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if completePatch == nil {
+		t.Fatal("no PATCH with gate_reason observed — recordPlaybookRunComplete never persisted it")
+	}
+	if completePatch["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("persisted gate_reason = %v, want objective_evidence:pod_restarted", completePatch["gate_reason"])
 	}
 }
 

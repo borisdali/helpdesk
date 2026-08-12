@@ -80,6 +80,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		TraceID          string                  `json:"trace_id,omitempty"`
 		DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 		SawSignalLine    bool                    `json:"saw_signal_line,omitempty"`
+		GateReason       string                  `json:"gate_reason,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -90,7 +91,7 @@ func (s *playbookRunServer) handleUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.AgentTranscript, body.TraceID, body.DiagnosticReport, body.SawSignalLine); err != nil {
+	if err := s.store.Update(r.Context(), runID, body.Outcome, body.EscalatedTo, body.TransitionedTo, body.FindingsSummary, body.AgentTranscript, body.TraceID, body.DiagnosticReport, body.SawSignalLine, body.GateReason); err != nil {
 		slog.Error("failed to update playbook run", "run_id", runID, "err", err)
 		http.Error(w, "failed to update run", http.StatusInternalServerError)
 		return

@@ -118,7 +118,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false)
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 		RootCause:  "Updated root cause",
 		Hypotheses: []DiagnosticHypothesis{{Rank: 1, Text: "Updated", Confidence: 0.99, IsPrimary: true}},
 	}
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", "", report2, false); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", "", report2, false, ""); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	got2, err := s.GetByRunID(ctx, run.RunID)
@@ -407,7 +407,7 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 		t.Errorf("AgentTranscript should be empty before Update, got %q", got.AgentTranscript)
 	}
 
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", "tr_abc123", nil, true); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", "tr_abc123", nil, true, "low_confidence+objective_evidence:pod_restarted"); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -420,6 +420,9 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 	}
 	if got2.AgentTranscript != "full agent reasoning narrative here" {
 		t.Errorf("AgentTranscript = %q, want %q", got2.AgentTranscript, "full agent reasoning narrative here")
+	}
+	if got2.GateReason != "low_confidence+objective_evidence:pod_restarted" {
+		t.Errorf("GateReason = %q, want %q", got2.GateReason, "low_confidence+objective_evidence:pod_restarted")
 	}
 	// TraceID and PriorRunID are immutable — Update must not clear them.
 	if got2.TraceID != "tr_abc123" {
