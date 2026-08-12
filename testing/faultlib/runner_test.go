@@ -284,6 +284,39 @@ func TestRunViaPlaybook_EvidenceWarningsPopulated(t *testing.T) {
 	}
 }
 
+// TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated mirrors
+// TestRunViaPlaybook_EvidenceWarningsPopulated exactly, for the two newer
+// response fields (target_drift, objective_evidence_signals) added to the
+// same anonymous decode struct — both were previously undecoded anywhere in
+// this package; a faulttest run that hit either field would have silently
+// dropped it, exactly like evidence_warnings did before that field was wired.
+func TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
+		"text":                       "result",
+		"run_id":                     "run_drift01",
+		"target_drift":               []string{"host=localhost port=15432 dbname=testdb"},
+		"objective_evidence_signals": []string{"pod_restarted"},
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-wal-disk-full-k8s", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_db_restart_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if len(resp.TargetDrift) != 1 || resp.TargetDrift[0] != "host=localhost port=15432 dbname=testdb" {
+		t.Errorf("TargetDrift = %v, want [host=localhost port=15432 dbname=testdb]", resp.TargetDrift)
+	}
+	if len(resp.ObjectiveEvidenceSignals) != 1 || resp.ObjectiveEvidenceSignals[0] != "pod_restarted" {
+		t.Errorf("ObjectiveEvidenceSignals = %v, want [pod_restarted]", resp.ObjectiveEvidenceSignals)
+	}
+}
+
 // TestRunViaPlaybook_SendsSkipTrustGate is a regression guard for a real
 // bootstrapping requirement: faulttest traffic must always set
 // skip_trust_gate=true, unconditionally, on every playbook-run request — not

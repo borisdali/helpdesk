@@ -938,18 +938,38 @@ never carried enough to answer "which tool, and to where."
 `TestCheckTargetScope_FullConnStringMatchesShortName`,
 `TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`,
 `TestCheckTargetScope_DetailAttributesToolCalls`,
-`TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted` (persistence).
+`TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted` (persistence — also
+asserts `TargetDriftDetail` on both the persisted event and the live
+`target_drift_detail` response field),
+`TestHandlePlaybookRun_AutoChain_ChainedHopRawTextAndSawSignalLine_Persisted`
+(proves the auto-chained hop's own raw transcript/`SawSignalLine` persist
+independently of the primary hop's, at the chain loop's separate
+`recordPlaybookRunComplete` call site).
 `internal/audit/store_test.go` — `TestQueryJourneys_HasTargetDrift`,
 `TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie`,
 `TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied`.
 `testing/integration/governance/governance_test.go` —
 `TestIntegration_TargetDrift_SurfacesInJourneys` (now also round-trips
-`target_drift_detail` through a real auditd binary).
+`target_drift_detail` through a real auditd binary),
+`TestIntegration_GovernanceEventsProxy_DelegationVerification_ByTraceAndType`
+(proves the gateway's generic `/api/v1/governance/events` proxy forwards a
+query-by-trace_id-and-event_type request — the exact call
+`fetchDelegationVerificationEvents` below makes — through a real gateway +
+auditd process pair, not just the sibling by-ID form already covered by the
+e2e suite).
+`testing/faultlib/runner_test.go` —
+`TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated` (proves
+`target_drift`/`objective_evidence_signals` decode from the gateway's raw
+JSON into `testutil.AgentResponse`, mirroring the pre-existing
+`TestRunViaPlaybook_EvidenceWarningsPopulated` pattern for exactly this class
+of gap — a new response field silently dropped by faulttest's decode struct).
 `testing/cmd/faulttest/vault_test.go` —
 `TestFetchDelegationVerificationEvents_Found/Empty/ServerError`,
 `TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail`,
 `TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues`,
-`TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools`.
+`TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools`,
+`TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent` (the third of
+the three warning sections wired to `fetchDelegationVerificationEvents`).
 
 ---
 
@@ -1063,7 +1083,11 @@ different package/layer than everything else here. `ResourceType`/
 `TestCheckPolicyDenials_NoAuditURL`, `_NoEvents`, `_AllowOnly_NoDenials`,
 `_Deny`, `TestAppendPolicyDenials_AccumulatesAcrossCalls`,
 `TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse` (end-to-end through
-the real HTTP path).
+the real HTTP path),
+`TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops` (proves
+both the primary and the auto-chained hop's separate `checkPolicyDenials`
+call sites fire and accumulate into the same response array, not just that
+`appendPolicyDenials` itself can accumulate in isolation).
 
 ---
 

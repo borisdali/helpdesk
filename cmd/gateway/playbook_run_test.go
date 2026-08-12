@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1364,6 +1365,27 @@ func TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted(t *testing.T) {
 	if !strings.HasPrefix(driftEvent.EventID, "gv_") {
 		t.Errorf("EventID = %q, want gv_ prefix", driftEvent.EventID)
 	}
+	if len(driftEvent.DelegationVerification.TargetDriftDetail) != 1 {
+		t.Fatalf("TargetDriftDetail = %v, want 1 entry attributing the drift to list_databases", driftEvent.DelegationVerification.TargetDriftDetail)
+	}
+	gotDetail := driftEvent.DelegationVerification.TargetDriftDetail[0]
+	wantDetail := audit.TargetDriftDetail{Tool: "list_databases", ConnectionString: "pg-cluster-minikube"}
+	if gotDetail != wantDetail {
+		t.Errorf("TargetDriftDetail[0] = %+v, want %+v", gotDetail, wantDetail)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, w.Body.String())
+	}
+	respDetail, ok := resp["target_drift_detail"].([]any)
+	if !ok || len(respDetail) != 1 {
+		t.Fatalf("response target_drift_detail = %v, want 1 entry", resp["target_drift_detail"])
+	}
+	d, _ := respDetail[0].(map[string]any)
+	if d["tool"] != "list_databases" || d["connection_string"] != "pg-cluster-minikube" {
+		t.Errorf("response target_drift_detail[0] = %v, want {tool: list_databases, connection_string: pg-cluster-minikube}", d)
+	}
 }
 
 // ---- checkTargetScope tests ----
@@ -2388,6 +2410,125 @@ func TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops proves
+// checkPolicyDenials's call site inside the auto-chain loop (playbooks.go,
+// alongside recordSignalLessWarnings) actually fires for a chained hop and
+// accumulates onto the same extra["policy_denials"] the primary hop's call
+// site populated — not just that appendPolicyDenials itself can accumulate
+// (already covered by TestAppendPolicyDenials_AccumulatesAcrossCalls) or that
+// a single-hop response surfaces a denial (TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse).
+// Each hop's policy_decision fetch returns a distinct denial, differentiated
+// by call order, so both showing up in the final response proves both real
+// call sites fired, not just one twice.
+func TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_pdchain_triage",
+		SeriesID:      "pbs_pdchain_triage",
+		Name:          "PD Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "pdchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_pdchain_sysadmin",
+		SeriesID:      "pbs_pdchain_sysadmin",
+		Name:          "PD Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "pdchain_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pbTriage)
+
+	var policyCalls int32
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if r.URL.Query().Get("series_id") == "pbs_pdchain_sysadmin" {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pbSysadmin}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_pdchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("event_type") == "policy_decision":
+			n := atomic.AddInt32(&policyCalls, 1)
+			resourceName := "pg-cluster-primary"
+			if n > 1 {
+				resourceName = "pg-cluster-sysadmin-target"
+			}
+			denyEvent, _ := json.Marshal([]audit.Event{
+				{
+					EventType: audit.EventTypePolicyDecision,
+					PolicyDecision: &audit.PolicyDecision{
+						ResourceType: "database",
+						ResourceName: resourceName,
+						Effect:       "deny",
+						PolicyName:   "require-purpose",
+					},
+				},
+			})
+			w.Write(denyEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "pdchain_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_pdchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "pdchain_sysadmin_agent",
+		"FINDINGS: container looks fine\nESCALATE_TO: none\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"pdchain_db_agent":       dbCard,
+		"pdchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	denials, ok := resp["policy_denials"].([]any)
+	if !ok || len(denials) != 2 {
+		t.Fatalf("expected 2 accumulated policy_denials (one per hop), got %v — body: %s", resp["policy_denials"], rec.Body.String())
+	}
+	var gotNames []string
+	for _, d := range denials {
+		m, _ := d.(map[string]any)
+		gotNames = append(gotNames, fmt.Sprintf("%v", m["resource_name"]))
+	}
+	wantNames := []string{"pg-cluster-primary", "pg-cluster-sysadmin-target"}
+	for _, want := range wantNames {
+		found := false
+		for _, got := range gotNames {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("policy_denials missing entry for %q — got resource_names %v (primary hop's own denial should not be lost when the chained hop's is appended)", want, gotNames)
+		}
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal is a regression
 // test for a real bug found during live 3-hop escalation-chain verification:
 // the primary/entry-point run's OWN escalated_to/transitioned_to fields were
@@ -2541,6 +2682,89 @@ func mockA2AServerCapturing(t *testing.T, agentName, responseText string, captur
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 	}
 	return srv, card
+}
+
+// TestHandlePlaybookRun_AutoChain_ChainedHopRawTextAndSawSignalLine_Persisted
+// proves the chained-hop path (recordPlaybookRunComplete's second call site,
+// playbooks.go's auto-chain loop) persists the chained hop's OWN raw text and
+// SawSignalLine — not just the primary hop's, which
+// TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted already covers. The
+// two call sites are separate code paths (primary vs. chainRes.rawText/
+// chainRes.sawSignalLine) and nothing previously proved the chained one wires
+// correctly.
+func TestHandlePlaybookRun_AutoChain_ChainedHopRawTextAndSawSignalLine_Persisted(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_rawchain_triage",
+		SeriesID:      "pbs_rawchain_triage",
+		Name:          "Raw Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_rawchain_sysadmin",
+		SeriesID:      "pbs_rawchain_sysadmin",
+		Name:          "Raw Chain Sysadmin",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawchain_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_rawchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_rawchain_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "rawchain_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_rawchain_sysadmin\n")
+	chainedRawText := "Investigated container state.\n\nFINDINGS: container healthy; no action needed.\nESCALATE_TO: none\n"
+	_, sysadminCard := mockA2AServerWithText(t, "rawchain_sysadmin_agent", chainedRawText)
+	for name, card := range map[string]*a2a.AgentCard{
+		"rawchain_db_agent":       dbCard,
+		"rawchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	chainedRunID, _ := resp["chained_run_id"].(string)
+	if chainedRunID == "" {
+		t.Fatalf("response missing chained_run_id — body: %s", rec.Body.String())
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(chainedRunID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for chained run %s within timeout", chainedRunID)
+	}
+
+	transcript, _ := patch["agent_transcript"].(string)
+	if !strings.Contains(transcript, "ESCALATE_TO: none") {
+		t.Errorf("chained run's persisted agent_transcript should contain its OWN raw, un-stripped signal line, got %q", transcript)
+	}
+	if patch["saw_signal_line"] != true {
+		t.Errorf("chained run's persisted saw_signal_line = %v, want true", patch["saw_signal_line"])
+	}
 }
 
 // TestHandlePlaybookRun_AutoChain_IsTransitionFraming is a regression test
@@ -4459,6 +4683,10 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 	if resp["transition_target"] != "pbs_db_config_recovery" {
 		t.Errorf("transition_target = %q, want pbs_db_config_recovery", resp["transition_target"])
 	}
+	signals, ok := resp["objective_evidence_signals"].([]any)
+	if !ok || len(signals) != 1 || signals[0] != "pod_restarted" {
+		t.Errorf("objective_evidence_signals = %v, want [pod_restarted] — structured field must be populated at the force-gate call site, not just the gate_reason substring", resp["objective_evidence_signals"])
+	}
 }
 
 // TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason is
@@ -4559,6 +4787,10 @@ func TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning(t *tes
 	warnStr, _ := warnings[0].(string)
 	if !strings.Contains(warnStr, "oom_killed") {
 		t.Errorf("evidence_warnings[0] = %q, want it to mention oom_killed", warnStr)
+	}
+	signals, ok := resp["objective_evidence_signals"].([]any)
+	if !ok || len(signals) != 1 || signals[0] != "oom_killed" {
+		t.Errorf("objective_evidence_signals = %v, want [oom_killed] — structured field must be populated at the warn-only (recordSignalLessWarnings) call site too, not just the force-gate one", resp["objective_evidence_signals"])
 	}
 }
 

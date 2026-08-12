@@ -1229,6 +1229,71 @@ func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
 	}
 }
 
+// TestIntegration_GovernanceEventsProxy_DelegationVerification_ByTraceAndType
+// proves the gateway's generic /api/v1/governance/events proxy
+// (proxyGovernanceRequest, called with path="/v1/events") correctly forwards
+// a query-by-trace_id-and-event_type request through to a real auditd and
+// back — the exact call `faulttest vault journey <trace_id>`'s
+// fetchDelegationVerificationEvents makes to show tool/value warning detail
+// (see MUTATION_TOOLS.md's target-scope-drift and policy-denial sections).
+// The e2e suite (testing/e2e/governance_test.go's
+// TestGovernance_GetEvent_DelegationVerification) already proves the sibling
+// by-ID form (/api/v1/governance/events/{eventID}) round-trips through a real
+// gateway, but that is a different query shape hitting the same generic
+// passthrough function — this test is the one that actually exercises the
+// query-string list form the CLI depends on, through a real gateway process
+// (not just a mocked one, unlike every cmd/gateway-package test of
+// fetchDelegationVerificationEvents-equivalent logic).
+func TestIntegration_GovernanceEventsProxy_DelegationVerification_ByTraceAndType(t *testing.T) {
+	traceID := fmt.Sprintf("dv-gwproxy-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	post(t, auditdAddr, "/v1/events", anchor)
+
+	dvEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"agent":               "postgres_database_agent",
+			"action_class":        "read",
+			"mismatch":            false,
+			"target_drift":        []string{"host=localhost port=15432 dbname=testdb"},
+			"target_drift_detail": []map[string]any{{"tool": "get_session_info", "connection_string": "host=localhost port=15432 dbname=testdb"}},
+		},
+	}
+	post(t, auditdAddr, "/v1/events", dvEvent)
+
+	// Same query shape fetchDelegationVerificationEvents (testing/cmd/faulttest/vault.go)
+	// sends, but through the real gateway's proxy rather than direct to auditd.
+	events := getList(t, gatewayAddr, "/api/v1/governance/events?trace_id="+traceID+"&event_type=delegation_verification")
+	found := false
+	for _, e := range events {
+		if e["trace_id"] != traceID {
+			continue
+		}
+		dv, _ := e["delegation_verification"].(map[string]any)
+		if dv == nil {
+			t.Fatalf("event for trace_id=%s missing delegation_verification field: %v", traceID, e)
+		}
+		if dv["agent"] != "postgres_database_agent" {
+			t.Errorf("delegation_verification.agent = %v, want postgres_database_agent", dv["agent"])
+		}
+		detail, _ := dv["target_drift_detail"].([]any)
+		if len(detail) != 1 {
+			t.Errorf("delegation_verification.target_drift_detail = %v, want 1 entry — proxy must forward the full event body, not a truncated projection", dv["target_drift_detail"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("event with trace_id=%s not found via gateway governance/events proxy — got %d events: %v", traceID, len(events), events)
+	}
+}
+
 // TestIntegration_ProtocolViolation_SurfacesInJourneys mirrors
 // TestIntegration_TargetDrift_SurfacesInJourneys exactly, for the new
 // ProtocolViolation signal (a triage-typed playbook's hop that resolved

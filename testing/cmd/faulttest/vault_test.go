@@ -1973,6 +1973,54 @@ func TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues(t *testing
 	}
 }
 
+// TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent proves the
+// PROTOCOL VIOLATION WARNING section shows which agent's hop violated the
+// protocol, from the raw delegation_verification event — the third of the
+// three warning sections wired to fetchDelegationVerificationEvents, closing
+// out the last untested case (FABRICATION and TARGET DRIFT are covered by
+// the tests above).
+func TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":               "tr_pvdetail1",
+					"started_at":             time.Now().UTC().Format(time.RFC3339),
+					"outcome":                "protocol_violation",
+					"has_protocol_violation": true,
+					"tools_used":             []string{},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":              "sysadmin_agent",
+						"protocol_violation": true,
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_pvdetail1", false)
+	})
+
+	if !strings.Contains(out, "PROTOCOL VIOLATION WARNING") {
+		t.Fatalf("output missing PROTOCOL VIOLATION WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Agent(s): sysadmin_agent") {
+		t.Errorf("output missing agent detail, got:\n%s", out)
+	}
+}
+
 // ── escalationHopDesc ─────────────────────────────────────────────────────
 
 func TestEscalationHopDesc(t *testing.T) {
