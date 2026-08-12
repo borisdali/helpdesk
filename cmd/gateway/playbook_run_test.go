@@ -1369,7 +1369,7 @@ func TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted(t *testing.T) {
 // ---- checkTargetScope tests ----
 
 func TestCheckTargetScope_NoAuditURL(t *testing.T) {
-	drift := checkTargetScope(nil, "", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, "", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil with empty auditURL, got %v", drift)
 	}
@@ -1387,14 +1387,14 @@ func TestCheckTargetScope_ShortNameNoInfra_Skipped(t *testing.T) {
 		},
 	}
 	srv := serveFakeToolEvents(t, events)
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (short name, no infra config — skip check), got %v", drift)
 	}
 }
 
 func TestCheckTargetScope_EmptyIntendedTarget(t *testing.T) {
-	drift := checkTargetScope(nil, "http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
+	drift, _ := checkTargetScope(nil, "http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
 	if drift != nil {
 		t.Errorf("expected nil with empty intended target, got %v", drift)
 	}
@@ -1409,7 +1409,7 @@ func TestCheckTargetScope_NoDrift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (no drift), got %v", drift)
 	}
@@ -1433,7 +1433,7 @@ func TestCheckTargetScope_Drift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
 		t.Errorf("expected [pg-cluster-minikube], got %v", drift)
 	}
@@ -1452,7 +1452,7 @@ func TestCheckTargetScope_FullConnStringMatchesShortName(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (full conn string contains intended target as host), got %v", drift)
 	}
@@ -1480,7 +1480,7 @@ func TestCheckTargetScope_ResolvedViaInfraConfig(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (agent-added user= field is allowed), got %v", drift)
 	}
@@ -1515,9 +1515,163 @@ func TestCheckTargetScope_ResolvedPlusUnintendedServer(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if len(drift) != 1 || drift[0] != "test-db" {
 		t.Errorf("expected [test-db], got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_DetailAttributesToolCalls(t *testing.T) {
+	// Two different tools drift to two different unintended targets — detail
+	// must attribute each divergent connection string to the tool that used it,
+	// which the deduplicated drift []string alone discards.
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {Name: "Test Postgres", ConnectionString: "host=localhost port=35432 dbname=postgres"},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "list_databases", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_pods", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			// Same tool, same connection string as above — must not duplicate in detail.
+			Tool: &audit.ToolExecution{Name: "get_pods", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift, detail := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
+		t.Fatalf("expected drift [pg-cluster-minikube], got %v", drift)
+	}
+	want := []audit.TargetDriftDetail{
+		{Tool: "get_pods", ConnectionString: "pg-cluster-minikube"},
+		{Tool: "list_databases", ConnectionString: "pg-cluster-minikube"},
+	}
+	if len(detail) != len(want) {
+		t.Fatalf("got %d detail entries, want %d: %+v", len(detail), len(want), detail)
+	}
+	for i, d := range detail {
+		if d != want[i] {
+			t.Errorf("detail[%d] = %+v, want %+v", i, d, want[i])
+		}
+	}
+}
+
+// ---- checkPolicyDenials tests ----
+
+func TestCheckPolicyDenials_NoAuditURL(t *testing.T) {
+	denials := checkPolicyDenials("", "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil with empty auditURL, got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_NoEvents(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil with no events, got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_AllowOnly_NoDenials(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube",
+				Effect:       "allow",
+				PolicyName:   "default-read",
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil (allow only, no denials), got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_Deny(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube",
+				Effect:       "allow",
+				PolicyName:   "default-read",
+			},
+		},
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube-local",
+				Effect:       "deny",
+				PolicyName:   "require-purpose",
+				Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if len(denials) != 1 {
+		t.Fatalf("expected 1 denial, got %d: %v", len(denials), denials)
+	}
+	got := denials[0]
+	want := PolicyDenialSummary{
+		ResourceType: "database",
+		ResourceName: "pg-cluster-minikube-local",
+		PolicyName:   "require-purpose",
+		Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+	}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestAppendObjectiveEvidenceSignal_DedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendObjectiveEvidenceSignal(extra, "pod_restarted")
+	appendObjectiveEvidenceSignal(extra, "")
+	appendObjectiveEvidenceSignal(extra, "pod_restarted")
+	appendObjectiveEvidenceSignal(extra, "oom_killed")
+
+	got, _ := extra["objective_evidence_signals"].([]string)
+	want := []string{"pod_restarted", "oom_killed"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAppendPolicyDenials_AccumulatesAcrossCalls(t *testing.T) {
+	extra := map[string]any{}
+	appendPolicyDenials(extra, []PolicyDenialSummary{{ResourceName: "db-a"}})
+	appendPolicyDenials(extra, nil)
+	appendPolicyDenials(extra, []PolicyDenialSummary{{ResourceName: "db-b"}})
+
+	got, _ := extra["policy_denials"].([]PolicyDenialSummary)
+	if len(got) != 2 || got[0].ResourceName != "db-a" || got[1].ResourceName != "db-b" {
+		t.Errorf("expected accumulated [db-a db-b], got %v", got)
 	}
 }
 
@@ -2045,6 +2199,192 @@ func TestHandlePlaybookRun_ExplicitEscalateToNone_NoProtocolViolation(t *testing
 		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
 			t.Fatal("no protocol-violation event should be recorded for an explicit ESCALATE_TO: none")
 		}
+	}
+}
+
+// TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted proves the raw
+// (pre-strip) agent text and the SawSignalLine flag both reach the PATCH
+// sent to auditd — not just the live HTTP response's already-cleaned
+// "text" field. Root cause this closes: capturedText(capture) decoded
+// capture.body after respBody["text"] had already been overwritten with
+// esc.CleanText, so AgentTranscript persisted via recordPlaybookRunComplete
+// was always the cleaned text, and SawSignalLine was never persisted at
+// all — meaning there was no way to verify after the fact why
+// protocol_violation did or didn't fire for a given run.
+func TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_rawtext01",
+		SeriesID:      "pbs_rawtext_triage",
+		Name:          "Raw Text Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawtext_agent",
+		IsActive:      true,
+	}
+
+	var patchBodies [][]byte
+	var mu sync.Mutex
+	pbData, _ := json.Marshal(pb)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rawtext_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBodies = append(patchBodies, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	rawText := "Analysis complete.\n\nFINDINGS: connection pool exhausted; 48/50 in use.\nESCALATE_TO: none\n"
+	_, card := mockA2AServerWithText(t, "rawtext_agent", rawText)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"rawtext_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"pool exhaustion"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if text, _ := resp["text"].(string); strings.Contains(text, "ESCALATE_TO:") {
+		t.Errorf("live response text should still be stripped of the signal line, got %q", text)
+	}
+
+	// recordPlaybookRunComplete's PATCH is fired via "go" (fire-and-forget)
+	// at the call sites this test exercises, so it can land after the HTTP
+	// response is already written — poll briefly instead of racing it.
+	var completePatch map[string]any
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		bodies := append([][]byte(nil), patchBodies...)
+		mu.Unlock()
+		for _, b := range bodies {
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				continue
+			}
+			if _, ok := m["agent_transcript"]; ok {
+				completePatch = m
+			}
+		}
+		if completePatch != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if completePatch == nil {
+		t.Fatal("no PATCH with agent_transcript observed — recordPlaybookRunComplete never fired")
+	}
+	transcript, _ := completePatch["agent_transcript"].(string)
+	if !strings.Contains(transcript, "ESCALATE_TO: none") {
+		t.Errorf("persisted agent_transcript should contain the raw, un-stripped signal line, got %q", transcript)
+	}
+	if completePatch["saw_signal_line"] != true {
+		t.Errorf("persisted saw_signal_line = %v, want true", completePatch["saw_signal_line"])
+	}
+}
+
+// TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse proves policy_decision
+// deny events for the run's trace end up on the response's policy_denials
+// field — end-to-end through the real HTTP path, not just checkPolicyDenials
+// as a standalone function (already covered above). This is what lets a human
+// (or downstream tool) see *why* a narrated-but-unconfirmed tool call is
+// missing evidence, instead of only having the agent's own prose explanation
+// of the denial to go on.
+func TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_policydenial01",
+		SeriesID:      "pbs_policydenial_triage",
+		Name:          "Policy Denial Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "policydenial_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pb)
+	denyEvent, _ := json.Marshal([]audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube-local",
+				Effect:       "deny",
+				PolicyName:   "require-purpose",
+				Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+			},
+		},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_policydenial_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=policy_decision"):
+			w.Write(denyEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	_, card := mockA2AServerWithText(t, "policydenial_agent",
+		"FINDINGS: could not check connection; access denied.\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"policydenial_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	denials, ok := resp["policy_denials"].([]any)
+	if !ok || len(denials) != 1 {
+		t.Fatalf("expected 1 policy_denials entry, got %v", resp["policy_denials"])
+	}
+	d, ok := denials[0].(map[string]any)
+	if !ok {
+		t.Fatalf("policy_denials[0] not an object: %v", denials[0])
+	}
+	if d["resource_name"] != "pg-cluster-minikube-local" {
+		t.Errorf("resource_name = %v, want pg-cluster-minikube-local", d["resource_name"])
+	}
+	if d["policy_name"] != "require-purpose" {
+		t.Errorf("policy_name = %v, want require-purpose", d["policy_name"])
 	}
 }
 

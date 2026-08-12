@@ -2259,6 +2259,63 @@ func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journ
 	return summaries, nil
 }
 
+// targetDriftDetail mirrors audit.TargetDriftDetail for JSON decoding.
+type targetDriftDetail struct {
+	Tool             string `json:"tool"`
+	ConnectionString string `json:"connection_string"`
+}
+
+// delegationVerificationEvent mirrors the audit.DelegationVerification fields
+// vault journey needs to show tool/value detail instead of generic boilerplate
+// in its warning sections — a strict subset of the full struct.
+type delegationVerificationEvent struct {
+	Agent                string              `json:"agent"`
+	NarratedNotConfirmed []string            `json:"narrated_not_confirmed,omitempty"`
+	WriteConfirmed       []string            `json:"write_confirmed,omitempty"`
+	DestructiveConfirmed []string            `json:"destructive_confirmed,omitempty"`
+	TargetDrift          []string            `json:"target_drift,omitempty"`
+	TargetDriftDetail    []targetDriftDetail `json:"target_drift_detail,omitempty"`
+	ProtocolViolation    bool                `json:"protocol_violation,omitempty"`
+}
+
+// fetchDelegationVerificationEvents calls GET /api/v1/governance/events for
+// every delegation_verification event recorded on traceID — the raw events
+// that back a journey's HasMismatch/HasTargetDrift/HasProtocolViolation
+// booleans, carrying the tool/value detail those flags alone discard.
+func fetchDelegationVerificationEvents(gatewayURL, apiKey, traceID string) ([]delegationVerificationEvent, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/governance/events?trace_id=" +
+		neturl.QueryEscape(traceID) + "&event_type=delegation_verification"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var events []struct {
+		DelegationVerification *delegationVerificationEvent `json:"delegation_verification"`
+	}
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	verifications := make([]delegationVerificationEvent, 0, len(events))
+	for _, e := range events {
+		if e.DelegationVerification != nil {
+			verifications = append(verifications, *e.DelegationVerification)
+		}
+	}
+	return verifications, nil
+}
+
 // vaultJourney shows the audit trail for one or more journey traces.
 // Usage: faulttest vault journey [<trace_id>] [--limit N] [--since duration] [--category db|k8s] [--outcome X] [--incident]
 func vaultJourney(args []string) {
@@ -2552,11 +2609,38 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		}
 	}
 
+	// Fetch the raw delegation_verification events backing HasMismatch/
+	// HasTargetDrift/HasProtocolViolation once, up front, so each warning
+	// section below can show tool names / drift values instead of generic
+	// boilerplate. Fetch failures degrade to the boilerplate-only text — this
+	// is supplementary detail, not required for the warning itself to display.
+	var verifs []delegationVerificationEvent
+	if j.HasMismatch || j.HasTargetDrift || j.HasProtocolViolation {
+		var verifErr error
+		verifs, verifErr = fetchDelegationVerificationEvents(gatewayURL, apiKey, j.TraceID)
+		if verifErr != nil {
+			slog.Debug("vault journey: could not fetch delegation_verification events", "trace_id", j.TraceID, "err", verifErr)
+		}
+	}
+
 	if j.HasMismatch {
 		sectionJ("FABRICATION WARNING")
 		fmt.Println("  ! One or more delegations reported success but no matching tool")
 		fmt.Println("    execution was recorded in the audit trail.")
 		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
+		var narrated []string
+		seen := map[string]bool{}
+		for _, v := range verifs {
+			for _, t := range v.NarratedNotConfirmed {
+				if !seen[t] {
+					seen[t] = true
+					narrated = append(narrated, t)
+				}
+			}
+		}
+		if len(narrated) > 0 {
+			fmt.Printf("    Narrated but unconfirmed: %s\n", strings.Join(narrated, ", "))
+		}
 	}
 
 	if j.HasTargetDrift {
@@ -2565,6 +2649,33 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		fmt.Println("    than the run was invoked with. The tool call itself is genuine —")
 		fmt.Println("    HasMismatch may be false — but any diagnosis built on it reflects")
 		fmt.Println("    the wrong server. Review which target the agent actually queried.")
+		var detailLines []string
+		var plainValues []string
+		seenDetail := map[string]bool{}
+		seenPlain := map[string]bool{}
+		for _, v := range verifs {
+			for _, d := range v.TargetDriftDetail {
+				key := d.Tool + "\x00" + d.ConnectionString
+				if !seenDetail[key] {
+					seenDetail[key] = true
+					detailLines = append(detailLines, fmt.Sprintf("%s → %s", d.Tool, d.ConnectionString))
+				}
+			}
+			for _, cs := range v.TargetDrift {
+				if !seenPlain[cs] {
+					seenPlain[cs] = true
+					plainValues = append(plainValues, cs)
+				}
+			}
+		}
+		if len(detailLines) > 0 {
+			fmt.Println("    Offending calls:")
+			for _, l := range detailLines {
+				fmt.Printf("      %s\n", l)
+			}
+		} else if len(plainValues) > 0 {
+			fmt.Printf("    Drifted to: %s\n", strings.Join(plainValues, ", "))
+		}
 	}
 
 	if j.HasProtocolViolation {
@@ -2573,6 +2684,17 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		fmt.Println("    required TRANSITION_TO/ESCALATE_TO signal at all — not even an")
 		fmt.Println("    explicit \"none\". No gate was forced (no target to gate into);")
 		fmt.Println("    this run also negates the fault's CLEAN cert on the next recert.")
+		var agents []string
+		seen := map[string]bool{}
+		for _, v := range verifs {
+			if v.ProtocolViolation && v.Agent != "" && !seen[v.Agent] {
+				seen[v.Agent] = true
+				agents = append(agents, v.Agent)
+			}
+		}
+		if len(agents) > 0 {
+			fmt.Printf("    Agent(s): %s\n", strings.Join(agents, ", "))
+		}
 	}
 
 	if j.IncidentRunID != "" {
@@ -4253,6 +4375,7 @@ type narrativeEscalationHop struct {
 	HasMismatch          bool                 `json:"has_mismatch,omitempty"`
 	HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
 	HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
+	SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
 }
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
@@ -4272,6 +4395,7 @@ type incidentNarrative struct {
 		HasMismatch          bool                 `json:"has_mismatch,omitempty"`
 		HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
 		HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
+		SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
 	} `json:"triage"`
 	Gate *struct {
 		ApprovedBy     string    `json:"approved_by,omitempty"`
@@ -4293,6 +4417,7 @@ type incidentNarrative struct {
 		HasMismatch          bool            `json:"has_mismatch,omitempty"`
 		HasTargetDrift       bool            `json:"has_target_drift,omitempty"`
 		HasProtocolViolation bool            `json:"has_protocol_violation,omitempty"`
+		SawSignalLine        bool            `json:"saw_signal_line,omitempty"`
 	} `json:"remediation,omitempty"`
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`

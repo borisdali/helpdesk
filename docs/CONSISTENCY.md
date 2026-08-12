@@ -169,13 +169,13 @@ Stability certs are stored with a composite primary key of `(fault_id, diagnosis
 
 ### CLEAN axis fields (v0.24.0)
 
-Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which three signals count and which two are deliberately excluded.
+Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which four signals count and which two are deliberately excluded.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `warning_count` | int | Number of the cert's N runs that tripped a verified warning signal |
 | `is_clean` | bool | `true` only when `warning_count == 0` — zero-tolerance, no percentage threshold |
-| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence": 1, "protocol_violation": 2}`. Shown via `vault accuracy`'s `Warning types:` line; not shown in `vault list`. |
+| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses. Shown via `vault accuracy`'s `Warning types:` line; not shown in `vault list`. |
 
 `is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires both `is_stable` and `is_clean` across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended.
 
@@ -529,11 +529,11 @@ rather than returning early — the consistency signal is available independentl
 
 When `Clean` is `no`, a `Warning types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
-the three signals fired:
+the four signals fired:
 
 ```
   Clean         : no  (2/5 run(s) tripped a verified warning signal)
-  Warning types : objective_evidence=1, protocol_violation=1
+  Warning types : objective_evidence:pod_restarted=1, protocol_violation=1
 ```
 
 If the cert is older than 30 days, a warning is shown:

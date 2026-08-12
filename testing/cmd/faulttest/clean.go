@@ -24,18 +24,29 @@ type CleanReport struct {
 }
 
 // warningTypesFor returns which named warning type(s) fired for a single run
-// — a run can trip more than one. "objective_evidence" covers both
-// manifestations of the same underlying signal (the warn-only path via
-// EvidenceWarnings, and the force-gate path via ObjectiveEvidenceGate) since
-// both stem from the same code-derived tool evidence, just reached via a
-// different control-flow branch on the gateway side.
+// — a run can trip more than one. Objective-evidence entries are keyed by the
+// specific signal ("objective_evidence:pod_restarted") when
+// ObjectiveEvidenceSignals is populated — this covers both manifestations of
+// the same underlying signal (the warn-only path via EvidenceWarnings, and
+// the force-gate path via ObjectiveEvidenceGate) since ObjectiveEvidenceSignals
+// is populated at both call sites in cmd/gateway/playbooks.go. Falls back to
+// the flat "objective_evidence" bucket when EvidenceWarnings/ObjectiveEvidenceGate
+// fired but ObjectiveEvidenceSignals is empty, for responses recorded before
+// that field existed.
 func warningTypesFor(er EvalResult) []string {
 	var types []string
-	if len(er.EvidenceWarnings) > 0 || er.ObjectiveEvidenceGate {
+	if len(er.ObjectiveEvidenceSignals) > 0 {
+		for _, sig := range er.ObjectiveEvidenceSignals {
+			types = append(types, "objective_evidence:"+sig)
+		}
+	} else if len(er.EvidenceWarnings) > 0 || er.ObjectiveEvidenceGate {
 		types = append(types, "objective_evidence")
 	}
 	if er.ProtocolViolation {
 		types = append(types, "protocol_violation")
+	}
+	if er.TargetDrift {
+		types = append(types, "target_drift")
 	}
 	return types
 }

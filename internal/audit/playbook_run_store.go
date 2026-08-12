@@ -38,7 +38,8 @@ type PlaybookRun struct {
 	Namespace        string            `json:"namespace,omitempty"`         // target K8s namespace; forwarded to chained runs, analogous to ConnectionString for non-DB agents
 	Purpose          string            `json:"purpose,omitempty"`           // declared purpose (diagnostic, remediation, ...); forwarded to chained runs, analogous to ConnectionString
 	TraceID          string            `json:"trace_id,omitempty"`          // X-Trace-ID of the originating request; links to audit events
-	AgentTranscript  string            `json:"agent_transcript,omitempty"`  // full agent response text — the chain-of-thought narrative
+	AgentTranscript  string            `json:"agent_transcript,omitempty"`  // full RAW agent response text (before signal-line stripping) — the chain-of-thought narrative
+	SawSignalLine    bool              `json:"saw_signal_line,omitempty"`   // true iff the agent's raw response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of its resolved value — see agentEscalation.SawSignalLine in cmd/gateway
 	PriorRunID       string            `json:"prior_run_id,omitempty"`      // triage run_id that preceded this remediation run
 	TriggerContext   string            `json:"trigger_context,omitempty"`   // original alert text or context that initiated the run
 	Operator         string            `json:"operator"`
@@ -86,20 +87,20 @@ type PlaybookRunStats struct {
 // PlaybookVersionStats summarises run history broken down by playbook version.
 // Each row represents one version of a series, ordered by version string.
 type PlaybookVersionStats struct {
-	SeriesID    string `json:"series_id"`
-	PlaybookID  string `json:"playbook_id"`  // ID of the playbook version (for vault diff)
-	OriginTrace string `json:"origin_trace"` // trace/run that generated this version; empty for manual/system
-	Version         string  `json:"version"`
-	IsActive        bool    `json:"is_active"`         // currently active version for this series
-	TotalRuns        int     `json:"total_runs"`
-	Resolved         int     `json:"resolved"`
-	ResolutionRate   float64 `json:"resolution_rate"`    // resolved / total_runs; 0 when no runs
-	Transitioned     int     `json:"transitioned"`
-	TransitionRate   float64 `json:"transition_rate"`    // transitioned / total_runs; meaningful for triage series
-	Escalated        int     `json:"escalated"`
-	EscalationRate   float64 `json:"escalation_rate"`    // escalated / total_runs; meaningful for triage series that cross domain
-	AvgStepCount    float64 `json:"avg_step_count"`    // average steps per run; 0 when no step data
-	AvgRecoverySecs float64 `json:"avg_recovery_secs"` // average wall-clock seconds for completed runs; 0 when no data
+	SeriesID            string  `json:"series_id"`
+	PlaybookID          string  `json:"playbook_id"`  // ID of the playbook version (for vault diff)
+	OriginTrace         string  `json:"origin_trace"` // trace/run that generated this version; empty for manual/system
+	Version             string  `json:"version"`
+	IsActive            bool    `json:"is_active"` // currently active version for this series
+	TotalRuns           int     `json:"total_runs"`
+	Resolved            int     `json:"resolved"`
+	ResolutionRate      float64 `json:"resolution_rate"` // resolved / total_runs; 0 when no runs
+	Transitioned        int     `json:"transitioned"`
+	TransitionRate      float64 `json:"transition_rate"` // transitioned / total_runs; meaningful for triage series
+	Escalated           int     `json:"escalated"`
+	EscalationRate      float64 `json:"escalation_rate"`       // escalated / total_runs; meaningful for triage series that cross domain
+	AvgStepCount        float64 `json:"avg_step_count"`        // average steps per run; 0 when no step data
+	AvgRecoverySecs     float64 `json:"avg_recovery_secs"`     // average wall-clock seconds for completed runs; 0 when no data
 	AvgDiagnosisScore   float64 `json:"avg_diagnosis_score"`   // average diagnosis_score; 0 when no eval data
 	DiagEvalCount       int     `json:"diag_eval_count"`       // number of runs with diagnosis scores
 	AvgRemediationScore float64 `json:"avg_remediation_score"` // average remediation_score; 0 when no remediation data
@@ -163,7 +164,6 @@ CREATE TABLE IF NOT EXISTS playbook_runs (
 	return s.migrate()
 }
 
-
 // migrate applies additive schema changes to existing databases.
 // Each ALTER TABLE is swallowed if the column already exists (idempotent).
 func (s *PlaybookRunStore) migrate() error {
@@ -180,6 +180,7 @@ func (s *PlaybookRunStore) migrate() error {
 		{"trigger_context", `ALTER TABLE playbook_runs ADD COLUMN trigger_context TEXT NOT NULL DEFAULT ''`},
 		{"namespace", `ALTER TABLE playbook_runs ADD COLUMN namespace TEXT NOT NULL DEFAULT ''`},
 		{"purpose", `ALTER TABLE playbook_runs ADD COLUMN purpose TEXT NOT NULL DEFAULT ''`},
+		{"saw_signal_line", `ALTER TABLE playbook_runs ADD COLUMN saw_signal_line INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -236,15 +237,19 @@ func (s *PlaybookRunStore) Record(ctx context.Context, r *PlaybookRun) error {
 // agent_transcript, and completed_at for an existing run. Used when the agent session concludes.
 // traceID, when non-empty, updates the run's trace_id (the agent's own X-Trace-ID from the
 // response — distinct from the request trace ID stored at run start).
-func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *DiagnosticReport) error {
+func (s *PlaybookRunStore) Update(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *DiagnosticReport, sawSignalLine bool) error {
 	diagJSON := marshalDiagnosticReport(report)
+	sawSignalLineInt := 0
+	if sawSignalLine {
+		sawSignalLineInt = 1
+	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE playbook_runs
 		 SET outcome = ?, escalated_to = ?, transitioned_to = ?, findings_summary = ?,
-		     diagnostic_report = ?, agent_transcript = ?, completed_at = ?,
+		     diagnostic_report = ?, agent_transcript = ?, saw_signal_line = ?, completed_at = ?,
 		     trace_id = CASE WHEN ? != '' THEN ? ELSE trace_id END
 		 WHERE run_id = ?`,
-		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript,
+		outcome, escalatedTo, transitionedTo, findingsSummary, diagJSON, agentTranscript, sawSignalLineInt,
 		time.Now().UTC().Format("2006-01-02 15:04:05"),
 		traceID, traceID,
 		runID,
@@ -355,7 +360,7 @@ func (s *PlaybookRunStore) GetByRunID(ctx context.Context, runID string) (*Playb
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       trigger_context, operator, started_at, completed_at
+		       saw_signal_line, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE run_id = ?`, runID)
 	return scanPlaybookRun(row)
@@ -370,7 +375,7 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       trigger_context, operator, started_at, completed_at
+		       saw_signal_line, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE playbook_id = ?
 		ORDER BY started_at DESC
@@ -392,7 +397,7 @@ func (s *PlaybookRunStore) ListByPriorRunID(ctx context.Context, priorRunID stri
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       trigger_context, operator, started_at, completed_at
+		       saw_signal_line, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE prior_run_id = ?
 		ORDER BY started_at DESC
@@ -413,7 +418,7 @@ func (s *PlaybookRunStore) ListBySeriesID(ctx context.Context, seriesID string, 
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       trigger_context, operator, started_at, completed_at
+		       saw_signal_line, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE series_id = ?
 		ORDER BY started_at DESC
@@ -433,7 +438,7 @@ func (s *PlaybookRunStore) ListByOutcome(ctx context.Context, outcome string, li
 		SELECT run_id, playbook_id, series_id, execution_mode, outcome,
 		       escalated_to, transitioned_to, findings_summary, diagnostic_report,
 		       context_id, connection_string, namespace, purpose, trace_id, prior_run_id, agent_transcript,
-		       trigger_context, operator, started_at, completed_at
+		       saw_signal_line, trigger_context, operator, started_at, completed_at
 		FROM playbook_runs
 		WHERE outcome = ?
 		ORDER BY started_at DESC
@@ -464,14 +469,16 @@ type playbookRunScanner interface {
 func scanPlaybookRun(s playbookRunScanner) (*PlaybookRun, error) {
 	var r PlaybookRun
 	var startedStr, completedStr, diagJSON string
+	var sawSignalLineInt int
 	if err := s.Scan(
 		&r.RunID, &r.PlaybookID, &r.SeriesID, &r.ExecutionMode, &r.Outcome,
 		&r.EscalatedTo, &r.TransitionedTo, &r.FindingsSummary, &diagJSON,
 		&r.ContextID, &r.ConnectionString, &r.Namespace, &r.Purpose, &r.TraceID, &r.PriorRunID, &r.AgentTranscript,
-		&r.TriggerContext, &r.Operator, &startedStr, &completedStr,
+		&sawSignalLineInt, &r.TriggerContext, &r.Operator, &startedStr, &completedStr,
 	); err != nil {
 		return nil, err
 	}
+	r.SawSignalLine = sawSignalLineInt != 0
 	r.StartedAt = parseFlexTime(startedStr)
 	r.CompletedAt = parseFlexTime(completedStr)
 	r.DiagnosticReport = unmarshalDiagnosticReport(diagJSON)
@@ -698,23 +705,23 @@ func (s *PlaybookRunStore) StatsByVersion(ctx context.Context, seriesID string) 
 	for _, v := range orderedVersions {
 		a := acc[v]
 		st := &PlaybookVersionStats{
-			SeriesID:    seriesID,
-			PlaybookID:  a.playbookID,
-			OriginTrace: a.originTrace,
-			Version:     v,
-			IsActive:    a.isActive,
-			TotalRuns:    a.totalRuns,
-			Resolved:     a.resolved,
-			Transitioned: a.transitioned,
-			Escalated:    a.escalated,
+			SeriesID:       seriesID,
+			PlaybookID:     a.playbookID,
+			OriginTrace:    a.originTrace,
+			Version:        v,
+			IsActive:       a.isActive,
+			TotalRuns:      a.totalRuns,
+			Resolved:       a.resolved,
+			Transitioned:   a.transitioned,
+			Escalated:      a.escalated,
 			DiagEvalCount:  a.diagEvalCount,
 			RemedEvalCount: a.remedEvalCount,
 		}
 		if a.totalRuns > 0 {
-			st.ResolutionRate  = float64(a.resolved)     / float64(a.totalRuns)
-			st.TransitionRate  = float64(a.transitioned) / float64(a.totalRuns)
-			st.EscalationRate  = float64(a.escalated)    / float64(a.totalRuns)
-			st.AvgStepCount   = a.stepSum / float64(a.totalRuns)
+			st.ResolutionRate = float64(a.resolved) / float64(a.totalRuns)
+			st.TransitionRate = float64(a.transitioned) / float64(a.totalRuns)
+			st.EscalationRate = float64(a.escalated) / float64(a.totalRuns)
+			st.AvgStepCount = a.stepSum / float64(a.totalRuns)
 		}
 		if a.recoveryCount > 0 {
 			st.AvgRecoverySecs = a.recoverySumSecs / float64(a.recoveryCount)

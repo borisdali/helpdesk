@@ -63,6 +63,18 @@ type AgentResponse struct {
 	// auto approval mode). Non-empty means the gateway already ran remediation —
 	// callers should not trigger a second remediation run.
 	ChainedRunID string
+	// TargetDrift lists connection strings a tool call in this run actually used
+	// that differ from the connection_string the playbook run was invoked with —
+	// see checkTargetScope (cmd/gateway/playbooks.go). Empty when no drift was
+	// detected or the run had no connection_string to check against.
+	TargetDrift []string
+	// ObjectiveEvidenceSignals lists deduplicated, code-derived evidence signal
+	// names (e.g. "pod_restarted", "oom_killed") recorded across every hop of
+	// this run — covers both the force-gate path (GateReason contains
+	// "objective_evidence:<signal>") and the warn-only path (EvidenceWarnings),
+	// uniformly and without string-parsing gate_reason. See
+	// objectiveEvidenceForceGate (cmd/gateway/playbooks.go).
+	ObjectiveEvidenceSignals []string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

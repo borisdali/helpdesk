@@ -301,6 +301,14 @@ type DelegationVerification struct {
 	// server. May be recorded on its own event, separate from the event this hop's
 	// write/destructive/narration verification produced.
 	TargetDrift []string `json:"target_drift,omitempty"`
+	// TargetDriftDetail carries the same drift as TargetDrift, but attributed to
+	// the specific tool call that produced each divergent connection string —
+	// TargetDrift alone discards this, since it's built from a deduplicated set.
+	// Additive: a new field alongside TargetDrift rather than a breaking change
+	// to it, so existing consumers of TargetDrift are unaffected. May be empty
+	// even when TargetDrift is non-empty, for events recorded before this field
+	// existed.
+	TargetDriftDetail []TargetDriftDetail `json:"target_drift_detail,omitempty"`
 	// ProtocolViolation is true when a triage-typed playbook's hop ended
 	// without emitting a required TRANSITION_TO/ESCALATE_TO signal at all
 	// (not even an explicit "none") — computed by protocolViolation
@@ -308,6 +316,16 @@ type DelegationVerification struct {
 	// recorded on its own event, separate from the event this hop's
 	// write/destructive/narration verification produced.
 	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+}
+
+// TargetDriftDetail attributes a single instance of target-scope drift to the
+// tool call that produced it. See DelegationVerification.TargetDriftDetail.
+type TargetDriftDetail struct {
+	// Tool is the tool name whose call used ConnectionString.
+	Tool string `json:"tool"`
+	// ConnectionString is the divergent connection string the tool call used —
+	// one of the values also present (deduplicated) in TargetDrift.
+	ConnectionString string `json:"connection_string"`
 }
 
 // ObjectiveEvidence captures a deterministic, code-derived signal extracted

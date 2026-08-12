@@ -1174,9 +1174,38 @@ func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
 			"tools_confirmed":     []string{"check_connection"},
 			"mismatch":            false,
 			"target_drift":        []string{"host=localhost port=15432 dbname=testdb"},
+			"target_drift_detail": []map[string]any{
+				{"tool": "get_session_info", "connection_string": "host=localhost port=15432 dbname=testdb"},
+			},
 		},
 	}
 	post(t, auditdAddr, "/v1/events", driftEvent)
+
+	// TargetDriftDetail is additive on DelegationVerification, not carried by
+	// the summarized journey (journeySummary only has the boolean
+	// has_target_drift) — round-trip it through the raw event, mirroring
+	// TestIntegration_ObjectiveEvidence_RoundTrips's shape below, since only a
+	// real auditd binary (not the gateway-package mocks) can catch a
+	// marshal/unmarshal or SQL storage bug in this new field.
+	rawEvents := getList(t, auditdAddr, "/v1/events?event_type=delegation_verification&trace_id="+traceID)
+	foundDetail := false
+	for _, e := range rawEvents {
+		dv, _ := e["delegation_verification"].(map[string]any)
+		if dv == nil {
+			continue
+		}
+		detail, _ := dv["target_drift_detail"].([]any)
+		if len(detail) != 1 {
+			continue
+		}
+		entry, _ := detail[0].(map[string]any)
+		if entry["tool"] == "get_session_info" && entry["connection_string"] == "host=localhost port=15432 dbname=testdb" {
+			foundDetail = true
+		}
+	}
+	if !foundDetail {
+		t.Errorf("raw delegation_verification event missing round-tripped target_drift_detail, got events: %v", rawEvents)
+	}
 
 	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=target_drift_detected")
 	found := false

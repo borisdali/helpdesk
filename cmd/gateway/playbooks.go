@@ -482,7 +482,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil, false)
 	}
 }
 
@@ -495,6 +495,7 @@ type agentRunResult struct {
 	escalatedTo      string // set when agent emits ESCALATE_TO (true out-of-scope escalation)
 	transitionTo     string // set when agent emits TRANSITION_TO (same-domain triage→remediation)
 	sawSignalLine    bool   // true iff a TRANSITION_TO:/ESCALATE_TO: line was present at all (see agentEscalation.SawSignalLine)
+	rawText          string // the model's raw, pre-strip response text — see capturedText's doc comment for why this is not the same as capture.body's text
 	findings         string
 	diagReport       *audit.DiagnosticReport
 	runID            string
@@ -564,6 +565,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
 			if text, ok := respBody["text"].(string); ok {
+				res.rawText = text
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
@@ -639,10 +641,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		extra["warnings"] = warnings
 	}
 
+	appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart))
+
 	// Post-run target-scope check.
 	if req.ConnectionString != "" {
-		if drift := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, req.ConnectionString); len(drift) > 0 {
+		if drift, detail := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, req.ConnectionString); len(drift) > 0 {
 			extra["target_drift"] = drift
+			if len(detail) > 0 {
+				extra["target_drift_detail"] = detail
+			}
 			slog.Warn("playbook run: target scope drift detected",
 				"trace_id", primary.traceID,
 				"intended", req.ConnectionString,
@@ -667,9 +674,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 						ID: primary.traceID,
 					},
 					DelegationVerification: &audit.DelegationVerification{
-						Agent:       primary.agentName,
-						ActionClass: audit.ActionRead,
-						TargetDrift: drift,
+						Agent:             primary.agentName,
+						ActionClass:       audit.ActionRead,
+						TargetDrift:       drift,
+						TargetDriftDetail: detail,
 					},
 				}
 				if err := g.auditor.RecordEvent(r.Context(), driftEvent); err != nil {
@@ -688,7 +696,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", "", primary.findings, "", primary.traceID, nil)
+				runID, primary.outcome, "", "", primary.findings, primary.rawText, primary.traceID, nil, primary.sawSignalLine)
 		}
 		return
 	}
@@ -770,6 +778,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			}
 			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
 				gateReasons = append(gateReasons, "objective_evidence:"+reason)
+				appendObjectiveEvidenceSignal(extra, reason)
 			}
 			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
 				gateReasons = append(gateReasons, "trust_not_earned")
@@ -876,6 +885,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, nextPB, *chained) {
 			g.recordProtocolViolationEvent(r.Context(), *chained)
 		}
+		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -992,7 +1002,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, capturedText(primary.capture), primary.traceID, finalReport)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine)
 	}
 }
 
@@ -1059,7 +1069,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 
 	if chainRunID != "" {
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, capturedText(chainRes.capture), chainRes.traceID, chainRes.diagReport)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.rawText, chainRes.traceID, chainRes.diagReport, chainRes.sawSignalLine)
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -1261,6 +1271,25 @@ func appendWarning(extra map[string]any, key, msg string) {
 	}
 }
 
+// appendObjectiveEvidenceSignal accumulates a deterministic, code-derived
+// evidence signal (e.g. "pod_restarted", "oom_killed") into
+// extra["objective_evidence_signals"], deduplicated and appended across hops
+// like appendWarning — but for a structured signal name rather than a
+// human-readable message, so faulttest/CLEAN-cert consumers can bucket by
+// signal instead of string-matching gate_reason.
+func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
+	if signal == "" {
+		return
+	}
+	existing, _ := extra["objective_evidence_signals"].([]string)
+	for _, s := range existing {
+		if s == signal {
+			return
+		}
+	}
+	extra["objective_evidence_signals"] = append(existing, signal)
+}
+
 // recordSignalLessWarnings runs three independent, unconditional checks on
 // any hop that resolved without emitting TRANSITION_TO/ESCALATE_TO — a case
 // the in-loop force-gates never reach, since the chain loop itself only runs
@@ -1294,6 +1323,7 @@ func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb 
 		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
 			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
 			hop.playbookSeriesID, hop.agentName, reason))
+		appendObjectiveEvidenceSignal(extra, reason)
 	}
 
 	if protocolViolation(pb.PlaybookType, hop) {
@@ -1473,7 +1503,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport, false)
 		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
@@ -1508,7 +1538,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false)
 
 	// Store at-gate feedback when provided. Captured before remediation runs —
 	// a cleaner signal than post-incident feedback because the operator hasn't
@@ -2157,7 +2187,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 // agentTranscript is the full agent response text (chain of thought narrative); pass "" when not available.
 // traceID is the agent's trace ID (from response X-Trace-ID header); used to link audit events to the run.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport, sawSignalLine bool) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
@@ -2166,6 +2196,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 		"escalated_to":     escalatedTo,
 		"transitioned_to":  transitionedTo,
 		"findings_summary": findingsSummary,
+		"saw_signal_line":  sawSignalLine,
 	}
 	if agentTranscript != "" {
 		payload["agent_transcript"] = agentTranscript
@@ -2858,18 +2889,24 @@ func buildServerTypeHint(cfg *infra.Config, connectionString string) string {
 }
 
 // checkTargetScope returns connection strings from audit events for traceID that
-// differ from intendedTarget. Used to detect when the agent queried a server
-// other than the one specified in the playbook run request.
+// differ from intendedTarget, and the same drift attributed to the specific tool
+// calls that produced it. Used to detect when the agent queried a server other
+// than the one specified in the playbook run request.
 //
 // cfg is used to resolve a short server name (e.g. "test-pg") to its canonical
 // connection string from infra config, so that the full resolved form used by
 // the agent (e.g. "host=localhost port=35432 dbname=postgres user=postgres")
 // is not incorrectly flagged as drift.
 //
-// Returns nil when auditURL is empty, no traceID, or no drift is found.
-func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since time.Time, intendedTarget string) []string {
+// drift is deduplicated by connection string, as before. detail has one entry
+// per offending tool call, deduplicated by (tool, connection string) pair — a
+// second call to the same wrong target from the same tool is not repeated, but
+// two different tools drifting to the same (or different) target both show up.
+//
+// Returns (nil, nil) when auditURL is empty, no traceID, or no drift is found.
+func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since time.Time, intendedTarget string) (drift []string, detail []audit.TargetDriftDetail) {
 	if auditURL == "" || traceID == "" || intendedTarget == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Resolve short name to canonical connection string so that
@@ -2891,11 +2928,12 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 	if resolved == intendedTarget && !strings.Contains(intendedTarget, "=") {
 		slog.Debug("checkTargetScope: cannot resolve short name to connection string, skipping",
 			"intended", intendedTarget)
-		return nil
+		return nil, nil
 	}
 
 	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
-	seen := map[string]bool{}
+	seenCS := map[string]bool{}
+	seenDetail := map[string]bool{}
 	for _, ev := range events {
 		if ev.Tool == nil {
 			continue
@@ -2904,19 +2942,83 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 		if cs == "" {
 			continue
 		}
-		if !targetMatches(intendedTarget, cs) && !targetMatches(resolved, cs) {
-			seen[cs] = true
+		if targetMatches(intendedTarget, cs) || targetMatches(resolved, cs) {
+			continue
+		}
+		seenCS[cs] = true
+		detailKey := ev.Tool.Name + "\x00" + cs
+		if !seenDetail[detailKey] {
+			seenDetail[detailKey] = true
+			detail = append(detail, audit.TargetDriftDetail{Tool: ev.Tool.Name, ConnectionString: cs})
 		}
 	}
-	if len(seen) == 0 {
-		return nil
+	if len(seenCS) == 0 {
+		return nil, nil
 	}
-	drift := make([]string, 0, len(seen))
-	for cs := range seen {
+	drift = make([]string, 0, len(seenCS))
+	for cs := range seenCS {
 		drift = append(drift, cs)
 	}
 	sort.Strings(drift)
-	return drift
+	sort.Slice(detail, func(i, j int) bool {
+		if detail[i].Tool != detail[j].Tool {
+			return detail[i].Tool < detail[j].Tool
+		}
+		return detail[i].ConnectionString < detail[j].ConnectionString
+	})
+	return drift, detail
+}
+
+// PolicyDenialSummary is the response-facing shape of a single policy_decision
+// event with Effect=="deny" for a hop — surfaced on the playbook-run response
+// so a human (or downstream tool) can see *why* the agent's narrated tool call
+// never produced a tool_execution event, without having to separately query
+// auditd or take the agent's own prose explanation on faith. Tool-name
+// attribution is deliberately out of scope: PolicyDecision has no tool-name
+// field today (RecordPolicyDecision never populates Event.Tool), so
+// ResourceType/ResourceName/Message is the most specific attribution
+// currently possible.
+type PolicyDenialSummary struct {
+	ResourceType string `json:"resource_type,omitempty"`
+	ResourceName string `json:"resource_name,omitempty"`
+	PolicyName   string `json:"policy_name,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+// checkPolicyDenials returns a summary of every policy_decision event with
+// Effect=="deny" recorded for traceID since the hop started. Unlike
+// checkTargetScope, this has no "intended" concept to compare against — any
+// denial is worth surfacing, since it's a deterministic, code-derived
+// explanation for missing tool evidence that the agent's own narration
+// cannot be trusted to self-report accurately.
+func checkPolicyDenials(auditURL, apiKey, traceID string, since time.Time) []PolicyDenialSummary {
+	if auditURL == "" || traceID == "" {
+		return nil
+	}
+	events := audit.FetchPolicyDecisionEvents(auditURL, apiKey, traceID, since)
+	var denials []PolicyDenialSummary
+	for _, ev := range events {
+		if ev.PolicyDecision == nil || ev.PolicyDecision.Effect != "deny" {
+			continue
+		}
+		denials = append(denials, PolicyDenialSummary{
+			ResourceType: ev.PolicyDecision.ResourceType,
+			ResourceName: ev.PolicyDecision.ResourceName,
+			PolicyName:   ev.PolicyDecision.PolicyName,
+			Message:      ev.PolicyDecision.Message,
+		})
+	}
+	return denials
+}
+
+// appendPolicyDenials accumulates policy denials into extra["policy_denials"]
+// across hops, mirroring appendWarning's accumulate-don't-overwrite pattern.
+func appendPolicyDenials(extra map[string]any, denials []PolicyDenialSummary) {
+	if len(denials) == 0 {
+		return
+	}
+	existing, _ := extra["policy_denials"].([]PolicyDenialSummary)
+	extra["policy_denials"] = append(existing, denials...)
 }
 
 // targetMatches returns true when:
@@ -3008,7 +3110,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false)
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -3113,7 +3215,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil, false)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -3161,7 +3263,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil, false)
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -3203,13 +3305,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, run.Namespace, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil, false)
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false)
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

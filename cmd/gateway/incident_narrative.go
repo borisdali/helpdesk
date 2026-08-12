@@ -65,6 +65,12 @@ type TriageChapter struct {
 	HasMismatch          bool `json:"has_mismatch,omitempty"`
 	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
 	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine is read directly off the persisted PlaybookRun (not a
+	// Journey lookup like the three flags above) — true iff the agent's raw
+	// response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of
+	// its resolved value. Lets a reader distinguish "explicitly declined"
+	// from a genuine protocol violation without needing the raw transcript.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // GateChapter holds the operator approval decision.
@@ -89,6 +95,8 @@ type RemediationChapter struct {
 	HasMismatch          bool   `json:"has_mismatch,omitempty"`
 	HasTargetDrift       bool   `json:"has_target_drift,omitempty"`
 	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine — see TriageChapter's doc comment.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // EscalationHop is one intermediate playbook run reached via ESCALATE_TO,
@@ -112,6 +120,8 @@ type EscalationHop struct {
 	HasMismatch          bool `json:"has_mismatch,omitempty"`
 	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
 	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine — see TriageChapter's doc comment.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -165,6 +175,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			DiagnosticReport: run.DiagnosticReport,
 			Transcript:       run.AgentTranscript,
 			TraceID:          run.TraceID,
+			SawSignalLine:    run.SawSignalLine,
 		},
 	}
 	if js := lookupJourney(run.TraceID); js != nil {
@@ -230,13 +241,14 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		if predecessor.TransitionedTo != "" {
 			steps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
 			rem := &RemediationChapter{
-				RunID:      hop.RunID,
-				Playbook:   hop.SeriesID,
-				Outcome:    hop.Outcome,
-				Steps:      steps,
-				Findings:   hop.FindingsSummary,
-				Transcript: hop.AgentTranscript,
-				TraceID:    hop.TraceID,
+				RunID:         hop.RunID,
+				Playbook:      hop.SeriesID,
+				Outcome:       hop.Outcome,
+				Steps:         steps,
+				Findings:      hop.FindingsSummary,
+				Transcript:    hop.AgentTranscript,
+				TraceID:       hop.TraceID,
+				SawSignalLine: hop.SawSignalLine,
 			}
 			if js := lookupJourney(hop.TraceID); js != nil {
 				rem.HasMismatch = js.HasMismatch
@@ -263,6 +275,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			Transcript:       hop.AgentTranscript,
 			TraceID:          hop.TraceID,
 			StartedAt:        hop.StartedAt,
+			SawSignalLine:    hop.SawSignalLine,
 		}
 		if js := lookupJourney(hop.TraceID); js != nil {
 			eh.HasMismatch = js.HasMismatch

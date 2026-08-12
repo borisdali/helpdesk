@@ -1834,6 +1834,145 @@ func TestPrintJourneyDetail_MismatchWarning_NoDriftWarning(t *testing.T) {
 	}
 }
 
+// TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail proves the TARGET
+// DRIFT WARNING section shows the offending tool/connection-string pairs from
+// the raw delegation_verification event, not just the generic boilerplate —
+// closing the gap where vault journey had no way to show which tool actually
+// drifted without a separate manual curl to auditd.
+func TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":         "tr_driftdetail1",
+					"started_at":       time.Now().UTC().Format(time.RFC3339),
+					"outcome":          "target_drift_detected",
+					"has_mismatch":     false,
+					"has_target_drift": true,
+					"tools_used":       []string{"get_pods"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":        "k8s_agent",
+						"target_drift": []string{"pg-cluster-minikube"},
+						"target_drift_detail": []map[string]any{
+							{"tool": "get_pods", "connection_string": "pg-cluster-minikube"},
+						},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_driftdetail1", false)
+	})
+
+	if !strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Fatalf("output missing TARGET DRIFT WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "get_pods → pg-cluster-minikube") {
+		t.Errorf("output missing tool-attributed drift detail, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools proves the
+// FABRICATION WARNING section shows which narrated tool(s) were never
+// confirmed, from the raw delegation_verification event.
+func TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":     "tr_mismatchdetail1",
+					"started_at":   time.Now().UTC().Format(time.RFC3339),
+					"outcome":      "unverified_claim",
+					"has_mismatch": true,
+					"tools_used":   []string{},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":                  "db_agent",
+						"narrated_not_confirmed": []string{"cancel_query"},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_mismatchdetail1", false)
+	})
+
+	if !strings.Contains(out, "FABRICATION WARNING") {
+		t.Fatalf("output missing FABRICATION WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Narrated but unconfirmed: cancel_query") {
+		t.Errorf("output missing narrated-not-confirmed detail, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues proves the
+// TARGET DRIFT WARNING section still shows the plain drifted values when
+// TargetDriftDetail is empty (e.g. events recorded before target_drift_detail
+// shipped) instead of silently showing nothing extra.
+func TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":         "tr_driftfallback1",
+					"started_at":       time.Now().UTC().Format(time.RFC3339),
+					"outcome":          "target_drift_detected",
+					"has_target_drift": true,
+					"tools_used":       []string{"get_pods"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":        "k8s_agent",
+						"target_drift": []string{"pg-cluster-minikube"},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_driftfallback1", false)
+	})
+
+	if !strings.Contains(out, "Drifted to: pg-cluster-minikube") {
+		t.Errorf("output missing plain-value fallback, got:\n%s", out)
+	}
+}
+
 // ── escalationHopDesc ─────────────────────────────────────────────────────
 
 func TestEscalationHopDesc(t *testing.T) {
@@ -2049,6 +2188,82 @@ func TestFetchJourneys_PassesQueryParams(t *testing.T) {
 		if gotQuery[k] != want {
 			t.Errorf("query param %s = %q, want %q", k, gotQuery[k], want)
 		}
+	}
+}
+
+func TestFetchDelegationVerificationEvents_Found(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/governance/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"event_type": "delegation_verification",
+				"delegation_verification": map[string]any{
+					"agent":                  "k8s_agent",
+					"target_drift":           []string{"pg-cluster-minikube"},
+					"target_drift_detail":    []map[string]any{{"tool": "get_pods", "connection_string": "pg-cluster-minikube"}},
+					"narrated_not_confirmed": []string{"restart_deployment"},
+					"protocol_violation":     true,
+				},
+			},
+			// Non-delegation_verification events in the same trace should be
+			// filtered out (DelegationVerification field absent/null).
+			{"event_type": "tool_execution"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (non-delegation_verification event filtered out)", len(got))
+	}
+	if got[0].Agent != "k8s_agent" {
+		t.Errorf("Agent = %q, want k8s_agent", got[0].Agent)
+	}
+	if len(got[0].TargetDriftDetail) != 1 || got[0].TargetDriftDetail[0].Tool != "get_pods" {
+		t.Errorf("TargetDriftDetail = %+v, want [{get_pods pg-cluster-minikube}]", got[0].TargetDriftDetail)
+	}
+	if !got[0].ProtocolViolation {
+		t.Error("ProtocolViolation = false, want true")
+	}
+	if gotQuery.Get("trace_id") != "tr_abc123" || gotQuery.Get("event_type") != "delegation_verification" {
+		t.Errorf("query = %v, want trace_id=tr_abc123 event_type=delegation_verification", gotQuery)
+	}
+}
+
+func TestFetchDelegationVerificationEvents_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_none")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchDelegationVerificationEvents_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_abc123")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
 	}
 }
 

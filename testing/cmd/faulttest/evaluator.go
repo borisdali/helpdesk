@@ -65,6 +65,16 @@ type EvalResult struct {
 	// Substring match, not equality: gate_reason can be a "+"-joined
 	// combination, e.g. "low_confidence+objective_evidence:pod_restarted".
 	ObjectiveEvidenceGate bool `json:"objective_evidence_gate,omitempty"`
+	// TargetDrift is true when resp.TargetDrift is non-empty — the agent queried
+	// a server other than the one specified in the playbook run request. See
+	// checkTargetScope (cmd/gateway/playbooks.go).
+	TargetDrift bool `json:"target_drift,omitempty"`
+	// ObjectiveEvidenceSignals mirrors resp.ObjectiveEvidenceSignals — deduplicated
+	// code-derived evidence signal names (e.g. "pod_restarted", "oom_killed").
+	// Additive alongside ObjectiveEvidenceGate: covers both the gated and the
+	// warn-only (EvidenceWarnings) case uniformly, without string-parsing
+	// gate_reason. Empty on responses recorded before this field existed.
+	ObjectiveEvidenceSignals []string `json:"objective_evidence_signals,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -115,16 +125,18 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the three
+// hasCleanWarning returns true when this run tripped any of the four
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
-// saw but didn't act on, or an outright protocol violation (omitted the
-// required TRANSITION_TO/ESCALATE_TO signal entirely). Used to compute the
-// CLEAN stability axis — deliberately excludes low_confidence/confidence_warning,
-// which are self-reported and already substantially captured by the existing
-// evaluation-stability axis (judge/confidence variance).
+// saw but didn't act on, an outright protocol violation (omitted the
+// required TRANSITION_TO/ESCALATE_TO signal entirely), or target-scope drift
+// (the agent queried a server other than the one it was asked about). Used to
+// compute the CLEAN stability axis — deliberately excludes
+// low_confidence/confidence_warning, which are self-reported and already
+// substantially captured by the existing evaluation-stability axis
+// (judge/confidence variance).
 func hasCleanWarning(er EvalResult) bool {
-	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.

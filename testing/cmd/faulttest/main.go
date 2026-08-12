@@ -534,6 +534,16 @@ func cmdRun(args []string) {
 				if strings.Contains(resp.GateReason, "objective_evidence:") {
 					evalResult.ObjectiveEvidenceGate = true
 				}
+				// Target-scope drift: the agent queried a server other than the one
+				// specified in the playbook run request — see checkTargetScope
+				// (cmd/gateway/playbooks.go).
+				if len(resp.TargetDrift) > 0 {
+					evalResult.TargetDrift = true
+					fmt.Printf("  ⚠  TARGET DRIFT: %v\n", resp.TargetDrift)
+				}
+				if len(resp.ObjectiveEvidenceSignals) > 0 {
+					evalResult.ObjectiveEvidenceSignals = resp.ObjectiveEvidenceSignals
+				}
 
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.

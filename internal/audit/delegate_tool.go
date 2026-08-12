@@ -504,6 +504,14 @@ func fetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time
 	return fetchEventsByType(auditURL, apiKey, traceID, "policy_decision", since, false)
 }
 
+// FetchPolicyDecisionEvents queries auditd for policy_decision events in the
+// given trace. Exported so the gateway can surface policy denials on the
+// playbook-run response, mirroring FetchToolExecutionEvents/
+// FetchObjectiveEvidenceEvents above.
+func FetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchPolicyDecisionEvents(auditURL, apiKey, traceID, since)
+}
+
 // FetchObjectiveEvidenceEvents queries auditd for objective_evidence events in
 // the given trace — used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go)
 // to force a human-reviewed gate based on deterministic, code-derived tool

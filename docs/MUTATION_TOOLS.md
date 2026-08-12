@@ -39,6 +39,7 @@ databases or your infra.
 5. [Delegation Verification](#5-delegation-verification-zero-trust-in-agent-outcome)
    - [Target-Scope Drift Detection (5.6)](#56-target-scope-drift-detection-checktargetscope)
    - [Narrated-But-Unconfirmed Tool Calls (5.7)](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
+   - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -864,7 +865,15 @@ for playbook runs. After an agent-mode playbook run completes, it:
    infra config first, so a server referenced by name in the request and
    by full DSN in the tool call isn't flagged as a false positive.
 4. Returns the distinct set of connection strings the agent used that
-   don't match, sorted, as `target_drift` in the run's HTTP response.
+   don't match, sorted, as `target_drift` in the run's HTTP response —
+   plus, additively, `target_drift_detail`: the same drift attributed to
+   the specific tool call(s) that produced it (`{"tool": "...",
+   "connection_string": "..."}`, deduplicated by (tool, connection string)
+   pair). `target_drift` alone is a deduplicated set of values with no way
+   to tell which tool call is the offender when a hop used more than one
+   tool; `target_drift_detail` exists specifically to answer that. It is a
+   new field alongside the existing `target_drift`, not a breaking change
+   to it — omitted (absent, not `null`) when empty, same as `target_drift`.
 
 This check is **unconditional** — it runs before the crystal-ball branch
 in `handlePlaybookRunAsAgent`, so it fires the same way whether or not
@@ -877,12 +886,17 @@ was asked to investigate `host=127.0.0.1 port=5433 ...`, an intentionally
 unregistered target. Its final answer confidently diagnosed a "port
 misconfiguration" and recommended connecting to port `15432` instead —
 built entirely from real data it pulled from an unrelated database it
-found by name in infra config. `target_drift` on that same response:
+found by name in infra config. `target_drift`/`target_drift_detail` on
+that same response:
 
 ```json
 "target_drift": [
   "host=host.docker.internal port=15432 dbname=testdb user=postgres password=***",
   "host=localhost port=15432 dbname=testdb user=postgres password=***"
+],
+"target_drift_detail": [
+  {"tool": "get_session_info", "connection_string": "host=host.docker.internal port=15432 dbname=testdb user=postgres password=***"},
+  {"tool": "list_databases",   "connection_string": "host=localhost port=15432 dbname=testdb user=postgres password=***"}
 ]
 ```
 
@@ -893,8 +907,9 @@ catch it.
 
 **Persisted, like `delegation_verification`.** When drift is found,
 `handlePlaybookRunAsAgent` records a `delegation_verification` event with
-`target_drift` populated (`TraceID`/`Session.ID` set to the run's trace so it
-attaches to the journey), independent of whatever verification event
+`target_drift` **and** `target_drift_detail` populated (`TraceID`/`Session.ID`
+set to the run's trace so it attaches to the journey), independent of whatever
+verification event
 §5's own check already recorded for the same hop — the two are orthogonal
 signals (a real tool call, at the wrong target, is not the same problem as no
 tool call at all), so a hop can produce either, both, or neither. The stored
@@ -906,8 +921,14 @@ not different severities. `JourneySummary.has_target_drift` (mirroring
 with both a mismatch and drift on different hops surfaces both booleans
 correctly regardless of which outcome string wins as the displayed `Outcome`.
 `GET /v1/journeys?outcome=target_drift_detected` now surfaces every drifted
-run — the ephemeral `extra["target_drift"]` response field is unchanged and
-still present for immediate callers.
+run — the ephemeral `extra["target_drift"]`/`extra["target_drift_detail"]`
+response fields are unchanged and still present for immediate callers.
+`faulttest vault journey <trace_id>` fetches the raw `delegation_verification`
+event(s) for the trace and shows the tool/value detail inline under the
+"TARGET DRIFT WARNING" section (falling back to the plain `target_drift`
+values when `target_drift_detail` is empty, e.g. for events recorded before
+this field existed) — the journey summary's `has_target_drift` boolean alone
+never carried enough to answer "which tool, and to where."
 
 **Test coverage**: `cmd/gateway/playbook_run_test.go` —
 `TestCheckTargetScope_NoDrift`, `TestCheckTargetScope_Drift`,
@@ -916,10 +937,19 @@ still present for immediate callers.
 `TestCheckTargetScope_ResolvedPlusUnintendedServer`,
 `TestCheckTargetScope_FullConnStringMatchesShortName`,
 `TestCheckTargetScope_EmptyIntendedTarget`, `TestCheckTargetScope_NoAuditURL`,
+`TestCheckTargetScope_DetailAttributesToolCalls`,
 `TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted` (persistence).
 `internal/audit/store_test.go` — `TestQueryJourneys_HasTargetDrift`,
 `TestQueryJourneys_MismatchAndTargetDrift_BothDiscoverableDespiteTie`,
 `TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied`.
+`testing/integration/governance/governance_test.go` —
+`TestIntegration_TargetDrift_SurfacesInJourneys` (now also round-trips
+`target_drift_detail` through a real auditd binary).
+`testing/cmd/faulttest/vault_test.go` —
+`TestFetchDelegationVerificationEvents_Found/Empty/ServerError`,
+`TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail`,
+`TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues`,
+`TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools`.
 
 ---
 
@@ -986,6 +1016,54 @@ fabrication signal, and manual-hold destructive delegations don't explain it.
 `cmd/auditor/auditor_test.go` —
 `TestCheckFabricationMismatch_NarrationOnly_EmitsWarningNotCritical`,
 `_WriteDestructiveAbsence_StaysCriticalEvenWithNarration`.
+
+---
+
+### 5.8 Structured Policy-Denial Visibility (`checkPolicyDenials`)
+
+§5.7 above already fetches `policy_decision` deny events for a trace, but
+only to *suppress* the narration check — the denial itself never reaches the
+response or a human reading it. That leaves the same gap for every other
+case: an operator (or a live-testing session) sees a narrated-but-vague
+excuse in the agent's prose ("could not check connection") with no
+structured way to confirm *why*, short of a manual `curl` against auditd —
+found live, during manual testing of a request missing the `X-Purpose`
+header, which produced exactly this: a policy-denied `check_connection`
+call and an agent response with no trace of the denial anywhere in the JSON.
+
+**The check**: `checkPolicyDenials` (`cmd/gateway/playbooks.go`) fetches
+`policy_decision` events for the hop's trace via the newly-exported
+`audit.FetchPolicyDecisionEvents` (mirroring `FetchToolExecutionEvents`/
+`FetchObjectiveEvidenceEvents`), filters to `Effect == "deny"`, and maps each
+to a `PolicyDenialSummary{ResourceType, ResourceName, PolicyName, Message}`.
+Called for both the primary hop and every auto-chained hop, accumulating into
+`extra["policy_denials"]` across hops (same accumulate-don't-overwrite pattern
+as `warnings`).
+
+```json
+"policy_denials": [
+  {
+    "resource_type": "database",
+    "resource_name": "pg-cluster-minikube-local",
+    "policy_name":   "require-purpose",
+    "message":       "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration"
+  }
+]
+```
+
+**Tool-name attribution is deliberately out of scope.** `PolicyDecision`
+(`internal/audit/event.go`) has no tool-name field today, and
+`RecordPolicyDecision` never populates `Event.Tool` for `policy_decision`
+events — adding that would mean changing `agentutil.PolicyEnforcer`, a
+different package/layer than everything else here. `ResourceType`/
+`ResourceName`/`Message` is the most specific attribution currently possible;
+`Message` already self-describes what was blocked in practice.
+
+**Test coverage**: `cmd/gateway/playbook_run_test.go` —
+`TestCheckPolicyDenials_NoAuditURL`, `_NoEvents`, `_AllowOnly_NoDenials`,
+`_Deny`, `TestAppendPolicyDenials_AccumulatesAcrossCalls`,
+`TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse` (end-to-end through
+the real HTTP path).
 
 ---
 
