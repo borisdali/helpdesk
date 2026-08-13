@@ -1848,6 +1848,87 @@ func TestProxyToAgent_MismatchHeader_AbsentOnRead(t *testing.T) {
 	}
 }
 
+// TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch verifies the fix for
+// the collision the Plan agent found: manualHold (approval_mode=manual + destructive
+// delegation) is expected to suppress the write/destructive-absence mismatch, since
+// no execution is expected pending approval — but it must NOT also silently clear a
+// genuine narrated-but-unconfirmed tool call, which is an orthogonal signal manual-hold
+// destructive delegations don't explain.
+func TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch(t *testing.T) {
+	_, card := mockA2AServer(t, agentNameDB)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// Auditd: no tool_execution events at all (expected under manual hold), but an
+	// agent_reasoning event narrates calling get_session_info, which never executed,
+	// and no policy_decision denial explains it.
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var events []map[string]any
+		if r.URL.Query().Get("event_type") == "agent_reasoning" {
+			events = []map[string]any{
+				{"event_type": "agent_reasoning", "agent_reasoning": map[string]any{"tool_calls": []string{"get_session_info"}}},
+			}
+		}
+		json.NewEncoder(w).Encode(events) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	// Manual-mode + destructive delegation, mirroring how runAgentPlaybook injects
+	// approval context (cmd/gateway/playbooks.go:524-532).
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/query", nil)
+	ctx := context.WithValue(req.Context(), ctxKeyApprovalSession, approvalContext{mode: "manual"})
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	gw.proxyToAgent(rec, req, agentNameDB, "", "terminate the connection holding the lock")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var verifEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification {
+			verifEvent = e
+			break
+		}
+	}
+	if verifEvent == nil {
+		t.Fatal("no delegation_verification event emitted")
+	}
+	dv := verifEvent.DelegationVerification
+	if dv == nil {
+		t.Fatal("DelegationVerification is nil")
+	}
+	if !dv.Mismatch {
+		t.Error("Mismatch = false, want true: manualHold must not clear a narration-based mismatch")
+	}
+	if len(dv.NarratedNotConfirmed) != 1 || dv.NarratedNotConfirmed[0] != "get_session_info" {
+		t.Errorf("NarratedNotConfirmed = %v, want [get_session_info] to survive the manual-hold clearing", dv.NarratedNotConfirmed)
+	}
+	// The write/destructive-absence signal, in contrast, IS expected to be
+	// suppressed by manual hold — DestructiveConfirmed being empty should not by
+	// itself explain Mismatch here; NarratedNotConfirmed is what does.
+	if len(dv.DestructiveConfirmed) != 0 {
+		t.Errorf("DestructiveConfirmed = %v, want empty (nothing executed under manual hold)", dv.DestructiveConfirmed)
+	}
+}
+
 // TestGatewayMetrics_FabricationCounter verifies that the Prometheus counter is
 // incremented when a fabrication mismatch is detected.
 func TestGatewayMetrics_FabricationCounter(t *testing.T) {

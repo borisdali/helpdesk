@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,6 +234,9 @@ func TestParseAgentEscalation_FullSignal(t *testing.T) {
 	if esc.EscalateTo != "pbs_pitr_recovery" {
 		t.Errorf("escalate_to = %q", esc.EscalateTo)
 	}
+	if !esc.SawSignalLine {
+		t.Error("SawSignalLine should be true when a real target is emitted")
+	}
 	if strings.Contains(esc.CleanText, "FINDINGS:") {
 		t.Error("CleanText should not contain FINDINGS: line")
 	}
@@ -265,6 +269,9 @@ func TestParseAgentEscalation_NoSignal(t *testing.T) {
 
 	if esc.Findings != "" || esc.EscalateTo != "" {
 		t.Errorf("expected empty signal, got findings=%q escalate_to=%q", esc.Findings, esc.EscalateTo)
+	}
+	if esc.SawSignalLine {
+		t.Error("SawSignalLine should be false — no TRANSITION_TO:/ESCALATE_TO: line was present at all (the protocol-violation case)")
 	}
 	if esc.CleanText != text {
 		t.Errorf("CleanText should equal original text when no signal present")
@@ -790,6 +797,9 @@ func TestParseAgentEscalation_EscalateToNone(t *testing.T) {
 	if esc.Findings != "Database is operational." {
 		t.Errorf("Findings = %q", esc.Findings)
 	}
+	if !esc.SawSignalLine {
+		t.Error("SawSignalLine should be true — an explicit ESCALATE_TO: none line IS the required signal, distinct from omitting the line entirely")
+	}
 }
 
 func TestParseAgentEscalation_FallbackFromCleanText(t *testing.T) {
@@ -1255,10 +1265,133 @@ func TestTargetMatches_SubsetMismatch(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted verifies the fix for the
+// documented "not persisted" limitation (docs/MUTATION_TOOLS.md §5.6): when
+// checkTargetScope detects drift for a playbook run, handlePlaybookRunAsAgent must
+// now record a durable delegation_verification event (previously the drift only
+// ever appeared in this run's own HTTP response, with no queryable trace afterward).
+func TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted(t *testing.T) {
+	agentSrv, card := mockA2AServerWithText(t, agentNameDB, "investigation complete")
+	_ = agentSrv
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	intended := "test-pg"
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			intended: {Name: "Test Postgres", ConnectionString: "host=localhost port=35432 dbname=postgres"},
+		},
+	}
+
+	// Auditd: serves a tool_execution event whose connection_string differs from
+	// the intended target — this is what both checkTargetScope AND
+	// proxyToAgentWithTool's own buildDelegationVerification will see (both query
+	// the same event_type=tool_execution for the trace); agent_reasoning and
+	// policy_decision fetches return empty (nothing narrated, nothing denied).
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("event_type") == "tool_execution" {
+			json.NewEncoder(w).Encode([]audit.Event{ //nolint:errcheck
+				{
+					EventType: audit.EventTypeToolExecution,
+					Tool: &audit.ToolExecution{
+						Name:       "list_databases",
+						Parameters: map[string]any{"connection_string": "pg-cluster-minikube"},
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]audit.Event{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		infra:    cfg,
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_drift01",
+		SeriesID:      "pbs_db_restart_triage",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Step 1: run check_connection.",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	req := PlaybookRunRequest{ConnectionString: intended, Context: "connection refused"}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/playbooks/pb_drift01/run", nil)
+	w := httptest.NewRecorder()
+
+	gw.handlePlaybookRunAsAgent(w, r, pb, req, "plr_drift01", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var driftEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification &&
+			e.DelegationVerification != nil && len(e.DelegationVerification.TargetDrift) > 0 {
+			driftEvent = e
+			break
+		}
+	}
+	if driftEvent == nil {
+		t.Fatalf("no delegation_verification event with TargetDrift populated was recorded; got %d total events", len(events))
+	}
+	if driftEvent.TraceID == "" {
+		t.Error("TraceID is empty — event will not attach to the run's journey")
+	}
+	if driftEvent.Session.ID != driftEvent.TraceID {
+		t.Errorf("Session.ID = %q, want to match TraceID %q", driftEvent.Session.ID, driftEvent.TraceID)
+	}
+	if len(driftEvent.DelegationVerification.TargetDrift) != 1 || driftEvent.DelegationVerification.TargetDrift[0] != "pg-cluster-minikube" {
+		t.Errorf("TargetDrift = %v, want [pg-cluster-minikube]", driftEvent.DelegationVerification.TargetDrift)
+	}
+	if driftEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch = true, want false: this event records drift, not fabrication — a real tool call happened")
+	}
+	if !strings.HasPrefix(driftEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", driftEvent.EventID)
+	}
+	if len(driftEvent.DelegationVerification.TargetDriftDetail) != 1 {
+		t.Fatalf("TargetDriftDetail = %v, want 1 entry attributing the drift to list_databases", driftEvent.DelegationVerification.TargetDriftDetail)
+	}
+	gotDetail := driftEvent.DelegationVerification.TargetDriftDetail[0]
+	wantDetail := audit.TargetDriftDetail{Tool: "list_databases", ConnectionString: "pg-cluster-minikube"}
+	if gotDetail != wantDetail {
+		t.Errorf("TargetDriftDetail[0] = %+v, want %+v", gotDetail, wantDetail)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, w.Body.String())
+	}
+	respDetail, ok := resp["target_drift_detail"].([]any)
+	if !ok || len(respDetail) != 1 {
+		t.Fatalf("response target_drift_detail = %v, want 1 entry", resp["target_drift_detail"])
+	}
+	d, _ := respDetail[0].(map[string]any)
+	if d["tool"] != "list_databases" || d["connection_string"] != "pg-cluster-minikube" {
+		t.Errorf("response target_drift_detail[0] = %v, want {tool: list_databases, connection_string: pg-cluster-minikube}", d)
+	}
+}
+
 // ---- checkTargetScope tests ----
 
 func TestCheckTargetScope_NoAuditURL(t *testing.T) {
-	drift := checkTargetScope(nil, "", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, "", "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil with empty auditURL, got %v", drift)
 	}
@@ -1276,14 +1409,14 @@ func TestCheckTargetScope_ShortNameNoInfra_Skipped(t *testing.T) {
 		},
 	}
 	srv := serveFakeToolEvents(t, events)
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (short name, no infra config — skip check), got %v", drift)
 	}
 }
 
 func TestCheckTargetScope_EmptyIntendedTarget(t *testing.T) {
-	drift := checkTargetScope(nil, "http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
+	drift, _ := checkTargetScope(nil, "http://localhost:9999", "", "tr_abc", time.Now().Add(-time.Minute), "")
 	if drift != nil {
 		t.Errorf("expected nil with empty intended target, got %v", drift)
 	}
@@ -1298,7 +1431,7 @@ func TestCheckTargetScope_NoDrift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (no drift), got %v", drift)
 	}
@@ -1322,7 +1455,7 @@ func TestCheckTargetScope_Drift(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
 		t.Errorf("expected [pg-cluster-minikube], got %v", drift)
 	}
@@ -1341,7 +1474,7 @@ func TestCheckTargetScope_FullConnStringMatchesShortName(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(nil, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (full conn string contains intended target as host), got %v", drift)
 	}
@@ -1369,9 +1502,48 @@ func TestCheckTargetScope_ResolvedViaInfraConfig(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if drift != nil {
 		t.Errorf("expected nil (agent-added user= field is allowed), got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_ResolvedViaContainerName(t *testing.T) {
+	// "test-pg" is only the Docker container_name nested inside the "test-db"
+	// entry, not a top-level key or Name — before this fix, checkTargetScope
+	// could not resolve it at all and silently skipped the drift check
+	// entirely (found live: a real request using the container name as
+	// connection_string never got its drift checked).
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-db": {
+				Name:             "Test DB",
+				ConnectionString: "host=localhost port=35432 dbname=postgres",
+				ContainerName:    "test-pg",
+			},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "get_session_info",
+				Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"},
+			},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:       "list_databases",
+				Parameters: map[string]any{"connection_string": "pg-cluster-minikube"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
+		t.Errorf("expected [pg-cluster-minikube] (resolved via container_name, agent-added user= on the intended target allowed), got %v", drift)
 	}
 }
 
@@ -1404,9 +1576,253 @@ func TestCheckTargetScope_ResolvedPlusUnintendedServer(t *testing.T) {
 	}
 	srv := serveFakeToolEvents(t, events)
 
-	drift := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	drift, _ := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
 	if len(drift) != 1 || drift[0] != "test-db" {
 		t.Errorf("expected [test-db], got %v", drift)
+	}
+}
+
+func TestCheckTargetScope_DetailAttributesToolCalls(t *testing.T) {
+	// Two different tools drift to two different unintended targets — detail
+	// must attribute each divergent connection string to the tool that used it,
+	// which the deduplicated drift []string alone discards.
+	cfg := &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"test-pg": {Name: "Test Postgres", ConnectionString: "host=localhost port=35432 dbname=postgres"},
+		},
+	}
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_session_info", Parameters: map[string]any{"connection_string": "host=localhost port=35432 dbname=postgres user=postgres"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "list_databases", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_pods", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+		{
+			EventType: audit.EventTypeToolExecution,
+			// Same tool, same connection string as above — must not duplicate in detail.
+			Tool: &audit.ToolExecution{Name: "get_pods", Parameters: map[string]any{"connection_string": "pg-cluster-minikube"}},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+
+	drift, detail := checkTargetScope(cfg, srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), "test-pg")
+	if len(drift) != 1 || drift[0] != "pg-cluster-minikube" {
+		t.Fatalf("expected drift [pg-cluster-minikube], got %v", drift)
+	}
+	want := []audit.TargetDriftDetail{
+		{Tool: "get_pods", ConnectionString: "pg-cluster-minikube"},
+		{Tool: "list_databases", ConnectionString: "pg-cluster-minikube"},
+	}
+	if len(detail) != len(want) {
+		t.Fatalf("got %d detail entries, want %d: %+v", len(detail), len(want), detail)
+	}
+	for i, d := range detail {
+		if d != want[i] {
+			t.Errorf("detail[%d] = %+v, want %+v", i, d, want[i])
+		}
+	}
+}
+
+// ---- checkPolicyDenials tests ----
+
+func TestCheckPolicyDenials_NoAuditURL(t *testing.T) {
+	denials := checkPolicyDenials("", "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil with empty auditURL, got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_NoEvents(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil with no events, got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_AllowOnly_NoDenials(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube",
+				Effect:       "allow",
+				PolicyName:   "default-read",
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if denials != nil {
+		t.Errorf("expected nil (allow only, no denials), got %v", denials)
+	}
+}
+
+func TestCheckPolicyDenials_Deny(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube",
+				Effect:       "allow",
+				PolicyName:   "default-read",
+			},
+		},
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube-local",
+				Effect:       "deny",
+				PolicyName:   "require-purpose",
+				Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	denials := checkPolicyDenials(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if len(denials) != 1 {
+		t.Fatalf("expected 1 denial, got %d: %v", len(denials), denials)
+	}
+	got := denials[0]
+	want := PolicyDenialSummary{
+		ResourceType: "database",
+		ResourceName: "pg-cluster-minikube-local",
+		PolicyName:   "require-purpose",
+		Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+	}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestAppendObjectiveEvidenceSignal_DedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendObjectiveEvidenceSignal(extra, "pod_restarted")
+	appendObjectiveEvidenceSignal(extra, "")
+	appendObjectiveEvidenceSignal(extra, "pod_restarted")
+	appendObjectiveEvidenceSignal(extra, "oom_killed")
+
+	got, _ := extra["objective_evidence_signals"].([]string)
+	want := []string{"pod_restarted", "oom_killed"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestAppendPolicyDenials_AccumulatesAcrossCalls(t *testing.T) {
+	extra := map[string]any{}
+	appendPolicyDenials(extra, []PolicyDenialSummary{{ResourceName: "db-a"}})
+	appendPolicyDenials(extra, nil)
+	appendPolicyDenials(extra, []PolicyDenialSummary{{ResourceName: "db-b"}})
+
+	got, _ := extra["policy_denials"].([]PolicyDenialSummary)
+	if len(got) != 2 || got[0].ResourceName != "db-a" || got[1].ResourceName != "db-b" {
+		t.Errorf("expected accumulated [db-a db-b], got %v", got)
+	}
+}
+
+// ---- checkFabricationRisk tests ----
+
+func TestCheckFabricationRisk_NoAuditURL(t *testing.T) {
+	mismatch, narrated := checkFabricationRisk("", "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) with empty auditURL, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestCheckFabricationRisk_NoEvents(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) with no events, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestCheckFabricationRisk_Mismatch(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:                "postgres_database_agent",
+				Mismatch:             true,
+				NarratedNotConfirmed: []string{"check_connection", "read_pg_log"},
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if !mismatch {
+		t.Error("mismatch = false, want true")
+	}
+	if len(narrated) != 2 || narrated[0] != "check_connection" || narrated[1] != "read_pg_log" {
+		t.Errorf("narrated = %v, want [check_connection read_pg_log]", narrated)
+	}
+}
+
+// TestCheckFabricationRisk_IgnoresDriftAndProtocolViolationEvents proves the
+// aggregation doesn't false-positive on the other two delegation_verification
+// event shapes that can coexist for the same trace: checkTargetScope's
+// target-drift event and recordProtocolViolationEvent's — both always leave
+// Mismatch=false and NarratedNotConfirmed empty, so they must not contribute.
+func TestCheckFabricationRisk_IgnoresDriftAndProtocolViolationEvents(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: audit.ActionRead,
+				TargetDrift: []string{"pg-cluster-minikube"},
+			},
+		},
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:             "postgres_database_agent",
+				ActionClass:       audit.ActionRead,
+				ProtocolViolation: true,
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	mismatch, narrated := checkFabricationRisk(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute))
+	if mismatch || narrated != nil {
+		t.Errorf("expected (false, nil) — drift/protocol-violation events must not be mistaken for fabrication, got (%v, %v)", mismatch, narrated)
+	}
+}
+
+func TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendFabricationRisk(extra, true, []string{"check_connection"})
+	appendFabricationRisk(extra, false, nil)
+	appendFabricationRisk(extra, false, []string{"check_connection", "read_pg_log"})
+
+	if extra["mismatch"] != true {
+		t.Errorf("mismatch = %v, want true (must not be cleared by a later false)", extra["mismatch"])
+	}
+	got, _ := extra["narrated_not_confirmed"].([]string)
+	want := []string{"check_connection", "read_pg_log"}
+	if len(got) != len(want) {
+		t.Fatalf("narrated_not_confirmed = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("narrated_not_confirmed[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
@@ -1712,12 +2128,31 @@ type mockChainAuditd struct {
 	mu        sync.Mutex
 	nextRunID int
 	patches   map[string]map[string]any
+
+	// evidenceSkipCalls/evidenceSignal let tests inject a real objective_evidence
+	// event starting from the Nth /v1/events?event_type=objective_evidence query
+	// (0-indexed) — used to distinguish which hop's fetch should see evidence,
+	// since each hop's trace_id is generated dynamically and unknown in advance.
+	// Zero value (evidenceSignal == "") preserves the original always-empty
+	// behavior for every existing caller of newMockChainAuditd.
+	evidenceSkipCalls int
+	evidenceSignal    string
+	eventsCallCount   int
 }
 
 func (m *mockChainAuditd) patchFor(runID string) map[string]any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.patches[runID]
+}
+
+// runCount returns how many playbook runs have been created (one POST .../runs
+// call per run) — used to assert a chain stopped at the expected hop count
+// rather than continuing further than it should have.
+func (m *mockChainAuditd) runCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.nextRunID
 }
 
 func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries map[string]*audit.Playbook) *mockChainAuditd {
@@ -1761,6 +2196,20 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 			m.patches[runID] = body
 			m.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence" && m.evidenceSignal != "":
+			m.mu.Lock()
+			callIdx := m.eventsCallCount
+			m.eventsCallCount++
+			m.mu.Unlock()
+			if callIdx < m.evidenceSkipCalls {
+				w.Write([]byte("[]")) //nolint:errcheck
+				return
+			}
+			evidenceData, _ := json.Marshal([]audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: m.evidenceSignal}},
+			})
+			w.Write(evidenceData) //nolint:errcheck
 		default:
 			// Prior-findings lookups, delegation-verification event queries, etc.
 			w.Write([]byte("[]")) //nolint:errcheck
@@ -1768,6 +2217,522 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 	}))
 	t.Cleanup(m.Close)
 	return m
+}
+
+// TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent proves the
+// signal-less-hop fix end-to-end through a real HTTP request — not just
+// recordSignalLessWarnings as a standalone function (already covered), and
+// not just the audit-store round-trip via a directly-crafted event (already
+// covered by TestQueryJourneys_HasProtocolViolation). makePlaybookRunGateway/
+// makeGateGateway never set gw.auditor, so recordProtocolViolationEvent's
+// nil-guard silently no-ops in every other end-to-end test in this file —
+// meaning nothing previously proved the actual call site inside
+// handlePlaybookRunAsAgent invokes it with the right hop data at all.
+func TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_protoviol01",
+		SeriesID:      "pbs_protoviol_triage",
+		Name:          "Protocol Violation Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "protoviol_agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+
+	// Deliberately no TRANSITION_TO:/ESCALATE_TO: line at all.
+	_, card := mockA2AServerWithText(t, "protoviol_agent",
+		"FINDINGS: could not connect to server; cause unclear.\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"protoviol_agent": client}
+	gw.auditor = audit.NewGatewayAuditor(ta)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("response protocol_violation = %v, want true", resp["protocol_violation"])
+	}
+	warnings, _ := resp["warnings"].([]any)
+	found := false
+	for _, w := range warnings {
+		if s, ok := w.(string); ok && strings.Contains(s, "omitted required TRANSITION_TO") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("response warnings should contain a protocol-violation entry, got %v", resp["warnings"])
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	var violEvent *audit.Event
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			violEvent = e
+			break
+		}
+	}
+	if violEvent == nil {
+		t.Fatal("no delegation_verification event with ProtocolViolation=true recorded — the real call site inside handlePlaybookRunAsAgent never invoked recordProtocolViolationEvent")
+	}
+	if violEvent.DelegationVerification.Agent != "protoviol_agent" {
+		t.Errorf("event Agent = %q, want protoviol_agent", violEvent.DelegationVerification.Agent)
+	}
+	if violEvent.TraceID == "" {
+		t.Error("event TraceID is empty")
+	}
+}
+
+// TestHandlePlaybookRun_ExplicitEscalateToNone_NoProtocolViolation is the
+// negative counterpart: an explicit "ESCALATE_TO: none" must NOT record a
+// protocol-violation event or set protocol_violation on the response — the
+// whole point of SawSignalLine is distinguishing this from the omitted-line
+// case above. Proven through the same real HTTP path, not just the parser
+// unit test, since the distinction has to survive all the way through
+// runAgentPlaybook → protocolViolation → recordSignalLessWarnings.
+func TestHandlePlaybookRun_ExplicitEscalateToNone_NoProtocolViolation(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_explicitnone01",
+		SeriesID:      "pbs_explicitnone_triage",
+		Name:          "Explicit None Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "explicitnone_agent",
+		IsActive:      true,
+	}
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+
+	_, card := mockA2AServerWithText(t, "explicitnone_agent",
+		"FINDINGS: all checks passed; nothing to do.\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"explicitnone_agent": client}
+	gw.auditor = audit.NewGatewayAuditor(ta)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if _, ok := resp["protocol_violation"]; ok {
+		t.Errorf("response should not have protocol_violation key, got %v", resp["protocol_violation"])
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			t.Fatal("no protocol-violation event should be recorded for an explicit ESCALATE_TO: none")
+		}
+	}
+}
+
+// TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted proves the raw
+// (pre-strip) agent text and the SawSignalLine flag both reach the PATCH
+// sent to auditd — not just the live HTTP response's already-cleaned
+// "text" field. Root cause this closes: capturedText(capture) decoded
+// capture.body after respBody["text"] had already been overwritten with
+// esc.CleanText, so AgentTranscript persisted via recordPlaybookRunComplete
+// was always the cleaned text, and SawSignalLine was never persisted at
+// all — meaning there was no way to verify after the fact why
+// protocol_violation did or didn't fire for a given run.
+func TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_rawtext01",
+		SeriesID:      "pbs_rawtext_triage",
+		Name:          "Raw Text Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawtext_agent",
+		IsActive:      true,
+	}
+
+	var patchBodies [][]byte
+	var mu sync.Mutex
+	pbData, _ := json.Marshal(pb)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rawtext_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBodies = append(patchBodies, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	rawText := "Analysis complete.\n\nFINDINGS: connection pool exhausted; 48/50 in use.\nESCALATE_TO: none\n"
+	_, card := mockA2AServerWithText(t, "rawtext_agent", rawText)
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"rawtext_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"pool exhaustion"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if text, _ := resp["text"].(string); strings.Contains(text, "ESCALATE_TO:") {
+		t.Errorf("live response text should still be stripped of the signal line, got %q", text)
+	}
+
+	// recordPlaybookRunComplete's PATCH is fired via "go" (fire-and-forget)
+	// at the call sites this test exercises, so it can land after the HTTP
+	// response is already written — poll briefly instead of racing it.
+	var completePatch map[string]any
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		bodies := append([][]byte(nil), patchBodies...)
+		mu.Unlock()
+		for _, b := range bodies {
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				continue
+			}
+			if _, ok := m["agent_transcript"]; ok {
+				completePatch = m
+			}
+		}
+		if completePatch != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if completePatch == nil {
+		t.Fatal("no PATCH with agent_transcript observed — recordPlaybookRunComplete never fired")
+	}
+	transcript, _ := completePatch["agent_transcript"].(string)
+	if !strings.Contains(transcript, "ESCALATE_TO: none") {
+		t.Errorf("persisted agent_transcript should contain the raw, un-stripped signal line, got %q", transcript)
+	}
+	if completePatch["saw_signal_line"] != true {
+		t.Errorf("persisted saw_signal_line = %v, want true", completePatch["saw_signal_line"])
+	}
+}
+
+// TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse proves policy_decision
+// deny events for the run's trace end up on the response's policy_denials
+// field — end-to-end through the real HTTP path, not just checkPolicyDenials
+// as a standalone function (already covered above). This is what lets a human
+// (or downstream tool) see *why* a narrated-but-unconfirmed tool call is
+// missing evidence, instead of only having the agent's own prose explanation
+// of the denial to go on.
+func TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_policydenial01",
+		SeriesID:      "pbs_policydenial_triage",
+		Name:          "Policy Denial Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "policydenial_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pb)
+	denyEvent, _ := json.Marshal([]audit.Event{
+		{
+			EventType: audit.EventTypePolicyDecision,
+			PolicyDecision: &audit.PolicyDecision{
+				ResourceType: "database",
+				ResourceName: "pg-cluster-minikube-local",
+				Effect:       "deny",
+				PolicyName:   "require-purpose",
+				Message:      "policy denied: access to database/pg-cluster-minikube-local requires an explicit purpose declaration",
+			},
+		},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_policydenial_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=policy_decision"):
+			w.Write(denyEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	_, card := mockA2AServerWithText(t, "policydenial_agent",
+		"FINDINGS: could not check connection; access denied.\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"policydenial_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"routine check"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	denials, ok := resp["policy_denials"].([]any)
+	if !ok || len(denials) != 1 {
+		t.Fatalf("expected 1 policy_denials entry, got %v", resp["policy_denials"])
+	}
+	d, ok := denials[0].(map[string]any)
+	if !ok {
+		t.Fatalf("policy_denials[0] not an object: %v", denials[0])
+	}
+	if d["resource_name"] != "pg-cluster-minikube-local" {
+		t.Errorf("resource_name = %v, want pg-cluster-minikube-local", d["resource_name"])
+	}
+	if d["policy_name"] != "require-purpose" {
+		t.Errorf("policy_name = %v, want require-purpose", d["policy_name"])
+	}
+}
+
+// TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse proves
+// mismatch/narrated_not_confirmed reach the live response — previously the
+// only signal was an X-Audit-Mismatch response header carrying no detail,
+// which the playbook-run path never read at all; the only way to see
+// fabrication risk was to query the audit trail directly (found live: a
+// crystal-ball run against an unresolvable connection_string produced a
+// delegation_verification event with mismatch=true and
+// narrated_not_confirmed=["check_connection","read_pg_log"] that was
+// completely invisible on the response JSON).
+func TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_fabrication01",
+		SeriesID:      "pbs_fabrication_triage",
+		Name:          "Fabrication Test Triage",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "fabrication_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pb)
+	mismatchEvent, _ := json.Marshal([]audit.Event{
+		{
+			EventType: audit.EventTypeDelegationVerification,
+			DelegationVerification: &audit.DelegationVerification{
+				Agent:                "fabrication_agent",
+				Mismatch:             true,
+				NarratedNotConfirmed: []string{"check_connection", "read_pg_log"},
+			},
+		},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_fabrication_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=delegation_verification"):
+			w.Write(mismatchEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	_, card := mockA2AServerWithText(t, "fabrication_agent",
+		"Connection succeeded and logs look clean.\nFINDINGS: no issue found\nESCALATE_TO: none\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"fabrication_agent": client}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"host=127.0.0.1 port=5433 dbname=nope","context":"investigate"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["mismatch"] != true {
+		t.Errorf("mismatch = %v, want true", resp["mismatch"])
+	}
+	narrated, ok := resp["narrated_not_confirmed"].([]any)
+	if !ok || len(narrated) != 2 || narrated[0] != "check_connection" || narrated[1] != "read_pg_log" {
+		t.Errorf("narrated_not_confirmed = %v, want [check_connection read_pg_log]", resp["narrated_not_confirmed"])
+	}
+}
+
+// TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops proves
+// checkPolicyDenials's call site inside the auto-chain loop (playbooks.go,
+// alongside recordSignalLessWarnings) actually fires for a chained hop and
+// accumulates onto the same extra["policy_denials"] the primary hop's call
+// site populated — not just that appendPolicyDenials itself can accumulate
+// (already covered by TestAppendPolicyDenials_AccumulatesAcrossCalls) or that
+// a single-hop response surfaces a denial (TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse).
+// Each hop's policy_decision fetch returns a distinct denial, differentiated
+// by call order, so both showing up in the final response proves both real
+// call sites fired, not just one twice.
+func TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_pdchain_triage",
+		SeriesID:      "pbs_pdchain_triage",
+		Name:          "PD Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "pdchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_pdchain_sysadmin",
+		SeriesID:      "pbs_pdchain_sysadmin",
+		Name:          "PD Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "pdchain_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pbTriage)
+
+	var policyCalls int32
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if r.URL.Query().Get("series_id") == "pbs_pdchain_sysadmin" {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pbSysadmin}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_pdchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("event_type") == "policy_decision":
+			n := atomic.AddInt32(&policyCalls, 1)
+			resourceName := "pg-cluster-primary"
+			if n > 1 {
+				resourceName = "pg-cluster-sysadmin-target"
+			}
+			denyEvent, _ := json.Marshal([]audit.Event{
+				{
+					EventType: audit.EventTypePolicyDecision,
+					PolicyDecision: &audit.PolicyDecision{
+						ResourceType: "database",
+						ResourceName: resourceName,
+						Effect:       "deny",
+						PolicyName:   "require-purpose",
+					},
+				},
+			})
+			w.Write(denyEvent) //nolint:errcheck
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "pdchain_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_pdchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "pdchain_sysadmin_agent",
+		"FINDINGS: container looks fine\nESCALATE_TO: none\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"pdchain_db_agent":       dbCard,
+		"pdchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	denials, ok := resp["policy_denials"].([]any)
+	if !ok || len(denials) != 2 {
+		t.Fatalf("expected 2 accumulated policy_denials (one per hop), got %v — body: %s", resp["policy_denials"], rec.Body.String())
+	}
+	var gotNames []string
+	for _, d := range denials {
+		m, _ := d.(map[string]any)
+		gotNames = append(gotNames, fmt.Sprintf("%v", m["resource_name"]))
+	}
+	wantNames := []string{"pg-cluster-primary", "pg-cluster-sysadmin-target"}
+	for _, want := range wantNames {
+		found := false
+		for _, got := range gotNames {
+			if got == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("policy_denials missing entry for %q — got resource_names %v (primary hop's own denial should not be lost when the chained hop's is appended)", want, gotNames)
+		}
+	}
 }
 
 // TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal is a regression
@@ -1925,6 +2890,89 @@ func mockA2AServerCapturing(t *testing.T, agentName, responseText string, captur
 	return srv, card
 }
 
+// TestHandlePlaybookRun_AutoChain_ChainedHopRawTextAndSawSignalLine_Persisted
+// proves the chained-hop path (recordPlaybookRunComplete's second call site,
+// playbooks.go's auto-chain loop) persists the chained hop's OWN raw text and
+// SawSignalLine — not just the primary hop's, which
+// TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted already covers. The
+// two call sites are separate code paths (primary vs. chainRes.rawText/
+// chainRes.sawSignalLine) and nothing previously proved the chained one wires
+// correctly.
+func TestHandlePlaybookRun_AutoChain_ChainedHopRawTextAndSawSignalLine_Persisted(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_rawchain_triage",
+		SeriesID:      "pbs_rawchain_triage",
+		Name:          "Raw Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_rawchain_sysadmin",
+		SeriesID:      "pbs_rawchain_sysadmin",
+		Name:          "Raw Chain Sysadmin",
+		PlaybookType:  "triage",
+		ExecutionMode: "agent",
+		AgentName:     "rawchain_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_rawchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_rawchain_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "rawchain_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_rawchain_sysadmin\n")
+	chainedRawText := "Investigated container state.\n\nFINDINGS: container healthy; no action needed.\nESCALATE_TO: none\n"
+	_, sysadminCard := mockA2AServerWithText(t, "rawchain_sysadmin_agent", chainedRawText)
+	for name, card := range map[string]*a2a.AgentCard{
+		"rawchain_db_agent":       dbCard,
+		"rawchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	chainedRunID, _ := resp["chained_run_id"].(string)
+	if chainedRunID == "" {
+		t.Fatalf("response missing chained_run_id — body: %s", rec.Body.String())
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(chainedRunID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for chained run %s within timeout", chainedRunID)
+	}
+
+	transcript, _ := patch["agent_transcript"].(string)
+	if !strings.Contains(transcript, "ESCALATE_TO: none") {
+		t.Errorf("chained run's persisted agent_transcript should contain its OWN raw, un-stripped signal line, got %q", transcript)
+	}
+	if patch["saw_signal_line"] != true {
+		t.Errorf("chained run's persisted saw_signal_line = %v, want true", patch["saw_signal_line"])
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_IsTransitionFraming is a regression test
 // for the third bug found during live 3-hop escalation-chain verification:
 // PriorFindings was threaded correctly (data-plumbing was never broken), but
@@ -2022,6 +3070,241 @@ func TestHandlePlaybookRun_AutoChain_IsTransitionFraming(t *testing.T) {
 	}
 	if strings.Contains(remediatePrompt, "verify it with your own domain-specific tools") {
 		t.Error("remediate (transition hop) prompt should NOT tell the agent to verify with its own tools — it's the same agent continuing")
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate verifies that
+// objectiveEvidenceForceGate fires for a SECOND hop in a real multi-hop chain,
+// not just the primary/first hop — the in-loop gate is re-evaluated on every
+// loop iteration using `prev`, which only holds the primary's data on the
+// first iteration. Hop1 (triage) escalates cleanly (no evidence on its own
+// fetch); hop2 (sysadmin) both emits its own TRANSITION_TO AND has real
+// objective evidence, so hop3 must never be reached — the gate must intercept
+// using hop2's own trace/evidence, mirroring
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate but one hop deeper.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain_triage", SeriesID: "pbs_oevchain_triage",
+		Name: "OEV Chain Triage", ExecutionMode: "agent", AgentName: "oev_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain_sysadmin", SeriesID: "pbs_oevchain_sysadmin",
+		Name: "OEV Chain Sysadmin", ExecutionMode: "agent", AgentName: "oev_sysadmin_agent", IsActive: true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID: "pb_oevchain_remediate", SeriesID: "pbs_oevchain_remediate",
+		Name: "OEV Chain Remediate", ExecutionMode: "agent", AgentName: "oev_remediate_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_oevchain_sysadmin":  pbSysadmin,
+			"pbs_oevchain_remediate": pbRemediate,
+		})
+	// Skip 1 call: hop1's own evidence fetch sees no evidence, so it does not
+	// get gated on its own and chainEscalation actually runs. Every call from
+	// the 2nd onward (hop2's fetch) sees real evidence.
+	auditSrv.evidenceSkipCalls = 1
+	auditSrv.evidenceSignal = "pod_restarted"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "oev_sysadmin_agent",
+		"HYPOTHESIS_1: pod recovered after restart | CONFIDENCE: 0.90 | EVIDENCE: \"restart_count=2\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod recovered\nTRANSITION_TO: pbs_oevchain_remediate\n")
+	_, remediateCard := mockA2AServerWithText(t, "oev_remediate_agent", "FINDINGS: should never be reached\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev_db_agent":        dbCard,
+		"oev_sysadmin_agent":  sysadminCard,
+		"oev_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — chained-hop objective-evidence gate did not fire; body: %s", resp["status"], rec.Body.String())
+	}
+	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_oevchain_remediate" {
+		t.Errorf("transition_target = %q, want pbs_oevchain_remediate — must reflect hop2's own signal, not hop1's", resp["transition_target"])
+	}
+	// Only 2 runs should have been created (hop1 + hop2) — the gate must stop
+	// the chain before hop3 (remediate) is ever invoked.
+	if got := auditSrv.runCount(); got != 2 {
+		t.Errorf("runCount() = %d, want 2 — remediate agent should never have been invoked, the chain must stop at the gate", got)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning
+// verifies the standalone-warning path for a SECOND hop: hop1 (triage)
+// escalates cleanly with no evidence; hop2 (sysadmin) has real objective
+// evidence but emits no further TRANSITION_TO/ESCALATE_TO. The chain must
+// complete normally (no pending_gate — there is no next-hop to gate approval
+// for), and extra["evidence_warnings"] set by recordEvidenceWithoutEscalationWarning's
+// *chained call site (not just its primary call site) must appear on the
+// final response.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain2_triage", SeriesID: "pbs_oevchain2_triage",
+		Name: "OEV Chain2 Triage", ExecutionMode: "agent", AgentName: "oev2_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain2_sysadmin", SeriesID: "pbs_oevchain2_sysadmin",
+		Name: "OEV Chain2 Sysadmin", ExecutionMode: "agent", AgentName: "oev2_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain2_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_oevchain2_sysadmin": pbSysadmin})
+	auditSrv.evidenceSkipCalls = 1 // hop1's own fetch sees no evidence
+	auditSrv.evidenceSignal = "oom_killed"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev2_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain2_sysadmin\n")
+	// No TRANSITION_TO/ESCALATE_TO — hop2 silently closes out despite evidence.
+	_, sysadminCard := mockA2AServerWithText(t, "oev2_sysadmin_agent",
+		"HYPOTHESIS_1: pod is healthy now | CONFIDENCE: 0.95 | EVIDENCE: \"status=Running\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod healthy; no action needed\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev2_db_agent":       dbCard,
+		"oev2_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but hop2 has no escalation target — should not re-route into the gate flow")
+	}
+	warnings, ok := resp["evidence_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one evidence_warnings entry from hop2's chained call site, got %v — body: %s", resp["evidence_warnings"], rec.Body.String())
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "oom_killed") || !strings.Contains(warnStr, "pbs_oevchain2_sysadmin") {
+		t.Errorf("evidence_warnings[0] = %q, want it to mention oom_killed and the sysadmin hop's own series_id", warnStr)
+	}
+	if resp["chained_run_id"] == nil || resp["chained_run_id"] == "" {
+		t.Error("expected a chained_run_id — hop2 must have actually run via chainEscalation, not been skipped")
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ProtocolViolation mirrors
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning
+// exactly, for protocol_violation instead of objective_evidence — proves the
+// CHAINED-hop call site (playbooks.go's `if recordSignalLessWarnings(...)`
+// inside the loop, not just the primary-hop call site already covered by
+// TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent above) uses
+// hop2's own data, not hop1's, and that hop2's own audit event actually gets
+// recorded via g.recordProtocolViolationEvent — not just the response shape.
+func TestHandlePlaybookRun_ChainedHop_ProtocolViolation(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_pvchain_triage", SeriesID: "pbs_pvchain_triage",
+		Name: "PV Chain Triage", ExecutionMode: "agent", AgentName: "pv_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_pvchain_sysadmin", SeriesID: "pbs_pvchain_sysadmin",
+		Name: "PV Chain Sysadmin", PlaybookType: "triage", ExecutionMode: "agent", AgentName: "pv_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_pvchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_pvchain_sysadmin": pbSysadmin})
+
+	ta := &testAuditor{}
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.auditor = audit.NewGatewayAuditor(ta)
+	_, dbCard := mockA2AServerWithText(t, "pv_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_pvchain_sysadmin\n")
+	// No TRANSITION_TO/ESCALATE_TO at all — hop2 (a triage-typed playbook)
+	// silently closes out, a genuine protocol violation on ITS OWN response.
+	_, sysadminCard := mockA2AServerWithText(t, "pv_sysadmin_agent",
+		"FINDINGS: container looks fine; cause unclear.\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"pv_db_agent":       dbCard,
+		"pv_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but hop2 has no escalation target — should not re-route into the gate flow")
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("response protocol_violation = %v, want true (from hop2, not hop1)", resp["protocol_violation"])
+	}
+	warnings, ok := resp["warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one warnings entry from hop2's chained call site, got %v — body: %s", resp["warnings"], rec.Body.String())
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "pbs_pvchain_sysadmin") {
+		t.Errorf("warnings[0] = %q, want it to mention hop2's own series_id (pbs_pvchain_sysadmin), not hop1's", warnStr)
+	}
+	if strings.Contains(warnStr, "pbs_pvchain_triage") {
+		t.Errorf("warnings[0] = %q, must not attribute the violation to hop1 (which escalated cleanly)", warnStr)
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+	var violEvent *audit.Event
+	for _, e := range events {
+		if e.DelegationVerification != nil && e.DelegationVerification.ProtocolViolation {
+			violEvent = e
+			break
+		}
+	}
+	if violEvent == nil {
+		t.Fatal("no delegation_verification event with ProtocolViolation=true recorded for the chained hop")
+	}
+	if violEvent.DelegationVerification.Agent != "pv_sysadmin_agent" {
+		t.Errorf("event Agent = %q, want pv_sysadmin_agent (hop2's own agent, not hop1's)", violEvent.DelegationVerification.Agent)
 	}
 }
 
@@ -2557,6 +3840,68 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_PreservesGateReason is a regression guard for a
+// real bug found during review: recordPlaybookRunComplete's Update SQL sets
+// gate_reason unconditionally (no COALESCE), so a resolve call that passed ""
+// instead of the run's existing GateReason would silently erase it the moment
+// an operator interacted with proceed-escalation — right when it becomes most
+// useful to have queryable. Covers both the denied and approved branches,
+// since each has its own recordPlaybookRunComplete call site.
+func TestHandleProceedEscalation_PreservesGateReason(t *testing.T) {
+	for _, resolution := range []string{"denied", "approved"} {
+		t.Run(resolution, func(t *testing.T) {
+			var patchBody string
+			run := &audit.PlaybookRun{
+				RunID:           "plr_gatereason_resolve01",
+				Outcome:         audit.OutcomeGatePending,
+				TransitionedTo:  "pbs_vacuum_remediate",
+				FindingsSummary: "Vacuum lag detected; manual vacuum needed.",
+				GateReason:      "objective_evidence:pod_restarted",
+			}
+			remedPB := &audit.Playbook{
+				PlaybookID:    "pb_vac_rem02",
+				SeriesID:      "pbs_vacuum_remediate",
+				Name:          "Vacuum & Bloat — Remediation",
+				ExecutionMode: "agent",
+				IsActive:      true,
+			}
+			runData, _ := json.Marshal(run)
+
+			auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+					w.Write(runData) //nolint:errcheck
+				case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+					b, _ := io.ReadAll(r.Body)
+					patchBody = string(b)
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+					json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+				case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+					w.WriteHeader(http.StatusCreated)
+					json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem03"}) //nolint:errcheck
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(auditSrv.Close)
+
+			gw := makePlaybookRunGateway(auditSrv.URL, nil)
+			postProceedEscalation(t, gw, "plr_gatereason_resolve01",
+				fmt.Sprintf(`{"resolution":%q,"resolved_by":"ops-alice","approval_mode":"auto"}`, resolution))
+
+			var patch map[string]any
+			if err := json.Unmarshal([]byte(patchBody), &patch); err != nil {
+				t.Fatalf("PATCH body not valid JSON: %v — body: %s", err, patchBody)
+			}
+			if patch["gate_reason"] != "objective_evidence:pod_restarted" {
+				t.Errorf("PATCH gate_reason = %v, want objective_evidence:pod_restarted (must be preserved through resolve, not wiped)", patch["gate_reason"])
+			}
+		})
+	}
+}
+
 // TestHandleProceedEscalation_NamespaceFallsBackToTriageRun verifies the
 // informed-gate flow (used with --gate-escalation, distinct from faulttest's
 // default direct-remediation path already covered by
@@ -2613,6 +3958,79 @@ func TestHandleProceedEscalation_NamespaceFallsBackToTriageRun(t *testing.T) {
 	}
 	if !strings.Contains(runStartBody, `"namespace":"helpdesk-test"`) {
 		t.Errorf("recordPlaybookRunStart body should carry namespace=helpdesk-test (fallback from the triage run), got: %s", runStartBody)
+	}
+}
+
+// TestHandleProceedEscalation_PurposeFallsBackToTriageRun verifies the same
+// fallback behavior as TestHandleProceedEscalation_NamespaceFallsBackToTriageRun,
+// for purpose: when the operator's proceed-escalation request doesn't specify
+// a purpose, the chained remediation run must fall back to the one stored on
+// the triage run rather than starting the remediation playbook with no
+// purpose at all — an empty purpose can cause policy checks on the next hop
+// to deny an otherwise-legitimate tool call (e.g. K8s get_pods requiring an
+// explicit purpose in its allowed_purposes list).
+func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
+	var runStartBody string
+	run := &audit.PlaybookRun{
+		RunID:           "plr_gate_purpose01",
+		Outcome:         audit.OutcomeGatePending,
+		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		FindingsSummary: "Pod is Kubernetes-managed; sysadmin investigation required.",
+		Purpose:         "diagnostic",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_sysadmin_rem01",
+		SeriesID:      "pbs_sysadmin_docker_inspect",
+		Name:          "Sysadmin — Docker Inspect",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	runData, _ := json.Marshal(run)
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.Write(runData) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			b, _ := io.ReadAll(r.Body)
+			runStartBody = string(b)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_rem_purpose01"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	// No "purpose" field in the request body — must fall back to run.Purpose.
+	// Dispatch inline (rather than via postProceedEscalation) so the test can
+	// inspect the request's headers after the call — proxyToAgentWithTool reads
+	// X-Purpose directly off this same *http.Request, so this is the actual
+	// mechanism the live bug was about, not just the recorded metadata body.
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/fleet/playbook-runs/plr_gate_purpose01/proceed-escalation",
+		strings.NewReader(`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// No A2A client → 502, confirming the agent chain path was reached.
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("got %d, want 502 (no A2A client wired); body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(runStartBody, `"purpose":"diagnostic"`) {
+		t.Errorf("recordPlaybookRunStart body should carry purpose=diagnostic (fallback from the triage run), got: %s", runStartBody)
+	}
+	if got := req.Header.Get("X-Purpose"); got != "diagnostic" {
+		t.Errorf("X-Purpose header = %q, want %q — proxyToAgentWithTool reads this directly for downstream policy checks", got, "diagnostic")
 	}
 }
 
@@ -2973,6 +4391,439 @@ func TestLowConfidenceForceGate(t *testing.T) {
 	}
 }
 
+// ── objectiveEvidenceForceGate ─────────────────────────────────────────────
+
+func TestObjectiveEvidenceForceGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		events     []audit.Event
+		wantFire   bool
+		wantReason string
+	}{
+		{
+			name:     "no events — no gate",
+			events:   nil,
+			wantFire: false,
+		},
+		{
+			name: "event with nil ObjectiveEvidence — no gate",
+			events: []audit.Event{
+				{EventType: audit.EventTypeObjectiveEvidence},
+			},
+			wantFire: false,
+		},
+		{
+			name: "event with empty Signal — no gate",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}},
+			},
+			wantFire: false,
+		},
+		{
+			name: "real pod_restarted signal — gate fires",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+			},
+			wantFire:   true,
+			wantReason: "pod_restarted",
+		},
+		{
+			name: "real oom_killed signal — gate fires",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+			},
+			wantFire:   true,
+			wantReason: "oom_killed",
+		},
+		{
+			name: "unrelated events mixed in — first real signal wins",
+			events: []audit.Event{
+				{EventType: audit.EventTypePolicyDecision},
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}}, // empty signal, skipped
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+			},
+			wantFire:   true,
+			wantReason: "pod_restarted",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fire, reason := objectiveEvidenceForceGate(tc.events)
+			if fire != tc.wantFire {
+				t.Errorf("objectiveEvidenceForceGate() fire = %v, want %v", fire, tc.wantFire)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("objectiveEvidenceForceGate() reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// ── trustNotYetEarnedForceGate ──────────────────────────────────────────────
+
+// serveFakeFaultStabilityCerts starts an httptest.Server that responds to
+// GET /v1/fleet/fault-stability with the given certs JSON-encoded, mirroring
+// the real {"certs": [...]} envelope auditd's handleList returns.
+func serveFakeFaultStabilityCerts(t *testing.T, certs []*audit.FaultStabilityCert) *httptest.Server {
+	t.Helper()
+	if certs == nil {
+		certs = []*audit.FaultStabilityCert{}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"certs": certs}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_NoDiagnosisModel(t *testing.T) {
+	// Mechanism not configured (diagnosisModel empty, the default for every
+	// gateway that never calls SetDiagnosisModel — i.e. every other test in
+	// this package) — must fail open regardless of what auditd would say.
+	// Server would say "not earned" (empty certs) if it were ever queried.
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL}
+	if g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-open (false) when diagnosisModel is unset")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_NoAuditURL(t *testing.T) {
+	g := &Gateway{diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-open (false) when auditURL is unset")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsOpen_EmptySeriesID(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("") {
+		t.Error("expected fail-open (false) when seriesID is empty")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_FailsClosed_NoCertOnRecord(t *testing.T) {
+	// Mechanism IS configured, auditd genuinely has zero certs for this
+	// series+model — "never faulttested" must be treated as "not earned."
+	srv := serveFakeFaultStabilityCerts(t, nil)
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_db_restart_triage") {
+		t.Error("expected fail-closed (true) when no cert is on record")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_Earned_AllCertsStableAndClean(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected earned (false) when every known cert is stable and clean")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_NotEarned_OneUnstable(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: false, IsClean: true},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected not earned (true) when even one known cert is unstable — conservative, not 'any good result passes'")
+	}
+}
+
+func TestTrustNotYetEarnedForceGate_NotEarned_OneDirty(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: false, WarningCount: 2},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected not earned (true) when even one known cert is dirty (IsClean=false)")
+	}
+}
+
+// TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook is an end-to-end
+// test through handlePlaybookRunAsAgent: a playbook with no fault-stability
+// cert on record must come back pending_gate with gate_reason="trust_not_earned",
+// even under approval_mode=force — consistent with how the existing two
+// force-gates already override force mode (they run before canAutoChain is
+// ever consulted).
+func TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_trust01",
+		SeriesID:      "pbs_trust_triage",
+		Name:          "Trust Gate Triage",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "HYPOTHESIS_1: clear root cause | CONFIDENCE: 0.95 | EVIDENCE: \"clean signal\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: resolved cleanly\nTRANSITION_TO: pbs_trust_remediate\n"
+
+	// mockGateAuditdPlaybook's default branch returns "[]" for any unmatched
+	// GET — including /v1/fleet/fault-stability — so this playbook has no
+	// cert on record, same as "never faulttested."
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	gw.SetDiagnosisModel("claude-sonnet-4-6")
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"test","approval_mode":"force"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — trust gate did not fire under force mode despite no earned cert", resp["status"])
+	}
+	if resp["gate_reason"] != "trust_not_earned" {
+		t.Errorf("gate_reason = %q, want trust_not_earned", resp["gate_reason"])
+	}
+}
+
+// TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet mirrors the
+// faulttest bootstrapping case: a calibration run explicitly sets
+// skip_trust_gate so it isn't gated waiting on a cert it's trying to
+// establish in the first place.
+func TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_trust02",
+		SeriesID:      "pbs_trust_triage2",
+		Name:          "Trust Gate Triage 2",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "HYPOTHESIS_1: clear root cause | CONFIDENCE: 0.95 | EVIDENCE: \"clean signal\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: resolved cleanly\n"
+	// No TRANSITION_TO/ESCALATE_TO — closes out on its own, same as a
+	// faulttest calibration run's final hop typically would.
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	gw.SetDiagnosisModel("claude-sonnet-4-6")
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"test","approval_mode":"force","skip_trust_gate":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but skip_trust_gate was set — trust gate should not have fired")
+	}
+}
+
+// ── recordSignalLessWarnings ────────────────────────────────────────────────
+// (formerly recordEvidenceWithoutEscalationWarning; these cases exercise only
+// the pre-existing objective_evidence check — untyped playbook (PlaybookType
+// unset) so protocolViolation never fires and pollutes these fixtures. See
+// TestRecordSignalLessWarnings_ProtocolViolation/_LowConfidence below for the
+// two checks added in this session.)
+
+func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
+	untyped := &audit.Playbook{}
+	t.Run("hop escalated — no-op regardless of evidence", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when hop escalated, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("hop transitioned — no-op regardless of evidence", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_recovery"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when hop transitioned, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("no escalation, no evidence — no-op", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, nil)
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["evidence_warnings"]; ok {
+			t.Errorf("expected no evidence_warnings when no evidence recorded, got %v", extra["evidence_warnings"])
+		}
+	})
+
+	t.Run("no escalation, real evidence — warning appended", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+		})
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", playbookSeriesID: "pbs_k8s_pod_crash_triage", agentName: "k8s_agent"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		warnings, ok := extra["evidence_warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one evidence_warnings entry, got %v", extra["evidence_warnings"])
+		}
+		if !strings.Contains(warnings[0], "pbs_k8s_pod_crash_triage") || !strings.Contains(warnings[0], "k8s_agent") || !strings.Contains(warnings[0], "pod_restarted") {
+			t.Errorf("warning missing expected context: %q", warnings[0])
+		}
+	})
+
+	t.Run("second hop appends to existing warnings — accumulates, does not overwrite", func(t *testing.T) {
+		srv := serveFakeToolEvents(t, []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
+		})
+		extra := map[string]any{"evidence_warnings": []string{"prior hop warning"}}
+		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_docker_inspect", agentName: "sysadmin_agent"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		warnings, ok := extra["evidence_warnings"].([]string)
+		if !ok || len(warnings) != 2 {
+			t.Fatalf("expected two accumulated evidence_warnings entries, got %v", extra["evidence_warnings"])
+		}
+		if warnings[0] != "prior hop warning" {
+			t.Errorf("first warning should be preserved unchanged, got %q", warnings[0])
+		}
+	})
+}
+
+// TestRecordSignalLessWarnings_ProtocolViolation covers the new unconditional
+// protocol-violation check: a triage-typed playbook's hop that resolves
+// without a TRANSITION_TO/ESCALATE_TO line at all.
+func TestRecordSignalLessWarnings_ProtocolViolation(t *testing.T) {
+	triage := &audit.Playbook{PlaybookType: "triage"}
+	remediation := &audit.Playbook{PlaybookType: "remediation"}
+	srv := serveFakeToolEvents(t, nil)
+
+	t.Run("triage, no signal line — violation fires, event recorded", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_1", playbookSeriesID: "pbs_db_restart_triage", agentName: "postgres_database_agent"}
+		fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop)
+		if !fired {
+			t.Error("expected protocolViolationFired=true")
+		}
+		if extra["protocol_violation"] != true {
+			t.Errorf("extra[protocol_violation] = %v, want true", extra["protocol_violation"])
+		}
+		warnings, ok := extra["warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one warnings entry, got %v", extra["warnings"])
+		}
+		if !strings.Contains(warnings[0], "omitted required TRANSITION_TO") {
+			t.Errorf("warning text must stay substring-compatible with faulttest's ProtocolViolation detection, got %q", warnings[0])
+		}
+	})
+
+	t.Run("triage, explicit ESCALATE_TO: none — no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_2", sawSignalLine: true}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
+			t.Error("expected no protocol violation when SawSignalLine=true (explicit \"none\")")
+		}
+		if _, ok := extra["protocol_violation"]; ok {
+			t.Errorf("expected no protocol_violation key, got %v", extra["protocol_violation"])
+		}
+	})
+
+	t.Run("remediation playbook, no signal line — exempt, no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_3"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", remediation, hop); fired {
+			t.Error("expected no protocol violation on a remediation playbook — it must never emit a signal")
+		}
+	})
+
+	t.Run("untyped playbook, no signal line — exempt, no violation", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_4"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", &audit.Playbook{}, hop); fired {
+			t.Error("expected no protocol violation on an untyped playbook")
+		}
+	})
+
+	t.Run("hop escalated — no-op regardless of playbook type", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
+			t.Error("expected no protocol violation when hop escalated")
+		}
+	})
+}
+
+// TestRecordSignalLessWarnings_LowConfidence covers the new unconditional
+// low-confidence-without-escalation warning — visibility only, never counted
+// toward the CLEAN cert (verified separately in faulttest tests).
+func TestRecordSignalLessWarnings_LowConfidence(t *testing.T) {
+	untyped := &audit.Playbook{}
+	srv := serveFakeToolEvents(t, nil)
+
+	t.Run("low confidence, no escalation — warning appended", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{
+			traceID:          "tr_1",
+			playbookSeriesID: "pbs_db_restart_triage",
+			agentName:        "postgres_database_agent",
+			diagReport: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.35},
+			}},
+		}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		warnings, ok := extra["warnings"].([]string)
+		if !ok || len(warnings) != 1 {
+			t.Fatalf("expected exactly one warnings entry, got %v", extra["warnings"])
+		}
+		if !strings.Contains(warnings[0], "low-confidence") {
+			t.Errorf("warning missing expected content: %q", warnings[0])
+		}
+		// Must not collide with either substring faulttest's ProtocolViolation
+		// detection checks for (testing/cmd/faulttest/main.go) — this is a
+		// deliberately distinct signal that must never cap the faulttest score
+		// the way a real protocol violation does.
+		if strings.Contains(warnings[0], "omitted required TRANSITION_TO") || strings.Contains(warnings[0], "ESCALATE_TO signal") {
+			t.Error("low_confidence warning text must not match either protocol_violation substring")
+		}
+	})
+
+	t.Run("high confidence, no escalation — no warning", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{
+			traceID: "tr_2",
+			diagReport: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.85},
+			}},
+		}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["warnings"]; ok {
+			t.Errorf("expected no warnings for high-confidence resolution, got %v", extra["warnings"])
+		}
+	})
+
+	t.Run("nil diagnostic report — no warning (pre-B1 playbooks unaffected)", func(t *testing.T) {
+		extra := map[string]any{}
+		hop := agentRunResult{traceID: "tr_3"}
+		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
+		if _, ok := extra["warnings"]; ok {
+			t.Errorf("expected no warnings when diagReport is nil, got %v", extra["warnings"])
+		}
+	})
+}
+
 // TestHandlePlaybookRun_LowConfidence_ForcedGate verifies that when a triage
 // agent emits a low-confidence primary hypothesis (< 0.50), the gateway fires
 // a gate even without gate_escalation=true in the request, and sets
@@ -3019,6 +4870,293 @@ func TestHandlePlaybookRun_LowConfidence_ForcedGate(t *testing.T) {
 	}
 	if resp["transition_target"] != "pbs_vacuum_remediate" {
 		t.Errorf("transition_target = %q, want pbs_vacuum_remediate", resp["transition_target"])
+	}
+}
+
+// mockGateAuditdPlaybookWithEvidence is mockGateAuditdPlaybook plus a real
+// objective_evidence event served for GET /v1/events?event_type=objective_evidence
+// — used to test objectiveEvidenceForceGate / recordEvidenceWithoutEscalationWarning
+// without needing a real K8s agent to actually run get_pods.
+func mockGateAuditdPlaybookWithEvidence(t *testing.T, pb *audit.Playbook, signal string) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	evidenceData, _ := json.Marshal([]audit.Event{
+		{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Resource: "pg-cluster-minkube-1", Signal: signal}},
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence":
+			w.Write(evidenceData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_evidence01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate verifies that a hop with a
+// real objective_evidence event (e.g. a pod restart) forces a pending_gate even
+// with high self-reported confidence and no gate_escalation flag from the
+// caller — objectiveEvidenceForceGate must fire independent of, and in addition
+// to, lowConfidenceForceGate.
+func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_db_restart_triage01",
+		SeriesID:      "pbs_db_restart_triage",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Check connection and pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// High confidence (0.85, well above the 0.50 low-confidence threshold) —
+	// isolates objective evidence as the reason the gate fires.
+	agentText := "Pod recovered after a restart and is now healthy.\n\n" +
+		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod recovered; no further action needed\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	// Deliberately omit gate_escalation — the objective-evidence gate must
+	// fire on its own, same as the low-confidence gate does.
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate — objective-evidence gate did not fire despite high confidence", resp["status"])
+	}
+	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_db_config_recovery" {
+		t.Errorf("transition_target = %q, want pbs_db_config_recovery", resp["transition_target"])
+	}
+	signals, ok := resp["objective_evidence_signals"].([]any)
+	if !ok || len(signals) != 1 || signals[0] != "pod_restarted" {
+		t.Errorf("objective_evidence_signals = %v, want [pod_restarted] — structured field must be populated at the force-gate call site, not just the gate_reason substring", resp["objective_evidence_signals"])
+	}
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted proves
+// gate_reason survives past the live HTTP response — previously it existed
+// only in the ephemeral extra map with no durable/queryable trace, so once a
+// caller discarded the response body (e.g. piping straight to `jq
+// '.policy_denials'`), gate_reason was permanently unrecoverable, even via
+// GET /api/v1/fleet/playbook-runs/{run_id} or direct SQL. Also proves the
+// value survives a subsequent gate resolution (proceed-escalation) rather
+// than being wiped — Update's SQL sets gate_reason unconditionally, so a
+// resolve call that didn't thread the existing value through would silently
+// erase it right when it becomes most useful to have.
+func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_db_restart_triage02",
+		SeriesID:      "pbs_db_restart_triage2",
+		Name:          "Database Down — Restart Triage",
+		Guidance:      "Check connection and pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Pod recovered after a restart and is now healthy.\n\n" +
+		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod recovered; no further action needed\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	var patchBodies [][]byte
+	var mu sync.Mutex
+	pbData, _ := json.Marshal(pb)
+	evidenceData, _ := json.Marshal([]audit.Event{
+		{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Resource: "pg-cluster-minkube-1", Signal: "pod_restarted"}},
+	})
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence":
+			w.Write(evidenceData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gatereason_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			patchBodies = append(patchBodies, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+
+	// recordPlaybookRunComplete's PATCH is fire-and-forget — poll for it.
+	var completePatch map[string]any
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		bodies := append([][]byte(nil), patchBodies...)
+		mu.Unlock()
+		for _, b := range bodies {
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				continue
+			}
+			if _, ok := m["gate_reason"]; ok {
+				completePatch = m
+			}
+		}
+		if completePatch != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if completePatch == nil {
+		t.Fatal("no PATCH with gate_reason observed — recordPlaybookRunComplete never persisted it")
+	}
+	if completePatch["gate_reason"] != "objective_evidence:pod_restarted" {
+		t.Errorf("persisted gate_reason = %v, want objective_evidence:pod_restarted", completePatch["gate_reason"])
+	}
+}
+
+// TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason is
+// a regression test for a real bug found via manual verification: the
+// low-confidence and objective-evidence force-gate checks used to each guard
+// themselves on `!req.GateEscalation`, so whichever ran first silently
+// prevented the other from ever being evaluated — a hop with BOTH a
+// low-confidence diagnosis AND real tool evidence only ever reported
+// gate_reason: "low_confidence", hiding the fact that independently-verified
+// evidence also existed. Both conditions must now be evaluated unconditionally
+// and combined into a single "+"-joined gate_reason.
+func TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_combined_triage01",
+		SeriesID:      "pbs_combined_triage",
+		Name:          "Combined Signal Triage",
+		Guidance:      "Check pod state.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Low confidence (0.35, below the 0.50 threshold) on a hop that ALSO has
+	// real objective evidence served by the mock.
+	agentText := "Uncertain diagnosis; pod recently restarted but root cause unclear.\n\n" +
+		"HYPOTHESIS_1: transient issue, may have resolved | CONFIDENCE: 0.35 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod state uncertain\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+	gateReason, _ := resp["gate_reason"].(string)
+	if !strings.Contains(gateReason, "low_confidence") {
+		t.Errorf("gate_reason = %q, want it to mention low_confidence", gateReason)
+	}
+	if !strings.Contains(gateReason, "objective_evidence:pod_restarted") {
+		t.Errorf("gate_reason = %q, want it to also mention objective_evidence:pod_restarted — both signals must survive, not just whichever fired first", gateReason)
+	}
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning verifies
+// the complementary case objectiveEvidenceForceGate cannot catch on its own: a
+// hop with real objective evidence that emits no TRANSITION_TO/ESCALATE_TO at
+// all. There is no next-hop to gate approval for, so the response must not
+// become pending_gate — instead recordEvidenceWithoutEscalationWarning must
+// surface the discrepancy via extra["evidence_warnings"].
+func TestHandlePlaybookRun_ObjectiveEvidence_NoEscalation_SurfacesWarning(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_k8s_pod_crash_triage01",
+		SeriesID:      "pbs_k8s_pod_crash_triage",
+		Name:          "K8s Pod Crash Triage",
+		Guidance:      "Check pod status and restart history.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// No TRANSITION_TO/ESCALATE_TO line — the model silently closes out
+	// despite the pod having real restart evidence (served by the mock below).
+	agentText := "Pod is currently healthy.\n\n" +
+		"HYPOTHESIS_1: transient issue, now resolved | CONFIDENCE: 0.90 | EVIDENCE: \"status=Running\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod healthy; no action needed\n"
+
+	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "oom_killed")
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"connection refused"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Error("status = pending_gate, but there is no escalation target — should not re-route into the gate flow")
+	}
+	warnings, ok := resp["evidence_warnings"].([]any)
+	if !ok || len(warnings) != 1 {
+		t.Fatalf("expected exactly one evidence_warnings entry, got %v", resp["evidence_warnings"])
+	}
+	warnStr, _ := warnings[0].(string)
+	if !strings.Contains(warnStr, "oom_killed") {
+		t.Errorf("evidence_warnings[0] = %q, want it to mention oom_killed", warnStr)
+	}
+	signals, ok := resp["objective_evidence_signals"].([]any)
+	if !ok || len(signals) != 1 || signals[0] != "oom_killed" {
+		t.Errorf("objective_evidence_signals = %v, want [oom_killed] — structured field must be populated at the warn-only (recordSignalLessWarnings) call site too, not just the force-gate one", resp["objective_evidence_signals"])
 	}
 }
 
@@ -3080,6 +5218,109 @@ func TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("warning should mention omitted signal, got: %v", warnings)
+		}
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_SyntheticGate_TriageType_NoDuplicateWarning
+// verifies the dedup: when the triage playbook has PlaybookType == "triage" (so
+// recordSignalLessWarnings' unconditional protocol_violation check ALSO fires,
+// unlike TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal above, whose
+// fixture leaves PlaybookType unset), the fallback gate's own warning message
+// must be suppressed rather than duplicating the one recordSignalLessWarnings
+// already added for the exact same underlying fact.
+func TestHandlePlaybookRun_GateEscalation_SyntheticGate_TriageType_NoDuplicateWarning(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage02",
+		SeriesID:      "pbs_cache_miss_triage2",
+		Name:          "Cache Miss Triage",
+		PlaybookType:  "triage",
+		Guidance:      "Check cache hit ratio and sequential scans.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// No TRANSITION_TO line — protocol violation, same as the test above.
+	agentText := "FINDINGS: cache_hit_ratio=0.928; blks_read=576; worst_table=test_large_table; recommended=add_index\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true,"remediation_series_id":"pbs_cache_miss_remediate"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["protocol_violation"] != true {
+		t.Errorf("protocol_violation = %v, want true (PlaybookType is triage)", resp["protocol_violation"])
+	}
+	warnings, _ := resp["warnings"].([]any)
+	if len(warnings) != 1 {
+		t.Errorf("warnings should contain exactly 1 entry (deduped), got %d: %v", len(warnings), warnings)
+	}
+}
+
+// TestHandlePlaybookRun_GateEscalation_ExplicitNone_NoSyntheticGate is the
+// negative counterpart to TestHandlePlaybookRun_GateEscalation_SyntheticGate_NoSignal:
+// when the agent explicitly emits "ESCALATE_TO: none" (a compliant, complete
+// conclusion — SawSignalLine=true), the fallback gate must NOT fire, even
+// though escalatedTo/transitionTo are both empty exactly as in the omitted-
+// signal case. Found live: before this fix, a wal-stale-slot triage run that
+// concluded "database healthy, false alarm" with an explicit ESCALATE_TO: none
+// still got a pending_gate manufactured against the caller's
+// remediation_series_id (a target the model never mentioned), and logged a
+// factually wrong "agent omitted TRANSITION_TO/ESCALATE_TO" warning.
+func TestHandlePlaybookRun_GateEscalation_ExplicitNone_NoSyntheticGate(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_cache_triage03",
+		SeriesID:      "pbs_cache_miss_triage3",
+		Name:          "Cache Miss Triage",
+		Guidance:      "Check cache hit ratio and sequential scans.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	// Explicit "none" — a compliant, complete conclusion, not an omission.
+	agentText := "Cache hit ratio is healthy; no action needed.\n\n" +
+		"HYPOTHESIS_1: cache performance is normal | CONFIDENCE: 0.95 | EVIDENCE: \"hit_ratio=0.99\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: cache is healthy; no issue found\n" +
+		"ESCALATE_TO: none\n"
+
+	auditSrv := mockGateAuditdPlaybook(t, pb)
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"high cache miss","gate_escalation":true,"remediation_series_id":"pbs_cache_miss_remediate"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] == "pending_gate" {
+		t.Errorf("status = pending_gate, want no gate — explicit ESCALATE_TO: none is a compliant conclusion, not a protocol violation; got body: %s", rec.Body.String())
+	}
+	if resp["transition_target"] != nil {
+		t.Errorf("transition_target = %v, want absent — the model never proposed a target", resp["transition_target"])
+	}
+	if resp["protocol_violation"] == true {
+		t.Error("protocol_violation = true, want unset — explicit none is compliant")
+	}
+	warnings, _ := resp["warnings"].([]any)
+	for _, w := range warnings {
+		if s, _ := w.(string); strings.Contains(s, "omitted") {
+			t.Errorf("warnings should not contain an 'omitted' entry for an explicit ESCALATE_TO: none, got: %v", warnings)
 		}
 	}
 }

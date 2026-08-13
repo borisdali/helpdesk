@@ -385,6 +385,8 @@ type stabilityInfo struct {
 	TestedAt              time.Time
 	PrimaryAttribution    string
 	AttributionConsistent bool
+	WarningCount          int
+	IsClean               bool
 	hasData               bool
 }
 
@@ -406,6 +408,9 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	AttributionDistribution map[string]int `json:"attribution_distribution"`
 	JudgeSpread             float64        `json:"judge_spread"`
 	TaxonomyVersion         string         `json:"taxonomy_version"`
+	WarningCount            int            `json:"warning_count"`
+	IsClean                 bool           `json:"is_clean"`
+	WarningDistribution     map[string]int `json:"warning_distribution"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -443,6 +448,9 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		AttributionDistribution map[string]int `json:"attribution_distribution"`
 		JudgeSpread             float64        `json:"judge_spread"`
 		TaxonomyVersion         string         `json:"taxonomy_version"`
+		WarningCount            int            `json:"warning_count"`
+		IsClean                 bool           `json:"is_clean"`
+		WarningDistribution     map[string]int `json:"warning_distribution"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -575,6 +583,8 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 			TestedAt              string `json:"tested_at"`
 			PrimaryAttribution    string `json:"primary_attribution"`
 			AttributionConsistent bool   `json:"attribution_consistent"`
+			WarningCount          int    `json:"warning_count"`
+			IsClean               bool   `json:"is_clean"`
 		} `json:"certs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -592,6 +602,8 @@ func fetchStabilityCerts(gatewayURL, apiKey string) map[string]stabilityInfo {
 			NRuns:                 c.NRuns,
 			PrimaryAttribution:    c.PrimaryAttribution,
 			AttributionConsistent: c.AttributionConsistent,
+			WarningCount:          c.WarningCount,
+			IsClean:               c.IsClean,
 			hasData:               true,
 		}
 		if c.TestedAt != "" {
@@ -775,6 +787,12 @@ func vaultList(args []string) {
 				label = "STABLE"
 			}
 			stableCol = fmt.Sprintf("%s(%d)", label, si.NRuns)
+			// Append a CLEAN indicator — a distinct axis from IsStable: a
+			// playbook can be perfectly stable while still consistently
+			// missing evidence it should have acted on.
+			if !si.IsClean {
+				stableCol += fmt.Sprintf(" ⚠%d/%d warnings", si.WarningCount, si.NRuns)
+			}
 			// Append attribution label when available.
 			if si.PrimaryAttribution != "" && si.PrimaryAttribution != "UNKNOWN" {
 				if si.AttributionConsistent {
@@ -1419,6 +1437,14 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	fmt.Printf("  Runs          : %d\n", cert.NRuns)
 	fmt.Printf("  Pass rate     : %.0f%%\n", cert.PassRate*100)
 	fmt.Printf("  Conf range    : %dpp  (primary hypothesis, passing runs only)\n", cert.ConfRangePP)
+	cleanVerdict := "yes"
+	if !cert.IsClean {
+		cleanVerdict = fmt.Sprintf("no  (%d/%d run(s) tripped a verified warning signal)", cert.WarningCount, cert.NRuns)
+	}
+	fmt.Printf("  Clean         : %s\n", cleanVerdict)
+	if dist := warningDistributionString(cert.WarningDistribution); dist != "" {
+		fmt.Printf("  Warning types : %s\n", dist)
+	}
 	if cert.PlaybookSeriesID != "" {
 		fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
 	}
@@ -2174,22 +2200,24 @@ func vaultIncidents(args []string) {
 
 // journeySummary mirrors audit.JourneySummary for JSON decoding.
 type journeySummary struct {
-	TraceID       string              `json:"trace_id"`
-	StartedAt     string              `json:"started_at"`
-	EndedAt       string              `json:"ended_at"`
-	DurationMs    int64               `json:"duration_ms"`
-	UserID        string              `json:"user_id,omitempty"`
-	UserQuery     string              `json:"user_query,omitempty"`
-	Agent         string              `json:"agent,omitempty"`
-	Category      string              `json:"category,omitempty"`
-	Delegations   []delegationSummary `json:"delegations,omitempty"`
-	ToolsUsed     []string            `json:"tools_used"`
-	Outcome       string              `json:"outcome,omitempty"`
-	EventCount    int                 `json:"event_count"`
-	RetryCount    int                 `json:"retry_count,omitempty"`
-	Origin        string              `json:"origin,omitempty"`
-	HasMismatch   bool                `json:"has_mismatch,omitempty"`
-	IncidentRunID string              `json:"incident_run_id,omitempty"`
+	TraceID              string              `json:"trace_id"`
+	StartedAt            string              `json:"started_at"`
+	EndedAt              string              `json:"ended_at"`
+	DurationMs           int64               `json:"duration_ms"`
+	UserID               string              `json:"user_id,omitempty"`
+	UserQuery            string              `json:"user_query,omitempty"`
+	Agent                string              `json:"agent,omitempty"`
+	Category             string              `json:"category,omitempty"`
+	Delegations          []delegationSummary `json:"delegations,omitempty"`
+	ToolsUsed            []string            `json:"tools_used"`
+	Outcome              string              `json:"outcome,omitempty"`
+	EventCount           int                 `json:"event_count"`
+	RetryCount           int                 `json:"retry_count,omitempty"`
+	Origin               string              `json:"origin,omitempty"`
+	HasMismatch          bool                `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool                `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool                `json:"has_protocol_violation,omitempty"`
+	IncidentRunID        string              `json:"incident_run_id,omitempty"`
 }
 
 // delegationSummary mirrors audit.DelegationSummary.
@@ -2229,6 +2257,63 @@ func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journ
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return summaries, nil
+}
+
+// targetDriftDetail mirrors audit.TargetDriftDetail for JSON decoding.
+type targetDriftDetail struct {
+	Tool             string `json:"tool"`
+	ConnectionString string `json:"connection_string"`
+}
+
+// delegationVerificationEvent mirrors the audit.DelegationVerification fields
+// vault journey needs to show tool/value detail instead of generic boilerplate
+// in its warning sections — a strict subset of the full struct.
+type delegationVerificationEvent struct {
+	Agent                string              `json:"agent"`
+	NarratedNotConfirmed []string            `json:"narrated_not_confirmed,omitempty"`
+	WriteConfirmed       []string            `json:"write_confirmed,omitempty"`
+	DestructiveConfirmed []string            `json:"destructive_confirmed,omitempty"`
+	TargetDrift          []string            `json:"target_drift,omitempty"`
+	TargetDriftDetail    []targetDriftDetail `json:"target_drift_detail,omitempty"`
+	ProtocolViolation    bool                `json:"protocol_violation,omitempty"`
+}
+
+// fetchDelegationVerificationEvents calls GET /api/v1/governance/events for
+// every delegation_verification event recorded on traceID — the raw events
+// that back a journey's HasMismatch/HasTargetDrift/HasProtocolViolation
+// booleans, carrying the tool/value detail those flags alone discard.
+func fetchDelegationVerificationEvents(gatewayURL, apiKey, traceID string) ([]delegationVerificationEvent, error) {
+	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/governance/events?trace_id=" +
+		neturl.QueryEscape(traceID) + "&event_type=delegation_verification"
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var events []struct {
+		DelegationVerification *delegationVerificationEvent `json:"delegation_verification"`
+	}
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	verifications := make([]delegationVerificationEvent, 0, len(events))
+	for _, e := range events {
+		if e.DelegationVerification != nil {
+			verifications = append(verifications, *e.DelegationVerification)
+		}
+	}
+	return verifications, nil
 }
 
 // vaultJourney shows the audit trail for one or more journey traces.
@@ -2382,7 +2467,13 @@ func vaultJourney(args []string) {
 		}
 		mismatchFlag := ""
 		if j.HasMismatch {
-			mismatchFlag = " !"
+			mismatchFlag += " !"
+		}
+		if j.HasTargetDrift {
+			mismatchFlag += " D"
+		}
+		if j.HasProtocolViolation {
+			mismatchFlag += " P"
 		}
 
 		toolStr := strings.Join(j.ToolsUsed, ", ")
@@ -2412,6 +2503,8 @@ func vaultJourney(args []string) {
 
 	fmt.Println()
 	fmt.Println("  ! = fabrication mismatch (agent reported success but no tool call recorded)")
+	fmt.Println("  D = target-scope drift (a real tool call used a different connection_string than requested)")
+	fmt.Println("  P = protocol violation (a triage hop omitted the required TRANSITION_TO/ESCALATE_TO signal)")
 	fmt.Printf("\nTo drill into a trace:\n  faulttest vault journey <trace_id> --gateway %s\n", cfg.GatewayURL)
 }
 
@@ -2516,11 +2609,92 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		}
 	}
 
+	// Fetch the raw delegation_verification events backing HasMismatch/
+	// HasTargetDrift/HasProtocolViolation once, up front, so each warning
+	// section below can show tool names / drift values instead of generic
+	// boilerplate. Fetch failures degrade to the boilerplate-only text — this
+	// is supplementary detail, not required for the warning itself to display.
+	var verifs []delegationVerificationEvent
+	if j.HasMismatch || j.HasTargetDrift || j.HasProtocolViolation {
+		var verifErr error
+		verifs, verifErr = fetchDelegationVerificationEvents(gatewayURL, apiKey, j.TraceID)
+		if verifErr != nil {
+			slog.Debug("vault journey: could not fetch delegation_verification events", "trace_id", j.TraceID, "err", verifErr)
+		}
+	}
+
 	if j.HasMismatch {
 		sectionJ("FABRICATION WARNING")
 		fmt.Println("  ! One or more delegations reported success but no matching tool")
 		fmt.Println("    execution was recorded in the audit trail.")
 		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
+		var narrated []string
+		seen := map[string]bool{}
+		for _, v := range verifs {
+			for _, t := range v.NarratedNotConfirmed {
+				if !seen[t] {
+					seen[t] = true
+					narrated = append(narrated, t)
+				}
+			}
+		}
+		if len(narrated) > 0 {
+			fmt.Printf("    Narrated but unconfirmed: %s\n", strings.Join(narrated, ", "))
+		}
+	}
+
+	if j.HasTargetDrift {
+		sectionJ("TARGET DRIFT WARNING")
+		fmt.Println("  D A real tool call in this journey used a different connection_string")
+		fmt.Println("    than the run was invoked with. The tool call itself is genuine —")
+		fmt.Println("    HasMismatch may be false — but any diagnosis built on it reflects")
+		fmt.Println("    the wrong server. Review which target the agent actually queried.")
+		var detailLines []string
+		var plainValues []string
+		seenDetail := map[string]bool{}
+		seenPlain := map[string]bool{}
+		for _, v := range verifs {
+			for _, d := range v.TargetDriftDetail {
+				key := d.Tool + "\x00" + d.ConnectionString
+				if !seenDetail[key] {
+					seenDetail[key] = true
+					detailLines = append(detailLines, fmt.Sprintf("%s → %s", d.Tool, d.ConnectionString))
+				}
+			}
+			for _, cs := range v.TargetDrift {
+				if !seenPlain[cs] {
+					seenPlain[cs] = true
+					plainValues = append(plainValues, cs)
+				}
+			}
+		}
+		if len(detailLines) > 0 {
+			fmt.Println("    Offending calls:")
+			for _, l := range detailLines {
+				fmt.Printf("      %s\n", l)
+			}
+		} else if len(plainValues) > 0 {
+			fmt.Printf("    Drifted to: %s\n", strings.Join(plainValues, ", "))
+		}
+	}
+
+	if j.HasProtocolViolation {
+		sectionJ("PROTOCOL VIOLATION WARNING")
+		fmt.Println("  P A triage-typed playbook's hop resolved without emitting the")
+		fmt.Println("    required TRANSITION_TO/ESCALATE_TO signal at all — not even an")
+		fmt.Println("    explicit \"none\". No gate was forced (no target to gate into);")
+		fmt.Println("    this run also negates the fault's CLEAN cert on the next recert.")
+		var agents []string
+		seen := map[string]bool{}
+		for _, v := range verifs {
+			if v.ProtocolViolation && v.Agent != "" && !seen[v.Agent] {
+				seen[v.Agent] = true
+				agents = append(agents, v.Agent)
+			}
+		}
+		if len(agents) > 0 {
+			fmt.Printf("    Agent(s): %s\n", strings.Join(agents, ", "))
+		}
 	}
 
 	if j.IncidentRunID != "" {
@@ -3157,7 +3331,7 @@ func postEvaluations(gatewayURL, apiKey string, results []EvalResult) {
 // postStabilityCert posts a fault triage consistency certification to auditd
 // via the gateway. Silently skipped when --gateway is not set. Errors are
 // logged but never cause the run to fail.
-func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, attr *attributionSummary) {
+func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr StabilityReport, cr CleanReport, attr *attributionSummary) {
 	if cfg.GatewayURL == "" {
 		return
 	}
@@ -3171,6 +3345,11 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		"pass_rate":          sr.passRate(),
 		"conf_range_pp":      int(math.Round(sr.confRange() * 100)),
 		"is_stable":          sr.isStable(),
+		"warning_count":      cr.WarningCount,
+		"is_clean":           cr.isClean(),
+	}
+	if len(cr.WarningDistribution) > 0 {
+		payload["warning_distribution"] = cr.WarningDistribution
 	}
 	if attr != nil {
 		payload["primary_attribution"] = attr.PrimaryAttribution
@@ -3209,7 +3388,11 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 	if sr.isStable() {
 		verdict = "STABLE"
 	}
-	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "n_runs", sr.N)
+	cleanVerdict := "DIRTY"
+	if cr.isClean() {
+		cleanVerdict = "CLEAN"
+	}
+	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "clean", cleanVerdict, "warning_count", cr.WarningCount, "n_runs", sr.N)
 }
 
 // ── vault versions ────────────────────────────────────────────────────────────
@@ -3744,6 +3927,8 @@ type certCompareEntry struct {
 	attributionConsistent bool
 	taxonomyVersion       string
 	judgeSpread           float64
+	warningCount          int
+	isClean               bool
 }
 
 // vaultCertCompare compares stability certs for two diagnosis models.
@@ -3788,6 +3973,8 @@ func vaultCertCompare(args []string) {
 			attributionConsistent: c.AttributionConsistent,
 			taxonomyVersion:       c.TaxonomyVersion,
 			judgeSpread:           c.JudgeSpread,
+			warningCount:          c.WarningCount,
+			isClean:               c.IsClean,
 		}
 		if c.FaultName != "" {
 			names[c.FaultID] = c.FaultName
@@ -3907,6 +4094,23 @@ func vaultCertCompare(args []string) {
 				fmt.Printf("  attribution: %s → %s%s\n", oldAttr, newAttr, taxWarning)
 			}
 		}
+		// CLEAN comparison: flag when a model regresses from clean to dirty,
+		// or vice versa — a distinct axis from isStable, so this can fire
+		// independently of a pass-rate/attribution regression.
+		if r.oldCert != nil && r.newCert != nil && r.oldCert.isClean != r.newCert.isClean {
+			oldClean, newClean := "clean", "clean"
+			if !r.oldCert.isClean {
+				oldClean = fmt.Sprintf("dirty(%d/%d)", r.oldCert.warningCount, r.oldCert.nRuns)
+			}
+			if !r.newCert.isClean {
+				newClean = fmt.Sprintf("dirty(%d/%d)", r.newCert.warningCount, r.newCert.nRuns)
+			}
+			marker := "⚠"
+			if r.newCert.isClean {
+				marker = "✓"
+			}
+			fmt.Printf("  %s clean: %s → %s\n", marker, oldClean, newClean)
+		}
 	}
 
 	fmt.Println()
@@ -3948,6 +4152,8 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 	AttributionConsistent bool    `json:"attribution_consistent"`
 	TaxonomyVersion       string  `json:"taxonomy_version"`
 	JudgeSpread           float64 `json:"judge_spread"`
+	WarningCount          int     `json:"warning_count"`
+	IsClean               bool    `json:"is_clean"`
 }, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/fault-stability"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -3979,6 +4185,8 @@ func fetchAllStabilityCerts(gatewayURL, apiKey string) ([]struct {
 			AttributionConsistent bool    `json:"attribution_consistent"`
 			TaxonomyVersion       string  `json:"taxonomy_version"`
 			JudgeSpread           float64 `json:"judge_spread"`
+			WarningCount          int     `json:"warning_count"`
+			IsClean               bool    `json:"is_clean"`
 		} `json:"certs"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
@@ -4156,14 +4364,18 @@ type narrativeJourneyRef struct {
 
 // narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
 type narrativeEscalationHop struct {
-	RunID            string               `json:"run_id"`
-	Playbook         string               `json:"playbook"`
-	Outcome          string               `json:"outcome"`
-	EscalatedTo      string               `json:"escalated_to,omitempty"`
-	Findings         string               `json:"findings,omitempty"`
-	DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
-	Steps            []narrativeStep      `json:"steps,omitempty"`
-	TraceID          string               `json:"trace_id,omitempty"`
+	RunID                string               `json:"run_id"`
+	Playbook             string               `json:"playbook"`
+	Outcome              string               `json:"outcome"`
+	EscalatedTo          string               `json:"escalated_to,omitempty"`
+	Findings             string               `json:"findings,omitempty"`
+	DiagnosticReport     *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+	Steps                []narrativeStep      `json:"steps,omitempty"`
+	TraceID              string               `json:"trace_id,omitempty"`
+	HasMismatch          bool                 `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
+	SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
 }
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
@@ -4175,10 +4387,15 @@ type incidentNarrative struct {
 	Operator       string     `json:"operator"`
 	TriggerContext string     `json:"trigger_context,omitempty"`
 	Triage         struct {
-		RunID            string               `json:"run_id"`
-		Playbook         string               `json:"playbook"`
-		Findings         string               `json:"findings,omitempty"`
-		DiagnosticReport *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+		RunID                string               `json:"run_id"`
+		Playbook             string               `json:"playbook"`
+		Findings             string               `json:"findings,omitempty"`
+		DiagnosticReport     *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+		TraceID              string               `json:"trace_id,omitempty"`
+		HasMismatch          bool                 `json:"has_mismatch,omitempty"`
+		HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
+		HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
+		SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
 	} `json:"triage"`
 	Gate *struct {
 		ApprovedBy     string    `json:"approved_by,omitempty"`
@@ -4190,12 +4407,17 @@ type incidentNarrative struct {
 	// strictly between Triage and the (optional) terminal Remediation.
 	Escalations []narrativeEscalationHop `json:"escalations,omitempty"`
 	Remediation *struct {
-		RunID      string          `json:"run_id"`
-		Playbook   string          `json:"playbook"`
-		Outcome    string          `json:"outcome"`
-		Findings   string          `json:"findings,omitempty"`
-		Transcript string          `json:"transcript,omitempty"`
-		Steps      []narrativeStep `json:"steps,omitempty"`
+		RunID                string          `json:"run_id"`
+		Playbook             string          `json:"playbook"`
+		Outcome              string          `json:"outcome"`
+		Findings             string          `json:"findings,omitempty"`
+		Transcript           string          `json:"transcript,omitempty"`
+		Steps                []narrativeStep `json:"steps,omitempty"`
+		TraceID              string          `json:"trace_id,omitempty"`
+		HasMismatch          bool            `json:"has_mismatch,omitempty"`
+		HasTargetDrift       bool            `json:"has_target_drift,omitempty"`
+		HasProtocolViolation bool            `json:"has_protocol_violation,omitempty"`
+		SawSignalLine        bool            `json:"saw_signal_line,omitempty"`
 	} `json:"remediation,omitempty"`
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
@@ -4241,6 +4463,25 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	section := func(title string) {
 		fmt.Printf("\n── %-54s\n", title)
 	}
+	// printFlags surfaces this chapter's Journey-level verification signals
+	// inline, right under its Findings — previously a reader had to separately
+	// know to run `vault journey <trace_id>` to discover either of these; a
+	// confident-looking chapter gave no indication its underlying tool calls
+	// weren't fully verified. Absence of both lines can mean either "verified
+	// clean" or "no Journey data exists for this trace" (fail-open by design,
+	// same ambiguity already present at the Journey layer) — not a positive
+	// attestation either way.
+	printFlags := func(hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
+		if hasMismatch {
+			fmt.Println("           ⚠ unverified — no matching tool execution in the audit trail")
+		}
+		if hasTargetDrift {
+			fmt.Println("           ⚠ target drift — a tool call used a different connection string")
+		}
+		if hasProtocolViolation {
+			fmt.Println("           ⚠ protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted")
+		}
+	}
 
 	fmt.Printf("\n%s\n", divider)
 	started := n.StartedAt.UTC().Format("2006-01-02 15:04 UTC")
@@ -4263,6 +4504,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	if n.Triage.Findings != "" {
 		fmt.Printf("Findings:  %s\n", wordWrap(n.Triage.Findings, 70, "           "))
 	}
+	printFlags(n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
 	if n.Triage.DiagnosticReport != nil && len(n.Triage.DiagnosticReport.Hypotheses) > 0 {
 		fmt.Println("\nHypotheses:")
 		for _, h := range n.Triage.DiagnosticReport.Hypotheses {
@@ -4329,6 +4571,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if hop.Findings != "" {
 			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
 		}
+		printFlags(hop.HasMismatch, hop.HasTargetDrift, hop.HasProtocolViolation)
 		if hop.DiagnosticReport != nil && len(hop.DiagnosticReport.Hypotheses) > 0 {
 			fmt.Println("\nHypotheses:")
 			for _, h := range hop.DiagnosticReport.Hypotheses {
@@ -4359,6 +4602,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if n.Remediation.Findings != "" {
 			fmt.Printf("Plan:      %s\n", wordWrap(n.Remediation.Findings, 70, "           "))
 		}
+		printFlags(n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation)
 		if len(n.Remediation.Steps) > 0 {
 			stepNames := make([]string, 0, len(n.Remediation.Steps))
 			for _, s := range n.Remediation.Steps {

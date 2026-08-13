@@ -465,6 +465,51 @@ func TestPlaybookStructure_TransitionTargetsExist(t *testing.T) {
 	}
 }
 
+// TestPlaybookStructure_TransitionsToMatchesGuidance guards against the
+// structural transitions_to allow-list silently drifting out of sync with
+// what the guidance prose actually tells the model to do. isAllowedNextPlaybook
+// (cmd/gateway/playbooks.go) treats an empty transitions_to as fail-open —
+// "accept anything" — so a triage playbook whose guidance emits
+// TRANSITION_TO: <real target> but whose transitions_to is empty still works
+// at runtime, but silently loses both the hallucination-detection allow-list
+// (the field's entire purpose) and any tooling/API consumer's ability to see
+// that a remediation counterpart exists at all — found live via `curl
+// .../fleet/playbooks?active_only=true | jq 'select(.transitions_to==[])'`
+// flagging 12 playbooks as "no remediation" when one existed and was already
+// running via guidance alone.
+func TestPlaybookStructure_TransitionsToMatchesGuidance(t *testing.T) {
+	ps := newTestStore(t)
+	ctx := context.Background()
+	if err := playbooks.SeedSystemPlaybooks(ctx, ps); err != nil {
+		t.Fatalf("SeedSystemPlaybooks: %v", err)
+	}
+	all, err := ps.List(ctx, audit.PlaybookListQuery{ActiveOnly: false, IncludeSystem: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, pb := range all {
+		allowed := make(map[string]bool, len(pb.TransitionsTo))
+		for _, s := range pb.TransitionsTo {
+			allowed[s] = true
+		}
+		for _, line := range strings.Split(pb.Guidance, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "TRANSITION_TO:") {
+				continue
+			}
+			target := strings.TrimSpace(strings.TrimPrefix(line, "TRANSITION_TO:"))
+			if target == "" || target == "none" {
+				continue
+			}
+			if !allowed[target] {
+				t.Errorf("series %q: guidance emits TRANSITION_TO: %q but transitions_to does not list it — "+
+					"the allow-list is either empty (fail-open, disabling hallucination detection) or stale",
+					pb.SeriesID, target)
+			}
+		}
+	}
+}
+
 // TestPlaybookStructure_HypothesisFormat checks that every entry-point triage
 // playbook (execution_mode=agent, entry_point=true) instructs the agent to emit
 // HYPOTHESIS_1: lines. Without this, parseDiagnosticReport never populates and

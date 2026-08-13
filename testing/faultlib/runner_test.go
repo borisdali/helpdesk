@@ -185,7 +185,7 @@ func TestRunViaPlaybook_OmitsConnectionStringForKubernetesFaults(t *testing.T) {
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -215,7 +215,7 @@ func TestRunViaPlaybook_SendsConnectionStringForNonKubernetesFaults(t *testing.T
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -249,6 +249,135 @@ func TestRunViaPlaybook_RunIDPopulated(t *testing.T) {
 	}
 	if resp.RunID != "run_xyz789" {
 		t.Errorf("RunID = %q, want %q", resp.RunID, "run_xyz789")
+	}
+}
+
+// TestRunViaPlaybook_EvidenceWarningsPopulated confirms evidence_warnings
+// decodes from the gateway's raw JSON through runViaPlaybook's anonymous
+// struct into testutil.AgentResponse — this field is new (added alongside the
+// objective-evidence escalation gate) and, unlike gate_reason, was previously
+// undecoded anywhere in this package; a faulttest run that hit this field
+// would have silently dropped it.
+func TestRunViaPlaybook_EvidenceWarningsPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_k8s_pod_crash_triage", "pb_abc", map[string]any{
+		"text":              "result",
+		"run_id":            "run_evidence01",
+		"evidence_warnings": []string{`hop "pbs_k8s_pod_crash_triage" (agent k8s_agent) recorded objective evidence (pod_restarted) but did not escalate or transition`},
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "k8s-oomkilled", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if len(resp.EvidenceWarnings) != 1 {
+		t.Fatalf("EvidenceWarnings = %v, want exactly 1 entry", resp.EvidenceWarnings)
+	}
+	if !strings.Contains(resp.EvidenceWarnings[0], "pod_restarted") {
+		t.Errorf("EvidenceWarnings[0] = %q, want it to mention pod_restarted", resp.EvidenceWarnings[0])
+	}
+}
+
+// TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated mirrors
+// TestRunViaPlaybook_EvidenceWarningsPopulated exactly, for the two newer
+// response fields (target_drift, objective_evidence_signals) added to the
+// same anonymous decode struct — both were previously undecoded anywhere in
+// this package; a faulttest run that hit either field would have silently
+// dropped it, exactly like evidence_warnings did before that field was wired.
+func TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
+		"text":                       "result",
+		"run_id":                     "run_drift01",
+		"target_drift":               []string{"host=localhost port=15432 dbname=testdb"},
+		"objective_evidence_signals": []string{"pod_restarted"},
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-wal-disk-full-k8s", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_db_restart_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if len(resp.TargetDrift) != 1 || resp.TargetDrift[0] != "host=localhost port=15432 dbname=testdb" {
+		t.Errorf("TargetDrift = %v, want [host=localhost port=15432 dbname=testdb]", resp.TargetDrift)
+	}
+	if len(resp.ObjectiveEvidenceSignals) != 1 || resp.ObjectiveEvidenceSignals[0] != "pod_restarted" {
+		t.Errorf("ObjectiveEvidenceSignals = %v, want [pod_restarted]", resp.ObjectiveEvidenceSignals)
+	}
+}
+
+// TestRunViaPlaybook_MismatchPopulated mirrors
+// TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated for the
+// mismatch field (fabrication risk) — same class of gap: a new response
+// field silently dropped by faulttest's decode struct.
+func TestRunViaPlaybook_MismatchPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
+		"text":     "result",
+		"run_id":   "run_mismatch01",
+		"mismatch": true,
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-connection-refused", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_db_restart_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if !resp.Mismatch {
+		t.Error("Mismatch = false, want true")
+	}
+}
+
+// TestRunViaPlaybook_SendsSkipTrustGate is a regression guard for a real
+// bootstrapping requirement: faulttest traffic must always set
+// skip_trust_gate=true, unconditionally, on every playbook-run request — not
+// just --repeat calibration runs. If this field were ever silently dropped
+// by a refactor, faulttest's own calibration runs would start getting gated
+// by cmd/gateway/playbooks.go's trustNotYetEarnedForceGate — the exact check
+// they exist to establish a cert for in the first place — and nothing would
+// fail loudly; calibration runs would just stop completing.
+func TestRunViaPlaybook_SendsSkipTrustGate(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_abc"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-lock", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_lock_chain_triage",
+	}
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if gotBody["skip_trust_gate"] != true {
+		t.Errorf("skip_trust_gate = %v, want true", gotBody["skip_trust_gate"])
 	}
 }
 
@@ -447,8 +576,8 @@ func TestCategoryToGatewayAgent(t *testing.T) {
 		want     string
 	}{
 		{"database", "database"},
-		{"kubernetes", "k8s"},   // gateway alias is "k8s", not "kubernetes"
-		{"host", "sysadmin"},    // gateway alias is "sysadmin"
+		{"kubernetes", "k8s"}, // gateway alias is "k8s", not "kubernetes"
+		{"host", "sysadmin"},  // gateway alias is "sysadmin"
 		{"compound", "database"},
 		{"unknown", "database"}, // default falls back to database
 	}
@@ -502,15 +631,15 @@ func TestRunViaPlaybook_GateEscalation_SendsRemediationSeriesID(t *testing.T) {
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok", "run_id": "plr_x"}) //nolint:errcheck
 	}))
 	defer srv.Close()
 
 	r := NewRunner(&HarnessConfig{
-		GatewayURL:    srv.URL,
-		GatewayAPIKey: "key",
-		ViaGateway:    true,
+		GatewayURL:     srv.URL,
+		GatewayAPIKey:  "key",
+		ViaGateway:     true,
 		GateEscalation: true,
 	})
 	f := Failure{
@@ -550,7 +679,7 @@ func TestRunViaPlaybook_GateEscalation_NoRemediationSeriesID_WhenPlaybookIDEmpty
 			})
 			return
 		}
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
 		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
 	}))
 	defer srv.Close()

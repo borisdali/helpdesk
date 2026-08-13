@@ -453,6 +453,22 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 	case ActionWrite:
 		verif.Mismatch = len(verif.WriteConfirmed) == 0 && len(verif.DestructiveConfirmed) == 0
 	}
+
+	// Narrated-but-unconfirmed tool calls: orthogonal to the write/destructive-only
+	// switch above, and unconditional on actionClass — a read delegation whose model
+	// narrated calling a tool that never produced a tool_execution event is just as
+	// untrustworthy as a write/destructive delegation with no evidence, since reads
+	// are the bulk of actual triage/diagnosis work. Suppressed when a policy denial
+	// explains the absence, so this doesn't flag policy working correctly as fabrication.
+	reasoningEvents := fetchAgentReasoningEvents(auditURL, auditAPIKey, traceID, since)
+	notConfirmed := narratedToolsNotConfirmed(reasoningEvents, verif.ToolsConfirmed)
+	if len(notConfirmed) > 0 {
+		policyEvents := fetchPolicyDecisionEvents(auditURL, auditAPIKey, traceID, since)
+		if !hasPolicyDenial(policyEvents) {
+			verif.NarratedNotConfirmed = notConfirmed
+			verif.Mismatch = true
+		}
+	}
 	return verif
 }
 
@@ -466,17 +482,81 @@ func FetchToolExecutionEvents(auditURL, apiKey, traceID string, since time.Time)
 }
 
 func fetchToolExecutionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "tool_execution", since, true)
+}
+
+// fetchAgentReasoningEvents queries auditd for agent_reasoning events in the given
+// trace — used to cross-reference tools the model's own reasoning says it invoked
+// against what actually executed. No retry: unlike tool_execution events (written by
+// the mutation tool itself, sometimes racing the verification read), agent_reasoning
+// events are written by the sub-agent's AfterModelCallback well before its response
+// even returns to the caller running this check, so async propagation is not a
+// realistic concern here — retrying would only add latency to every delegation.
+func fetchAgentReasoningEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "agent_reasoning", since, false)
+}
+
+// fetchPolicyDecisionEvents queries auditd for policy_decision events in the given
+// trace — used to suppress a narrated-but-unconfirmed tool call when it was actually
+// a legitimate policy denial rather than fabrication. No retry, same reasoning as
+// fetchAgentReasoningEvents.
+func fetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "policy_decision", since, false)
+}
+
+// FetchPolicyDecisionEvents queries auditd for policy_decision events in the
+// given trace. Exported so the gateway can surface policy denials on the
+// playbook-run response, mirroring FetchToolExecutionEvents/
+// FetchObjectiveEvidenceEvents above.
+func FetchPolicyDecisionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchPolicyDecisionEvents(auditURL, apiKey, traceID, since)
+}
+
+// FetchDelegationVerificationEvents queries auditd for delegation_verification
+// events in the given trace — used by checkFabricationRisk (cmd/gateway/playbooks.go)
+// to surface Mismatch/NarratedNotConfirmed on the live response. These events are
+// otherwise only ever recorded durably (proxyToAgentWithTool sets the
+// X-Audit-Mismatch response header as a same-request side channel, but that
+// carries no detail and is never read by the playbook-run path at all — a
+// caller had no way to see fabrication risk short of querying the audit
+// trail directly). No retry, same reasoning as fetchAgentReasoningEvents/
+// fetchPolicyDecisionEvents.
+func FetchDelegationVerificationEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "delegation_verification", since, false)
+}
+
+// FetchObjectiveEvidenceEvents queries auditd for objective_evidence events in
+// the given trace — used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go)
+// to force a human-reviewed gate based on deterministic, code-derived tool
+// evidence rather than the model's self-reported confidence. No retry, same
+// reasoning as fetchAgentReasoningEvents/fetchPolicyDecisionEvents — these are
+// recorded by the agent synchronously during its own tool call, not subject to
+// the async write-propagation lag that motivates the tool_execution retry.
+// Exported so the gateway can use it, mirroring FetchToolExecutionEvents above.
+func FetchObjectiveEvidenceEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, "objective_evidence", since, false)
+}
+
+// fetchEventsByType queries auditd for events of a single type in the given trace
+// after a start time. When retry is true, retries once after 200 ms to absorb async
+// write propagation; when false, a single attempt is made and failures fail open
+// (returns nil, treated by callers as "no events of this type").
+func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.Time, retry bool) []Event {
 	reqURL := strings.TrimRight(auditURL, "/") +
-		"/v1/events?event_type=tool_execution&trace_id=" + traceID +
+		"/v1/events?event_type=" + eventType + "&trace_id=" + traceID +
 		"&since=" + since.UTC().Format(time.RFC3339)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	attempts := 1
+	if retry {
+		attempts = 2
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
 		req, err := http.NewRequest(http.MethodGet, reqURL, nil) //nolint:noctx
 		if err != nil {
-			slog.Debug("delegation verification: build request failed", "attempt", attempt, "err", err)
+			slog.Debug("delegation verification: build request failed", "event_type", eventType, "attempt", attempt, "err", err)
 			continue
 		}
 		if apiKey != "" {
@@ -484,19 +564,66 @@ func fetchToolExecutionEvents(auditURL, apiKey, traceID string, since time.Time)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			slog.Debug("delegation verification: fetch failed", "attempt", attempt, "err", err)
+			slog.Debug("delegation verification: fetch failed", "event_type", eventType, "attempt", attempt, "err", err)
 			continue
 		}
 		var events []Event
 		decodeErr := json.NewDecoder(resp.Body).Decode(&events)
 		resp.Body.Close()
 		if decodeErr != nil {
-			slog.Debug("delegation verification: decode failed", "attempt", attempt, "err", decodeErr)
+			slog.Debug("delegation verification: decode failed", "event_type", eventType, "attempt", attempt, "err", decodeErr)
 			continue
 		}
 		return events
 	}
 	return nil
+}
+
+// narratedToolsNotConfirmed returns the tool names the model's own reasoning says it
+// invoked (AgentReasoning.ToolCalls — structured FunctionCall data, not text-scanned,
+// so this cannot misfire on the model merely mentioning a tool name in prose) that
+// have no matching entry in toolsConfirmed (names that actually produced a
+// tool_execution event). A non-empty result means the model narrated calling a tool
+// that never actually executed — either fabrication, or a legitimate policy denial /
+// unregistered tool name; callers should check hasPolicyDenial before treating this
+// as a mismatch.
+func narratedToolsNotConfirmed(agentReasoningEvents []Event, toolsConfirmed []string) []string {
+	confirmed := make(map[string]bool, len(toolsConfirmed))
+	for _, name := range toolsConfirmed {
+		confirmed[name] = true
+	}
+
+	seen := make(map[string]bool)
+	var notConfirmed []string
+	for _, ev := range agentReasoningEvents {
+		if ev.AgentReasoning == nil {
+			continue
+		}
+		for _, name := range ev.AgentReasoning.ToolCalls {
+			if name == "" || seen[name] || confirmed[name] {
+				continue
+			}
+			seen[name] = true
+			notConfirmed = append(notConfirmed, name)
+		}
+	}
+	return notConfirmed
+}
+
+// hasPolicyDenial returns true when any policy_decision event in the trace has
+// effect=deny. Coarse-grained by design: any denial in the hop suppresses the
+// narrated-tool-call mismatch check for that hop, rather than matching denials to
+// specific tool names. Simpler and safer to ship correctly than precise per-tool
+// matching, at the cost of occasionally under-reporting a real narration issue that
+// happens to co-occur with an unrelated denial in the same hop — an acceptable
+// tradeoff to avoid false-positive CRITICAL alerts on a brand-new check.
+func hasPolicyDenial(policyDecisionEvents []Event) bool {
+	for _, ev := range policyDecisionEvents {
+		if ev.PolicyDecision != nil && ev.PolicyDecision.Effect == "deny" {
+			return true
+		}
+	}
+	return false
 }
 
 // formatVerificationBlock builds the [AUDIT VERIFICATION] text appended to the
@@ -529,7 +656,11 @@ func formatVerificationBlock(v *DelegationVerification) string {
 		sb.WriteString("Destructive tools confirmed: none\n")
 	}
 
-	if v.Mismatch {
+	if len(v.NarratedNotConfirmed) > 0 {
+		sb.WriteString("⚠️  NARRATED BUT NOT CONFIRMED: the response describes calling " +
+			strings.Join(v.NarratedNotConfirmed, ", ") + ", but no matching tool execution appears in the audit trail.\n")
+		sb.WriteString("You MUST tell the user this could not be verified and may not have actually happened. Do NOT present it as a completed step.\n")
+	} else if v.Mismatch {
 		sb.WriteString("⚠️  MISMATCH: this delegation was classified as " + string(v.ActionClass) + " but NO " + string(v.ActionClass) + "-or-stronger tool execution appears in the audit trail.\n")
 		sb.WriteString("You MUST tell the user the action could not be verified and was likely not executed. Do NOT claim success.\n")
 	} else {

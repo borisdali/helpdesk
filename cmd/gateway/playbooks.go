@@ -311,6 +311,16 @@ type PlaybookRunRequest struct {
 	// Use "diagnostic", "remediation", "maintenance", etc.
 	Purpose     string `json:"purpose,omitempty"`
 	PurposeNote string `json:"purpose_note,omitempty"`
+
+	// SkipTrustGate bypasses trustNotYetEarnedForceGate — the check that
+	// otherwise forces a gate on any playbook that hasn't earned a stable+clean
+	// fault-stability cert for the gateway's configured diagnosis model. Exists
+	// specifically so faulttest's own --repeat calibration runs (which are
+	// trying to *establish* that cert in the first place) aren't gated waiting
+	// on a cert that can't exist yet — a real production incident should never
+	// set this. Not exposed as a general escape hatch: it does not affect
+	// lowConfidenceForceGate or objectiveEvidenceForceGate, only the trust gate.
+	SkipTrustGate bool `json:"skip_trust_gate,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -398,7 +408,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, startTraceID, req.PriorRunID, req.TriggerContext, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -472,7 +482,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	// Fleet runs complete synchronously; outcome is unknown until operator
 	// reviews and approves the plan. Record completion best-effort.
 	if runID != "" {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "unknown", "", "", "", "", "", nil, false, "")
 	}
 }
 
@@ -484,6 +494,8 @@ type agentRunResult struct {
 	outcome          string
 	escalatedTo      string // set when agent emits ESCALATE_TO (true out-of-scope escalation)
 	transitionTo     string // set when agent emits TRANSITION_TO (same-domain triage→remediation)
+	sawSignalLine    bool   // true iff a TRANSITION_TO:/ESCALATE_TO: line was present at all (see agentEscalation.SawSignalLine)
+	rawText          string // the model's raw, pre-strip response text — see capturedText's doc comment for why this is not the same as capture.body's text
 	findings         string
 	diagReport       *audit.DiagnosticReport
 	runID            string
@@ -553,9 +565,11 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
 			if text, ok := respBody["text"].(string); ok {
+				res.rawText = text
 				res.diagReport = parseDiagnosticReport(text)
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
+				res.sawSignalLine = esc.SawSignalLine
 				// Validate emitted next-playbook targets against the triage
 				// playbook's declared allow-lists. TRANSITION_TO is checked
 				// against transitions_to (same-domain follow-ons), ESCALATE_TO
@@ -627,14 +641,51 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		extra["warnings"] = warnings
 	}
 
+	appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart))
+	primaryMismatch, primaryNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart)
+	appendFabricationRisk(extra, primaryMismatch, primaryNarrated)
+
 	// Post-run target-scope check.
 	if req.ConnectionString != "" {
-		if drift := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, req.ConnectionString); len(drift) > 0 {
+		if drift, detail := checkTargetScope(g.infra, g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, req.ConnectionString); len(drift) > 0 {
 			extra["target_drift"] = drift
+			if len(detail) > 0 {
+				extra["target_drift_detail"] = detail
+			}
 			slog.Warn("playbook run: target scope drift detected",
 				"trace_id", primary.traceID,
 				"intended", req.ConnectionString,
 				"actual", drift)
+			// Persist as a durable, queryable audit event (previously only visible in
+			// this response's target_drift field) — independent of whatever
+			// delegation_verification event proxyToAgentWithTool already recorded for
+			// this hop; TargetDrift and Mismatch are orthogonal signals, so a second
+			// event is expected, not a duplicate (safe: delegation_verification events
+			// don't contribute to event_count/tools_used, and Mismatch stays
+			// zero-valued here so this never double-fires the CRITICAL fabrication
+			// alert). ActionRead is a static default — target-scope drift is almost
+			// always on read/diagnostic tools, and nothing branches on ActionClass for
+			// TargetDrift specifically.
+			if g.auditor != nil {
+				driftEvent := &audit.Event{
+					EventID:   "gv_" + uuid.New().String()[:8],
+					Timestamp: time.Now().UTC(),
+					EventType: audit.EventTypeDelegationVerification,
+					TraceID:   primary.traceID,
+					Session: audit.Session{
+						ID: primary.traceID,
+					},
+					DelegationVerification: &audit.DelegationVerification{
+						Agent:             primary.agentName,
+						ActionClass:       audit.ActionRead,
+						TargetDrift:       drift,
+						TargetDriftDetail: detail,
+					},
+				}
+				if err := g.auditor.RecordEvent(r.Context(), driftEvent); err != nil {
+					slog.Warn("playbook run: failed to record target drift event", "trace_id", primary.traceID, "err", err)
+				}
+			}
 		}
 	}
 
@@ -647,7 +698,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		injectFields(w, primary.capture, extra)
 		if runID != "" {
 			go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-				runID, primary.outcome, "", "", primary.findings, "", primary.traceID, nil)
+				runID, primary.outcome, "", "", primary.findings, primary.rawText, primary.traceID, nil, primary.sawSignalLine, "")
 		}
 		return
 	}
@@ -669,6 +720,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		Text:             capturedText(primary.capture),
 		DiagnosticReport: primary.diagReport,
 	}}
+
+	if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, pb, primary) {
+		g.recordProtocolViolationEvent(r.Context(), primary)
+	}
 
 	const maxChainDepth = 5
 	prev := primary
@@ -705,11 +760,35 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
-		// Forced gate: low-confidence triage must not auto-chain into destructive
-		// remediation regardless of the caller's gate_escalation flag.
-		if !req.GateEscalation && lowConfidenceForceGate(prev.diagReport) {
-			req.GateEscalation = true
-			extra["gate_reason"] = "low_confidence"
+		// Forced gate: low-confidence triage and/or real objective evidence must
+		// not silently auto-chain into remediation, regardless of the caller's
+		// gate_escalation flag. Both checks always run — neither short-circuits
+		// the other — so an operator reviewing the gate sees every applicable
+		// reason, not just whichever one happened to be checked first. These are
+		// complementary signals (one self-reported by the model, one
+		// independently verified from tool output), not alternatives: a model
+		// reporting high confidence doesn't make real tool evidence go away, and
+		// a low-confidence hop can still have zero objective evidence behind it.
+		// An earlier version of this code checked `if !req.GateEscalation` on
+		// each force-gate independently, which meant a hop with both low
+		// confidence AND real evidence only ever reported "low_confidence" —
+		// the evidence check was silently skipped once the first one fired.
+		if !req.GateEscalation {
+			var gateReasons []string
+			if lowConfidenceForceGate(prev.diagReport) {
+				gateReasons = append(gateReasons, "low_confidence")
+			}
+			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
+				gateReasons = append(gateReasons, "objective_evidence:"+reason)
+				appendObjectiveEvidenceSignal(extra, reason)
+			}
+			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
+				gateReasons = append(gateReasons, "trust_not_earned")
+			}
+			if len(gateReasons) > 0 {
+				req.GateEscalation = true
+				extra["gate_reason"] = strings.Join(gateReasons, "+")
+			}
 		}
 
 		// Informed gate: operator reviews findings at the phase boundary before
@@ -805,6 +884,12 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		if chained == nil {
 			break
 		}
+		if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, nextPB, *chained) {
+			g.recordProtocolViolationEvent(r.Context(), *chained)
+		}
+		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
+		chainedMismatch, chainedNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart)
+		appendFabricationRisk(extra, chainedMismatch, chainedNarrated)
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -841,12 +926,27 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Fallback gate: when gate_escalation=true with an explicit remediation target,
-	// always pause at the phase boundary even if the triage agent did not emit
-	// TRANSITION_TO. This guarantees the operator reviews triage findings before
-	// remediation runs, regardless of whether the agent signalled a transition.
+	// pause at the phase boundary if the triage agent omitted the required
+	// TRANSITION_TO/ESCALATE_TO signal entirely. This guarantees the operator
+	// reviews triage findings before remediation runs when the agent's response
+	// is genuinely ambiguous (no signal at all).
+	//
+	// !prev.sawSignalLine is required, not just an empty escalatedTo/transitionTo:
+	// an explicit "ESCALATE_TO: none" is a compliant, complete conclusion (the
+	// model investigated and found nothing to hand off) — SawSignalLine=true
+	// distinguishes it from a genuinely omitted line, exactly as protocolViolation()
+	// does. Before this check existed, an explicit "none" and a silently omitted
+	// signal were indistinguishable here, so a model that correctly concluded
+	// "nothing to do" still got a pending_gate manufactured against the caller's
+	// remediation_series_id — a target the model never mentioned — misrepresenting
+	// its own conclusion as an unresolved handoff. Found live: a wal-stale-slot
+	// triage run concluded "database healthy, false alarm" with ESCALATE_TO: none,
+	// but still surfaced transition_target: pbs_db_config_recovery and a
+	// misleading "protocol violation — agent omitted" log line.
 	if req.GateEscalation && req.RemediationSeriesID != "" &&
 		prev.escalatedTo == "" && prev.transitionTo == "" &&
 		finalOutcome != audit.OutcomeGatePending &&
+		!prev.sawSignalLine &&
 		!findingsRecommendMonitor(prev.findings) {
 		warn, suggestedMode := g.confidenceWarning(prev.diagReport)
 		extra["status"] = "pending_gate"
@@ -874,9 +974,16 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with
 		// TRANSITION_TO or ESCALATE_TO. A run that omits this signal is a bug.
-		existingWarnings, _ := extra["warnings"].([]string)
-		extra["warnings"] = append(existingWarnings,
-			"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal; gate created from remediation_series_id")
+		// Skipped when recordSignalLessWarnings already appended an equivalent,
+		// per-hop-attributed message for this exact same fact (extra["protocol_violation"]
+		// is only set when pb.PlaybookType == "triage" — for any other playbook
+		// type this fallback-gate message is still the only signal, so it must
+		// still be added).
+		if extra["protocol_violation"] != true {
+			existingWarnings, _ := extra["warnings"].([]string)
+			extra["warnings"] = append(existingWarnings,
+				"triage agent omitted required TRANSITION_TO/ESCALATE_TO signal; gate created from remediation_series_id")
+		}
 		slog.Warn("playbook: triage protocol violation — agent omitted TRANSITION_TO/ESCALATE_TO",
 			"run_id", prev.runID, "remediation_series", req.RemediationSeriesID,
 			"confidence_warning", warn)
@@ -913,8 +1020,9 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	injectFields(w, primary.capture, extra)
 
 	if runID != "" {
+		gateReason, _ := extra["gate_reason"].(string)
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, capturedText(primary.capture), primary.traceID, finalReport)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine, gateReason)
 	}
 }
 
@@ -976,12 +1084,16 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		}
 	}
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
+		// gate_reason is always "" here: chainEscalation only completes for a
+		// hop that was greenlit to chain (i.e. NOT gated) — the in-loop
+		// force-gate that would set gate_reason breaks the loop instead of
+		// calling chainEscalation for that iteration.
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, capturedText(chainRes.capture), chainRes.traceID, chainRes.diagReport)
+			chainRunID, chainRes.outcome, chainRes.escalatedTo, chainRes.transitionTo, chainRes.findings, chainRes.rawText, chainRes.traceID, chainRes.diagReport, chainRes.sawSignalLine, "")
 	}
 
 	slog.Info("playbook: auto-chained escalation",
@@ -1133,6 +1245,229 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 	return true // primary hypothesis not marked — treat as uncertain
 }
 
+// objectiveEvidenceForceGate returns true, with a short reason string, when
+// any objective_evidence event was recorded for this hop — a deterministic,
+// code-derived distress signal (e.g. a real pod restart or OOM kill) read
+// directly from a tool's structured result, independent of what the model's
+// own text concludes about it. Unlike lowConfidenceForceGate, this does not
+// depend on the model self-reporting anything: the same tool evidence
+// produces the same gate regardless of the model's stated ESCALATE_TO or
+// CONFIDENCE. Returns false, "" when no such events were recorded — deliberately
+// scoped today to whichever tools populate objective_evidence (currently only
+// the K8s agent's get_pods; see the plan's "generic plumbing, narrow rollout"
+// scoping note before extending this to other tools).
+func objectiveEvidenceForceGate(events []audit.Event) (bool, string) {
+	for _, ev := range events {
+		if ev.ObjectiveEvidence != nil && ev.ObjectiveEvidence.Signal != "" {
+			return true, ev.ObjectiveEvidence.Signal
+		}
+	}
+	return false, ""
+}
+
+// protocolViolation reports whether hop violated the triage response
+// protocol: PlaybookType=="triage" playbooks are contractually required to
+// end with an explicit TRANSITION_TO/ESCALATE_TO signal, even "none" — see
+// validatePlaybookProtocol in playbook_from_trace.go, the authoring-time
+// version of this same rule ("guidance: missing signal line — must end with
+// TRANSITION_TO: <series_id> or ESCALATE_TO: <target|none>"). Remediation and
+// untyped playbooks are exempt: validatePlaybookProtocol explicitly forbids
+// remediation playbooks from ever emitting either signal at all ("routing is
+// handled by the triage gate"), so applying this check to them would
+// false-positive on every completed remediation run.
+func protocolViolation(pbType string, hop agentRunResult) bool {
+	if pbType != "triage" {
+		return false
+	}
+	if hop.escalatedTo != "" || hop.transitionTo != "" {
+		return false
+	}
+	return !hop.sawSignalLine
+}
+
+// appendWarning appends msg to the string slice stored at extra[key],
+// creating it if absent.
+func appendWarning(extra map[string]any, key, msg string) {
+	if existing, ok := extra[key].([]string); ok {
+		extra[key] = append(existing, msg)
+	} else {
+		extra[key] = []string{msg}
+	}
+}
+
+// appendObjectiveEvidenceSignal accumulates a deterministic, code-derived
+// evidence signal (e.g. "pod_restarted", "oom_killed") into
+// extra["objective_evidence_signals"], deduplicated and appended across hops
+// like appendWarning — but for a structured signal name rather than a
+// human-readable message, so faulttest/CLEAN-cert consumers can bucket by
+// signal instead of string-matching gate_reason.
+func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
+	if signal == "" {
+		return
+	}
+	existing, _ := extra["objective_evidence_signals"].([]string)
+	for _, s := range existing {
+		if s == signal {
+			return
+		}
+	}
+	extra["objective_evidence_signals"] = append(existing, signal)
+}
+
+// recordSignalLessWarnings runs three independent, unconditional checks on
+// any hop that resolved without emitting TRANSITION_TO/ESCALATE_TO — a case
+// the in-loop force-gates never reach, since the chain loop itself only runs
+// when a hop has a signal to chain on. Each check surfaces a warning without
+// gating or blocking anything: there is no next-hop candidate to gate
+// approval for.
+//
+//   - objective_evidence: real, code-derived tool evidence (e.g. a pod
+//     restart/OOM kill) the hop saw but didn't act on.
+//   - protocol_violation: the triage response protocol itself was violated
+//     (see protocolViolation). Returns true so the caller can additionally
+//     persist a durable, queryable audit event (see checkTargetScope's
+//     analogous target-drift event for the established pattern) — this
+//     function only has auditURL/apiKey for reading existing events, not a
+//     *Gateway to write one.
+//   - low_confidence: reuses lowConfidenceForceGate's existing 50% threshold,
+//     no new number. Deliberately NOT counted toward the CLEAN cert (see
+//     hasCleanWarning in testing/cmd/faulttest) — self-reported, already
+//     captured by the separate Evaluation stability axis, same reason
+//     gate_reason:"low_confidence" is already excluded there.
+//
+// trust_not_earned is deliberately not included: it's about whether to trust
+// a *proposed handoff*, and a signal-less hop has no handoff to evaluate
+// trust for.
+func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb *audit.Playbook, hop agentRunResult) (protocolViolationFired bool) {
+	if hop.escalatedTo != "" || hop.transitionTo != "" {
+		return false
+	}
+
+	if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
+		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
+			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName, reason))
+		appendObjectiveEvidenceSignal(extra, reason)
+	}
+
+	if protocolViolation(pb.PlaybookType, hop) {
+		extra["protocol_violation"] = true
+		// Substring "omitted required TRANSITION_TO" is deliberately kept
+		// compatible with testing/cmd/faulttest/main.go's existing detection
+		// (strings.Contains(w, "omitted required TRANSITION_TO")), so the
+		// CLEAN-cert computation picks this up with zero faulttest-side change.
+		appendWarning(extra, "warnings", fmt.Sprintf(
+			"hop %q (agent %s) omitted required TRANSITION_TO/ESCALATE_TO signal",
+			hop.playbookSeriesID, hop.agentName))
+		protocolViolationFired = true
+	}
+
+	if lowConfidenceForceGate(hop.diagReport) {
+		appendWarning(extra, "warnings", fmt.Sprintf(
+			"hop %q (agent %s) resolved with a low-confidence diagnosis but did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName))
+	}
+
+	return protocolViolationFired
+}
+
+// recordProtocolViolationEvent persists a durable, queryable
+// delegation_verification event for a hop that violated the triage response
+// protocol (see protocolViolation) — mirrors checkTargetScope's target-drift
+// event-emission block above exactly. This is what makes
+// GET /v1/journeys?outcome=protocol_violation work, and is the mechanism
+// that surfaces the violation even on a fully unattended run with nobody
+// watching a Decision Hub: no gate, no stall — the run completes normally,
+// but the violation stays independently discoverable via the Journey.
+func (g *Gateway) recordProtocolViolationEvent(ctx context.Context, hop agentRunResult) {
+	if g.auditor == nil {
+		return
+	}
+	event := &audit.Event{
+		EventID:   "gv_" + uuid.New().String()[:8],
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypeDelegationVerification,
+		TraceID:   hop.traceID,
+		Session: audit.Session{
+			ID: hop.traceID,
+		},
+		DelegationVerification: &audit.DelegationVerification{
+			Agent:             hop.agentName,
+			ActionClass:       audit.ActionRead,
+			ProtocolViolation: true,
+		},
+	}
+	if err := g.auditor.RecordEvent(ctx, event); err != nil {
+		slog.Warn("playbook run: failed to record protocol violation event", "trace_id", hop.traceID, "err", err)
+	}
+}
+
+// fetchFaultStabilityCerts queries auditd for every fault-stability cert on
+// record for seriesID+model. Fails open (returns nil) on any error — same
+// convention as the other audit fetch helpers in this file — so an auditd
+// hiccup degrades to "can't verify" rather than blocking every run.
+func fetchFaultStabilityCerts(auditURL, apiKey, seriesID, model string) []*audit.FaultStabilityCert {
+	url := strings.TrimSuffix(auditURL, "/") + "/v1/fleet/fault-stability?series_id=" + seriesID + "&model=" + model
+	req, err := http.NewRequest(http.MethodGet, url, nil) //nolint:noctx
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+	var result struct {
+		Certs []*audit.FaultStabilityCert `json:"certs"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil
+	}
+	return result.Certs
+}
+
+// trustNotYetEarnedForceGate returns true when seriesID has no fault-stability
+// cert on record for the gateway's configured diagnosis model
+// (g.diagnosisModel, from HELPDESK_MODEL_NAME) with both IsStable and IsClean
+// true — i.e. this playbook/model combination has not yet earned unattended
+// trust. Fails closed on an actual answer of "no cert" or "unearned cert":
+// never-faulttested is treated the same as explicitly unearned, not as a pass.
+// Fails OPEN (returns false — no gate) when the mechanism itself isn't
+// configured (g.diagnosisModel or g.auditURL empty) — a missing config is a
+// deployment/operator concern, not a per-playbook trust verdict, and this
+// distinction is also what keeps existing tests (which never call
+// SetDiagnosisModel) unaffected by this check.
+//
+// A series can map to multiple faults (e.g. one playbook tested against
+// several distinct fault scenarios) — ALL known certs for that series+model
+// must be stable+clean, not just one, matching "gated by default until
+// proven," not "gated until at least one good result exists."
+func (g *Gateway) trustNotYetEarnedForceGate(seriesID string) bool {
+	if g.diagnosisModel == "" || seriesID == "" || g.auditURL == "" {
+		return false
+	}
+	certs := fetchFaultStabilityCerts(g.auditURL, g.auditAPIKey, seriesID, g.diagnosisModel)
+	if len(certs) == 0 {
+		return true
+	}
+	for _, c := range certs {
+		if !c.IsStable || !c.IsClean {
+			return true
+		}
+	}
+	return false
+}
+
 // ProceedEscalationRequest is the request body for POST
 // /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 type ProceedEscalationRequest struct {
@@ -1142,6 +1477,7 @@ type ProceedEscalationRequest struct {
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
 	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, forwarded to the remediation playbook (analogous to ConnectionString)
+	Purpose          string `json:"purpose,omitempty"`           // declared purpose, forwarded to the remediation playbook (analogous to ConnectionString); falls back to the triage run's own purpose when omitted
 	Reason           string `json:"reason,omitempty"`            // optional operator rationale
 	// At-gate feedback — captured before remediation runs, while the hypothesis
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
@@ -1191,7 +1527,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport)
+		// gate_reason passed through from run (not ""): Update's SQL sets the
+		// column unconditionally, so passing "" here would wipe the reason
+		// recorded when the run first entered gate_pending, right at the
+		// moment it becomes most useful to have queryable.
+		g.recordPlaybookRunComplete(r.Context(), runID, audit.OutcomeAbandoned, "", "", "gate denied by operator", "", "", run.DiagnosticReport, false, run.GateReason)
 		go g.submitDenialFeedback(context.WithoutCancel(r.Context()), runID, run.SeriesID, resolvedBy, req.Reason)
 		if g.decisionNotifier != nil {
 			g.decisionNotifier.NotifyResolved(r.Context(), decisions.Decision{
@@ -1226,7 +1566,8 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport)
+	// gate_reason passed through from run — see the denied branch above for why.
+	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
 	// Store at-gate feedback when provided. Captured before remediation runs —
 	// a cleaner signal than post-incident feedback because the operator hasn't
@@ -1255,14 +1596,26 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if namespace == "" {
 		namespace = run.Namespace
 	}
+	purpose := req.Purpose
+	if purpose == "" {
+		purpose = run.Purpose
+	}
 
 	remReq := PlaybookRunRequest{
 		ConnectionString: connStr,
 		Namespace:        namespace,
+		Purpose:          purpose,
 		PriorRunID:       runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
 		IsTransition:     isTransition,
+	}
+	// Bridge purpose into the header so proxyToAgentWithTool's policy checks see
+	// it on the chained hop — handlePlaybookRun does this for the initial /run
+	// request, but proceed-escalation dispatches directly to
+	// handlePlaybookRunApprove/handlePlaybookRunAsAgent, bypassing that bridge.
+	if purpose != "" && r.Header.Get("X-Purpose") == "" {
+		r.Header.Set("X-Purpose", purpose)
 	}
 	if remReq.ApprovalMode == "" {
 		remReq.ApprovalMode = nextPB.ApprovalMode
@@ -1280,7 +1633,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, remStartTraceID, runID, "", resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -1801,7 +2154,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, traceID, priorRunID, triggerContext, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -1812,6 +2165,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		ContextID:        contextID,
 		ConnectionString: connStr,
 		Namespace:        namespace,
+		Purpose:          purpose,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
 		TriggerContext:   triggerContext,
@@ -1862,7 +2216,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 // agentTranscript is the full agent response text (chain of thought narrative); pass "" when not available.
 // traceID is the agent's trace ID (from response X-Trace-ID header); used to link audit events to the run.
 // Best-effort: failures are logged but not returned.
-func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport) {
+func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome, escalatedTo, transitionedTo, findingsSummary, agentTranscript, traceID string, report *audit.DiagnosticReport, sawSignalLine bool, gateReason string) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
@@ -1871,6 +2225,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 		"escalated_to":     escalatedTo,
 		"transitioned_to":  transitionedTo,
 		"findings_summary": findingsSummary,
+		"saw_signal_line":  sawSignalLine,
 	}
 	if agentTranscript != "" {
 		payload["agent_transcript"] = agentTranscript
@@ -1880,6 +2235,9 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	}
 	if report != nil {
 		payload["diagnostic_report"] = report
+	}
+	if gateReason != "" {
+		payload["gate_reason"] = gateReason
 	}
 	body, _ := json.Marshal(payload)
 	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/fleet/playbook-runs/" + runID
@@ -2108,10 +2466,15 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 
 // agentEscalation holds the structured signals parsed from an agent response.
 type agentEscalation struct {
-	EscalateTo   string // series_id for out-of-scope escalations (ESCALATE_TO signal)
-	TransitionTo string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
-	Findings     string // one-sentence diagnosis summary
-	CleanText    string // response text with signal lines removed
+	EscalateTo    string // series_id for out-of-scope escalations (ESCALATE_TO signal)
+	TransitionTo  string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	Findings      string // one-sentence diagnosis summary
+	CleanText     string // response text with signal lines removed
+	SawSignalLine bool   // true iff a TRANSITION_TO: or ESCALATE_TO: line was present at
+	// all, regardless of whether its value resolved to a real target, "none",
+	// or "" — lets callers distinguish "explicitly declined" (compliant) from
+	// "protocol violation: line omitted entirely" (both collapse to empty
+	// EscalateTo/TransitionTo otherwise).
 }
 
 // parseAgentEscalation scans the agent's response text for structured signal
@@ -2131,11 +2494,13 @@ func parseAgentEscalation(text string) agentEscalation {
 		// Normalise markdown bold: **FINDINGS:** → FINDINGS:
 		trimmed = strings.NewReplacer("**FINDINGS:**", "FINDINGS:", "**ESCALATE_TO:**", "ESCALATE_TO:").Replace(trimmed)
 		if strings.HasPrefix(trimmed, "TRANSITION_TO:") {
+			result.SawSignalLine = true
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "TRANSITION_TO:"))
 			if v != "none" && v != "" {
 				result.TransitionTo = v
 			}
 		} else if strings.HasPrefix(trimmed, "ESCALATE_TO:") {
+			result.SawSignalLine = true
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "ESCALATE_TO:"))
 			if v != "none" && v != "" {
 				result.EscalateTo = v
@@ -2556,26 +2921,35 @@ func buildServerTypeHint(cfg *infra.Config, connectionString string) string {
 }
 
 // checkTargetScope returns connection strings from audit events for traceID that
-// differ from intendedTarget. Used to detect when the agent queried a server
-// other than the one specified in the playbook run request.
+// differ from intendedTarget, and the same drift attributed to the specific tool
+// calls that produced it. Used to detect when the agent queried a server other
+// than the one specified in the playbook run request.
 //
 // cfg is used to resolve a short server name (e.g. "test-pg") to its canonical
 // connection string from infra config, so that the full resolved form used by
 // the agent (e.g. "host=localhost port=35432 dbname=postgres user=postgres")
 // is not incorrectly flagged as drift.
 //
-// Returns nil when auditURL is empty, no traceID, or no drift is found.
-func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since time.Time, intendedTarget string) []string {
+// drift is deduplicated by connection string, as before. detail has one entry
+// per offending tool call, deduplicated by (tool, connection string) pair — a
+// second call to the same wrong target from the same tool is not repeated, but
+// two different tools drifting to the same (or different) target both show up.
+//
+// Returns (nil, nil) when auditURL is empty, no traceID, or no drift is found.
+func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since time.Time, intendedTarget string) (drift []string, detail []audit.TargetDriftDetail) {
 	if auditURL == "" || traceID == "" || intendedTarget == "" {
-		return nil
+		return nil, nil
 	}
 
-	// Resolve short name to canonical connection string so that
-	// "test-pg" and "host=localhost port=35432 ..." are treated as the same server.
+	// Resolve short name to canonical connection string so that a short name
+	// (infra config key, display Name, or Docker/Podman container name — e.g.
+	// "test-pg" as the container for the "test-db" entry) and the full-form
+	// "host=localhost port=35432 ..." are treated as the same server.
 	resolved := intendedTarget
 	if cfg != nil {
 		for key, db := range cfg.DBServers {
-			if key == intendedTarget || db.Name == intendedTarget {
+			if key == intendedTarget || db.Name == intendedTarget ||
+				(db.ContainerName != "" && db.ContainerName == intendedTarget) {
 				resolved = db.ConnectionString
 				break
 			}
@@ -2589,11 +2963,12 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 	if resolved == intendedTarget && !strings.Contains(intendedTarget, "=") {
 		slog.Debug("checkTargetScope: cannot resolve short name to connection string, skipping",
 			"intended", intendedTarget)
-		return nil
+		return nil, nil
 	}
 
 	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
-	seen := map[string]bool{}
+	seenCS := map[string]bool{}
+	seenDetail := map[string]bool{}
 	for _, ev := range events {
 		if ev.Tool == nil {
 			continue
@@ -2602,19 +2977,142 @@ func checkTargetScope(cfg *infra.Config, auditURL, apiKey, traceID string, since
 		if cs == "" {
 			continue
 		}
-		if !targetMatches(intendedTarget, cs) && !targetMatches(resolved, cs) {
-			seen[cs] = true
+		if targetMatches(intendedTarget, cs) || targetMatches(resolved, cs) {
+			continue
+		}
+		seenCS[cs] = true
+		detailKey := ev.Tool.Name + "\x00" + cs
+		if !seenDetail[detailKey] {
+			seenDetail[detailKey] = true
+			detail = append(detail, audit.TargetDriftDetail{Tool: ev.Tool.Name, ConnectionString: cs})
 		}
 	}
-	if len(seen) == 0 {
-		return nil
+	if len(seenCS) == 0 {
+		return nil, nil
 	}
-	drift := make([]string, 0, len(seen))
-	for cs := range seen {
+	drift = make([]string, 0, len(seenCS))
+	for cs := range seenCS {
 		drift = append(drift, cs)
 	}
 	sort.Strings(drift)
-	return drift
+	sort.Slice(detail, func(i, j int) bool {
+		if detail[i].Tool != detail[j].Tool {
+			return detail[i].Tool < detail[j].Tool
+		}
+		return detail[i].ConnectionString < detail[j].ConnectionString
+	})
+	return drift, detail
+}
+
+// PolicyDenialSummary is the response-facing shape of a single policy_decision
+// event with Effect=="deny" for a hop — surfaced on the playbook-run response
+// so a human (or downstream tool) can see *why* the agent's narrated tool call
+// never produced a tool_execution event, without having to separately query
+// auditd or take the agent's own prose explanation on faith. Tool-name
+// attribution is deliberately out of scope: PolicyDecision has no tool-name
+// field today (RecordPolicyDecision never populates Event.Tool), so
+// ResourceType/ResourceName/Message is the most specific attribution
+// currently possible.
+type PolicyDenialSummary struct {
+	ResourceType string `json:"resource_type,omitempty"`
+	ResourceName string `json:"resource_name,omitempty"`
+	PolicyName   string `json:"policy_name,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+// checkPolicyDenials returns a summary of every policy_decision event with
+// Effect=="deny" recorded for traceID since the hop started. Unlike
+// checkTargetScope, this has no "intended" concept to compare against — any
+// denial is worth surfacing, since it's a deterministic, code-derived
+// explanation for missing tool evidence that the agent's own narration
+// cannot be trusted to self-report accurately.
+func checkPolicyDenials(auditURL, apiKey, traceID string, since time.Time) []PolicyDenialSummary {
+	if auditURL == "" || traceID == "" {
+		return nil
+	}
+	events := audit.FetchPolicyDecisionEvents(auditURL, apiKey, traceID, since)
+	var denials []PolicyDenialSummary
+	for _, ev := range events {
+		if ev.PolicyDecision == nil || ev.PolicyDecision.Effect != "deny" {
+			continue
+		}
+		denials = append(denials, PolicyDenialSummary{
+			ResourceType: ev.PolicyDecision.ResourceType,
+			ResourceName: ev.PolicyDecision.ResourceName,
+			PolicyName:   ev.PolicyDecision.PolicyName,
+			Message:      ev.PolicyDecision.Message,
+		})
+	}
+	return denials
+}
+
+// appendPolicyDenials accumulates policy denials into extra["policy_denials"]
+// across hops, mirroring appendWarning's accumulate-don't-overwrite pattern.
+func appendPolicyDenials(extra map[string]any, denials []PolicyDenialSummary) {
+	if len(denials) == 0 {
+		return
+	}
+	existing, _ := extra["policy_denials"].([]PolicyDenialSummary)
+	extra["policy_denials"] = append(existing, denials...)
+}
+
+// checkFabricationRisk returns the Mismatch/NarratedNotConfirmed fields from
+// any delegation_verification event recorded for traceID since the hop
+// started — the orthogonal counterpart to checkTargetScope's target_drift:
+// drift requires a real tool call against the wrong server, fabrication
+// requires the model to claim a tool call that never executed at all. Prior
+// to this, neither was visible on the live response — proxyToAgentWithTool
+// only set an X-Audit-Mismatch response header with no detail, which the
+// playbook-run path never read; the only way to see fabrication risk was to
+// query the audit trail directly. Multiple delegation_verification events
+// can exist for the same trace (target-drift and protocol-violation each
+// write their own with Mismatch always false and no NarratedNotConfirmed) —
+// aggregating across all of them is safe since only the genuine fabrication
+// check ever populates these two fields.
+func checkFabricationRisk(auditURL, apiKey, traceID string, since time.Time) (mismatch bool, narratedNotConfirmed []string) {
+	if auditURL == "" || traceID == "" {
+		return false, nil
+	}
+	events := audit.FetchDelegationVerificationEvents(auditURL, apiKey, traceID, since)
+	seen := map[string]bool{}
+	for _, ev := range events {
+		if ev.DelegationVerification == nil {
+			continue
+		}
+		if ev.DelegationVerification.Mismatch {
+			mismatch = true
+		}
+		for _, tool := range ev.DelegationVerification.NarratedNotConfirmed {
+			if !seen[tool] {
+				seen[tool] = true
+				narratedNotConfirmed = append(narratedNotConfirmed, tool)
+			}
+		}
+	}
+	return mismatch, narratedNotConfirmed
+}
+
+// appendFabricationRisk accumulates mismatch/narrated_not_confirmed into
+// extra across hops, mirroring appendPolicyDenials's accumulate pattern.
+func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfirmed []string) {
+	if mismatch {
+		extra["mismatch"] = true
+	}
+	if len(narratedNotConfirmed) == 0 {
+		return
+	}
+	existing, _ := extra["narrated_not_confirmed"].([]string)
+	seen := map[string]bool{}
+	for _, t := range existing {
+		seen[t] = true
+	}
+	for _, t := range narratedNotConfirmed {
+		if !seen[t] {
+			seen[t] = true
+			existing = append(existing, t)
+		}
+	}
+	extra["narrated_not_confirmed"] = existing
 }
 
 // targetMatches returns true when:
@@ -2706,7 +3204,7 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 
 	if done {
 		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false, "")
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -2811,7 +3309,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 
 	if req.Resolution == "denied" {
 		g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, "denied", "", "", "")
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "step denied by operator", "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "denied"})
 		return
 	}
@@ -2859,7 +3357,7 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	g.updateRunStep(r.Context(), runID, pendingStep.StepIndex, stepStatus, pendingStep.ApprovalID, result, stepErrStr)
 
 	if toolErr != nil {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "tool execution failed: "+stepErrStr, "", run.TraceID, nil, false, "")
 		writeError(w, http.StatusUnprocessableEntity, "tool execution failed: "+stepErrStr)
 		return
 	}
@@ -2901,13 +3399,13 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	nextProposal, done, summary, err := g.proposeNextStep(r.Context(), pb, connStr, run.Namespace, priorFindings, history)
 	if err != nil {
 		slog.Error("handlePlaybookRunProceed: re-planning failed", "run_id", runID, "err", err)
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "abandoned", "", "", "re-planning failed: "+err.Error(), "", run.TraceID, nil, false, "")
 		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("re-planning failed after step %d: %v", pendingStep.StepIndex, err))
 		return
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

@@ -1146,6 +1146,335 @@ func TestIntegration_DelegationVerification_MismatchSurfacesInJourneys(t *testin
 	}
 }
 
+// TestIntegration_TargetDrift_SurfacesInJourneys verifies, against a real auditd
+// binary, that a delegation_verification event with TargetDrift populated (not
+// Mismatch — a real tool call happened, just against the wrong target) elevates
+// the journey outcome to "target_drift_detected" and is independently queryable
+// via ?outcome=target_drift_detected, with has_target_drift=true and
+// has_mismatch=false distinguishing it from the fabrication case.
+func TestIntegration_TargetDrift_SurfacesInJourneys(t *testing.T) {
+	traceID := fmt.Sprintf("dv-drift-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	anchorResult := post(t, auditdAddr, "/v1/events", anchor)
+	anchorID, _ := anchorResult["event_id"].(string)
+
+	driftEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"delegation_event_id": anchorID,
+			"agent":               "postgres_database_agent",
+			"action_class":        "read",
+			"tools_confirmed":     []string{"check_connection"},
+			"mismatch":            false,
+			"target_drift":        []string{"host=localhost port=15432 dbname=testdb"},
+			"target_drift_detail": []map[string]any{
+				{"tool": "get_session_info", "connection_string": "host=localhost port=15432 dbname=testdb"},
+			},
+		},
+	}
+	post(t, auditdAddr, "/v1/events", driftEvent)
+
+	// TargetDriftDetail is additive on DelegationVerification, not carried by
+	// the summarized journey (journeySummary only has the boolean
+	// has_target_drift) — round-trip it through the raw event, mirroring
+	// TestIntegration_ObjectiveEvidence_RoundTrips's shape below, since only a
+	// real auditd binary (not the gateway-package mocks) can catch a
+	// marshal/unmarshal or SQL storage bug in this new field.
+	rawEvents := getList(t, auditdAddr, "/v1/events?event_type=delegation_verification&trace_id="+traceID)
+	foundDetail := false
+	for _, e := range rawEvents {
+		dv, _ := e["delegation_verification"].(map[string]any)
+		if dv == nil {
+			continue
+		}
+		detail, _ := dv["target_drift_detail"].([]any)
+		if len(detail) != 1 {
+			continue
+		}
+		entry, _ := detail[0].(map[string]any)
+		if entry["tool"] == "get_session_info" && entry["connection_string"] == "host=localhost port=15432 dbname=testdb" {
+			foundDetail = true
+		}
+	}
+	if !foundDetail {
+		t.Errorf("raw delegation_verification event missing round-tripped target_drift_detail, got events: %v", rawEvents)
+	}
+
+	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=target_drift_detected")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "target_drift_detected" {
+			t.Errorf("journey outcome = %q, want target_drift_detected", j["outcome"])
+		}
+		if hasDrift, _ := j["has_target_drift"].(bool); !hasDrift {
+			t.Error("journey has_target_drift = false, want true")
+		}
+		if hasMismatch, _ := j["has_mismatch"].(bool); hasMismatch {
+			t.Error("journey has_mismatch = true, want false — this is drift (real tool call, wrong target), not fabrication")
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in outcome=target_drift_detected results", traceID)
+	}
+}
+
+// TestIntegration_GovernanceEventsProxy_DelegationVerification_ByTraceAndType
+// proves the gateway's generic /api/v1/governance/events proxy
+// (proxyGovernanceRequest, called with path="/v1/events") correctly forwards
+// a query-by-trace_id-and-event_type request through to a real auditd and
+// back — the exact call `faulttest vault journey <trace_id>`'s
+// fetchDelegationVerificationEvents makes to show tool/value warning detail
+// (see MUTATION_TOOLS.md's target-scope-drift and policy-denial sections).
+// The e2e suite (testing/e2e/governance_test.go's
+// TestGovernance_GetEvent_DelegationVerification) already proves the sibling
+// by-ID form (/api/v1/governance/events/{eventID}) round-trips through a real
+// gateway, but that is a different query shape hitting the same generic
+// passthrough function — this test is the one that actually exercises the
+// query-string list form the CLI depends on, through a real gateway process
+// (not just a mocked one, unlike every cmd/gateway-package test of
+// fetchDelegationVerificationEvents-equivalent logic).
+func TestIntegration_GovernanceEventsProxy_DelegationVerification_ByTraceAndType(t *testing.T) {
+	traceID := fmt.Sprintf("dv-gwproxy-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	post(t, auditdAddr, "/v1/events", anchor)
+
+	dvEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"agent":               "postgres_database_agent",
+			"action_class":        "read",
+			"mismatch":            false,
+			"target_drift":        []string{"host=localhost port=15432 dbname=testdb"},
+			"target_drift_detail": []map[string]any{{"tool": "get_session_info", "connection_string": "host=localhost port=15432 dbname=testdb"}},
+		},
+	}
+	post(t, auditdAddr, "/v1/events", dvEvent)
+
+	// Same query shape fetchDelegationVerificationEvents (testing/cmd/faulttest/vault.go)
+	// sends, but through the real gateway's proxy rather than direct to auditd.
+	events := getList(t, gatewayAddr, "/api/v1/governance/events?trace_id="+traceID+"&event_type=delegation_verification")
+	found := false
+	for _, e := range events {
+		if e["trace_id"] != traceID {
+			continue
+		}
+		dv, _ := e["delegation_verification"].(map[string]any)
+		if dv == nil {
+			t.Fatalf("event for trace_id=%s missing delegation_verification field: %v", traceID, e)
+		}
+		if dv["agent"] != "postgres_database_agent" {
+			t.Errorf("delegation_verification.agent = %v, want postgres_database_agent", dv["agent"])
+		}
+		detail, _ := dv["target_drift_detail"].([]any)
+		if len(detail) != 1 {
+			t.Errorf("delegation_verification.target_drift_detail = %v, want 1 entry — proxy must forward the full event body, not a truncated projection", dv["target_drift_detail"])
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("event with trace_id=%s not found via gateway governance/events proxy — got %d events: %v", traceID, len(events), events)
+	}
+}
+
+// TestIntegration_ProtocolViolation_SurfacesInJourneys mirrors
+// TestIntegration_TargetDrift_SurfacesInJourneys exactly, for the new
+// ProtocolViolation signal (a triage-typed playbook's hop that resolved
+// without emitting TRANSITION_TO/ESCALATE_TO at all) — confirms the real,
+// SQLite-backed round-trip through a real auditd binary: event write →
+// outcomeStatus switch → QueryJourneys → HasProtocolViolation/Outcome. The
+// gateway-package tests (cmd/gateway) mock auditd's HTTP responses entirely,
+// so they cannot catch a real storage/query bug in this path — only a real
+// binary can.
+func TestIntegration_ProtocolViolation_SurfacesInJourneys(t *testing.T) {
+	traceID := fmt.Sprintf("dv-protoviol-%d", time.Now().UnixNano())
+	sessionID := "dv-session-" + traceID
+
+	anchor := newEvent(sessionID, "delegation_decision")
+	anchor["trace_id"] = traceID
+	post(t, auditdAddr, "/v1/events", anchor)
+
+	violationEvent := map[string]any{
+		"event_id":   fmt.Sprintf("dv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"delegation_verification": map[string]any{
+			"agent":              "postgres_database_agent",
+			"action_class":       "read",
+			"mismatch":           false,
+			"protocol_violation": true,
+		},
+	}
+	post(t, auditdAddr, "/v1/events", violationEvent)
+
+	journeys := getList(t, auditdAddr, "/v1/journeys?outcome=protocol_violation")
+	found := false
+	for _, j := range journeys {
+		if j["trace_id"] != traceID {
+			continue
+		}
+		found = true
+		if j["outcome"] != "protocol_violation" {
+			t.Errorf("journey outcome = %q, want protocol_violation", j["outcome"])
+		}
+		if hasViol, _ := j["has_protocol_violation"].(bool); !hasViol {
+			t.Error("journey has_protocol_violation = false, want true")
+		}
+		if hasDrift, _ := j["has_target_drift"].(bool); hasDrift {
+			t.Error("journey has_target_drift = true, want false — protocol violation is an independent signal")
+		}
+		if hasMismatch, _ := j["has_mismatch"].(bool); hasMismatch {
+			t.Error("journey has_mismatch = true, want false — protocol violation is an independent signal")
+		}
+	}
+	if !found {
+		t.Errorf("journey with trace_id=%s not found in outcome=protocol_violation results", traceID)
+	}
+}
+
+// TestIntegration_ObjectiveEvidence_RoundTrips confirms the new
+// objective_evidence event type actually round-trips through a real auditd —
+// unlike the target_drift test above, this exercises genuinely new
+// serialization code (ObjectiveEvidence struct + EventTypeObjectiveEvidence),
+// not just a new value on an existing event shape. The gateway-package tests
+// (cmd/gateway) mock auditd's HTTP responses entirely, so they cannot catch a
+// real marshal/unmarshal or SQL storage bug in this new path — only a real
+// binary can. Mirrors the FetchObjectiveEvidenceEvents query contract
+// (cmd/gateway/playbooks.go's objectiveEvidenceForceGate) that the gateway
+// actually relies on: GET /v1/events?event_type=objective_evidence&trace_id=...
+func TestIntegration_ObjectiveEvidence_RoundTrips(t *testing.T) {
+	traceID := fmt.Sprintf("oev-%d", time.Now().UnixNano())
+	sessionID := "oev-session-" + traceID
+
+	evidenceEvent := map[string]any{
+		"event_id":   fmt.Sprintf("oev-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "objective_evidence",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"objective_evidence": map[string]any{
+			"agent":    "k8s_agent",
+			"tool":     "get_pods",
+			"resource": "pg-cluster-minkube-1",
+			"signal":   "pod_restarted",
+			"detail":   "pod pg-cluster-minkube-1 restarted 2 time(s)",
+		},
+	}
+	post(t, auditdAddr, "/v1/events", evidenceEvent)
+
+	events := getList(t, auditdAddr, "/v1/events?event_type=objective_evidence&trace_id="+traceID)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event for trace_id=%s, got %d", traceID, len(events))
+	}
+	ev, ok := events[0]["objective_evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("objective_evidence field missing or wrong shape: %v", events[0])
+	}
+	if ev["signal"] != "pod_restarted" {
+		t.Errorf("signal = %v, want pod_restarted", ev["signal"])
+	}
+	if ev["resource"] != "pg-cluster-minkube-1" {
+		t.Errorf("resource = %v, want pg-cluster-minkube-1", ev["resource"])
+	}
+	if ev["tool"] != "get_pods" {
+		t.Errorf("tool = %v, want get_pods", ev["tool"])
+	}
+
+	// A different event_type filter must not see this event (confirms the
+	// query is actually filtering by event_type, not just returning everything
+	// for the trace_id).
+	filtered := getList(t, auditdAddr, "/v1/events?event_type=agent_reasoning&trace_id="+traceID)
+	if len(filtered) != 0 {
+		t.Errorf("expected 0 agent_reasoning events for a trace that only has an objective_evidence event, got %d", len(filtered))
+	}
+}
+
+// TestIntegration_FaultStabilityCert_CleanFields_RoundTrip confirms the new
+// CLEAN-axis columns (warning_count, is_clean) on fault_stability_cert
+// actually round-trip through a real auditd — new SQL columns added via the
+// idempotent migrate() pattern are exactly the kind of thing a mocked
+// gateway-package test can't catch (it never touches real SQL storage).
+// Also confirms GET .../fault-stability's series_id+model query filter
+// (used by the gateway's trustNotYetEarnedForceGate) actually works against
+// a real store, not just the in-memory scanCert path.
+func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
+	faultID := fmt.Sprintf("fs-clean-%d", time.Now().UnixNano())
+	seriesID := "pbs_fs_clean_test_triage"
+	model := "claude-sonnet-4-6"
+
+	cert := map[string]any{
+		"fault_id":           faultID,
+		"fault_name":         "Clean Fields Round-Trip Test",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             5,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"warning_count":      2,
+		"is_clean":           false,
+	}
+	post(t, auditdAddr, "/v1/fleet/fault-stability", cert)
+
+	got := get(t, auditdAddr, "/v1/fleet/fault-stability/"+faultID)
+	if wc, _ := got["warning_count"].(float64); wc != 2 {
+		t.Errorf("warning_count = %v, want 2", got["warning_count"])
+	}
+	if isClean, _ := got["is_clean"].(bool); isClean {
+		t.Error("is_clean = true, want false")
+	}
+
+	// series_id + model query filter — the exact contract
+	// trustNotYetEarnedForceGate depends on. handleList wraps results in
+	// {"certs": [...]}, unlike the bare-array shape getList expects (that's
+	// the vault.go fetch convention for this endpoint), so decode via get()
+	// and unwrap manually.
+	filteredResp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model="+model)
+	filteredCerts, _ := filteredResp["certs"].([]any)
+	found := false
+	for _, raw := range filteredCerts {
+		c, _ := raw.(map[string]any)
+		if c["fault_id"] == faultID {
+			found = true
+			if wc, _ := c["warning_count"].(float64); wc != 2 {
+				t.Errorf("filtered result warning_count = %v, want 2", c["warning_count"])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("cert for fault_id=%s not found in series_id+model filtered list (got %d certs)", faultID, len(filteredCerts))
+	}
+
+	// A different model must not see this cert — confirms the filter is
+	// actually scoping by model, not just series_id.
+	otherModelResp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model=claude-opus-4-8")
+	otherModelCerts, _ := otherModelResp["certs"].([]any)
+	for _, raw := range otherModelCerts {
+		c, _ := raw.(map[string]any)
+		if c["fault_id"] == faultID {
+			t.Error("cert unexpectedly returned for a different model — series_id+model filter is not scoping by model")
+		}
+	}
+}
+
 // TestIntegration_VerifyTrace_QueryContract validates the server-side contract
 // that client.VerifyTrace depends on: tool_execution events must be queryable
 // by trace_id + since, with action_class at the top level and tool.name nested.

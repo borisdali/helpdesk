@@ -205,6 +205,108 @@ func TestRecordAgentReasoning_DynamicTraceID(t *testing.T) {
 	}
 }
 
+func TestRecordObjectiveEvidence_NilAuditor(t *testing.T) {
+	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
+	// Should be a no-op and not panic.
+	ta.RecordObjectiveEvidence(context.Background(), ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"})
+}
+
+func TestRecordObjectiveEvidence_EmptySignal(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s-agent", "sess-1", "trace-1")
+	// Empty Signal → no event recorded (no-op), mirrors RecordAgentReasoning's
+	// empty-reasoning no-op.
+	ta.RecordObjectiveEvidence(context.Background(), ObjectiveEvidence{Tool: "get_pods"})
+
+	events, err := store.Query(context.Background(), QueryOptions{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 events for empty signal, got %d", len(events))
+	}
+}
+
+func TestRecordObjectiveEvidence_RecordsEvent(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s_agent", "sess-oev", "trace-oev-42")
+
+	ta.RecordObjectiveEvidence(context.Background(), ObjectiveEvidence{
+		Tool:     "get_pods",
+		Resource: "pg-cluster-minkube-1",
+		Signal:   "pod_restarted",
+		Detail:   "pod pg-cluster-minkube-1 restarted 2 time(s)",
+	})
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+
+	evt := events[0]
+	if evt.TraceID != "trace-oev-42" {
+		t.Errorf("TraceID = %q, want trace-oev-42", evt.TraceID)
+	}
+	if evt.ObjectiveEvidence == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if evt.ObjectiveEvidence.Agent != "k8s_agent" {
+		t.Errorf("Agent = %q, want k8s_agent (should default to ta.agentName)", evt.ObjectiveEvidence.Agent)
+	}
+	if evt.ObjectiveEvidence.Signal != "pod_restarted" {
+		t.Errorf("Signal = %q, want pod_restarted", evt.ObjectiveEvidence.Signal)
+	}
+	if evt.ObjectiveEvidence.Resource != "pg-cluster-minkube-1" {
+		t.Errorf("Resource = %q, want pg-cluster-minkube-1", evt.ObjectiveEvidence.Resource)
+	}
+}
+
+func TestRecordObjectiveEvidence_EventIDHasOevPrefix(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s_agent", "sess-k8s", "")
+
+	ta.RecordObjectiveEvidence(context.Background(), ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"})
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no events recorded")
+	}
+	if len(events[0].EventID) < 4 || events[0].EventID[:4] != "oev_" {
+		t.Errorf("EventID = %q, want oev_ prefix", events[0].EventID)
+	}
+}
+
+func TestRecordObjectiveEvidence_ExplicitAgentOverridesToolAuditorAgentName(t *testing.T) {
+	store := newToolAuditTestStore(t)
+	ta := NewToolAuditor(store, "k8s_agent", "sess-1", "trace-1")
+
+	// An explicitly set Agent field should be preserved, not overwritten by
+	// ta.agentName — mirrors DelegationVerification.Agent which is always
+	// caller-supplied.
+	ta.RecordObjectiveEvidence(context.Background(), ObjectiveEvidence{
+		Tool:   "get_pods",
+		Signal: "pod_restarted",
+		Agent:  "some_other_agent",
+	})
+
+	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].ObjectiveEvidence.Agent != "some_other_agent" {
+		t.Errorf("Agent = %q, want some_other_agent (explicit value should not be overwritten)", events[0].ObjectiveEvidence.Agent)
+	}
+}
+
 func TestRecordToolRetry_NilAuditor(t *testing.T) {
 	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
 	// Should be a no-op and not panic.

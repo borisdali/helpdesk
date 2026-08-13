@@ -461,7 +461,44 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 		"labels":    args.Labels,
 	}, result.Count, err, duration)
 
+	if err == nil {
+		recordPodDistressEvidence(ctx, result)
+	}
+
 	return result, err
+}
+
+// recordPodDistressEvidence records a deterministic objective_evidence audit
+// event for any pod with real client-go evidence of distress — a nonzero
+// restart count or an OOMKilled last-termination state. This is read directly
+// off the typed GetPodsResult before it is ever summarized/truncated for the
+// general tool_execution audit event (recordClientGoAudit above only stores
+// "returned N items", not the pod details) or handed to the LLM as text — so
+// the signal is independent of anything the model later concludes from it.
+// See objectiveEvidenceForceGate (cmd/gateway/playbooks.go), which uses this
+// to force a human-reviewed gate even when the model's own ESCALATE_TO/
+// confidence would otherwise let a hop close out silently.
+func recordPodDistressEvidence(ctx context.Context, result GetPodsResult) {
+	if toolAuditor == nil {
+		return
+	}
+	for _, pod := range result.Pods {
+		if pod.Restarts <= 0 {
+			continue
+		}
+		signal := "pod_restarted"
+		detail := fmt.Sprintf("pod %s restarted %d time(s)", pod.Name, pod.Restarts)
+		if pod.LastState != nil && pod.LastState.OOMKilled {
+			signal = "oom_killed"
+			detail = fmt.Sprintf("pod %s was OOMKilled (restart count %d)", pod.Name, pod.Restarts)
+		}
+		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
+			Tool:     "get_pods",
+			Resource: pod.Name,
+			Signal:   signal,
+			Detail:   detail,
+		})
+	}
 }
 
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {

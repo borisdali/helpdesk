@@ -281,6 +281,87 @@ func TestAuditorFabricationMismatchAlert(t *testing.T) {
 	}
 }
 
+// TestAuditorNarrationMismatch_NoIncidentWebhook verifies, against a real auditor
+// binary in HTTP polling mode, that a Mismatch caused only by NarratedNotConfirmed
+// (not the write/destructive-absence check) does NOT reach the incident webhook —
+// confirming the severity tiering (cmd/auditor/main.go's checkFabricationMismatch)
+// actually suppresses the CRITICAL/incident-webhook path at the real cross-process
+// level, not just in the in-process unit test that inspects auditor.securityAlerts
+// directly. A narration-only mismatch should fire a WARNING-level
+// narrated_tool_not_confirmed alert instead, which recordSecurityAlert never
+// forwards to the incident webhook (only level==AlertCritical is forwarded).
+func TestAuditorNarrationMismatch_NoIncidentWebhook(t *testing.T) {
+	auditdURL, _ := startAuditdOnPort(t, 19913)
+
+	incidentCh := make(chan map[string]any, 16)
+	incidentSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+			select {
+			case incidentCh <- payload:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer incidentSrv.Close()
+
+	cmd := exec.Command(auditorBin,
+		"-audit-service="+auditdURL,
+		"-incident-webhook="+incidentSrv.URL,
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start auditor: %v", err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+
+	time.Sleep(6 * time.Second)
+
+	traceID := fmt.Sprintf("tr_narr_%d", time.Now().UnixNano())
+	anchor := map[string]any{
+		"event_id":   fmt.Sprintf("gwr_%d", time.Now().UnixNano()),
+		"event_type": "gateway_request",
+		"trace_id":   traceID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"session":    map[string]any{"id": traceID},
+	}
+	body, _ := json.Marshal(anchor)
+	http.Post(auditdURL+"/v1/events", "application/json", bytes.NewReader(body)) //nolint:errcheck
+
+	// Narration-only mismatch: ActionClass=read, DestructiveConfirmed/WriteConfirmed
+	// both empty (irrelevant for read), NarratedNotConfirmed populated.
+	dvEvent := map[string]any{
+		"event_id":   fmt.Sprintf("gv_%d", time.Now().UnixNano()),
+		"event_type": "delegation_verification",
+		"trace_id":   traceID,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"session":    map[string]any{"id": traceID},
+		"delegation_verification": map[string]any{
+			"agent":                  "postgres_database_agent",
+			"action_class":           "read",
+			"mismatch":               true,
+			"narrated_not_confirmed": []string{"read_pg_log"},
+		},
+	}
+	body, _ = json.Marshal(dvEvent)
+	resp, err := http.Post(auditdURL+"/v1/events", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST delegation_verification: %v", err)
+	}
+	resp.Body.Close()
+
+	// The auditor should NOT forward this to the incident webhook within a
+	// generous window — if it does, severity tiering has regressed to uniform
+	// CRITICAL for narration-only mismatches.
+	select {
+	case incident := <-incidentCh:
+		t.Fatalf("narration-only mismatch reached the incident webhook, want none: %v", incident)
+	case <-time.After(15 * time.Second):
+		// pass — no incident fired, as expected for WARNING-level severity
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Secbot HTTP polling mode
 // ─────────────────────────────────────────────────────────────────────────────

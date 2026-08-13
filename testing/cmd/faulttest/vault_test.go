@@ -1557,6 +1557,159 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_VerificationFlags_InlineWarnings verifies that
+// has_mismatch/has_target_drift surface inline right under each chapter's
+// Findings — previously invisible in this exact CLI output, requiring a
+// separate `vault journey <trace_id>` lookup the user might not know to run.
+func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_flags1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":           "plr_flags1",
+				"playbook":         "pbs_db_restart_triage",
+				"findings":         "connection refused",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":           "plr_flags2",
+					"playbook":         "pbs_sysadmin_docker_inspect",
+					"outcome":          "resolved",
+					"findings":         "container healthy",
+					"has_mismatch":     false,
+					"has_target_drift": true,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_flags1")
+	})
+
+	if !strings.Contains(out, "⚠ unverified") {
+		t.Errorf("output missing inline unverified warning for triage's has_mismatch=true, got:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output missing inline target drift warning for escalation's has_target_drift=true, got:\n%s", out)
+	}
+	// The two warnings must appear on the *correct* chapter, not both on
+	// every chapter — count occurrences precisely rather than just presence.
+	if got := strings.Count(out, "⚠ unverified"); got != 1 {
+		t.Errorf("⚠ unverified appeared %d times, want exactly 1 (triage only)", got)
+	}
+	if got := strings.Count(out, "⚠ target drift"); got != 1 {
+		t.Errorf("⚠ target drift appeared %d times, want exactly 1 (escalation only)", got)
+	}
+}
+
+// TestPrintIncidentJourney_VerificationFlags_RemediationChapter verifies the
+// Remediation chapter's inline warning specifically — the third of three
+// printFlags call sites in printIncidentJourney, previously untested (the
+// other two, Triage and an Escalation hop, are covered by
+// TestPrintIncidentJourney_VerificationFlags_InlineWarnings above).
+func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_remflag1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_remflag1",
+				"playbook": "pbs_db_restart_triage",
+			},
+			"remediation": map[string]any{
+				"run_id":           "plr_remflag2",
+				"playbook":         "pbs_db_restart_action",
+				"outcome":          "resolved",
+				"findings":         "container restarted",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_remflag1")
+	})
+
+	if !strings.Contains(out, "REMEDIATION") {
+		t.Fatalf("output missing REMEDIATION section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ unverified") {
+		t.Errorf("output missing inline unverified warning for remediation's has_mismatch=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output should not show target drift warning, has_target_drift is false, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_VerificationFlags_ProtocolViolation verifies the
+// third inline warning marker (added alongside HasMismatch/HasTargetDrift)
+// appears on the correct chapter and is distinct from the other two.
+func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_pvflag1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":                 "plr_pvflag1",
+				"playbook":               "pbs_db_restart_triage",
+				"findings":               "could not connect; cause unclear",
+				"has_mismatch":           false,
+				"has_target_drift":       false,
+				"has_protocol_violation": true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_pvflag1")
+	})
+
+	if !strings.Contains(out, "⚠ protocol violation") {
+		t.Errorf("output missing inline protocol violation warning, got:\n%s", out)
+	}
+	if strings.Contains(out, "⚠ unverified") || strings.Contains(out, "⚠ target drift") {
+		t.Errorf("output should not show the other two warnings, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean verifies no
+// warning lines print when both flags are false/absent — the fail-open case
+// must not produce spurious output.
+func TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_clean1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_clean1",
+				"playbook": "pbs_db_restart_triage",
+				"findings": "resolved cleanly",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_clean1")
+	})
+
+	if strings.Contains(out, "⚠") {
+		t.Errorf("output should contain no warning markers for a clean incident, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions guards against
 // the bug where every "escalation:N" phase got the same static "not yet
 // resolved" label regardless of that hop's actual outcome — including the
@@ -1612,6 +1765,259 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 	// generic "not yet resolved" text.
 	if strings.Count(out, "not yet resolved") != 0 {
 		t.Errorf("escalation:2 (terminal, resolved) incorrectly still labeled as 'not yet resolved', got:\n%s", out)
+	}
+}
+
+// ── printJourneyDetail: HasTargetDrift / HasMismatch rendering ────────────
+
+// TestPrintJourneyDetail_TargetDriftWarning guards against the gap found
+// during a coverage review: journeySummary (this package's own mirror of
+// audit.JourneySummary) didn't know about has_target_drift at all, so a
+// journey with real target-scope drift rendered as fully clean in this exact
+// CLI — the same tool used throughout this session to inspect journeys.
+func TestPrintJourneyDetail_TargetDriftWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":         "tr_drift1",
+				"started_at":       time.Now().UTC().Format(time.RFC3339),
+				"outcome":          "target_drift_detected",
+				"has_mismatch":     false,
+				"has_target_drift": true,
+				"tools_used":       []string{"check_connection"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_drift1", false)
+	})
+
+	if !strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Errorf("output missing TARGET DRIFT WARNING section for has_target_drift=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "FABRICATION WARNING") {
+		t.Errorf("output should not show FABRICATION WARNING when has_mismatch=false, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_MismatchWarning_NoDriftWarning is the inverse case —
+// confirms the two warning sections are independently gated, not accidentally
+// coupled by the fix above.
+func TestPrintJourneyDetail_MismatchWarning_NoDriftWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":         "tr_mismatch1",
+				"started_at":       time.Now().UTC().Format(time.RFC3339),
+				"outcome":          "unverified_claim",
+				"has_mismatch":     true,
+				"has_target_drift": false,
+				"tools_used":       []string{},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_mismatch1", false)
+	})
+
+	if !strings.Contains(out, "FABRICATION WARNING") {
+		t.Errorf("output missing FABRICATION WARNING section for has_mismatch=true, got:\n%s", out)
+	}
+	if strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Errorf("output should not show TARGET DRIFT WARNING when has_target_drift=false, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail proves the TARGET
+// DRIFT WARNING section shows the offending tool/connection-string pairs from
+// the raw delegation_verification event, not just the generic boilerplate —
+// closing the gap where vault journey had no way to show which tool actually
+// drifted without a separate manual curl to auditd.
+func TestPrintJourneyDetail_TargetDriftWarning_ShowsDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":         "tr_driftdetail1",
+					"started_at":       time.Now().UTC().Format(time.RFC3339),
+					"outcome":          "target_drift_detected",
+					"has_mismatch":     false,
+					"has_target_drift": true,
+					"tools_used":       []string{"get_pods"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":        "k8s_agent",
+						"target_drift": []string{"pg-cluster-minikube"},
+						"target_drift_detail": []map[string]any{
+							{"tool": "get_pods", "connection_string": "pg-cluster-minikube"},
+						},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_driftdetail1", false)
+	})
+
+	if !strings.Contains(out, "TARGET DRIFT WARNING") {
+		t.Fatalf("output missing TARGET DRIFT WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "get_pods → pg-cluster-minikube") {
+		t.Errorf("output missing tool-attributed drift detail, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools proves the
+// FABRICATION WARNING section shows which narrated tool(s) were never
+// confirmed, from the raw delegation_verification event.
+func TestPrintJourneyDetail_MismatchWarning_ShowsNarratedTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":     "tr_mismatchdetail1",
+					"started_at":   time.Now().UTC().Format(time.RFC3339),
+					"outcome":      "unverified_claim",
+					"has_mismatch": true,
+					"tools_used":   []string{},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":                  "db_agent",
+						"narrated_not_confirmed": []string{"cancel_query"},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_mismatchdetail1", false)
+	})
+
+	if !strings.Contains(out, "FABRICATION WARNING") {
+		t.Fatalf("output missing FABRICATION WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Narrated but unconfirmed: cancel_query") {
+		t.Errorf("output missing narrated-not-confirmed detail, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues proves the
+// TARGET DRIFT WARNING section still shows the plain drifted values when
+// TargetDriftDetail is empty (e.g. events recorded before target_drift_detail
+// shipped) instead of silently showing nothing extra.
+func TestPrintJourneyDetail_TargetDriftWarning_FallsBackToPlainValues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":         "tr_driftfallback1",
+					"started_at":       time.Now().UTC().Format(time.RFC3339),
+					"outcome":          "target_drift_detected",
+					"has_target_drift": true,
+					"tools_used":       []string{"get_pods"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":        "k8s_agent",
+						"target_drift": []string{"pg-cluster-minikube"},
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_driftfallback1", false)
+	})
+
+	if !strings.Contains(out, "Drifted to: pg-cluster-minikube") {
+		t.Errorf("output missing plain-value fallback, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent proves the
+// PROTOCOL VIOLATION WARNING section shows which agent's hop violated the
+// protocol, from the raw delegation_verification event — the third of the
+// three warning sections wired to fetchDelegationVerificationEvents, closing
+// out the last untested case (FABRICATION and TARGET DRIFT are covered by
+// the tests above).
+func TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":               "tr_pvdetail1",
+					"started_at":             time.Now().UTC().Format(time.RFC3339),
+					"outcome":                "protocol_violation",
+					"has_protocol_violation": true,
+					"tools_used":             []string{},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type": "delegation_verification",
+					"delegation_verification": map[string]any{
+						"agent":              "sysadmin_agent",
+						"protocol_violation": true,
+					},
+				},
+			})
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_pvdetail1", false)
+	})
+
+	if !strings.Contains(out, "PROTOCOL VIOLATION WARNING") {
+		t.Fatalf("output missing PROTOCOL VIOLATION WARNING section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Agent(s): sysadmin_agent") {
+		t.Errorf("output missing agent detail, got:\n%s", out)
 	}
 }
 
@@ -1830,6 +2236,82 @@ func TestFetchJourneys_PassesQueryParams(t *testing.T) {
 		if gotQuery[k] != want {
 			t.Errorf("query param %s = %q, want %q", k, gotQuery[k], want)
 		}
+	}
+}
+
+func TestFetchDelegationVerificationEvents_Found(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/governance/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"event_type": "delegation_verification",
+				"delegation_verification": map[string]any{
+					"agent":                  "k8s_agent",
+					"target_drift":           []string{"pg-cluster-minikube"},
+					"target_drift_detail":    []map[string]any{{"tool": "get_pods", "connection_string": "pg-cluster-minikube"}},
+					"narrated_not_confirmed": []string{"restart_deployment"},
+					"protocol_violation":     true,
+				},
+			},
+			// Non-delegation_verification events in the same trace should be
+			// filtered out (DelegationVerification field absent/null).
+			{"event_type": "tool_execution"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (non-delegation_verification event filtered out)", len(got))
+	}
+	if got[0].Agent != "k8s_agent" {
+		t.Errorf("Agent = %q, want k8s_agent", got[0].Agent)
+	}
+	if len(got[0].TargetDriftDetail) != 1 || got[0].TargetDriftDetail[0].Tool != "get_pods" {
+		t.Errorf("TargetDriftDetail = %+v, want [{get_pods pg-cluster-minikube}]", got[0].TargetDriftDetail)
+	}
+	if !got[0].ProtocolViolation {
+		t.Error("ProtocolViolation = false, want true")
+	}
+	if gotQuery.Get("trace_id") != "tr_abc123" || gotQuery.Get("event_type") != "delegation_verification" {
+		t.Errorf("query = %v, want trace_id=tr_abc123 event_type=delegation_verification", gotQuery)
+	}
+}
+
+func TestFetchDelegationVerificationEvents_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	got, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_none")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+func TestFetchDelegationVerificationEvents_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchDelegationVerificationEvents(srv.URL, "", "tr_abc123")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
 	}
 }
 
@@ -2900,6 +3382,35 @@ func TestFetchStabilityCert_Found(t *testing.T) {
 	}
 }
 
+func TestFetchStabilityCert_CleanFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":             "k8s-oomkilled",
+			"n_runs":               5,
+			"is_stable":            true,
+			"warning_count":        2,
+			"is_clean":             false,
+			"warning_distribution": map[string]int{"objective_evidence": 1, "protocol_violation": 1},
+		})
+	}))
+	defer srv.Close()
+
+	got := fetchStabilityCert(srv.URL, "", "k8s-oomkilled")
+	if got == nil {
+		t.Fatal("expected cert, got nil")
+	}
+	if got.WarningCount != 2 {
+		t.Errorf("WarningCount = %d, want 2", got.WarningCount)
+	}
+	if got.IsClean {
+		t.Error("IsClean = true, want false")
+	}
+	if got.WarningDistribution["objective_evidence"] != 1 || got.WarningDistribution["protocol_violation"] != 1 {
+		t.Errorf("WarningDistribution = %v, want objective_evidence=1, protocol_violation=1", got.WarningDistribution)
+	}
+}
+
 func TestFetchStabilityCert_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -2970,7 +3481,7 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 		N:           5,
 		PassCount:   4,
 	}
-	postStabilityCert(context.Background(), cfg, f, sr, nil)
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
 
 	if gotBody["fault_id"] != "db-max-connections" {
 		t.Errorf("fault_id = %v, want db-max-connections", gotBody["fault_id"])
@@ -2998,7 +3509,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 	if gotAuth != "Bearer tok-stability" {
 		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
 	}
@@ -3007,7 +3518,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
 	// Should not panic or dial anything when GatewayURL is empty.
 	cfg := &HarnessConfig{GatewayURL: ""}
-	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 }
 
 func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
@@ -3018,7 +3529,7 @@ func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
 	// Should log a warning but not panic.
-	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, CleanReport{}, nil)
 }
 
 // ── wrapLines ────────────────────────────────────────────────────────────────
@@ -3641,7 +4152,7 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 		JudgeSpread:             0.08,
 		TaxonomyVersion:         "1.0",
 	}
-	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, attr)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-max-connections"}, StabilityReport{N: 3, PassCount: 3}, CleanReport{}, attr)
 
 	if gotBody["primary_attribution"] != "connection-pool-saturation" {
 		t.Errorf("primary_attribution = %v", gotBody["primary_attribution"])
@@ -3661,6 +4172,66 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 	}
 }
 
+func TestPostStabilityCert_CleanPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	// Non-zero-value CleanReport — the existing payload tests all pass
+	// CleanReport{} (the Go zero value), which would still "pass" even if
+	// the warning_count/is_clean wiring in postStabilityCert were silently
+	// broken. Use a report with a real warning to actually exercise it.
+	cr := buildCleanReport(Failure{ID: "k8s-oomkilled"}, []EvalResult{
+		{Passed: true},
+		{Passed: true, ProtocolViolation: true},
+		{Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "k8s-oomkilled"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	if gotBody["warning_count"] != float64(1) {
+		t.Errorf("warning_count = %v, want 1", gotBody["warning_count"])
+	}
+	if gotBody["is_clean"] != false {
+		t.Errorf("is_clean = %v, want false", gotBody["is_clean"])
+	}
+	dist, ok := gotBody["warning_distribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("warning_distribution missing or wrong shape: %v", gotBody["warning_distribution"])
+	}
+	if dist["protocol_violation"] != float64(1) {
+		t.Errorf("warning_distribution[protocol_violation] = %v, want 1", dist["protocol_violation"])
+	}
+}
+
+func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cr := buildCleanReport(Failure{ID: "db-lock-contention"}, []EvalResult{
+		{Passed: true}, {Passed: true}, {Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	if gotBody["warning_count"] != float64(0) {
+		t.Errorf("warning_count = %v, want 0", gotBody["warning_count"])
+	}
+	if gotBody["is_clean"] != true {
+		t.Errorf("is_clean = %v, want true — must be the real boolean true, not just absent/zero-value", gotBody["is_clean"])
+	}
+	if _, ok := gotBody["warning_distribution"]; ok {
+		t.Errorf("warning_distribution should be omitted entirely when there are no warnings, got %v", gotBody["warning_distribution"])
+	}
+}
+
 func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3670,7 +4241,7 @@ func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{GatewayURL: srv.URL}
-	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, nil)
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, CleanReport{}, nil)
 
 	if _, ok := gotBody["primary_attribution"]; ok {
 		t.Error("primary_attribution should not be in payload when attr=nil")
@@ -4028,5 +4599,186 @@ func TestVaultList_NoAttributionWhenEmpty(t *testing.T) {
 
 	if strings.Contains(out, "attr=") {
 		t.Errorf("expected no attr= in output when primary_attribution is empty:\n%s", out)
+	}
+}
+
+// ── v0.24.0: vault list CLEAN axis display tests ──────────────────────────
+
+func TestVaultList_CleanWarningShown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/fleet/fault-stability" {
+			fmt.Fprint(w, `{"certs":[{"fault_id":"db-max-connections","n_runs":5,"is_stable":true,"warning_count":2,"is_clean":false}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if !strings.Contains(out, "⚠2/5 warnings") {
+		t.Errorf("expected ⚠2/5 warnings in vault list output:\n%s", out)
+	}
+}
+
+func TestVaultList_NoCleanWarningWhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/fleet/fault-stability" {
+			fmt.Fprint(w, `{"certs":[{"fault_id":"db-lock-contention","n_runs":5,"is_stable":true,"warning_count":0,"is_clean":true}]}`)
+			return
+		}
+		fmt.Fprint(w, `{"playbooks":[]}`)
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultList([]string{"--gateway", srv.URL})
+	})
+
+	if strings.Contains(out, "warnings") {
+		t.Errorf("expected no warnings suffix in output when cert is clean:\n%s", out)
+	}
+}
+
+// ── v0.24.0: printFaultStabilityCert CLEAN line tests ─────────────────────
+
+func TestPrintFaultStabilityCert_ShowsCleanLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":      "k8s-oomkilled",
+			"fault_name":    "OOMKilled",
+			"n_runs":        5,
+			"is_stable":     true,
+			"warning_count": 2,
+			"is_clean":      false,
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "Clean         : no  (2/5 run(s) tripped a verified warning signal)") {
+		t.Errorf("expected dirty Clean line in output:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsCleanLine_WhenClean(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":      "db-lock-contention",
+			"n_runs":        5,
+			"is_stable":     true,
+			"warning_count": 0,
+			"is_clean":      true,
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "db-lock-contention", "")
+	})
+
+	if !strings.Contains(out, "Clean         : yes") {
+		t.Errorf("expected clean Clean line in output:\n%s", out)
+	}
+	if strings.Contains(out, "Warning types") {
+		t.Errorf("Warning types line should not appear when there's no distribution to show:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsWarningTypesLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"fault_id":             "k8s-crashloop",
+			"fault_name":           "CrashLoopBackOff",
+			"n_runs":               5,
+			"is_stable":            true,
+			"warning_count":        2,
+			"is_clean":             false,
+			"warning_distribution": map[string]int{"objective_evidence": 1, "protocol_violation": 1},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-crashloop", "")
+	})
+
+	if !strings.Contains(out, "Warning types : objective_evidence=1, protocol_violation=1") {
+		t.Errorf("expected Warning types line in output:\n%s", out)
+	}
+}
+
+// ── v0.24.0: vaultCertCompare CLEAN regression tests ───────────────────────
+
+func TestVaultCertCompare_CleanRegression(t *testing.T) {
+	// Dedicated fixture, not the shared newCertCompareServer dataset — avoids
+	// any risk of changing which fault_id triggers which existing
+	// REGRESSION/IMPROVEMENT/unchanged category in the other cert-compare
+	// tests. Both models STABLE (no pass-rate regression), but the model
+	// went from clean to dirty — the CLEAN axis must catch this on its own.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-5","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":true,"warning_count":0},
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-6","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":false,"warning_count":2}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "⚠ clean: clean → dirty(2/5)") {
+		t.Errorf("expected CLEAN regression line in output:\n%s", out)
+	}
+}
+
+func TestVaultCertCompare_CleanImprovement(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/fleet/fault-stability":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"certs":[
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-5","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":false,"warning_count":3},
+				{"fault_id":"k8s-oomkilled","fault_name":"OOMKilled","diagnosis_model":"claude-sonnet-4-6","n_runs":5,"pass_rate":1.0,"is_stable":true,"is_clean":true,"warning_count":0}
+			]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultCertCompare([]string{
+			"claude-sonnet-4-5", "claude-sonnet-4-6",
+			"--gateway", srv.URL,
+		})
+	})
+
+	if !strings.Contains(out, "✓ clean: dirty(3/5) → clean") {
+		t.Errorf("expected CLEAN improvement line in output:\n%s", out)
 	}
 }

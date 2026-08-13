@@ -647,3 +647,164 @@ func TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent(t *testing.T)
 		t.Fatalf("Upsert after idempotent migrate: %v", err)
 	}
 }
+
+// ── CLEAN axis (WarningCount / IsClean) ─────────────────────────────────────
+
+func TestFaultStabilityCert_CleanFields_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "k8s-oomkilled",
+		DiagnosisModel: "claude-sonnet-4-6",
+		NRuns:          5,
+		IsStable:       true,
+		WarningCount:   2,
+		IsClean:        false,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if got.WarningCount != 2 {
+		t.Errorf("WarningCount: got %d, want 2", got.WarningCount)
+	}
+	if got.IsClean {
+		t.Error("IsClean: got true, want false")
+	}
+}
+
+func TestFaultStabilityCert_CleanFields_ZeroValueIsClean(t *testing.T) {
+	// A cert with WarningCount=0 and IsClean=true (the common case) must not
+	// be confused with the Go zero-value (WarningCount=0, IsClean=false) —
+	// confirms IsClean is actually persisted, not just inferred from
+	// WarningCount==0 by the reader.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "db-lock-contention",
+		DiagnosisModel: "claude-sonnet-4-6",
+		NRuns:          5,
+		WarningCount:   0,
+		IsClean:        true,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if !got.IsClean {
+		t.Error("IsClean: got false, want true")
+	}
+}
+
+func TestFaultStabilityCert_WarningDistribution_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	dist := map[string]int{"objective_evidence": 1, "protocol_violation": 2}
+	cert := &FaultStabilityCert{
+		FaultID:             "k8s-crashloop",
+		DiagnosisModel:      "claude-haiku-4-5-20251001",
+		NRuns:               5,
+		WarningCount:        3,
+		IsClean:             false,
+		WarningDistribution: dist,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.WarningDistribution) != 2 || got.WarningDistribution["objective_evidence"] != 1 || got.WarningDistribution["protocol_violation"] != 2 {
+		t.Errorf("WarningDistribution: got %v, want %v", got.WarningDistribution, dist)
+	}
+}
+
+func TestFaultStabilityCert_WarningDistribution_Empty(t *testing.T) {
+	// Mirrors TestFaultStabilityCert_AttributionDistribution_Empty — a cert
+	// with no warnings at all must round-trip as a nil/empty map, not a
+	// literal "{}" string leaking into the Go value.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "db-auth-failure",
+		DiagnosisModel: "claude-haiku-4-5-20251001",
+		NRuns:          5,
+		IsClean:        true,
+	}
+	if err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.WarningDistribution) != 0 {
+		t.Errorf("WarningDistribution: got %v, want empty", got.WarningDistribution)
+	}
+}
+
+// ── GetBySeriesAndModel ──────────────────────────────────────────────────────
+
+func TestGetBySeriesAndModel_MultipleFaultsSameSeries(t *testing.T) {
+	// A single playbook series can map to multiple faults (e.g. one playbook
+	// tested against several distinct fault scenarios). GetBySeriesAndModel
+	// must return all of them, not just one.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	certs := []*FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true, IsClean: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true, IsClean: false, WarningCount: 1},
+		// Different series — must not be returned.
+		{FaultID: "db-lock-contention", PlaybookSeriesID: "pbs_lock_contention_triage", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true, IsClean: true},
+		// Same series, different model — must not be returned.
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-opus-4-8", NRuns: 5, IsStable: true, IsClean: true},
+	}
+	for _, c := range certs {
+		if err := store.Upsert(ctx, c); err != nil {
+			t.Fatalf("Upsert(%s, %s): %v", c.FaultID, c.DiagnosisModel, err)
+		}
+	}
+
+	got, err := store.GetBySeriesAndModel(ctx, "pbs_k8s_pod_crash_triage", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetBySeriesAndModel: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 certs, got %d", len(got))
+	}
+	byFault := map[string]*FaultStabilityCert{}
+	for _, c := range got {
+		byFault[c.FaultID] = c
+	}
+	if byFault["k8s-oomkilled"] == nil || !byFault["k8s-oomkilled"].IsClean {
+		t.Error("expected k8s-oomkilled cert, IsClean=true")
+	}
+	if byFault["k8s-crashloop"] == nil || byFault["k8s-crashloop"].IsClean {
+		t.Error("expected k8s-crashloop cert, IsClean=false")
+	}
+}
+
+func TestGetBySeriesAndModel_NoneRecorded(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	got, err := store.GetBySeriesAndModel(ctx, "pbs_never_tested", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetBySeriesAndModel: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 certs for a never-tested series, got %d", len(got))
+	}
+}

@@ -217,6 +217,11 @@ func main() {
 
 	gw.SetCrystalBall(crystalBall)
 	gw.SetAuthorizer(authzr)
+	if diagnosisModel := os.Getenv("HELPDESK_MODEL_NAME"); diagnosisModel != "" {
+		gw.SetDiagnosisModel(diagnosisModel)
+	} else {
+		slog.Warn("HELPDESK_MODEL_NAME not set — trust gate disabled: real playbook runs will auto-chain without requiring an earned STABLE+CLEAN fault-stability cert (trustNotYetEarnedForceGate fails open on an unconfigured diagnosis model)")
+	}
 
 	// Git webhook adapter config.
 	gw.gitWebhookCfg = GitWebhookConfig{

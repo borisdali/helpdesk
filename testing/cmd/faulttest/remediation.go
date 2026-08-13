@@ -71,6 +71,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 		RemediationPreview:    resp.RemediationPreview,
 		DiagnosticReport:      resp.DiagnosticReport,
 		GateReason:            resp.GateReason,
+		EvidenceWarnings:      resp.EvidenceWarnings,
 	}
 	slog.Info("gate pending: operator review required",
 		"failure", f.ID,
@@ -466,6 +467,12 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		warnSep := strings.Repeat("─", width)
 		fmt.Printf("\n%s\n", warnSep)
 		fmt.Printf("  ⚠  CONFIDENCE WARNING: %s\n", gate.ConfidenceWarning)
+		fmt.Printf("%s\n", warnSep)
+	}
+	for _, w := range gate.EvidenceWarnings {
+		warnSep := strings.Repeat("─", width)
+		fmt.Printf("\n%s\n", warnSep)
+		fmt.Printf("  ⚠  EVIDENCE WARNING: %s\n", w)
 		fmt.Printf("%s\n", warnSep)
 	}
 	fmt.Println()
@@ -957,7 +964,7 @@ func (r *Remediator) resolvedConnStr() string {
 func logicalArgs(args map[string]any) map[string]any {
 	skip := map[string]bool{
 		"connection_string": true,
-		"host": true, "port": true, "dbname": true,
+		"host":              true, "port": true, "dbname": true,
 		"user": true, "password": true,
 		"reason": true,
 	}
@@ -1220,4 +1227,3 @@ func wrapText(s string, width int) []string {
 	}
 	return lines
 }
-

@@ -156,6 +156,11 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	)
 	reqBody := map[string]any{
 		"context": ResolvePrompt(f.Prompt, r.cfg),
+		// faulttest traffic is evaluation, never a real incident — and a
+		// --repeat calibration run is specifically trying to *establish* a
+		// fault-stability cert, so it can't be gated on one already existing.
+		// See trustNotYetEarnedForceGate (cmd/gateway/playbooks.go).
+		"skip_trust_gate": true,
 	}
 	if connStr != "" {
 		reqBody["connection_string"] = connStr
@@ -201,22 +206,26 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 	}
 
 	var result struct {
-		Text               string         `json:"text"`
-		CrystalBall        bool           `json:"crystal_ball"`
-		Error              string         `json:"error"`
-		ToolCalls          []string       `json:"tool_calls"`
-		Warnings           []string       `json:"warnings"`
-		RunID              string         `json:"run_id"`
-		Status             string         `json:"status"`
-		TransitionTarget   string         `json:"transition_target,omitempty"`
-		EscalationTarget   string         `json:"escalation_target,omitempty"`
-		EscalationFindings string         `json:"escalation_findings"`
-		ConfidenceWarning  string         `json:"confidence_warning"`
-		SuggestedMode      string         `json:"suggested_approval_mode"`
-		RemediationPreview map[string]any `json:"remediation_preview,omitempty"`
-		DiagnosticReport   map[string]any `json:"diagnostic_report,omitempty"`
-		GateReason         string         `json:"gate_reason,omitempty"`
-		ChainedRunID       string         `json:"chained_run_id,omitempty"`
+		Text                     string         `json:"text"`
+		CrystalBall              bool           `json:"crystal_ball"`
+		Error                    string         `json:"error"`
+		ToolCalls                []string       `json:"tool_calls"`
+		Warnings                 []string       `json:"warnings"`
+		RunID                    string         `json:"run_id"`
+		Status                   string         `json:"status"`
+		TransitionTarget         string         `json:"transition_target,omitempty"`
+		EscalationTarget         string         `json:"escalation_target,omitempty"`
+		EscalationFindings       string         `json:"escalation_findings"`
+		ConfidenceWarning        string         `json:"confidence_warning"`
+		SuggestedMode            string         `json:"suggested_approval_mode"`
+		RemediationPreview       map[string]any `json:"remediation_preview,omitempty"`
+		DiagnosticReport         map[string]any `json:"diagnostic_report,omitempty"`
+		GateReason               string         `json:"gate_reason,omitempty"`
+		EvidenceWarnings         []string       `json:"evidence_warnings,omitempty"`
+		ChainedRunID             string         `json:"chained_run_id,omitempty"`
+		TargetDrift              []string       `json:"target_drift,omitempty"`
+		ObjectiveEvidenceSignals []string       `json:"objective_evidence_signals,omitempty"`
+		Mismatch                 bool           `json:"mismatch,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -228,21 +237,25 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		slog.Warn("gateway warning", "failure", f.ID, "warning", w)
 	}
 	ar := testutil.AgentResponse{
-		Text:               result.Text,
-		CrystalBall:        result.CrystalBall,
-		Duration:           duration,
-		Warnings:           result.Warnings,
-		RunID:              result.RunID,
-		Status:             result.Status,
-		TransitionTarget:   result.TransitionTarget,
-		EscalationTarget:   result.EscalationTarget,
-		EscalationFindings: result.EscalationFindings,
-		ConfidenceWarning:  result.ConfidenceWarning,
-		SuggestedMode:      result.SuggestedMode,
-		RemediationPreview: result.RemediationPreview,
-		DiagnosticReport:   result.DiagnosticReport,
-		GateReason:         result.GateReason,
-		ChainedRunID:       result.ChainedRunID,
+		Text:                     result.Text,
+		CrystalBall:              result.CrystalBall,
+		Duration:                 duration,
+		Warnings:                 result.Warnings,
+		RunID:                    result.RunID,
+		Status:                   result.Status,
+		TransitionTarget:         result.TransitionTarget,
+		EscalationTarget:         result.EscalationTarget,
+		EscalationFindings:       result.EscalationFindings,
+		ConfidenceWarning:        result.ConfidenceWarning,
+		SuggestedMode:            result.SuggestedMode,
+		RemediationPreview:       result.RemediationPreview,
+		DiagnosticReport:         result.DiagnosticReport,
+		GateReason:               result.GateReason,
+		EvidenceWarnings:         result.EvidenceWarnings,
+		ChainedRunID:             result.ChainedRunID,
+		TargetDrift:              result.TargetDrift,
+		ObjectiveEvidenceSignals: result.ObjectiveEvidenceSignals,
+		Mismatch:                 result.Mismatch,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)

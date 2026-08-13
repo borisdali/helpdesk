@@ -182,10 +182,10 @@ func TestRunPlaybook_UsesAgentConnStr(t *testing.T) {
 	defer srv.Close()
 
 	r := NewRemediator(&HarnessConfig{
-		GatewayURL:   srv.URL,
+		GatewayURL:    srv.URL,
 		GatewayAPIKey: "test-key",
-		ConnStr:      "host=primary",
-		AgentConnStr: "host=replica",
+		ConnStr:       "host=primary",
+		AgentConnStr:  "host=replica",
 	})
 	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
 		t.Fatalf("RunPlaybook: %v", err)
@@ -205,9 +205,9 @@ func TestRunPlaybook_FallsBackToConnStr(t *testing.T) {
 	defer srv.Close()
 
 	r := NewRemediator(&HarnessConfig{
-		GatewayURL:   srv.URL,
+		GatewayURL:    srv.URL,
 		GatewayAPIKey: "test-key",
-		ConnStr:      "host=primary",
+		ConnStr:       "host=primary",
 		// AgentConnStr intentionally empty
 	})
 	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
@@ -262,6 +262,32 @@ func TestRunPlaybook_OmitsNamespaceWhenEmpty(t *testing.T) {
 	}
 	if _, ok := gotBody["namespace"]; ok {
 		t.Errorf("namespace key should be absent when empty, got: %v", gotBody["namespace"])
+	}
+}
+
+// TestRunPlaybook_SendsSkipTrustGate is a regression guard mirroring
+// TestRunViaPlaybook_SendsSkipTrustGate in runner_test.go — faulttest's
+// remediation trigger must also always set skip_trust_gate=true, for the
+// same bootstrapping reason (a remediation playbook run is faulttest
+// traffic too, not a real incident).
+func TestRunPlaybook_SendsSkipTrustGate(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if gotBody["skip_trust_gate"] != true {
+		t.Errorf("skip_trust_gate = %v, want true", gotBody["skip_trust_gate"])
 	}
 }
 
@@ -343,7 +369,7 @@ func TestProceedStep_SendsCorrectPayload(t *testing.T) {
 	var gotBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                          //nolint:errcheck
 		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -615,9 +641,9 @@ func TestTriggerPlaybook_PendingGateDispatchesToRunGateLoop(t *testing.T) {
 		case r.URL.Path == "/api/v1/fleet/playbooks/pb_triage01/run":
 			// RunPlaybook: returns pending_gate
 			json.NewEncoder(w).Encode(ApproveRunResponse{ //nolint:errcheck
-				RunID:            "plr_gate01",
-				Status:           "pending_gate",
-				EscalationTarget: "pbs_lock_chain_remediate",
+				RunID:              "plr_gate01",
+				Status:             "pending_gate",
+				EscalationTarget:   "pbs_lock_chain_remediate",
 				EscalationFindings: "Lock chain detected.",
 			})
 		case strings.Contains(r.URL.Path, "/proceed-escalation"):

@@ -42,10 +42,19 @@ const (
 	// EventTypeDelegationVerification is emitted by DelegateTool after every
 	// sub-agent call. It records which tools the sub-agent actually executed
 	// (from the audit trail), independent of the agent's text response.
-	// When Mismatch is true — a destructive or write delegation produced no
-	// confirmed tool execution of that class or stronger — the journey outcome
-	// is set to "unverified_claim". The ActionClass field distinguishes write
-	// mismatches from destructive mismatches without joining to the delegation event.
+	// When Mismatch is true — either a destructive or write delegation produced no
+	// confirmed tool execution of that class or stronger, OR (regardless of action
+	// class, including read) the model's own reasoning named a tool call that never
+	// produced a matching tool_execution event and no policy denial explains the
+	// absence — the journey outcome is set to "unverified_claim". The ActionClass
+	// field distinguishes write mismatches from destructive mismatches without
+	// joining to the delegation event; NarratedNotConfirmed distinguishes the
+	// narration-based mismatch from the write/destructive-absence one.
+	// When TargetDrift is non-empty — a tool call in this hop used a different
+	// connection_string than the playbook run was invoked with — the journey
+	// outcome is set to "target_drift_detected" instead (see checkTargetScope in
+	// cmd/gateway/playbooks.go); this is independent of Mismatch and may appear on
+	// its own event for the same hop.
 	// Like verification_outcome, these events do NOT contribute to tools_used
 	// or event_count in journey aggregation.
 	EventTypeDelegationVerification EventType = "delegation_verification"
@@ -73,6 +82,18 @@ const (
 	// EventTypeRollbackVerified is emitted after the post-rollback verification
 	// loop confirms the resource returned to the expected pre-mutation state.
 	EventTypeRollbackVerified EventType = "rollback_verified"
+	// EventTypeObjectiveEvidence is emitted by an agent immediately after a tool
+	// call, when the tool's raw structured result (not the LLM's narrative text)
+	// contains a deterministic, code-derived distress signal — e.g. a Kubernetes
+	// pod's real restart count or OOMKilled state, read directly off the
+	// client-go object before it is ever summarized for the LLM or truncated for
+	// the audit trail. Unlike DiagnosticHypothesis.Confidence (self-reported by
+	// the model), this is independently verifiable: the same tool output would
+	// produce the same signal regardless of what the model concludes from it.
+	// Used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go) to force a
+	// human-reviewed gate even when the model's own ESCALATE_TO/confidence would
+	// otherwise let a hop close out silently.
+	EventTypeObjectiveEvidence EventType = "objective_evidence"
 )
 
 // RequestCategory classifies the type of user request.
@@ -258,11 +279,75 @@ type DelegationVerification struct {
 	// DestructiveConfirmed is the subset of ToolsConfirmed whose ActionClass is Destructive.
 	DestructiveConfirmed []string `json:"destructive_confirmed"`
 	// Mismatch is true when the delegation was classified as destructive or write but
-	// the audit trail contains no confirmed tool execution of that class or stronger.
+	// the audit trail contains no confirmed tool execution of that class or stronger,
+	// OR when NarratedNotConfirmed is non-empty (see below) — the two causes are
+	// distinguished by which of DestructiveConfirmed/WriteConfirmed/NarratedNotConfirmed
+	// is populated, not by a separate flag.
 	Mismatch bool `json:"mismatch"`
 	// MismatchReason explains why a potential mismatch was downgraded to non-alerting
 	// (e.g. approval_mode=manual means no execution is expected).
 	MismatchReason string `json:"mismatch_reason,omitempty"`
+	// NarratedNotConfirmed lists tool names the model's own reasoning (agent_reasoning
+	// events' ToolCalls) said it invoked, but which produced no matching tool_execution
+	// event anywhere in the trace, and which no policy_decision deny event explains.
+	// Computed regardless of ActionClass — unlike the write/destructive check above,
+	// this catches fabricated-or-narrated tool use on read delegations too, which are
+	// the bulk of actual triage/diagnosis work.
+	NarratedNotConfirmed []string `json:"narrated_not_confirmed,omitempty"`
+	// TargetDrift lists connection strings a tool call in this hop actually used that
+	// differ from the connection_string the playbook run was invoked with. Populated
+	// by checkTargetScope (cmd/gateway/playbooks.go), independent of Mismatch — a
+	// real tool call can execute cleanly (no Mismatch) while still targeting the wrong
+	// server. May be recorded on its own event, separate from the event this hop's
+	// write/destructive/narration verification produced.
+	TargetDrift []string `json:"target_drift,omitempty"`
+	// TargetDriftDetail carries the same drift as TargetDrift, but attributed to
+	// the specific tool call that produced each divergent connection string —
+	// TargetDrift alone discards this, since it's built from a deduplicated set.
+	// Additive: a new field alongside TargetDrift rather than a breaking change
+	// to it, so existing consumers of TargetDrift are unaffected. May be empty
+	// even when TargetDrift is non-empty, for events recorded before this field
+	// existed.
+	TargetDriftDetail []TargetDriftDetail `json:"target_drift_detail,omitempty"`
+	// ProtocolViolation is true when a triage-typed playbook's hop ended
+	// without emitting a required TRANSITION_TO/ESCALATE_TO signal at all
+	// (not even an explicit "none") — computed by protocolViolation
+	// (cmd/gateway/playbooks.go), independent of Mismatch/TargetDrift. May be
+	// recorded on its own event, separate from the event this hop's
+	// write/destructive/narration verification produced.
+	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+}
+
+// TargetDriftDetail attributes a single instance of target-scope drift to the
+// tool call that produced it. See DelegationVerification.TargetDriftDetail.
+type TargetDriftDetail struct {
+	// Tool is the tool name whose call used ConnectionString.
+	Tool string `json:"tool"`
+	// ConnectionString is the divergent connection string the tool call used —
+	// one of the values also present (deduplicated) in TargetDrift.
+	ConnectionString string `json:"connection_string"`
+}
+
+// ObjectiveEvidence captures a deterministic, code-derived signal extracted
+// from a tool's raw structured result — independent of anything the LLM says
+// about it. Recorded by the agent immediately after the tool call, before the
+// result is truncated/summarized for the audit trail or handed to the LLM as
+// text. See EventTypeObjectiveEvidence for the rationale.
+type ObjectiveEvidence struct {
+	// Agent is the agent process that recorded this evidence (e.g. "k8s_agent").
+	Agent string `json:"agent,omitempty"`
+	// Tool is the tool name that produced this evidence (e.g. "get_pods").
+	Tool string `json:"tool"`
+	// Resource identifies the specific resource this evidence is about
+	// (e.g. a pod name), when applicable.
+	Resource string `json:"resource,omitempty"`
+	// Signal is a short, stable machine-readable identifier for the distress
+	// condition (e.g. "pod_restarted", "oom_killed"). objectiveEvidenceForceGate
+	// matches on this field, not on Detail.
+	Signal string `json:"signal"`
+	// Detail is a short human-readable description for operators reading the
+	// audit trail directly.
+	Detail string `json:"detail,omitempty"`
 }
 
 // RollbackExecution is set on rollback_initiated, rollback_executed, and
@@ -329,6 +414,7 @@ type Event struct {
 	DelegationVerification *DelegationVerification `json:"delegation_verification,omitempty"`
 	Outcome                *Outcome                `json:"outcome,omitempty"`
 	RollbackExecution      *RollbackExecution      `json:"rollback_execution,omitempty"`
+	ObjectiveEvidence      *ObjectiveEvidence      `json:"objective_evidence,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.

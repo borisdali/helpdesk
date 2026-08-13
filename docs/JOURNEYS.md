@@ -279,7 +279,9 @@ are returned.
 | `event_count` | Audit events recorded under this trace (excludes `delegation_verification` and `verification_outcome` plumbing events) |
 | `retry_count` | Number of mutation-tool re-poll attempts (non-zero means a tool had to wait for state to propagate but ultimately succeeded) |
 | `origin` | Dispatch path for this Journey: `"agent"` for LLM-mediated interactions, `"gateway"` for gateway-originated NL queries. Taken from the first `tool_execution` event in the trace. See [§7.1](#71-origin-values-in-journeys). |
-| `has_mismatch` | `true` when at least one `delegation_verification` event in this Journey has `mismatch=true` — meaning an agent returned success but no matching tool execution appears in the audit trail. Omitted (falsy) when the Journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `has_mismatch` | `true` when at least one `delegation_verification` event in this Journey has `mismatch=true` — either a write/destructive delegation with no matching tool execution in the audit trail, or (any action class, including read) the agent's own reasoning narrated calling a tool that never actually executed and no policy denial explains it. Omitted (falsy) when the Journey is clean. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `has_target_drift` | `true` when at least one `delegation_verification` event in this Journey has a non-empty `target_drift` — a real tool call in this Journey used a different `connection_string` than the run was invoked with. Independent of `has_mismatch`: a real, genuinely-executed tool call can still target the wrong server. Omitted (falsy) when clean. The Journey summary only carries this boolean — the underlying `delegation_verification` event additionally carries `target_drift_detail` (tool-attributed) which `faulttest vault journey <trace_id>` fetches separately to show inline. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope). |
+| `has_protocol_violation` | `true` when at least one `delegation_verification` event in this Journey has `protocol_violation=true` — a `PlaybookType == "triage"` hop resolved without emitting `TRANSITION_TO`/`ESCALATE_TO` at all (not even an explicit `"none"`). Independent of `has_mismatch`/`has_target_drift`. Omitted (falsy) when clean. See [PLAYBOOKS.md — Decision flow](PLAYBOOKS.md#decision-flow). |
 | `incident_run_id` | `plr_*` playbook run ID when this Journey is linked to an incident run. Populated for triage and remediation Journeys that originated from a gateway playbook invocation. Empty for ad-hoc or non-incident sessions. |
 
 ### 5.6 Journey outcomes
@@ -289,7 +291,9 @@ in the trace. The priority order (highest to lowest) is:
 
 | Outcome | Priority | Meaning |
 |---------|----------|---------|
-| `unverified_claim` | 9 | A destructive delegation completed but no destructive tool execution appears in the audit trail — strong indicator of LLM fabrication. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `unverified_claim` | 9 | Either a write/destructive delegation completed with no matching tool execution in the audit trail, or (any action class) the agent's own reasoning narrated calling a tool that never executed — strong indicator of LLM fabrication. See [§8](#8-unverified-claims-and-llm-fabrication-detection). |
+| `target_drift_detected` | 9 | A tool call in this run used a different `connection_string` than the run was invoked with — a real, genuinely-executed tool call, just against the wrong target. Tied with `unverified_claim`, not ranked above/below it — both mean "don't trust this output as-is" for different reasons. Use `has_mismatch`/`has_target_drift` on the Journey object, not just the `outcome` string, to detect both when a single trace has one of each. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope). |
+| `protocol_violation` | 9 | A `PlaybookType == "triage"` hop resolved without emitting `TRANSITION_TO`/`ESCALATE_TO` at all — a required response-format signal was simply omitted, not explicitly declined. Tied with `unverified_claim`/`target_drift_detected`, not ranked — all three mean "don't trust this output as-is" for different reasons. Use `has_protocol_violation` on the Journey object, not just the `outcome` string, to detect it alongside the other two on the same trace. No gate is forced when this fires — see [PLAYBOOKS.md — Decision flow](PLAYBOOKS.md#decision-flow) for why. |
 | `error` | 8 | At least one tool or delegation returned an error |
 | `denied` | 7 | A policy engine decision denied the action |
 | `escalation_required` | 6 | A mutation tool exhausted all retries and could not confirm the action; manual escalation needed |
@@ -639,9 +643,18 @@ See [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a complete walkt
 ## 8. Unverified Claims and LLM Fabrication Detection
 
 The `unverified_claim` outcome is the highest-severity Journey outcome and
-indicates a potential **LLM fabrication** incident: the orchestrator delegated
-a destructive action (e.g. terminate a connection) to a sub-agent, but the
-audit trail shows no destructive tool was actually executed.
+indicates a potential **LLM fabrication** incident, via either of two
+independent checks:
+
+1. The orchestrator delegated a write or destructive action (e.g. terminate a
+   connection) to a sub-agent, but the audit trail shows no matching tool
+   executed.
+2. (Any action class, including read) the agent's own reasoning named a tool
+   it called, but no matching `tool_execution` event exists anywhere in the
+   trace, and no policy denial explains the absence. This is the newer of the
+   two checks — reads are the bulk of actual triage/diagnosis work, so a model
+   narrating an investigation it never actually performed was previously
+   invisible to check 1 above.
 
 ### How it works
 
@@ -651,18 +664,26 @@ After every `delegate_to_agent` call, the orchestrator:
    fetch all tool executions recorded by the sub-agent since the delegation started
 2. Classifies each tool against the known action map (`terminate_connection` →
    `destructive`, `cancel_query` → `write`, etc.)
-3. Emits a `delegation_verification` event recording the result
-4. If the delegation was `destructive` and **no destructive tool execution**
-   appears in the trail, sets `mismatch=true`
+3. If the delegation was `destructive`/`write` and **no matching tool
+   execution** appears in the trail, sets `mismatch=true`
+4. Independently of (3) — regardless of action class — fetches
+   `agent_reasoning` events for the trace and checks whether every tool name
+   the model's own reasoning says it invoked has a matching `tool_execution`
+   event. Any that don't are collected into `narrated_not_confirmed`. If
+   non-empty, and no `policy_decision` event with `effect=deny` exists on the
+   trace (which would mean the "missing" call was actually a legitimate
+   denial, not fabrication), sets `mismatch=true`.
+5. Emits a `delegation_verification` event recording the result
 
-When `mismatch=true`, four independent signals fire simultaneously:
+When `mismatch=true`, several independent signals fire simultaneously:
 
 | Signal | Where | Details |
 |--------|-------|---------|
 | **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object |
+| **Incident narrative chapter** | `GET /api/v1/incidents/{runID}` | `has_mismatch: true` on the TRIAGE/ESCALATION/REMEDIATION chapter that owns the flagged trace — inline, no separate Journey lookup needed; `vault incidents` prints an inline `⚠ unverified` line |
 | **HTTP response header** | API caller | Gateway sets `X-Audit-Mismatch: true` on the HTTP response for the offending request |
 | **Prometheus counter** | Gateway `/metrics` | `gateway_fabrication_mismatches_total{agent, action_class}` incremented |
-| **Security alert** | auditor → incident webhook | auditor fires a `CRITICAL` `fabrication_mismatch` incident to `--incident-webhook` |
+| **Security alert** | auditor → incident webhook | `CRITICAL` `fabrication_mismatch` when check 3 fired (write/destructive-absence, unchanged); a lower `WARNING`-level `narrated_tool_not_confirmed` alert (not forwarded to the incident webhook) when check 4 fired *without* check 3 also firing — kept off the CRITICAL path until this newer check's false-positive rate is observed on real traffic |
 
 Additionally, the LLM's system prompt instructs it to report the mismatch to the
 user and **not** claim success.
@@ -683,6 +704,9 @@ curl -s "http://localhost:1199/v1/events?trace_id=tr_9b3f1c7e&event_type=delegat
 The `delegation_verification` event shows:
 - `tools_confirmed`: what the agent actually executed
 - `destructive_confirmed`: which of those were destructive
+- `narrated_not_confirmed`: tool names the agent's own reasoning named but
+  which never actually executed (empty when the mismatch is the
+  write/destructive-absence kind instead)
 - `mismatch`: whether there is a discrepancy
 
 You can also spot mismatches directly on the Journey object without a separate filter — any Journey with `"has_mismatch": true` had at least one fabrication event, regardless of what other outcome it carries.

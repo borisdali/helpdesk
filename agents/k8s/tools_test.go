@@ -1348,6 +1348,173 @@ func TestGetPodsTool_AmbiguousCluster_Rejected(t *testing.T) {
 	}
 }
 
+// --- objective_evidence (pod distress) tests ---
+
+func TestGetPodsTool_RestartedPod_RecordsObjectiveEvidence(t *testing.T) {
+	// End-to-end: a real restart count on a fetched pod must produce a real
+	// objective_evidence audit event via the getPodsImpl call site, not just
+	// via a direct unit call to recordPodDistressEvidence.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pg-cluster-minkube-1", Namespace: "db"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:         "postgres",
+					RestartCount: 2,
+					LastTerminationState: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							Reason:   "Error",
+							ExitCode: 255,
+						},
+					},
+				},
+			},
+		},
+	}
+	cs := fake.NewClientset(pod)
+	defer injectFakeClientset("", cs)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_evidence_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_evidence", "trace_evidence")
+	defer func() { toolAuditor = origAuditor }()
+
+	ctx := newK8sTestContext()
+	result, err := getPodsTool(ctx, GetPodsArgs{Namespace: "db"})
+	if err != nil {
+		t.Fatalf("getPodsTool() error = %v", err)
+	}
+	if result.Count != 1 || result.Pods[0].Restarts != 2 {
+		t.Fatalf("expected 1 pod with 2 restarts, got %+v", result)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		EventType: audit.EventTypeObjectiveEvidence,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "pod_restarted" {
+		t.Errorf("Signal = %q, want pod_restarted (Reason=Error, not OOMKilled)", ev.Signal)
+	}
+	if ev.Resource != "pg-cluster-minkube-1" {
+		t.Errorf("Resource = %q, want pg-cluster-minkube-1", ev.Resource)
+	}
+	if ev.Tool != "get_pods" {
+		t.Errorf("Tool = %q, want get_pods", ev.Tool)
+	}
+}
+
+func TestGetPodsTool_HealthyPod_NoObjectiveEvidence(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-healthy", Namespace: "production"},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "app", Ready: true}}, // RestartCount: 0
+		},
+	}
+	cs := fake.NewClientset(pod)
+	defer injectFakeClientset("", cs)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_evidence_healthy_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_healthy", "trace_healthy")
+	defer func() { toolAuditor = origAuditor }()
+
+	ctx := newK8sTestContext()
+	if _, err := getPodsTool(ctx, GetPodsArgs{Namespace: "production"}); err != nil {
+		t.Fatalf("getPodsTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		EventType: audit.EventTypeObjectiveEvidence,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events for a healthy pod, got %d", len(events))
+	}
+}
+
+func TestRecordPodDistressEvidence_NilAuditor(t *testing.T) {
+	origAuditor := toolAuditor
+	toolAuditor = nil
+	defer func() { toolAuditor = origAuditor }()
+
+	// Should be a no-op and not panic.
+	recordPodDistressEvidence(context.Background(), GetPodsResult{
+		Pods: []PodInfo{{Name: "p1", Restarts: 5}},
+	})
+}
+
+func TestRecordPodDistressEvidence_OOMKilled(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_oom_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_oom", "trace_oom")
+	defer func() { toolAuditor = origAuditor }()
+
+	recordPodDistressEvidence(context.Background(), GetPodsResult{
+		Pods: []PodInfo{
+			{Name: "healthy-pod", Restarts: 0},
+			{
+				Name:     "oom-pod",
+				Restarts: 3,
+				LastState: &LastTerminatedState{
+					Reason:    "OOMKilled",
+					OOMKilled: true,
+					ExitCode:  137,
+				},
+			},
+		},
+	})
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		EventType: audit.EventTypeObjectiveEvidence,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 event (only the OOMKilled pod), got %d", len(events))
+	}
+	if events[0].ObjectiveEvidence.Signal != "oom_killed" {
+		t.Errorf("Signal = %q, want oom_killed", events[0].ObjectiveEvidence.Signal)
+	}
+	if events[0].ObjectiveEvidence.Resource != "oom-pod" {
+		t.Errorf("Resource = %q, want oom-pod", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
 // --- get_pod_resources tests ---
 
 // injectFakeClientset injects cs under the given context key and returns cleanup.

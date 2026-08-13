@@ -223,6 +223,25 @@ func resolveDatabaseInfo(connStrOrName string) (databaseInfo, error) {
 				IsFromInfraConfig: true,
 			}, nil
 		}
+		// Not a direct key match — check container_name as an alias. The infra
+		// config schema records this explicitly (e.g. "test-pg" as the Docker
+		// container for the "test-db" entry) and prompt context surfaces it to
+		// the model, but until now no resolution path here actually recognized
+		// it — a caller passing the container name literally (rather than
+		// relying on the model to silently substitute the canonical key from
+		// context) got a hard rejection below instead of a successful resolve.
+		for id, db := range infraConfig.DBServers {
+			if db.ContainerName != "" && db.ContainerName == connStrOrName {
+				slog.Info("resolved container name to infra entry", "container_name", connStrOrName, "id", id)
+				return databaseInfo{
+					Name:              id,
+					ConnectionStr:     db.ResolvedConnectionString(),
+					Tags:              db.Tags,
+					Sensitivity:       db.Sensitivity,
+					IsFromInfraConfig: true,
+				}, nil
+			}
+		}
 		// infraConfig is set but name not registered — check ephemeral registry.
 		ephemeralDBsMu.RLock()
 		if db, ok := ephemeralDBs[connStrOrName]; ok {

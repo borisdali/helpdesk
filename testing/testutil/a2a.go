@@ -48,13 +48,41 @@ type AgentResponse struct {
 	// Populated when the triage playbook emits HYPOTHESIS_N: lines.
 	DiagnosticReport map[string]any
 	// GateReason is "low_confidence" when the gate was forced by the gateway
-	// because the primary hypothesis confidence was below 50%. Empty otherwise.
+	// because the primary hypothesis confidence was below 50%, or
+	// "objective_evidence:<signal>" when forced by deterministic tool evidence
+	// (e.g. a real K8s pod restart/OOM kill). Empty otherwise.
 	GateReason string
+	// EvidenceWarnings lists hops where the gateway recorded objective, code-derived
+	// tool evidence (e.g. a real pod restart/OOM kill) but the model's own output did
+	// not escalate or transition to another playbook — set independent of Status;
+	// populated on both pending_gate and normal responses, since there is no
+	// next-hop candidate to gate approval for in this case. Empty otherwise.
+	EvidenceWarnings []string
 	// ChainedRunID is the run ID of the auto-chained follow-on playbook when
 	// the gateway completed a TRANSITION_TO/ESCALATE_TO chain inline (force or
 	// auto approval mode). Non-empty means the gateway already ran remediation —
 	// callers should not trigger a second remediation run.
 	ChainedRunID string
+	// TargetDrift lists connection strings a tool call in this run actually used
+	// that differ from the connection_string the playbook run was invoked with —
+	// see checkTargetScope (cmd/gateway/playbooks.go). Empty when no drift was
+	// detected or the run had no connection_string to check against.
+	TargetDrift []string
+	// ObjectiveEvidenceSignals lists deduplicated, code-derived evidence signal
+	// names (e.g. "pod_restarted", "oom_killed") recorded across every hop of
+	// this run — covers both the force-gate path (GateReason contains
+	// "objective_evidence:<signal>") and the warn-only path (EvidenceWarnings),
+	// uniformly and without string-parsing gate_reason. See
+	// objectiveEvidenceForceGate (cmd/gateway/playbooks.go).
+	ObjectiveEvidenceSignals []string
+	// Mismatch is true when a delegation_verification event for this run had
+	// Mismatch=true — the model narrated calling a tool (or claimed a
+	// write/destructive action) that produced no matching tool_execution
+	// event. See checkFabricationRisk (cmd/gateway/playbooks.go). The
+	// orthogonal counterpart to TargetDrift: this needs a claimed tool call
+	// that never executed at all, TargetDrift needs a real call at the wrong
+	// target.
+	Mismatch bool
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

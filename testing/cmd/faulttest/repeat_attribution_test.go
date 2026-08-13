@@ -60,7 +60,7 @@ func TestRepeatAttribution_NilCompleter_DoesNotPanic(t *testing.T) {
 
 	// postStabilityCert with an attribution summary where all are UNKNOWN — must not panic.
 	attrPtr := &summary
-	postStabilityCert(ctx, cfg, f, sr, attrPtr)
+	postStabilityCert(ctx, cfg, f, sr, CleanReport{}, attrPtr)
 
 	if gotBody == nil {
 		t.Error("postStabilityCert: no request received at mock gateway")

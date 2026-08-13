@@ -1,11 +1,17 @@
 series_id: pbs_checkpoint_bgwriter_triage
 name: Checkpoint & bgwriter Triage
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
 agent_name: postgres_database_agent
 approval_mode: auto
+# Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
+# The gateway validates emitted TRANSITION_TO directives against this list and
+# coerces anything outside it to requires_operator_approval — preventing the
+# model from inventing playbook names. No cross-domain escalations declared.
+transitions_to:
+  - pbs_bgwriter_remediate
 problem_class: performance
 author: aiHelpDesk
 description: |

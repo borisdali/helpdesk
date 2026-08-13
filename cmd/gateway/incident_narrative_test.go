@@ -24,6 +24,13 @@ type mockIncidentAuditd struct {
 	// PriorRunID — i.e. what GET .../playbook-runs?prior_run_id=<key> should
 	// return. Absent key ⇒ empty runs array (no successor for that hop).
 	nextRunByPriorID map[string]*audit.PlaybookRun
+	// journeyByTraceID maps a trace_id to the JourneySummary GET
+	// /v1/journeys?trace_id=<key> should return. Absent key ⇒ empty array
+	// (no Journey found for that trace — the fail-open case).
+	journeyByTraceID map[string]*audit.JourneySummary
+	// journeyRequestCount counts GET /v1/journeys requests per trace_id —
+	// used to assert the dedup cache in handleGetIncident actually works.
+	journeyRequestCount map[string]int
 }
 
 func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
@@ -54,6 +61,21 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 				runs = []any{next}
 			}
 			json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+
+		// Journey lookup: GET /v1/journeys?trace_id=X — bare array response,
+		// matching cmd/auditd's real handler (no envelope).
+		case strings.Contains(path, "/journeys"):
+			traceID := r.URL.Query().Get("trace_id")
+			if m.journeyRequestCount == nil {
+				m.journeyRequestCount = make(map[string]int)
+			}
+			m.journeyRequestCount[traceID]++
+			js, ok := m.journeyByTraceID[traceID]
+			if !ok {
+				json.NewEncoder(w).Encode([]audit.JourneySummary{}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode([]audit.JourneySummary{*js}) //nolint:errcheck
 
 		// Gate event lookup.
 		case strings.Contains(path, "/events"):
@@ -147,6 +169,213 @@ func TestHandleGetIncident_BasicNarrative(t *testing.T) {
 	}
 	if n.Remediation != nil {
 		t.Errorf("Remediation should be nil, got %+v", n.Remediation)
+	}
+}
+
+// TestHandleGetIncident_VerificationFlags_SurfaceOnChapter verifies that a
+// flagged Journey's has_mismatch/has_target_drift surface inline on the
+// Triage chapter, closing the gap where a confident narrative previously gave
+// no indication that its underlying tool calls weren't fully verified.
+func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_flag01",
+		SeriesID:        "pbs_db_restart_triage",
+		FindingsSummary: "Confident diagnosis",
+		Outcome:         audit.OutcomeResolved,
+		StartedAt:       time.Now().UTC(),
+		TraceID:         "tr_flag01",
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		journeyByTraceID: map[string]*audit.JourneySummary{
+			"tr_flag01": {TraceID: "tr_flag01", HasMismatch: true, HasTargetDrift: false, HasProtocolViolation: true},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_flag01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if n.Triage.TraceID != "tr_flag01" {
+		t.Errorf("Triage.TraceID = %q, want tr_flag01", n.Triage.TraceID)
+	}
+	if !n.Triage.HasMismatch {
+		t.Error("Triage.HasMismatch = false, want true — should surface inline without a separate Journey lookup")
+	}
+	if n.Triage.HasTargetDrift {
+		t.Error("Triage.HasTargetDrift = true, want false")
+	}
+	if !n.Triage.HasProtocolViolation {
+		t.Error("Triage.HasProtocolViolation = false, want true — should surface inline without a separate Journey lookup")
+	}
+}
+
+// TestHandleGetIncident_VerificationFlags_NoJourneyData_FailsOpen verifies
+// that a chapter whose trace has no discoverable Journey (no anchor event,
+// etc.) fails open to false rather than erroring — absence of a flag must
+// never be confused with "verified clean" vs "no data", but at the boolean
+// level both surface identically as false by design.
+func TestHandleGetIncident_VerificationFlags_NoJourneyData_FailsOpen(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:     "plr_flag02",
+		SeriesID:  "pbs_db_restart_triage",
+		Outcome:   audit.OutcomeResolved,
+		StartedAt: time.Now().UTC(),
+		TraceID:   "tr_flag02",
+	}
+	// journeyByTraceID deliberately has no entry for tr_flag02.
+	mock := &mockIncidentAuditd{triageRun: run}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_flag02")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if n.Triage.HasMismatch || n.Triage.HasTargetDrift || n.Triage.HasProtocolViolation {
+		t.Errorf("expected all three flags false when no Journey data exists, got HasMismatch=%v HasTargetDrift=%v HasProtocolViolation=%v",
+			n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
+	}
+}
+
+// TestHandleGetIncident_VerificationFlags_SharedTraceDedup verifies the
+// per-request journey cache: when triage and remediation share one trace_id
+// (the agent ran both in a single session — the same case buildJourneyRefs
+// already merges into "triage+remediation"), handleGetIncident must fetch
+// that trace's Journey exactly once, not once per chapter that references it.
+func TestHandleGetIncident_VerificationFlags_SharedTraceDedup(t *testing.T) {
+	const sharedTrace = "tr_shared01"
+	run := &audit.PlaybookRun{
+		RunID:          "plr_shared01",
+		SeriesID:       "pbs_db_restart_triage",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_db_restart_action",
+		StartedAt:      time.Now().UTC(),
+		TraceID:        sharedTrace,
+	}
+	remediationHop := &audit.PlaybookRun{
+		RunID:      "plr_shared02",
+		SeriesID:   "pbs_db_restart_action",
+		Outcome:    audit.OutcomeResolved,
+		PriorRunID: "plr_shared01",
+		TraceID:    sharedTrace,
+		StartedAt:  time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun:        run,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{"plr_shared01": remediationHop},
+		journeyByTraceID: map[string]*audit.JourneySummary{
+			sharedTrace: {TraceID: sharedTrace, HasMismatch: true},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_shared01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !n.Triage.HasMismatch {
+		t.Error("Triage.HasMismatch = false, want true")
+	}
+	if n.Remediation == nil || !n.Remediation.HasMismatch {
+		t.Errorf("Remediation.HasMismatch should also be true (shared trace), got %+v", n.Remediation)
+	}
+	if got := mock.journeyRequestCount[sharedTrace]; got != 1 {
+		t.Errorf("journey requests for shared trace = %d, want exactly 1 (dedup cache should prevent a second fetch)", got)
+	}
+}
+
+// TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent verifies
+// that Triage, an Escalation hop, AND Remediation each surface their OWN
+// flag value from their OWN distinct trace — closing a gap the shared-trace
+// dedup test doesn't: that test gives Triage and Remediation the *same*
+// trace/flag data (by design, to test the cache), so it can't prove
+// Remediation is wired to its own independent journey lookup rather than
+// accidentally inheriting Triage's.
+func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:       "plr_indep01",
+		SeriesID:    "pbs_db_restart_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		StartedAt:   time.Now().UTC(),
+		TraceID:     "tr_indep_triage",
+	}
+	escalation := &audit.PlaybookRun{
+		RunID:          "plr_indep02",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_db_restart_action",
+		PriorRunID:     "plr_indep01",
+		TraceID:        "tr_indep_escalation",
+		StartedAt:      time.Now().UTC(),
+	}
+	remediation := &audit.PlaybookRun{
+		RunID:      "plr_indep03",
+		SeriesID:   "pbs_db_restart_action",
+		Outcome:    audit.OutcomeResolved,
+		PriorRunID: "plr_indep02",
+		TraceID:    "tr_indep_remediation",
+		StartedAt:  time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_indep01": escalation,
+			"plr_indep02": remediation,
+		},
+		journeyByTraceID: map[string]*audit.JourneySummary{
+			"tr_indep_triage":      {HasMismatch: true, HasTargetDrift: false, HasProtocolViolation: false},
+			"tr_indep_escalation":  {HasMismatch: false, HasTargetDrift: false, HasProtocolViolation: true},
+			"tr_indep_remediation": {HasMismatch: false, HasTargetDrift: true, HasProtocolViolation: false},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_indep01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !n.Triage.HasMismatch || n.Triage.HasTargetDrift || n.Triage.HasProtocolViolation {
+		t.Errorf("Triage flags = (mismatch=%v, drift=%v, violation=%v), want (true, false, false)",
+			n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
+	}
+	if len(n.Escalations) != 1 {
+		t.Fatalf("escalations count = %d, want 1", len(n.Escalations))
+	}
+	if n.Escalations[0].HasMismatch || n.Escalations[0].HasTargetDrift || !n.Escalations[0].HasProtocolViolation {
+		t.Errorf("Escalation flags = (mismatch=%v, drift=%v, violation=%v), want (false, false, true) — must come from its own trace",
+			n.Escalations[0].HasMismatch, n.Escalations[0].HasTargetDrift, n.Escalations[0].HasProtocolViolation)
+	}
+	if n.Remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if n.Remediation.HasMismatch || !n.Remediation.HasTargetDrift || n.Remediation.HasProtocolViolation {
+		t.Errorf("Remediation flags = (mismatch=%v, drift=%v, violation=%v), want (false, true, false) — must come from its own trace, not Triage's",
+			n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation)
 	}
 }
 

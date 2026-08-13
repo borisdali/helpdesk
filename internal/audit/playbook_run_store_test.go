@@ -57,6 +57,53 @@ func TestPlaybookRunStore_RecordAndList(t *testing.T) {
 	}
 }
 
+func TestPlaybookRunStore_Purpose_RoundTrips(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	run := &PlaybookRun{
+		PlaybookID:    "pb_purpose01",
+		SeriesID:      "pbs_db_restart_triage",
+		ExecutionMode: "agent",
+		Purpose:       "diagnostic",
+		StartedAt:     time.Now().UTC(),
+	}
+	if err := s.Record(ctx, run); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got, err := s.GetByRunID(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID: %v", err)
+	}
+	if got.Purpose != "diagnostic" {
+		t.Errorf("Purpose = %q, want %q", got.Purpose, "diagnostic")
+	}
+}
+
+// TestPlaybookRunStore_MigrateIsIdempotent verifies migrate()'s documented
+// claim that re-running it against an already-migrated database is a no-op,
+// not an error — every ALTER TABLE ADD COLUMN in the migrate() list (Purpose
+// included) depends on the "duplicate column"/"already exists" error being
+// correctly swallowed on the second call. No prior test constructed a second
+// PlaybookRunStore against the same DB, so this behavior was unverified for
+// all 9 migrated columns, not just the one added by this change.
+func TestPlaybookRunStore_MigrateIsIdempotent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewStore(StoreConfig{DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if _, err := NewPlaybookRunStore(store.DB(), false); err != nil {
+		t.Fatalf("first NewPlaybookRunStore: %v", err)
+	}
+	if _, err := NewPlaybookRunStore(store.DB(), false); err != nil {
+		t.Fatalf("second NewPlaybookRunStore (migrate should be idempotent): %v", err)
+	}
+}
+
 func TestPlaybookRunStore_Update(t *testing.T) {
 	s := newPlaybookRunStore(t)
 	ctx := context.Background()
@@ -71,7 +118,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil)
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -313,7 +360,7 @@ func TestPlaybookRunStore_DiagnosticReport_RoundTrip(t *testing.T) {
 		RootCause:  "Updated root cause",
 		Hypotheses: []DiagnosticHypothesis{{Rank: 1, Text: "Updated", Confidence: 0.99, IsPrimary: true}},
 	}
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", "", report2); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "Updated findings", "", "", report2, false, ""); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	got2, err := s.GetByRunID(ctx, run.RunID)
@@ -360,7 +407,7 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 		t.Errorf("AgentTranscript should be empty before Update, got %q", got.AgentTranscript)
 	}
 
-	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", "tr_abc123", nil); err != nil {
+	if err := s.Update(ctx, run.RunID, "resolved", "", "", "findings text", "full agent reasoning narrative here", "tr_abc123", nil, true, "low_confidence+objective_evidence:pod_restarted"); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -368,8 +415,14 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByRunID after Update: %v", err)
 	}
+	if !got2.SawSignalLine {
+		t.Error("SawSignalLine = false, want true (set by Update)")
+	}
 	if got2.AgentTranscript != "full agent reasoning narrative here" {
 		t.Errorf("AgentTranscript = %q, want %q", got2.AgentTranscript, "full agent reasoning narrative here")
+	}
+	if got2.GateReason != "low_confidence+objective_evidence:pod_restarted" {
+		t.Errorf("GateReason = %q, want %q", got2.GateReason, "low_confidence+objective_evidence:pod_restarted")
 	}
 	// TraceID and PriorRunID are immutable — Update must not clear them.
 	if got2.TraceID != "tr_abc123" {

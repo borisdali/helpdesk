@@ -517,6 +517,40 @@ func cmdRun(args []string) {
 					}
 				}
 
+				// Real, code-derived tool evidence (e.g. a K8s pod restart/OOM kill)
+				// that the agent's own output didn't escalate or transition on.
+				// Populated regardless of Status — surface it here so it's visible
+				// even on a run that never reaches the pending_gate branch below.
+				if len(resp.EvidenceWarnings) > 0 {
+					evalResult.EvidenceWarnings = resp.EvidenceWarnings
+					for _, w := range resp.EvidenceWarnings {
+						fmt.Printf("  ⚠  EVIDENCE WARNING: %s\n", w)
+					}
+				}
+				// A pending_gate forced by real objective tool evidence (not the
+				// model's self-reported confidence) — see objectiveEvidenceForceGate
+				// in cmd/gateway/playbooks.go. Substring match since gate_reason can
+				// be a "+"-joined combination with low_confidence.
+				if strings.Contains(resp.GateReason, "objective_evidence:") {
+					evalResult.ObjectiveEvidenceGate = true
+				}
+				// Target-scope drift: the agent queried a server other than the one
+				// specified in the playbook run request — see checkTargetScope
+				// (cmd/gateway/playbooks.go).
+				if len(resp.TargetDrift) > 0 {
+					evalResult.TargetDrift = true
+					fmt.Printf("  ⚠  TARGET DRIFT: %v\n", resp.TargetDrift)
+				}
+				if len(resp.ObjectiveEvidenceSignals) > 0 {
+					evalResult.ObjectiveEvidenceSignals = resp.ObjectiveEvidenceSignals
+				}
+				// Fabrication risk: the agent narrated calling a tool that never
+				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
+				if resp.Mismatch {
+					evalResult.Mismatch = true
+					fmt.Printf("  ⚠  FABRICATION RISK: mismatch (narrated tool call not confirmed)\n")
+				}
+
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.
 				if !evalResult.JudgeSkipped && evalResult.JudgeReasoning != "" {
@@ -676,6 +710,7 @@ func cmdRun(args []string) {
 
 		if repeatMode {
 			sr := buildStabilityReport(f, repResults)
+			cr := buildCleanReport(f, repResults)
 			var attrSummary *attributionSummary
 			if cfg.DiagnosisModel != "" && f.DiagnosisPlaybookSeriesID != "" {
 				classes, taxonomyVersion := fetchRootCauseClasses(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID)
@@ -686,10 +721,11 @@ func cmdRun(args []string) {
 				}
 			}
 			sr.Print(attrSummary)
+			cr.Print()
 			if cfg.DiagnosisModel == "" {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
-				postStabilityCert(ctx, cfg, f, sr, attrSummary)
+				postStabilityCert(ctx, cfg, f, sr, cr, attrSummary)
 			}
 		}
 

@@ -52,6 +52,25 @@ type TriageChapter struct {
 	Findings         string                  `json:"findings,omitempty"`
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	Transcript       string                  `json:"transcript,omitempty"`
+	// TraceID identifies this chapter's Journey — the WHAT view behind this
+	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation below.
+	TraceID string `json:"trace_id,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation mirror the corresponding
+	// Journey's flags (GET /v1/journeys?trace_id=X) — surfaced inline here so a
+	// reader doesn't have to separately look up the Journey to know this
+	// chapter's tool calls weren't fully verified. Absent (false) can mean
+	// either "verified clean" or "no Journey data exists for this trace"
+	// (fail-open by design, same ambiguity already present at the Journey
+	// layer) — not a positive attestation either way.
+	HasMismatch          bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine is read directly off the persisted PlaybookRun (not a
+	// Journey lookup like the three flags above) — true iff the agent's raw
+	// response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of
+	// its resolved value. Lets a reader distinguish "explicitly declined"
+	// from a genuine protocol violation without needing the raw transcript.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // GateChapter holds the operator approval decision.
@@ -71,6 +90,13 @@ type RemediationChapter struct {
 	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
 	Findings   string                   `json:"findings,omitempty"`
 	Transcript string                   `json:"transcript,omitempty"`
+	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
+	TraceID              string `json:"trace_id,omitempty"`
+	HasMismatch          bool   `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool   `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine — see TriageChapter's doc comment.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // EscalationHop is one intermediate playbook run reached via ESCALATE_TO,
@@ -90,6 +116,12 @@ type EscalationHop struct {
 	TraceID          string                   `json:"trace_id,omitempty"`
 	StartedAt        time.Time                `json:"started_at"`
 	CompletedAt      *time.Time               `json:"completed_at,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
+	HasMismatch          bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// SawSignalLine — see TriageChapter's doc comment.
+	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -114,6 +146,23 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// journeyCache dedupes fetchJourneySummary calls when two chapters share a
+	// trace_id (e.g. an agent that ran triage and remediation in one session —
+	// buildJourneyRefs already merges this case for the Journeys[] list; this
+	// cache prevents fetching the same Journey twice for the flags below).
+	journeyCache := make(map[string]*audit.JourneySummary)
+	lookupJourney := func(traceID string) *audit.JourneySummary {
+		if traceID == "" {
+			return nil
+		}
+		if js, ok := journeyCache[traceID]; ok {
+			return js
+		}
+		js := g.fetchJourneySummary(r.Context(), traceID)
+		journeyCache[traceID] = js
+		return js
+	}
+
 	narrative := IncidentNarrative{
 		IncidentID:     runID,
 		StartedAt:      run.StartedAt,
@@ -125,7 +174,14 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			Findings:         run.FindingsSummary,
 			DiagnosticReport: run.DiagnosticReport,
 			Transcript:       run.AgentTranscript,
+			TraceID:          run.TraceID,
+			SawSignalLine:    run.SawSignalLine,
 		},
+	}
+	if js := lookupJourney(run.TraceID); js != nil {
+		narrative.Triage.HasMismatch = js.HasMismatch
+		narrative.Triage.HasTargetDrift = js.HasTargetDrift
+		narrative.Triage.HasProtocolViolation = js.HasProtocolViolation
 	}
 
 	// 2. Gate chapter — present when triage was an informed gate.
@@ -169,6 +225,13 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	// was set is the remediation — singular, wherever it falls in the chain.
 	// Classification stops at the first remediation hop found; a remediation
 	// run that itself further escalates is out of scope for now.
+	//
+	// Each hop also gets a lookupJourney call for HasMismatch/HasTargetDrift.
+	// This is sequential, matching fetchRunSteps just below it and the rest of
+	// this file/package's convention (no goroutine fan-out anywhere in
+	// cmd/gateway) — worst case (maxEscalationHops = 20) this roughly doubles
+	// the existing per-hop round-trip count, the same risk class as the
+	// fetchRunSteps calls already here, not a new one.
 	hops := g.fetchEscalationHops(r.Context(), runID)
 
 	var classified []*audit.PlaybookRun
@@ -177,14 +240,22 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		classified = append(classified, hop)
 		if predecessor.TransitionedTo != "" {
 			steps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
-			narrative.Remediation = &RemediationChapter{
-				RunID:      hop.RunID,
-				Playbook:   hop.SeriesID,
-				Outcome:    hop.Outcome,
-				Steps:      steps,
-				Findings:   hop.FindingsSummary,
-				Transcript: hop.AgentTranscript,
+			rem := &RemediationChapter{
+				RunID:         hop.RunID,
+				Playbook:      hop.SeriesID,
+				Outcome:       hop.Outcome,
+				Steps:         steps,
+				Findings:      hop.FindingsSummary,
+				Transcript:    hop.AgentTranscript,
+				TraceID:       hop.TraceID,
+				SawSignalLine: hop.SawSignalLine,
 			}
+			if js := lookupJourney(hop.TraceID); js != nil {
+				rem.HasMismatch = js.HasMismatch
+				rem.HasTargetDrift = js.HasTargetDrift
+				rem.HasProtocolViolation = js.HasProtocolViolation
+			}
+			narrative.Remediation = rem
 			predecessor = hop
 			break
 		}
@@ -204,6 +275,12 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			Transcript:       hop.AgentTranscript,
 			TraceID:          hop.TraceID,
 			StartedAt:        hop.StartedAt,
+			SawSignalLine:    hop.SawSignalLine,
+		}
+		if js := lookupJourney(hop.TraceID); js != nil {
+			eh.HasMismatch = js.HasMismatch
+			eh.HasTargetDrift = js.HasTargetDrift
+			eh.HasProtocolViolation = js.HasProtocolViolation
 		}
 		if !hop.CompletedAt.IsZero() {
 			t := hop.CompletedAt
@@ -259,6 +336,40 @@ func (g *Gateway) fetchGateAcknowledgedEvent(ctx context.Context, runID string) 
 		return nil
 	}
 	return &events[0]
+}
+
+// fetchJourneySummary fetches the Journey for traceID, used to surface
+// HasMismatch/HasTargetDrift inline on the chapter that owns this trace.
+// Returns nil on any error or when no Journey exists for this trace (e.g. the
+// trace never got a discoverable anchor event) — fail-open, matching every
+// other fetch helper in this file; callers must not treat nil as "verified
+// clean", only as "no signal available".
+//
+// GET /v1/journeys returns a bare JSON array, not an envelope — unlike
+// fetchAllRunFeedback's {"feedback": [...]} shape, decode directly into
+// []audit.JourneySummary (confirmed against cmd/auditd's handler).
+func (g *Gateway) fetchJourneySummary(ctx context.Context, traceID string) *audit.JourneySummary {
+	if g.auditURL == "" || traceID == "" {
+		return nil
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/journeys?trace_id=" + traceID + "&limit=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	defer resp.Body.Close()
+	var journeys []audit.JourneySummary
+	if err := json.NewDecoder(resp.Body).Decode(&journeys); err != nil || len(journeys) == 0 {
+		return nil
+	}
+	return &journeys[0]
 }
 
 // maxEscalationHops bounds how many prior_run_id hops handleGetIncident will

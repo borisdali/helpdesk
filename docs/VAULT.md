@@ -310,10 +310,11 @@ The per-version breakdown is the primary learning signal: it shows whether step 
 | `STABLE(N) Xd` | STABLE but cert is X days old — shown after 14 days as an age reminder |
 | `STABLE(N)  attr=<class>` | Outcome-stable and conclusion-stable: all N runs attributed to the same root-cause class |
 | `STABLE(N)  attr=<class>(split)` | Outcome-stable but conclusion-unstable: runs attributed to different classes within the same taxonomy |
+| `STABLE(N)  ⚠2/5 warnings` | Outcome-stable but dirty on the CLEAN axis: 2 of 5 runs tripped a verified, code-derived warning signal (independent of `attr=` — both can appear together) |
 | `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
 | `—` | No certification run has been posted for this fault |
 
-The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md).
+The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md). The `⚠N/M warnings` suffix, and how it gates real (non-faulttest) incidents by default, is documented in [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
 
 The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
 
@@ -367,6 +368,7 @@ Triage consistency
   Runs          : 5
   Pass rate     : 100%
   Conf range    : 5pp  (primary hypothesis, passing runs only)
+  Clean         : yes
   Playbook      : pbs_lock_chain_triage
   Diagnosis model: claude-sonnet-4-6
   Judge model   : claude-haiku-4-5-20251001
@@ -476,6 +478,29 @@ Remediation:   0.88 (LLM judge)
 ```
 
 The `Score` line matches the `SCORE` column in `vault incidents <series-id>` — it is the `overall_score` from `run_evaluation` (`diagnosis_score × 0.6 + remediation_score × 0.4`). The `Diagnosis` line shows the raw component scores before weighting.
+
+**Verification warnings appear inline, when present.** If a chapter's underlying tool calls
+weren't fully verified — the agent narrated calling a tool that never actually executed, or a real
+tool call targeted a different server than requested — an inline warning line prints right under
+that chapter's `Findings`, so it's visible without a separate `vault journey <trace_id>` lookup
+(the example above is a fully clean run, so neither warning appears there):
+
+```
+── TRIAGE ──────────────────────────────────────────────────
+Playbook:  pbs_db_restart_triage
+Findings:  Connection refused; no infra entry for this target
+           ⚠ unverified — no matching tool execution in the audit trail
+
+── ESCALATION 1/1 ───────────────────────────────────────────
+Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
+Findings:  check_host runtime=kubectl — target is Kubernetes-managed
+           ⚠ target drift — a tool call used a different connection string
+```
+
+Absence of either line can mean either "verified clean" or "no Journey data exists for this
+chapter's trace" (fail-open by design) — not a positive attestation either way. See
+[MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
+and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
 
 The `[auto_judge]` tag on a feedback line means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`), not by a human operator. Human-submitted feedback carries no tag. Both sources are counted equally in `vault accuracy` and `vault calibration`.
 

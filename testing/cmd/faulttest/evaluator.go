@@ -13,35 +13,35 @@ import (
 
 // EvalResult contains the evaluation outcome for a single failure test.
 type EvalResult struct {
-	FailureID    string  `json:"failure_id"`
-	FailureName  string  `json:"failure_name"`
-	Category     string  `json:"category"`
-	Score        float64 `json:"score"`
-	Passed       bool    `json:"passed"`
+	FailureID   string  `json:"failure_id"`
+	FailureName string  `json:"failure_name"`
+	Category    string  `json:"category"`
+	Score       float64 `json:"score"`
+	Passed      bool    `json:"passed"`
 	// RunID is the gateway playbook run_id (plr_*) for this fault's triage run.
 	// Set from resp.RunID after the agent call; empty for injection failures.
-	RunID        string  `json:"run_id,omitempty"`
-	KeywordPass  bool    `json:"keyword_pass"`
+	RunID         string `json:"run_id,omitempty"`
+	KeywordPass   bool   `json:"keyword_pass"`
 	DiagnosisPass bool   `json:"diagnosis_pass"`
-	ToolEvidence bool    `json:"tool_evidence"`
+	ToolEvidence  bool   `json:"tool_evidence"`
 	// ToolEvidenceMode records how tool evidence was determined:
 	//   "structured"   — exact name matching from the tool_call_summary DataPart (Option C, ADK agents)
 	//   "text_fallback" — keyword matching against response text (Option B, non-ADK or gateway path)
 	//   ""              — no expected tools; field not applicable
 	ToolEvidenceMode string `json:"tool_evidence_mode,omitempty"`
-	ResponseText string  `json:"response_text"`
-	Duration     string  `json:"duration"`
-	Error        string  `json:"error,omitempty"`
+	ResponseText     string `json:"response_text"`
+	Duration         string `json:"duration"`
+	Error            string `json:"error,omitempty"`
 
 	// Component scores — always populated, allow operators to see exactly why
 	// the composite score came out as it did without reverse-engineering.
-	KeywordScore   float64 `json:"keyword_score"`             // 0.0 or 1.0 (any-of match)
-	ToolScore      float64 `json:"tool_score"`                // 0.0-1.0 (fraction of expected tools found)
-	DiagnosisScore float64 `json:"diagnosis_score"`           // 0.0-1.0 from judge or category match
-	JudgeReasoning  string `json:"judge_reasoning,omitempty"`
-	JudgeModel      string `json:"judge_model,omitempty"`
-	JudgeSkipped    bool   `json:"judge_skipped,omitempty"`
-	JudgeFatalError bool   `json:"judge_fatal_error,omitempty"` // 401/403 — will not recover on retry
+	KeywordScore    float64 `json:"keyword_score"`   // 0.0 or 1.0 (any-of match)
+	ToolScore       float64 `json:"tool_score"`      // 0.0-1.0 (fraction of expected tools found)
+	DiagnosisScore  float64 `json:"diagnosis_score"` // 0.0-1.0 from judge or category match
+	JudgeReasoning  string  `json:"judge_reasoning,omitempty"`
+	JudgeModel      string  `json:"judge_model,omitempty"`
+	JudgeSkipped    bool    `json:"judge_skipped,omitempty"`
+	JudgeFatalError bool    `json:"judge_fatal_error,omitempty"` // 401/403 — will not recover on retry
 
 	// CrystalBall is true when the gateway ran without playbook scaffolding.
 	// Set only on --via-gateway runs; false on direct A2A calls.
@@ -54,6 +54,37 @@ type EvalResult struct {
 	ProtocolViolation bool `json:"protocol_violation,omitempty"`
 	// GatewayWarnings holds warnings returned by the gateway for this run.
 	GatewayWarnings []string `json:"gateway_warnings,omitempty"`
+	// EvidenceWarnings lists hops where the gateway recorded real, code-derived
+	// tool evidence (e.g. a pod restart/OOM kill) that the agent's own output did
+	// not escalate or transition on — populated regardless of gate/pending_gate
+	// status, see testutil.AgentResponse.EvidenceWarnings.
+	EvidenceWarnings []string `json:"evidence_warnings,omitempty"`
+	// ObjectiveEvidenceGate is true when resp.GateReason contains
+	// "objective_evidence:" — the gateway forced a pending_gate based on real,
+	// code-derived tool evidence (not the model's self-reported confidence).
+	// Substring match, not equality: gate_reason can be a "+"-joined
+	// combination, e.g. "low_confidence+objective_evidence:pod_restarted".
+	ObjectiveEvidenceGate bool `json:"objective_evidence_gate,omitempty"`
+	// TargetDrift is true when resp.TargetDrift is non-empty — the agent queried
+	// a server other than the one specified in the playbook run request. See
+	// checkTargetScope (cmd/gateway/playbooks.go).
+	TargetDrift bool `json:"target_drift,omitempty"`
+	// ObjectiveEvidenceSignals mirrors resp.ObjectiveEvidenceSignals — deduplicated
+	// code-derived evidence signal names (e.g. "pod_restarted", "oom_killed").
+	// Additive alongside ObjectiveEvidenceGate: covers both the gated and the
+	// warn-only (EvidenceWarnings) case uniformly, without string-parsing
+	// gate_reason. Empty on responses recorded before this field existed.
+	ObjectiveEvidenceSignals []string `json:"objective_evidence_signals,omitempty"`
+	// Mismatch is true when resp.Mismatch is true — a delegation_verification
+	// event for this run had Mismatch=true: the model narrated calling a tool
+	// (or claimed a write/destructive action) that produced no matching
+	// tool_execution event. See checkFabricationRisk (cmd/gateway/playbooks.go).
+	// The orthogonal counterpart to TargetDrift: this needs a claimed tool call
+	// that never executed at all, TargetDrift needs a real call at the wrong
+	// target. Tied at the same Journey-outcome priority (9, "unverified_claim")
+	// as TargetDrift's "target_drift_detected" and ProtocolViolation's own
+	// outcome — all three mean "don't trust this output as-is."
+	Mismatch bool `json:"mismatch,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -64,9 +95,9 @@ type EvalResult struct {
 	// Phase 2 scoring fields.
 	// RemediationScore is 0.0-1.0: 1.0 if recovered within half the verify timeout,
 	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
-	RemediationScore  float64 `json:"remediation_score,omitempty"`
+	RemediationScore float64 `json:"remediation_score,omitempty"`
 	// RemediationMethod records how remediation was triggered: "playbook", "agent_prompt", or "none".
-	RemediationMethod string  `json:"remediation_method,omitempty"`
+	RemediationMethod string `json:"remediation_method,omitempty"`
 	// OverallScore combines composite score and remediation: Score*0.6 + RemediationScore*0.4
 	// when remediation was attempted; equals Score when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`
@@ -104,23 +135,38 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
+// hasCleanWarning returns true when this run tripped any of the five
+// verified (code-derived, not self-reported) warning signals: real objective
+// tool evidence the gateway had to force a gate over, real evidence the model
+// saw but didn't act on, an outright protocol violation (omitted the
+// required TRANSITION_TO/ESCALATE_TO signal entirely), target-scope drift
+// (the agent queried a server other than the one it was asked about), or a
+// fabrication mismatch (the agent narrated calling a tool that never
+// actually executed). Used to compute the CLEAN stability axis —
+// deliberately excludes low_confidence/confidence_warning, which are
+// self-reported and already substantially captured by the existing
+// evaluation-stability axis (judge/confidence variance).
+func hasCleanWarning(er EvalResult) bool {
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch
+}
+
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
 var toolPatterns = map[string][]string{
-	"check_connection":     {"connection", "connect", "reachable", "refused"},
-	"get_database_info":    {"version", "server_version", "postgresql"},
+	"check_connection":       {"connection", "connect", "reachable", "refused"},
+	"get_database_info":      {"version", "server_version", "postgresql"},
 	"get_active_connections": {"pg_stat_activity", "active", "idle", "pid", "query"},
-	"get_connection_stats":  {"max_connections", "connections", "connection_count", "numbackends"},
-	"get_database_stats":    {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
-	"get_bgwriter_stats":    {"maxwritten_clean", "buffers_backend", "checkpoints_req"},
-	"get_config_parameter":  {"setting", "parameter", "configuration"},
+	"get_connection_stats":   {"max_connections", "connections", "connection_count", "numbackends"},
+	"get_database_stats":     {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
+	"get_bgwriter_stats":     {"maxwritten_clean", "buffers_backend", "checkpoints_req"},
+	"get_config_parameter":   {"setting", "parameter", "configuration"},
 	"get_replication_status": {"replication", "wal", "replay", "standby", "lag"},
-	"get_lock_info":         {"lock", "pg_locks", "granted", "waiting", "blocked"},
-	"get_table_stats":       {"n_dead_tup", "n_live_tup", "dead tuples", "autovacuum", "vacuum"},
-	"get_pods":              {"pod", "Running", "Pending", "CrashLoopBackOff", "ImagePull"},
-	"get_service":           {"ClusterIP", "LoadBalancer", "NodePort", "service"},
-	"get_endpoints":         {"endpoint", "address", "subset"},
-	"get_events":            {"event", "Warning", "Normal", "FailedScheduling", "BackOff"},
-	"describe_pod":          {"Conditions", "Container", "State", "Restart"},
+	"get_lock_info":          {"lock", "pg_locks", "granted", "waiting", "blocked"},
+	"get_table_stats":        {"n_dead_tup", "n_live_tup", "dead tuples", "autovacuum", "vacuum"},
+	"get_pods":               {"pod", "Running", "Pending", "CrashLoopBackOff", "ImagePull"},
+	"get_service":            {"ClusterIP", "LoadBalancer", "NodePort", "service"},
+	"get_endpoints":          {"endpoint", "address", "subset"},
+	"get_events":             {"event", "Warning", "Normal", "FailedScheduling", "BackOff"},
+	"describe_pod":           {"Conditions", "Container", "State", "Restart"},
 }
 
 // scoreToolEvidence returns (toolScore float64, toolEvidence bool, toolEvidenceMode string)
