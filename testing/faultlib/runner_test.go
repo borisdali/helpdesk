@@ -317,6 +317,33 @@ func TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated(t *testi
 	}
 }
 
+// TestRunViaPlaybook_MismatchPopulated mirrors
+// TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated for the
+// mismatch field (fabrication risk) — same class of gap: a new response
+// field silently dropped by faulttest's decode struct.
+func TestRunViaPlaybook_MismatchPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
+		"text":     "result",
+		"run_id":   "run_mismatch01",
+		"mismatch": true,
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-connection-refused", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_db_restart_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if !resp.Mismatch {
+		t.Error("Mismatch = false, want true")
+	}
+}
+
 // TestRunViaPlaybook_SendsSkipTrustGate is a regression guard for a real
 // bootstrapping requirement: faulttest traffic must always set
 // skip_trust_gate=true, unconditionally, on every playbook-run request — not

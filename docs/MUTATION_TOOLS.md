@@ -192,7 +192,7 @@ pod_name    string   required — exact pod name (from get_pods output)
 
 Runs `kubectl describe pod <name> -n <namespace>` and returns the full pod
 description: status, conditions, container states, resource requests/limits,
-events, and recent restart history. Call this before `delete_pod` to confirm
+events and recent restart history. Call this before `delete_pod` to confirm
 the pod identity and understand the current state before acting.
 
 ---
@@ -211,7 +211,7 @@ grace_period_seconds int      optional — graceful termination window in second
 ```
 
 Runs `kubectl delete pod <name> -n <namespace>`. If the pod is managed by a
-`Deployment`, `StatefulSet`, or `DaemonSet`, the controller will reschedule it
+`Deployment`, `StatefulSet` or `DaemonSet`, the controller will reschedule it
 automatically. Use to restart a single stuck or crash-looping pod without
 rolling the entire deployment.
 
@@ -308,7 +308,7 @@ services), not the node's own kernel state. Runs
 --attach=false -- chroot /host sh -c "dmesg | tail -n <lines>"`, which creates
 a short-lived, privileged pod running in the node's host namespaces with the
 node's filesystem mounted at `/host`. Use when node-level pressure
-(`MemoryPressure`/`DiskPressure` from `get_node_status`, or node warnings from
+(`MemoryPressure`/`DiskPressure` from `get_node_status` or node warnings from
 `get_events`) can't be explained by pod/container-level tools — e.g. a pod was
 evicted or OOM-killed not because of its own memory limit but because
 something else on the node exhausted memory (a "noisy neighbor").
@@ -377,12 +377,12 @@ Calls `docker restart <container_name>` (or `podman restart`) for the container 
 **Execution sequence**:
 
 1. Resolve server ID → `HostConfig` (fails immediately if server ID not in config or has no `host` block)
-2. Policy pre-check (`CheckTool` with `ActionDestructive`) — enforces operating mode, tag-based rules, and any configured blast-radius bounds. May trigger an approval request if the playbook mode requires it.
+2. Policy pre-check (`CheckTool` with `ActionDestructive`) — enforces operating mode, tag-based rules and any configured blast-radius bounds. May trigger an approval request if the playbook mode requires it.
 3. Execute `docker restart <container_name>` (or `podman restart`)
-4. Record `RecordToolCall` in audit log with server ID, runtime, container name, duration, and outcome
+4. Record `RecordToolCall` in audit log with server ID, runtime, container name, duration and outcome
 5. Return `RestartResult` with `success: true/false` and raw command output
 
-**Safeguards**: The agent's system prompt (`prompts/sysadmin.txt`) requires `check_host` and `get_host_logs` to be called before any restart recommendation. When `get_host_logs` shows a crash signal but lacks PostgreSQL-level detail, the agent is additionally instructed to call `read_pg_log_file` to read the Postgres log file via container exec before forming a hypothesis. The agent is instructed to **not** recommend restarting when disk is full, when logs show data directory corruption, or when logs show `PANIC` on data files — in those cases it escalates to a human DBA instead. The policy pre-check is a hard enforcement layer independent of the agent's reasoning.
+**Safeguards**: The agent's system prompt (`prompts/sysadmin.txt`) requires `check_host` and `get_host_logs` to be called before any restart recommendation. When `get_host_logs` shows a crash signal but lacks PostgreSQL-level detail, the agent is additionally instructed to call `read_pg_log_file` to read the Postgres log file via container exec before forming a hypothesis. The agent is instructed to **not** recommend restarting when disk is full, when logs show data directory corruption or when logs show `PANIC` on data files — in those cases it escalates to a human DBA instead. The policy pre-check is a hard enforcement layer independent of the agent's reasoning.
 
 **Policy note**: `restart_container` carries the `auto_remediation_eligible: true` flag. When a playbook uses `execution_mode: agent_auto` and lists `restart_container` in its `permitted_tools`, the agent may call this tool without a per-call approval gate. Policy rules still apply — the operating mode must be `fix` and any configured tag-based deny rules must not match.
 
@@ -400,7 +400,7 @@ Calls `systemctl restart <systemd_unit>` for the systemd unit associated with th
 
 Applies only to hosts where the database runs directly under systemd (not containerised). If the server's `host` block has `container_runtime` set, this tool returns an error — use `restart_container` instead.
 
-**Execution sequence**: identical to `restart_container` (§1.10) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording, and `auto_remediation_eligible` flag apply.
+**Execution sequence**: identical to `restart_container` (§1.10) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording and `auto_remediation_eligible` flag apply.
 
 ---
 
@@ -437,7 +437,7 @@ curl -X POST http://localhost:1199/v1/rollbacks \
   -d '{"original_event_id": "tool_abc12345", "justification": "scaled too far"}'
 ```
 
-See [ROLLBACK.md](ROLLBACK.md) for the full pre-mutation state capture design, Tier 1/Tier 2 DB capture, and governance flow.
+See [ROLLBACK.md](ROLLBACK.md) for the full pre-mutation state capture design, Tier 1/Tier 2 DB capture and governance flow.
 
 ---
 
@@ -544,7 +544,7 @@ Mechanisms B and C close this gap.
 When the db agent is called via the orchestrator's `delegate_to_agent` tool,
 each delegation is a **single A2A round-trip**. The db agent cannot keep the
 conversation open and wait for the user to type "yes". Without a signal, the
-db agent completes Step 1, returns session info, and the delegation ends —
+db agent completes Step 1, returns session info and the delegation ends —
 leaving the orchestrator in a loop that repeats Step 1 indefinitely.
 
 The orchestrator system prompt (`prompts/orchestrator_audit.txt`) instructs
@@ -851,7 +851,7 @@ For the investigation workflow and root-cause guide, see
 right *class*?" It does not ask whether that tool was pointed at the
 *right target*. An agent can genuinely execute `check_connection` or
 `get_session_info` — no fabrication, no missing audit event — against a
-server that has nothing to do with the incident, and delegation
+server that has nothing to do with the incident and delegation
 verification will report a clean, verified result.
 
 `checkTargetScope` (`cmd/gateway/playbooks.go`) closes that specific gap
@@ -865,7 +865,7 @@ for playbook runs. After an agent-mode playbook run completes, it:
    references to their canonical connection string via infra config
    first, so a server referenced by name in the request and by full DSN
    in the tool call isn't flagged as a false positive. Three forms
-   resolve: the infra config key, the `name` display field, and the
+   resolve: the infra config key, the `name` display field and the
    `container_name` alias (e.g. `"test-pg"` as the Docker container for
    the `"test-db"` entry) — found live that the third form silently fell
    through to "cannot resolve, skipping" before this was added, so a
@@ -885,7 +885,7 @@ for playbook runs. After an agent-mode playbook run completes, it:
 This check is **unconditional** — it runs before the crystal-ball branch
 in `handlePlaybookRunAsAgent`, so it fires the same way whether or not
 playbook guidance and escalation chaining are in effect. It is purely an
-audit-trail read; nothing about it depends on, or can be influenced by,
+audit-trail read; nothing about it depends on or can be influenced by,
 the agent's own response text.
 
 **Example** (crystal-ball mode, `db-wal-disk-full-k8s` fault): the agent
@@ -919,7 +919,7 @@ set to the run's trace so it attaches to the journey), independent of whatever
 verification event
 §5's own check already recorded for the same hop — the two are orthogonal
 signals (a real tool call, at the wrong target, is not the same problem as no
-tool call at all), so a hop can produce either, both, or neither. The stored
+tool call at all), so a hop can produce either, both or neither. The stored
 event's `outcome_status` is `target_drift_detected`, tied at the same
 priority (9) as `unverified_claim` in the outcome-elevation table — both
 represent "this agent's output can't be trusted as-is" for different reasons,
@@ -935,7 +935,7 @@ event(s) for the trace and shows the tool/value detail inline under the
 "TARGET DRIFT WARNING" section (falling back to the plain `target_drift`
 values when `target_drift_detail` is empty, e.g. for events recorded before
 this field existed) — the journey summary's `has_target_drift` boolean alone
-never carried enough to answer "which tool, and to where."
+never carried enough to answer "which tool and to where."
 
 **Test coverage**: `cmd/gateway/playbook_run_test.go` —
 `TestCheckTargetScope_NoDrift`, `TestCheckTargetScope_Drift`,
@@ -988,7 +988,7 @@ the three warning sections wired to `fetchDelegationVerificationEvents`).
 §5.4 noted reads are exempt from the write/destructive-absence mismatch
 check — there's no expected tool class to be absent for a read. But that
 left a real gap: a model can narrate calling a tool and describe its
-"result" without ever actually invoking it, and for a read delegation
+"result" without ever actually invoking it and for a read delegation
 nothing caught this. This was found live, not hypothetically — inspecting
 the raw audit trail (`GET /v1/events?trace_id=...`) for a real triage hop
 showed the agent's `agent_reasoning` events naming a tool (`read_pg_log`) it
@@ -1003,12 +1003,12 @@ every tool name in their `tool_calls` field (structured `FunctionCall` data,
 not text-scanned — the model merely mentioning a tool name in prose cannot
 trigger this). Any name with no matching `tool_execution` event is
 narrated-but-unconfirmed. This check is **unconditional on `action_class`** —
-orthogonal to, and independent of, the write/destructive-absence switch — so
-it covers read, write, and destructive delegations alike.
+orthogonal to and independent of, the write/destructive-absence switch — so
+it covers read, write and destructive delegations alike.
 
 **Suppression — not every narrated-but-unconfirmed call is fabrication.**
 Two common, legitimate cases produce the same signature: a policy-denied tool
-call (the model tried, was correctly denied, and reported that) and a
+call (the model tried, was correctly denied and reported that) and a
 hallucinated or unregistered tool name — both skip `ToolAuditor.RecordToolCall`
 entirely, same as real fabrication would. Before flagging a mismatch, the
 check fetches `policy_decision` events for the trace; if any has
@@ -1033,7 +1033,7 @@ already suppresses the write/destructive-absence mismatch when
 `approval_mode=manual` (the agent is expected to propose, not execute). That
 suppression does **not** extend to narration mismatches — a narrated
 Tool call unrelated to the pending destructive action is still a genuine
-fabrication signal, and manual-hold destructive delegations don't explain it.
+fabrication signal and manual-hold destructive delegations don't explain it.
 
 **Test coverage**: `internal/audit/delegate_tool_test.go` —
 `TestBuildDelegationVerification_MismatchFromNarration`,
@@ -1064,7 +1064,7 @@ call and an agent response with no trace of the denial anywhere in the JSON.
 **The check**: `checkPolicyDenials` (`cmd/gateway/playbooks.go`) fetches
 `policy_decision` events for the hop's trace via the newly-exported
 `audit.FetchPolicyDecisionEvents` (mirroring `FetchToolExecutionEvents`/
-`FetchObjectiveEvidenceEvents`), filters to `Effect == "deny"`, and maps each
+`FetchObjectiveEvidenceEvents`), filters to `Effect == "deny"` and maps each
 to a `PolicyDenialSummary{ResourceType, ResourceName, PolicyName, Message}`.
 Called for both the primary hop and every auto-chained hop, accumulating into
 `extra["policy_denials"]` across hops (same accumulate-don't-overwrite pattern
@@ -1082,7 +1082,7 @@ as `warnings`).
 ```
 
 **Tool-name attribution is deliberately out of scope.** `PolicyDecision`
-(`internal/audit/event.go`) has no tool-name field today, and
+(`internal/audit/event.go`) has no tool-name field today and
 `RecordPolicyDecision` never populates `Event.Tool` for `policy_decision`
 events — adding that would mean changing `agentutil.PolicyEnforcer`, a
 different package/layer than everything else here. `ResourceType`/
@@ -1103,16 +1103,16 @@ call sites fire and accumulate into the same response array, not just that
 
 ### 5.9 Fabrication-Risk Visibility (`checkFabricationRisk`)
 
-§5.7's `Mismatch`/`NarratedNotConfirmed` fields — the actual fabrication
-signal — were computed on every playbook-run hop (`runAgentPlaybook` →
+§5.7's `Mismatch`/`NarratedNotConfirmed` fields are the actual fabrication
+signal, which are computed on every playbook-run hop (`runAgentPlaybook` →
 `proxyToAgent` → `proxyToAgentWithTool` with `toolName=""`) and durably
 recorded on a `delegation_verification` event, but never reached the live
-response at all. The only trace was an `X-Audit-Mismatch: true` response
-header set by `proxyToAgentWithTool` — no detail, and never read by the
+response. The only trace was an `X-Audit-Mismatch: true` response
+header set by `proxyToAgentWithTool`, but with no detail and never read by the
 playbook-run path (`handlePlaybookRunAsAgent` writes its own response via
-`extra`, entirely separate from that header). Found live during manual
-testing: a crystal-ball run against an unresolvable `connection_string`
-produced a `delegation_verification` event with `mismatch: true` and
+`extra`, entirely separate from that header). This has been reported during live during 
+testing: a Crystal Ball run against an unresolvable `connection_string`
+and produced a `delegation_verification` event with `mismatch: true` and
 `narrated_not_confirmed: ["check_connection", "read_pg_log"]` — the model
 narrated calling both tools and described a result, but neither tool ever
 actually executed — yet the response JSON showed nothing to indicate this;
@@ -1121,13 +1121,13 @@ confirming it required querying `audit_events` directly.
 This is the orthogonal counterpart to [target-scope drift](#56-target-scope-drift-detection-checktargetscope):
 drift requires a *real* tool call against the *wrong* server; fabrication
 requires the model to *claim* a tool call that never executed at all. A
-given hop can trip either, both, or neither — they are independent checks
+given hop can trip either, both or neither — they are independent checks
 over independent evidence.
 
 **The check**: `checkFabricationRisk` (`cmd/gateway/playbooks.go`) fetches
 `delegation_verification` events for the hop's trace via the newly-exported
 `audit.FetchDelegationVerificationEvents` (mirroring
-`FetchPolicyDecisionEvents`/`FetchObjectiveEvidenceEvents`), and aggregates
+`FetchPolicyDecisionEvents`/`FetchObjectiveEvidenceEvents`) and aggregates
 `Mismatch`/`NarratedNotConfirmed` across every returned event. Multiple
 `delegation_verification` events can exist for the same trace — drift
 (§5.6) and protocol-violation (`recordProtocolViolationEvent`) each write
@@ -1145,6 +1145,17 @@ accumulate-don't-overwrite pattern as `policy_denials`/`warnings`).
 }
 ```
 
+**Now feeds the CLEAN cert** (`hasCleanWarning`/`warningTypesFor` in
+faulttest), the fifth signal alongside `objective_evidence`/
+`protocol_violation`/`target_drift`. `mismatch` was already tied at the
+same Journey-outcome priority (9, `unverified_claim`) as `target_drift`'s
+`target_drift_detected` and `protocol_violation`'s own outcome — leaving it
+out of CLEAN while including its two same-tier siblings would have been
+inconsistent, not a deliberate scoping choice. The `warning_distribution`
+bucket is a flat `"mismatch"` key (not tool-keyed like `objective_evidence`)
+since `narrated_not_confirmed` is an arbitrary list of tool names, not a
+small fixed vocabulary. See [`ATTRIBUTION_CERTS.md` §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+
 **Test coverage**: `cmd/gateway/playbook_run_test.go` —
 `TestCheckFabricationRisk_NoAuditURL`, `_NoEvents`, `_Mismatch`,
 `_IgnoresDriftAndProtocolViolationEvents` (the multi-event-shape aggregation
@@ -1152,6 +1163,12 @@ safety above),
 `TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops`,
 `TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse` (end-to-end
 through the real HTTP path).
+`testing/faultlib/runner_test.go` — `TestRunViaPlaybook_MismatchPopulated`
+(decode-wiring, same class of gap `TestRunViaPlaybook_EvidenceWarningsPopulated`
+exists to catch).
+`testing/cmd/faulttest/clean_test.go` — `TestBuildCleanReport_SomeWarnings`,
+`TestWarningTypesFor`, `TestHasCleanWarning` all extended with a `Mismatch`
+case.
 
 ---
 
@@ -1212,7 +1229,7 @@ tool issues both a list call for pod discovery/cleanup and a singular get for
 the status poll) — see `agents/k8s/tools_test.go` for details. There is
 deliberately no `TestDebugNodeDmesgTool_BlastRadiusDenied`: this tool checks
 blast radius pre-execution with a hardcoded `PodsAffected: 1` (see
-[§1.9](#19-debug_node_dmesg--worker-node-kernel-log-pull)), and
+[§1.9](#19-debug_node_dmesg--worker-node-kernel-log-pull)) and
 `internal/policy/engine.go`'s `max_pods_affected` condition is gated on `> 0`
 — `max_pods_affected: 0` is treated as "unset", not "deny anything" — so no
 valid threshold can ever deny a call whose count is always exactly `1`. This
@@ -1311,7 +1328,7 @@ Unit tests for `buildDelegationVerification` and `formatVerificationBlock`
 | `TestBuildDelegationVerification_ReadDelegation_NeverMismatch` | Read delegations with no tools are never a mismatch |
 | `TestBuildDelegationVerification_NoAuditURL` | Empty `auditURL` → zero-value verification, no mismatch |
 | `TestBuildDelegationVerification_WriteAction_NeverMismatch` | Write delegations are not subject to the mismatch check |
-| `TestFormatVerificationBlock_Mismatch` | Block contains `MISMATCH`, delegation event ID, and `Do NOT claim success` instruction |
+| `TestFormatVerificationBlock_Mismatch` | Block contains `MISMATCH`, delegation event ID and `Do NOT claim success` instruction |
 | `TestFormatVerificationBlock_Clean` | Clean block does not contain `MISMATCH`; does contain confirmed tool name |
 
 Journey store tests for the `unverified_claim` outcome (`internal/audit/store_test.go`):

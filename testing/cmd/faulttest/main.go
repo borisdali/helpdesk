@@ -544,6 +544,12 @@ func cmdRun(args []string) {
 				if len(resp.ObjectiveEvidenceSignals) > 0 {
 					evalResult.ObjectiveEvidenceSignals = resp.ObjectiveEvidenceSignals
 				}
+				// Fabrication risk: the agent narrated calling a tool that never
+				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
+				if resp.Mismatch {
+					evalResult.Mismatch = true
+					fmt.Printf("  ⚠  FABRICATION RISK: mismatch (narrated tool call not confirmed)\n")
+				}
 
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.

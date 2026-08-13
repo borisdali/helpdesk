@@ -30,18 +30,19 @@ func TestBuildCleanReport_SomeWarnings(t *testing.T) {
 		{Passed: true, EvidenceWarnings: []string{"hop x recorded evidence but did not escalate"}},
 		{Passed: true, ObjectiveEvidenceGate: true},
 		{Passed: true, TargetDrift: true},
+		{Passed: true, Mismatch: true},
 		{Passed: true},
 	}
 	r := buildCleanReport(f, results)
 
-	if r.N != 6 {
-		t.Errorf("N: got %d, want 6", r.N)
+	if r.N != 7 {
+		t.Errorf("N: got %d, want 7", r.N)
 	}
-	if r.WarningCount != 4 {
-		t.Errorf("WarningCount: got %d, want 4 (protocol violation, evidence warning, objective evidence gate, target drift)", r.WarningCount)
+	if r.WarningCount != 5 {
+		t.Errorf("WarningCount: got %d, want 5 (protocol violation, evidence warning, objective evidence gate, target drift, mismatch)", r.WarningCount)
 	}
 	if r.isClean() {
-		t.Error("should not be clean: 4/6 runs tripped a warning signal")
+		t.Error("should not be clean: 5/7 runs tripped a warning signal")
 	}
 	// EvidenceWarnings and ObjectiveEvidenceGate are two manifestations of the
 	// same underlying signal — both counted under "objective_evidence".
@@ -53,6 +54,9 @@ func TestBuildCleanReport_SomeWarnings(t *testing.T) {
 	}
 	if r.WarningDistribution["target_drift"] != 1 {
 		t.Errorf("WarningDistribution[target_drift]: got %d, want 1", r.WarningDistribution["target_drift"])
+	}
+	if r.WarningDistribution["mismatch"] != 1 {
+		t.Errorf("WarningDistribution[mismatch]: got %d, want 1", r.WarningDistribution["mismatch"])
 	}
 }
 
@@ -103,6 +107,8 @@ func TestWarningTypesFor(t *testing.T) {
 		{"signals present — keyed by signal, not flat bucket", EvalResult{EvidenceWarnings: []string{"x"}, ObjectiveEvidenceSignals: []string{"pod_restarted"}}, []string{"objective_evidence:pod_restarted"}},
 		{"multiple signals on one run", EvalResult{ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"pod_restarted", "oom_killed"}}, []string{"objective_evidence:pod_restarted", "objective_evidence:oom_killed"}},
 		{"gate fired but signals empty — falls back to flat bucket", EvalResult{ObjectiveEvidenceGate: true}, []string{"objective_evidence"}},
+		{"mismatch", EvalResult{Mismatch: true}, []string{"mismatch"}},
+		{"all five types on one run", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, TargetDrift: true, Mismatch: true}, []string{"objective_evidence", "protocol_violation", "target_drift", "mismatch"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +155,8 @@ func TestHasCleanWarning(t *testing.T) {
 		{"protocol violation", EvalResult{ProtocolViolation: true}, true},
 		{"objective evidence gate", EvalResult{ObjectiveEvidenceGate: true}, true},
 		{"target drift", EvalResult{TargetDrift: true}, true},
-		{"all four", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true}, true},
+		{"mismatch", EvalResult{Mismatch: true}, true},
+		{"all five", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true, Mismatch: true}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

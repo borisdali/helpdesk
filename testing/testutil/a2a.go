@@ -75,6 +75,14 @@ type AgentResponse struct {
 	// uniformly and without string-parsing gate_reason. See
 	// objectiveEvidenceForceGate (cmd/gateway/playbooks.go).
 	ObjectiveEvidenceSignals []string
+	// Mismatch is true when a delegation_verification event for this run had
+	// Mismatch=true — the model narrated calling a tool (or claimed a
+	// write/destructive action) that produced no matching tool_execution
+	// event. See checkFabricationRisk (cmd/gateway/playbooks.go). The
+	// orthogonal counterpart to TargetDrift: this needs a claimed tool call
+	// that never executed at all, TargetDrift needs a real call at the wrong
+	// target.
+	Mismatch bool
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

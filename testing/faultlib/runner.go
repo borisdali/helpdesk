@@ -225,6 +225,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		ChainedRunID             string         `json:"chained_run_id,omitempty"`
 		TargetDrift              []string       `json:"target_drift,omitempty"`
 		ObjectiveEvidenceSignals []string       `json:"objective_evidence_signals,omitempty"`
+		Mismatch                 bool           `json:"mismatch,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -254,6 +255,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		ChainedRunID:             result.ChainedRunID,
 		TargetDrift:              result.TargetDrift,
 		ObjectiveEvidenceSignals: result.ObjectiveEvidenceSignals,
+		Mismatch:                 result.Mismatch,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)

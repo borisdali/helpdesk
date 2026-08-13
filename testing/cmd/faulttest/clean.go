@@ -48,6 +48,13 @@ func warningTypesFor(er EvalResult) []string {
 	if er.TargetDrift {
 		types = append(types, "target_drift")
 	}
+	if er.Mismatch {
+		// Flat bucket, not tool-keyed: unlike objective_evidence's small fixed
+		// vocabulary (pod_restarted/oom_killed), narrated_not_confirmed is an
+		// arbitrary list of tool names — keying by tool name would produce an
+		// unbounded number of distinct WarningDistribution buckets.
+		types = append(types, "mismatch")
+	}
 	return types
 }
 

@@ -75,6 +75,16 @@ type EvalResult struct {
 	// warn-only (EvidenceWarnings) case uniformly, without string-parsing
 	// gate_reason. Empty on responses recorded before this field existed.
 	ObjectiveEvidenceSignals []string `json:"objective_evidence_signals,omitempty"`
+	// Mismatch is true when resp.Mismatch is true — a delegation_verification
+	// event for this run had Mismatch=true: the model narrated calling a tool
+	// (or claimed a write/destructive action) that produced no matching
+	// tool_execution event. See checkFabricationRisk (cmd/gateway/playbooks.go).
+	// The orthogonal counterpart to TargetDrift: this needs a claimed tool call
+	// that never executed at all, TargetDrift needs a real call at the wrong
+	// target. Tied at the same Journey-outcome priority (9, "unverified_claim")
+	// as TargetDrift's "target_drift_detected" and ProtocolViolation's own
+	// outcome — all three mean "don't trust this output as-is."
+	Mismatch bool `json:"mismatch,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -125,18 +135,19 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the four
+// hasCleanWarning returns true when this run tripped any of the five
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
 // saw but didn't act on, an outright protocol violation (omitted the
-// required TRANSITION_TO/ESCALATE_TO signal entirely), or target-scope drift
-// (the agent queried a server other than the one it was asked about). Used to
-// compute the CLEAN stability axis — deliberately excludes
-// low_confidence/confidence_warning, which are self-reported and already
-// substantially captured by the existing evaluation-stability axis
-// (judge/confidence variance).
+// required TRANSITION_TO/ESCALATE_TO signal entirely), target-scope drift
+// (the agent queried a server other than the one it was asked about), or a
+// fabrication mismatch (the agent narrated calling a tool that never
+// actually executed). Used to compute the CLEAN stability axis —
+// deliberately excludes low_confidence/confidence_warning, which are
+// self-reported and already substantially captured by the existing
+// evaluation-stability axis (judge/confidence variance).
 func hasCleanWarning(er EvalResult) bool {
-	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch
 }
 
 // toolPatterns maps tool names to output patterns that indicate the tool was called.
