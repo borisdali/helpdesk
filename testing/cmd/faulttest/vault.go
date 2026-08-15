@@ -1442,7 +1442,7 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 		cleanVerdict = fmt.Sprintf("no  (%d/%d run(s) tripped a verified warning signal)", cert.WarningCount, cert.NRuns)
 	}
 	fmt.Printf("  Clean         : %s\n", cleanVerdict)
-	if dist := warningDistributionString(cert.WarningDistribution); dist != "" {
+	if dist := warningDistributionString(cert.WarningDistribution, cert.NRuns); dist != "" {
 		fmt.Printf("  Warning types : %s\n", dist)
 	}
 	if cert.PlaybookSeriesID != "" {

@@ -4713,7 +4713,7 @@ func TestPrintFaultStabilityCert_ShowsWarningTypesLine(t *testing.T) {
 		printFaultStabilityCert(srv.URL, "", "k8s-crashloop", "")
 	})
 
-	if !strings.Contains(out, "Warning types : objective_evidence=1, protocol_violation=1") {
+	if !strings.Contains(out, "Warning types : objective_evidence=1(varies), protocol_violation=1(varies)") {
 		t.Errorf("expected Warning types line in output:\n%s", out)
 	}
 }

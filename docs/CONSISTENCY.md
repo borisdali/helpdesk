@@ -531,11 +531,23 @@ rather than returning early — the consistency signal is available independentl
 
 When `Clean` is `no`, a `Warning types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
-the five signals fired:
+the five signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
+count: `(predictable)` when the signal fired on *every* run (structurally baked into this
+fault/playbook/model combination — not fixable by prompting, chasing it with guidance changes is
+a dead end) vs. `(varies)` when it fired on some but not all otherwise-identical runs (the case
+actually worth investigating):
 
 ```
   Clean         : no  (2/5 run(s) tripped a verified warning signal)
-  Warning types : objective_evidence:pod_restarted=1, protocol_violation=1
+  Warning types : objective_evidence:pod_restarted=1(varies), protocol_violation=1(varies)
+```
+
+A predictable signal looks like this instead — worth knowing at a glance that no amount of
+re-running or prompt tuning will change it:
+
+```
+  Clean         : no  (5/5 run(s) tripped a verified warning signal)
+  Warning types : target_drift=5(predictable)
 ```
 
 If the cert is older than 30 days, a warning is shown:

@@ -129,15 +129,23 @@ func TestWarningDistributionString(t *testing.T) {
 	cases := []struct {
 		name string
 		dist map[string]int
+		n    int
 		want string
 	}{
-		{"empty", nil, ""},
-		{"single type", map[string]int{"protocol_violation": 1}, "protocol_violation=1"},
-		{"sorted regardless of map iteration order", map[string]int{"protocol_violation": 1, "objective_evidence": 2}, "objective_evidence=2, protocol_violation=1"},
+		{"empty", nil, 5, ""},
+		{"n<=0 skips annotation entirely", map[string]int{"protocol_violation": 1}, 0, "protocol_violation=1"},
+		{"fires every run — predictable", map[string]int{"protocol_violation": 5}, 5, "protocol_violation=5(predictable)"},
+		{"fires some but not all runs — varies", map[string]int{"protocol_violation": 2}, 5, "protocol_violation=2(varies)"},
+		{
+			"sorted regardless of map iteration order, mixed predictable/varies",
+			map[string]int{"protocol_violation": 5, "objective_evidence": 2},
+			5,
+			"objective_evidence=2(varies), protocol_violation=5(predictable)",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := warningDistributionString(tc.dist); got != tc.want {
+			if got := warningDistributionString(tc.dist, tc.n); got != tc.want {
 				t.Errorf("warningDistributionString() = %q, want %q", got, tc.want)
 			}
 		})
