@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildCleanReport_NoWarnings(t *testing.T) {
 	f := Failure{ID: "db-lock-contention", Name: "Lock contention"}
@@ -57,6 +60,36 @@ func TestBuildCleanReport_SomeWarnings(t *testing.T) {
 	}
 	if r.WarningDistribution["mismatch"] != 1 {
 		t.Errorf("WarningDistribution[mismatch]: got %d, want 1", r.WarningDistribution["mismatch"])
+	}
+}
+
+// TestCleanReport_Print_ShowsPredictableVsVariesAnnotation exercises the
+// actual printed stdout of faulttest run --repeat N's inline stability
+// report — the third of three render paths for warningDistributionString
+// (the other two: the function directly via TestWarningDistributionString,
+// and vault accuracy's persisted-cert display via
+// TestPrintFaultStabilityCert_ShowsWarningTypesLine). Only the underlying
+// WarningDistribution map was checked by TestBuildCleanReport_SomeWarnings;
+// this confirms the annotation actually reaches the operator's terminal on
+// this path too, not just the other two.
+func TestCleanReport_Print_ShowsPredictableVsVariesAnnotation(t *testing.T) {
+	f := Failure{ID: "custom-k8s-oomkill-signal", Name: "OOMKilled"}
+	results := []EvalResult{
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"oom_killed"}},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"oom_killed"}},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"oom_killed"}, Mismatch: true},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"oom_killed"}},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"oom_killed"}},
+	}
+	r := buildCleanReport(f, results)
+
+	out := captureStdout(func() { r.Print() })
+
+	if !strings.Contains(out, "objective_evidence:oom_killed=5(predictable)") {
+		t.Errorf("expected predictable annotation on a signal that fired every run:\n%s", out)
+	}
+	if !strings.Contains(out, "mismatch=1(varies)") {
+		t.Errorf("expected varies annotation on a signal that fired only some runs:\n%s", out)
 	}
 }
 

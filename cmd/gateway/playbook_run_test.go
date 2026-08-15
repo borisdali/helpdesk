@@ -4395,10 +4395,10 @@ func TestLowConfidenceForceGate(t *testing.T) {
 
 func TestObjectiveEvidenceForceGate(t *testing.T) {
 	cases := []struct {
-		name       string
-		events     []audit.Event
-		wantFire   bool
-		wantReason string
+		name        string
+		events      []audit.Event
+		wantFire    bool
+		wantReasons []string
 	}{
 		{
 			name:     "no events — no gate",
@@ -4424,36 +4424,63 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:   true,
-			wantReason: "pod_restarted",
+			wantFire:    true,
+			wantReasons: []string{"pod_restarted"},
 		},
 		{
 			name: "real oom_killed signal — gate fires",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 			},
-			wantFire:   true,
-			wantReason: "oom_killed",
+			wantFire:    true,
+			wantReasons: []string{"oom_killed"},
 		},
 		{
-			name: "unrelated events mixed in — first real signal wins",
+			name: "unrelated events mixed in — real signal still found",
 			events: []audit.Event{
 				{EventType: audit.EventTypePolicyDecision},
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}}, // empty signal, skipped
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:   true,
-			wantReason: "pod_restarted",
+			wantFire:    true,
+			wantReasons: []string{"pod_restarted"},
+		},
+		{
+			// The gap found and fixed in v0.25.0: a hop calling both get_pods
+			// and get_events (as pbs_k8s_pod_crash_triage's own guidance
+			// expects) can find independent real evidence from each — both
+			// must surface, not just whichever event came first.
+			name: "distinct signals from two different tools — both surface",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_events", Signal: "failed_scheduling"}},
+			},
+			wantFire:    true,
+			wantReasons: []string{"pod_restarted", "failed_scheduling"},
+		},
+		{
+			name: "same signal from two different events — deduplicated",
+			events: []audit.Event{
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-a"}},
+				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-b"}},
+			},
+			wantFire:    true,
+			wantReasons: []string{"oom_killed"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fire, reason := objectiveEvidenceForceGate(tc.events)
+			fire, reasons := objectiveEvidenceForceGate(tc.events)
 			if fire != tc.wantFire {
 				t.Errorf("objectiveEvidenceForceGate() fire = %v, want %v", fire, tc.wantFire)
 			}
-			if reason != tc.wantReason {
-				t.Errorf("objectiveEvidenceForceGate() reason = %q, want %q", reason, tc.wantReason)
+			if len(reasons) != len(tc.wantReasons) {
+				t.Fatalf("objectiveEvidenceForceGate() reasons = %v, want %v", reasons, tc.wantReasons)
+			}
+			for i := range reasons {
+				if reasons[i] != tc.wantReasons[i] {
+					t.Errorf("objectiveEvidenceForceGate() reasons[%d] = %q, want %q", i, reasons[i], tc.wantReasons[i])
+				}
 			}
 		})
 	}
@@ -4922,6 +4949,86 @@ func mockGateAuditdPlaybookWithEvidence(t *testing.T, pb *audit.Playbook, signal
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// mockGateAuditdPlaybookWithMultipleEvidence is mockGateAuditdPlaybookWithEvidence's
+// multi-signal sibling — one distinct ObjectiveEvidence event per signal,
+// as a real hop calling both get_pods and get_events would produce.
+func mockGateAuditdPlaybookWithMultipleEvidence(t *testing.T, pb *audit.Playbook, signals []string) *httptest.Server {
+	t.Helper()
+	pbData, _ := json.Marshal(pb)
+	var evEvents []audit.Event
+	for _, sig := range signals {
+		evEvents = append(evEvents, audit.Event{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Resource: "pg-cluster-minkube-1", Signal: sig}})
+	}
+	evidenceData, _ := json.Marshal(evEvents)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/events") &&
+			r.URL.Query().Get("event_type") == "objective_evidence":
+			w.Write(evidenceData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_evidence_multi01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_MultipleSignals is the
+// end-to-end regression test for the gap found and fixed in v0.25.0:
+// objectiveEvidenceForceGate used to return only the first matching signal
+// it found, silently dropping any others from gate_reason and
+// objective_evidence_signals. A single hop calling both get_pods and
+// get_events (as pbs_k8s_pod_crash_triage's own guidance expects) can find
+// independent real evidence from each — both must reach the live response.
+func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_MultipleSignals(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_k8s_pod_crash01",
+		SeriesID:      "pbs_k8s_pod_crash_triage",
+		Name:          "K8s Pod Crash Triage",
+		Guidance:      "Check pod state and events.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Pod recovered after a restart and is now healthy.\n\n" +
+		"HYPOTHESIS_1: pod restarted and was evicted due to node pressure | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
+		"ROOT_CAUSE: HYPOTHESIS_1\n" +
+		"FINDINGS: pod recovered; no further action needed\n" +
+		"TRANSITION_TO: pbs_db_config_recovery\n"
+
+	auditSrv := mockGateAuditdPlaybookWithMultipleEvidence(t, pb, []string{"pod_restarted", "evicted"})
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"pg-cluster-minkube-local","context":"pod keeps restarting"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Errorf("status = %q, want pending_gate", resp["status"])
+	}
+	if resp["gate_reason"] != "objective_evidence:pod_restarted,evicted" {
+		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted,evicted — both signals must surface, not just the first", resp["gate_reason"])
+	}
+	signals, ok := resp["objective_evidence_signals"].([]any)
+	if !ok || len(signals) != 2 || signals[0] != "pod_restarted" || signals[1] != "evicted" {
+		t.Errorf("objective_evidence_signals = %v, want [pod_restarted evicted] — both distinct signals from the hop must be surfaced", resp["objective_evidence_signals"])
+	}
 }
 
 // TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate verifies that a hop with a
