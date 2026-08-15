@@ -524,7 +524,7 @@ null
 >     --image-pull-policy=Never \
 >     --restart=Never \
 >     --namespace=helpdesk-system \
->     --env="HELPDESK_CLIENT_API_KEY=$GWKEY" \
+>     --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_CLIENT_API_KEY" \
 >     --attach --rm -i \
 >     -- faulttest vault incidents plr_42968c7e --gateway http://helpdesk-gateway:8080
 If you don't see a command prompt, try pressing enter.
@@ -608,7 +608,7 @@ And the corresponding (doubly-linked) Journey:
 >     --image-pull-policy=Never \
 >     --restart=Never \
 >     --namespace=helpdesk-system \
->     --env="HELPDESK_CLIENT_API_KEY=$GWKEY" \
+>     --env="HELPDESK_CLIENT_API_KEY=$HELPDESK_CLIENT_API_KEY" \
 >     --attach --rm -i \
 >     -- faulttest vault journeys tr_7122554b-10c --gateway http://helpdesk-gateway:8080
 
