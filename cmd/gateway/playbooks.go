@@ -1461,7 +1461,7 @@ func (g *Gateway) trustNotYetEarnedForceGate(seriesID string) bool {
 		return true
 	}
 	for _, c := range certs {
-		if !c.IsStable || !c.IsClean {
+		if !c.IsStable || !c.IsClean || !c.AttributionConsistent {
 			return true
 		}
 	}

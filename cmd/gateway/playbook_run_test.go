@@ -4516,12 +4516,32 @@ func TestTrustNotYetEarnedForceGate_FailsClosed_NoCertOnRecord(t *testing.T) {
 
 func TestTrustNotYetEarnedForceGate_Earned_AllCertsStableAndClean(t *testing.T) {
 	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
-		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
-		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true},
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true, AttributionConsistent: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true, AttributionConsistent: true},
 	})
 	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
 	if g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
-		t.Error("expected earned (false) when every known cert is stable and clean")
+		t.Error("expected earned (false) when every known cert is stable, clean, and attribution-consistent")
+	}
+}
+
+// TestTrustNotYetEarnedForceGate_NotEarned_OneAttributionInconsistent covers
+// the gap found live during v0.24.0 release-notes review: db-wal-disk-full-k8s
+// scored STABLE(5), 100% pass rate, while attribution split 3/5 wal-disk-full
+// vs. 1 clean-shutdown vs. 1 oom-kill. If also CLEAN, that cert would have
+// passed the production trust gate and auto-chained unattended despite the
+// model disagreeing with itself on root cause ~1/3 of the time — exactly the
+// "rubric gap" ATTRIBUTION_CERTS.md §1 exists to flag, not something safe to
+// auto-trust. AttributionConsistent now participates in the same gate
+// IsStable/IsClean already do.
+func TestTrustNotYetEarnedForceGate_NotEarned_OneAttributionInconsistent(t *testing.T) {
+	srv := serveFakeFaultStabilityCerts(t, []*audit.FaultStabilityCert{
+		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true, AttributionConsistent: true},
+		{FaultID: "k8s-crashloop", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-sonnet-4-6", IsStable: true, IsClean: true, AttributionConsistent: false},
+	})
+	g := &Gateway{auditURL: srv.URL, diagnosisModel: "claude-sonnet-4-6"}
+	if !g.trustNotYetEarnedForceGate("pbs_k8s_pod_crash_triage") {
+		t.Error("expected not earned (true) when even one known cert is STABLE+CLEAN but attribution-inconsistent")
 	}
 }
 

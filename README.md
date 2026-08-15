@@ -6,7 +6,7 @@
 </p>
 
 
-# aiHelpDesk: AI-driven incident response and remediation for production database and Kubernetes operations — governed, certified, auditable
+# aiHelpDesk: AI-driven incident response and remediation for database hosted on VM, Docker/Podman or K8s: governed, certified, auditable
 
 [![CI](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml) [![golangci-lint](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml) [![Release](https://github.com/borisdali/helpdesk/actions/workflows/release.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/release.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/borisdali/helpdesk)](https://github.com/borisdali/helpdesk/blob/main/go.mod) [![codecov](https://codecov.io/gh/borisdali/helpdesk/badge.svg)](https://codecov.io/gh/borisdali/helpdesk) [![Docs](https://img.shields.io/badge/docs-helpdesk-blue)](https://github.com/borisdali/helpdesk/tree/main/docs)
 
