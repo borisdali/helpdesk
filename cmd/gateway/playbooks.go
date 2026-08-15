@@ -31,6 +31,9 @@ func (g *Gateway) proxyToAuditd(w http.ResponseWriter, r *http.Request, auditPat
 		return
 	}
 	url := strings.TrimSuffix(g.auditURL, "/") + auditPath
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
 
 	// Build forwarded request.
 	var body io.Reader
@@ -1485,7 +1488,7 @@ func (g *Gateway) trustNotYetEarnedForceGate(seriesID string) bool {
 		return true
 	}
 	for _, c := range certs {
-		if !c.IsStable || !c.IsClean || !c.AttributionConsistent {
+		if !c.EarnsTrust() {
 			return true
 		}
 	}

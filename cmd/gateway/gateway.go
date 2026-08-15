@@ -466,6 +466,9 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/fleet/fault-stability/{faultID}", auth("GET /api/v1/fleet/fault-stability/{faultID}", func(w http.ResponseWriter, r *http.Request) {
 		g.proxyToAuditd(w, r, "/v1/fleet/fault-stability/"+r.PathValue("faultID"))
 	}))
+	mux.HandleFunc("GET /api/v1/fleet/fault-stability/{faultID}/history", auth("GET /api/v1/fleet/fault-stability/{faultID}/history", func(w http.ResponseWriter, r *http.Request) {
+		g.proxyToAuditd(w, r, "/v1/fleet/fault-stability/"+r.PathValue("faultID")+"/history")
+	}))
 
 	// Decision Hub — unified view and resolution across all decision types.
 	mux.HandleFunc("GET /api/v1/decisions", auth("GET /api/v1/decisions", g.handleGetDecisions))

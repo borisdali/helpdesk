@@ -339,6 +339,7 @@ func main() {
 	mux.HandleFunc("POST /v1/fleet/fault-stability", auth("POST /v1/fleet/fault-stability", faultStabilitySrv.handleUpsert))
 	mux.HandleFunc("GET /v1/fleet/fault-stability", auth("GET /v1/fleet/fault-stability", faultStabilitySrv.handleList))
 	mux.HandleFunc("GET /v1/fleet/fault-stability/{faultID}", auth("GET /v1/fleet/fault-stability/{faultID}", faultStabilitySrv.handleGet))
+	mux.HandleFunc("GET /v1/fleet/fault-stability/{faultID}/history", auth("GET /v1/fleet/fault-stability/{faultID}/history", faultStabilitySrv.handleHistory))
 
 	// Playbook run step endpoints (agent_approve mode)
 	mux.HandleFunc("POST /v1/fleet/playbook-runs/{runID}/steps", auth("POST /v1/fleet/playbook-runs/{runID}/steps", playbookRunStepSrv.handleCreateStep))

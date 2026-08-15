@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // FaultStabilityCert records the outcome of a --repeat N faulttest run for one
@@ -45,6 +48,30 @@ type FaultStabilityCert struct {
 	// mirroring AttributionDistribution's shape/purpose exactly — WarningCount
 	// alone can't tell an operator which kind of warning tripped a cert.
 	WarningDistribution map[string]int `json:"warning_distribution,omitempty"`
+
+	// Versioning fields (v0.25.0): which version of the playbook this cert was
+	// earned against. Deliberately NOT part of the composite key — a mismatch
+	// between PlaybookVersion and the playbook's current version is a signal
+	// ("this cert may be stale, recertify") not a reason to fork the cert row.
+	// Empty PlaybookVersion means the cert predates this field (pre-v0.25.0)
+	// and staleness can't be determined — callers should treat that as
+	// "unknown," not "fresh."
+	PlaybookVersion   string    `json:"playbook_version,omitempty"`
+	PlaybookUpdatedAt time.Time `json:"playbook_updated_at,omitempty"`
+}
+
+// EarnsTrust reports whether this cert clears the same three-condition bar
+// cmd/gateway/playbooks.go's trustNotYetEarnedForceGate requires before a
+// real (non-faulttest) incident is allowed to auto-chain unattended:
+// IsStable, IsClean, and AttributionConsistent, all true. Used both by that
+// gate (indirectly, via the same three fields) and by Upsert's regression
+// detection — "did this cert stop earning trust" is the same question asked
+// at two different times (per-request vs. per-recertification).
+func (c *FaultStabilityCert) EarnsTrust() bool {
+	if c == nil {
+		return false
+	}
+	return c.IsStable && c.IsClean && c.AttributionConsistent
 }
 
 // FaultStabilityStore persists and retrieves fault triage consistency certs.
@@ -87,13 +114,74 @@ CREATE TABLE IF NOT EXISTS fault_stability_cert (
     warning_count             INTEGER NOT NULL DEFAULT 0,
     is_clean                  INTEGER NOT NULL DEFAULT 0,
     warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (fault_id, diagnosis_model)
 )`)
+	if err != nil {
+		return err
+	}
+	return s.ensureCertHistoryTable()
+}
+
+// ensureCertHistoryTable creates fault_stability_cert_history if it doesn't
+// already exist — an append-only log of every Upsert. The cert table itself
+// only ever holds the latest snapshot per (fault_id, diagnosis_model), so
+// without this there is no way to answer "was this cert STABLE+CLEAN a
+// month ago, and when did that change," only "what is it right now."
+// Deliberately a separate table rather than a row-versioning scheme on
+// fault_stability_cert itself — the cert table's fast-lookup shape (one row
+// per fault+model) stays untouched; this is purely additive. id is
+// Go-generated ("csh_" + uuid[:8]), matching this codebase's existing
+// ID-generation convention (e.g. audit event IDs), rather than relying on
+// backend-specific AUTOINCREMENT/SERIAL semantics that would otherwise have
+// to be reconciled between the SQLite and Postgres schemas.
+//
+// Called from both createSchema (the normal NewFaultStabilityStore path)
+// and migrate (which some callers — including this package's own migration
+// tests — invoke standalone, on a *FaultStabilityStore built directly
+// without going through NewFaultStabilityStore/createSchema first). Both
+// statements are idempotent (IF NOT EXISTS), so calling this twice on a
+// normal startup is harmless.
+func (s *FaultStabilityStore) ensureCertHistoryTable() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS fault_stability_cert_history (
+    id                        TEXT    NOT NULL PRIMARY KEY,
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    recorded_at               TEXT    NOT NULL DEFAULT ''
+)`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_history_lookup
+    ON fault_stability_cert_history (fault_id, diagnosis_model, recorded_at DESC)`)
 	return err
 }
 
 // migrate applies schema changes to existing databases. Safe to call on every startup.
 func (s *FaultStabilityStore) migrate() error {
+	if err := s.ensureCertHistoryTable(); err != nil {
+		return err
+	}
 	if s.isPostgres {
 		return s.migratePostgres()
 	}
@@ -127,7 +215,10 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 		if err := s.addAttributionColumnsSQLite(); err != nil {
 			return err
 		}
-		return s.addCleanColumnsSQLite()
+		if err := s.addCleanColumnsSQLite(); err != nil {
+			return err
+		}
+		return s.addVersioningColumnsSQLite()
 	}
 
 	// Ensure diagnosis_model column exists before migration (it was added in a prior release).
@@ -182,7 +273,10 @@ func (s *FaultStabilityStore) migrateSQLite() error {
 	if err := s.addAttributionColumnsSQLite(); err != nil {
 		return err
 	}
-	return s.addCleanColumnsSQLite()
+	if err := s.addCleanColumnsSQLite(); err != nil {
+		return err
+	}
+	return s.addVersioningColumnsSQLite()
 }
 
 // addAttributionColumnsSQLite adds the v0.21.0 attribution columns to existing
@@ -215,6 +309,24 @@ func (s *FaultStabilityStore) addCleanColumnsSQLite() error {
 		`ALTER TABLE fault_stability_cert ADD COLUMN warning_distribution TEXT    NOT NULL DEFAULT '{}'`,
 	}
 	for _, stmt := range cleanCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
+				return fmt.Errorf("cert migrate: %s: %w", stmt, err)
+			}
+		}
+	}
+	return nil
+}
+
+// addVersioningColumnsSQLite adds the v0.25.0 playbook-version staleness
+// columns to existing SQLite databases. Duplicate-column errors are silently
+// ignored, same as addAttributionColumnsSQLite/addCleanColumnsSQLite.
+func (s *FaultStabilityStore) addVersioningColumnsSQLite() error {
+	versionCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN playbook_version    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range versionCols {
 		if _, err := s.db.Exec(stmt); err != nil {
 			if !containsAny(err.Error(), "duplicate column", "already exists") {
 				return fmt.Errorf("cert migrate: %s: %w", stmt, err)
@@ -272,12 +384,30 @@ func (s *FaultStabilityStore) migratePostgres() error {
 			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
 		}
 	}
+
+	// v0.25.0 playbook-version staleness columns.
+	versionCols := []string{
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS playbook_version    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range versionCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
+		}
+	}
 	return nil
 }
 
-// Upsert writes a stability cert. Each (fault_id, diagnosis_model) pair is a separate
-// cert — running with a new model creates a new row rather than overwriting the old one.
-func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCert) error {
+// Upsert writes a stability cert and appends it to fault_stability_cert_history,
+// atomically. Each (fault_id, diagnosis_model) pair is a separate cert —
+// running with a new model creates a new row rather than overwriting the old
+// one. Returns regressed=true when the fault+model previously earned trust
+// (see FaultStabilityCert.EarnsTrust) and this new cert does not — the read
+// of the prior state and the write of the new one happen inside the same
+// transaction, so this is race-free against concurrent recertification of
+// the same fault+model (which would be unusual, but not impossible if two
+// faulttest runs overlap).
+func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCert) (regressed bool, err error) {
 	if cert.TestedAt.IsZero() {
 		cert.TestedAt = time.Now().UTC()
 	}
@@ -291,10 +421,8 @@ func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCe
 	}
 	attrDistJSON := []byte("{}")
 	if len(cert.AttributionDistribution) > 0 {
-		var err error
-		attrDistJSON, err = json.Marshal(cert.AttributionDistribution)
-		if err != nil {
-			attrDistJSON = []byte("{}")
+		if b, jerr := json.Marshal(cert.AttributionDistribution); jerr == nil {
+			attrDistJSON = b
 		}
 	}
 	cleanInt := 0
@@ -303,18 +431,40 @@ func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCe
 	}
 	warnDistJSON := []byte("{}")
 	if len(cert.WarningDistribution) > 0 {
-		var err error
-		warnDistJSON, err = json.Marshal(cert.WarningDistribution)
-		if err != nil {
-			warnDistJSON = []byte("{}")
+		if b, jerr := json.Marshal(cert.WarningDistribution); jerr == nil {
+			warnDistJSON = b
 		}
 	}
-	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
+	playbookUpdatedAtStr := ""
+	if !cert.PlaybookUpdatedAt.IsZero() {
+		playbookUpdatedAtStr = cert.PlaybookUpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	testedAtStr := cert.TestedAt.UTC().Format(time.RFC3339Nano)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin cert upsert: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	prior, err := scanCert(tx.QueryRowContext(ctx, rebind(s.isPostgres, `
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), cert.FaultID, cert.DiagnosisModel))
+	switch {
+	case err == nil:
+		regressed = prior.EarnsTrust() && !cert.EarnsTrust()
+	case errors.Is(err, sql.ErrNoRows):
+		// No prior cert — never having earned trust isn't a regression from it.
+	default:
+		return false, fmt.Errorf("read prior cert: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, rebind(s.isPostgres, `
 INSERT INTO fault_stability_cert
     (fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
      primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version,
-     warning_count, is_clean, warning_distribution)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     fault_name                = excluded.fault_name,
     playbook_series_id        = excluded.playbook_series_id,
@@ -331,15 +481,42 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     taxonomy_version          = excluded.taxonomy_version,
     warning_count             = excluded.warning_count,
     is_clean                  = excluded.is_clean,
-    warning_distribution      = excluded.warning_distribution`),
+    warning_distribution      = excluded.warning_distribution,
+    playbook_version          = excluded.playbook_version,
+    playbook_updated_at       = excluded.playbook_updated_at`),
 		cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
 		cert.NRuns, cert.PassRate, cert.ConfRangePP,
-		stableInt, cert.TestedAt.UTC().Format(time.RFC3339Nano),
+		stableInt, testedAtStr,
 		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
 		cert.JudgeSpread, cert.TaxonomyVersion,
 		cert.WarningCount, cleanInt, string(warnDistJSON),
-	)
-	return err
+		cert.PlaybookVersion, playbookUpdatedAtStr,
+	); err != nil {
+		return false, fmt.Errorf("upsert cert: %w", err)
+	}
+
+	historyID := "csh_" + uuid.New().String()[:8]
+	if _, err := tx.ExecContext(ctx, rebind(s.isPostgres, `
+INSERT INTO fault_stability_cert_history
+    (id, fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
+     primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version,
+     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, recorded_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		historyID, cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
+		cert.NRuns, cert.PassRate, cert.ConfRangePP,
+		stableInt, testedAtStr,
+		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
+		cert.JudgeSpread, cert.TaxonomyVersion,
+		cert.WarningCount, cleanInt, string(warnDistJSON),
+		cert.PlaybookVersion, playbookUpdatedAtStr, testedAtStr,
+	); err != nil {
+		return false, fmt.Errorf("insert cert history: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit cert upsert: %w", err)
+	}
+	return regressed, nil
 }
 
 // GetByFaultID returns the most recently tested stability cert for the given fault,
@@ -347,7 +524,7 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultID(ctx context.Context, faultID string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), faultID)
 	return scanCert(row)
 }
@@ -356,7 +533,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), 
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultAndModel(ctx context.Context, faultID, model string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
 FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID, model)
 	return scanCert(row)
 }
@@ -372,7 +549,7 @@ FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID,
 // vacuously."
 func (s *FaultStabilityStore) GetBySeriesAndModel(ctx context.Context, seriesID, model string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
 FROM fault_stability_cert WHERE playbook_series_id = ? AND diagnosis_model = ?`), seriesID, model)
 	if err != nil {
 		return nil, err
@@ -385,7 +562,7 @@ FROM fault_stability_cert WHERE playbook_series_id = ? AND diagnosis_model = ?`)
 // When only one model has ever been used the slice has one element.
 func (s *FaultStabilityStore) ListByFaultID(ctx context.Context, faultID string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 	if err != nil {
 		return nil, err
@@ -397,10 +574,31 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 // ListAll returns all stability certs, ordered by fault_id then by tested_at desc.
 func (s *FaultStabilityStore) ListAll(ctx context.Context) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
 FROM fault_stability_cert ORDER BY fault_id, tested_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list fault stability certs: %w", err)
+	}
+	defer rows.Close()
+	return scanCerts(rows)
+}
+
+// GetHistory returns up to limit past cert snapshots for a fault+model,
+// most recent first, from the append-only fault_stability_cert_history
+// table — this is the trend fault_stability_cert alone can't answer, since
+// that table only ever holds the latest snapshot. Every Upsert call appends
+// exactly one history row (including the very first cert for a fault+model),
+// so a single entry is a normal "just certified once" state, not an error;
+// an empty slice means this fault+model has never been certified at all.
+func (s *FaultStabilityStore) GetHistory(ctx context.Context, faultID, model string, limit int) ([]*FaultStabilityCert, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+FROM fault_stability_cert_history WHERE fault_id = ? AND diagnosis_model = ? ORDER BY recorded_at DESC LIMIT ?`), faultID, model, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get cert history: %w", err)
 	}
 	defer rows.Close()
 	return scanCerts(rows)
@@ -412,13 +610,14 @@ type certScanner interface {
 
 func scanCert(s certScanner) (*FaultStabilityCert, error) {
 	var (
-		cert              FaultStabilityCert
-		stableInt         int
-		attrConsistentInt int
-		attrDistJSON      string
-		testedStr         string
-		cleanInt          int
-		warnDistJSON      string
+		cert                 FaultStabilityCert
+		stableInt            int
+		attrConsistentInt    int
+		attrDistJSON         string
+		testedStr            string
+		cleanInt             int
+		warnDistJSON         string
+		playbookUpdatedAtStr string
 	)
 	if err := s.Scan(
 		&cert.FaultID, &cert.FaultName, &cert.PlaybookSeriesID, &cert.JudgeModel, &cert.DiagnosisModel,
@@ -426,6 +625,7 @@ func scanCert(s certScanner) (*FaultStabilityCert, error) {
 		&cert.PrimaryAttribution, &attrConsistentInt, &attrDistJSON,
 		&cert.JudgeSpread, &cert.TaxonomyVersion,
 		&cert.WarningCount, &cleanInt, &warnDistJSON,
+		&cert.PlaybookVersion, &playbookUpdatedAtStr,
 	); err != nil {
 		return nil, err
 	}
@@ -447,6 +647,11 @@ func scanCert(s certScanner) (*FaultStabilityCert, error) {
 	if testedStr != "" {
 		if t, err := time.Parse(time.RFC3339Nano, testedStr); err == nil {
 			cert.TestedAt = t
+		}
+	}
+	if playbookUpdatedAtStr != "" {
+		if t, err := time.Parse(time.RFC3339Nano, playbookUpdatedAtStr); err == nil {
+			cert.PlaybookUpdatedAt = t
 		}
 	}
 	return &cert, nil

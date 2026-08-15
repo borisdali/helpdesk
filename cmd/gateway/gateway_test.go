@@ -2221,6 +2221,70 @@ func TestHandleRegisterEphemeralDB_Valid(t *testing.T) {
 	}
 }
 
+// TestProxyToAuditd_ForwardsQueryString is the regression test for a gap
+// found while wiring the fault-stability cert history endpoint: proxyToAuditd
+// only ever built its forwarded URL from the fixed auditPath argument,
+// silently dropping the original request's query string. Harmless for the
+// routes that existed before this — none of them relied on query params
+// going through this exact proxy path — but GET .../fault-stability/{id}/history
+// needs diagnosis_model and limit to reach auditd at all.
+func TestProxyToAuditd_ForwardsQueryString(t *testing.T) {
+	var gotQuery string
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"history":[]}`)) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	gw := &Gateway{auditURL: auditSrv.URL}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit=5", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotQuery != "diagnosis_model=claude-sonnet-4-6&limit=5" {
+		t.Errorf("query string forwarded to auditd = %q, want diagnosis_model=claude-sonnet-4-6&limit=5", gotQuery)
+	}
+}
+
+// TestProxyToAuditd_NoQueryString_URLUnchanged proves the fix is additive —
+// a request with no query string must not gain a trailing "?" on the
+// forwarded URL.
+func TestProxyToAuditd_NoQueryString_URLUnchanged(t *testing.T) {
+	var gotPath, gotQuery string
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"certs":[]}`)) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	gw := &Gateway{auditURL: auditSrv.URL}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/fault-stability", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/fleet/fault-stability" {
+		t.Errorf("path forwarded to auditd = %q, want /v1/fleet/fault-stability", gotPath)
+	}
+	if gotQuery != "" {
+		t.Errorf("query string forwarded to auditd = %q, want empty", gotQuery)
+	}
+}
+
 func TestHandleRegisterEphemeralDB_MissingFields(t *testing.T) {
 	gw := &Gateway{auditor: audit.NewGatewayAuditor(&testAuditor{})}
 	mux := http.NewServeMux()

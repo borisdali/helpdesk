@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"helpdesk/internal/audit"
 )
@@ -29,12 +30,19 @@ func (s *faultStabilityServer) handleUpsert(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "n_runs must be >= 1", http.StatusBadRequest)
 		return
 	}
-	if err := s.store.Upsert(r.Context(), &cert); err != nil {
+	regressed, err := s.store.Upsert(r.Context(), &cert)
+	if err != nil {
 		slog.Error("failed to upsert fault stability cert", "fault_id", cert.FaultID, "err", err)
 		http.Error(w, "failed to store cert", http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if regressed {
+		slog.Warn("fault stability cert regressed — previously earned trust (STABLE+CLEAN+attribution-consistent), no longer does",
+			"fault_id", cert.FaultID, "diagnosis_model", cert.DiagnosisModel)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]bool{"regressed": regressed}) //nolint:errcheck
 }
 
 // handleGet handles GET /v1/fleet/fault-stability/{faultID}.
@@ -56,6 +64,39 @@ func (s *faultStabilityServer) handleGet(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(cert) //nolint:errcheck
+}
+
+// handleHistory handles GET /v1/fleet/fault-stability/{faultID}/history.
+// diagnosis_model is required — history is scoped per (fault_id, model), same
+// as the cert itself. limit defaults to 10 (see FaultStabilityStore.GetHistory).
+func (s *faultStabilityServer) handleHistory(w http.ResponseWriter, r *http.Request) {
+	faultID := r.PathValue("faultID")
+	if faultID == "" {
+		http.Error(w, "faultID is required", http.StatusBadRequest)
+		return
+	}
+	model := r.URL.Query().Get("diagnosis_model")
+	if model == "" {
+		http.Error(w, "diagnosis_model query parameter is required", http.StatusBadRequest)
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	history, err := s.store.GetHistory(r.Context(), faultID, model, limit)
+	if err != nil {
+		slog.Error("failed to get fault stability cert history", "fault_id", faultID, "diagnosis_model", model, "err", err)
+		http.Error(w, "failed to get cert history", http.StatusInternalServerError)
+		return
+	}
+	if history == nil {
+		history = []*audit.FaultStabilityCert{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"history": history}) //nolint:errcheck
 }
 
 // handleList handles GET /v1/fleet/fault-stability. When both series_id and
