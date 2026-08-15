@@ -1515,6 +1515,123 @@ func TestRecordPodDistressEvidence_OOMKilled(t *testing.T) {
 	}
 }
 
+func TestRecordEventDistressEvidence_NilAuditor(t *testing.T) {
+	origAuditor := toolAuditor
+	toolAuditor = nil
+	defer func() { toolAuditor = origAuditor }()
+
+	// Should be a no-op and not panic.
+	recordEventDistressEvidence(context.Background(), GetEventsResult{
+		Events: []EventInfo{{Type: "Warning", Reason: "Evicted", Object: "Pod/p1"}},
+	})
+}
+
+func TestRecordEventDistressEvidence_DistressReasons(t *testing.T) {
+	cases := []struct {
+		name       string
+		eventType  string
+		reason     string
+		wantSignal string
+		wantFire   bool
+	}{
+		{"evicted", "Warning", "Evicted", "evicted", true},
+		{"failed scheduling", "Warning", "FailedScheduling", "failed_scheduling", true},
+		{"disk pressure", "Warning", "NodeHasDiskPressure", "disk_pressure", true},
+		{"memory pressure", "Warning", "NodeHasMemoryPressure", "memory_pressure", true},
+		{"normal type — ignored even if reason matches", "Normal", "Evicted", "", false},
+		{"warning but unlisted reason — routine noise, ignored", "Warning", "BackOff", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := audit.NewStore(audit.StoreConfig{
+				DBPath: filepath.Join(t.TempDir(), "k8s_event_evidence_test.db"),
+			})
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			t.Cleanup(func() { store.Close() })
+
+			origAuditor := toolAuditor
+			toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_evt", "trace_evt")
+			defer func() { toolAuditor = origAuditor }()
+
+			recordEventDistressEvidence(context.Background(), GetEventsResult{
+				Events: []EventInfo{{Type: tc.eventType, Reason: tc.reason, Object: "Pod/target", Message: "test message"}},
+			})
+
+			events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+				EventType: audit.EventTypeObjectiveEvidence,
+			})
+			if queryErr != nil {
+				t.Fatalf("Query: %v", queryErr)
+			}
+			if !tc.wantFire {
+				if len(events) != 0 {
+					t.Fatalf("expected no objective_evidence event, got %d", len(events))
+				}
+				return
+			}
+			if len(events) != 1 {
+				t.Fatalf("expected exactly 1 event, got %d", len(events))
+			}
+			if events[0].ObjectiveEvidence.Signal != tc.wantSignal {
+				t.Errorf("Signal = %q, want %q", events[0].ObjectiveEvidence.Signal, tc.wantSignal)
+			}
+			if events[0].ObjectiveEvidence.Tool != "get_events" {
+				t.Errorf("Tool = %q, want get_events", events[0].ObjectiveEvidence.Tool)
+			}
+			if events[0].ObjectiveEvidence.Resource != "Pod/target" {
+				t.Errorf("Resource = %q, want Pod/target", events[0].ObjectiveEvidence.Resource)
+			}
+		})
+	}
+}
+
+func TestGetEventsTool_RecordsDistressEvidence(t *testing.T) {
+	ev := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "postgres-0.evicted", Namespace: "helpdesk-test"},
+		Type:           "Warning",
+		Reason:         "Evicted",
+		Message:        "The node was low on resource: memory.",
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: "postgres-0"},
+	}
+	cs := fake.NewClientset(ev)
+	defer injectFakeClientset("", cs)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_events_evidence_e2e_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_evt_e2e", "trace_evt_e2e")
+	defer func() { toolAuditor = origAuditor }()
+
+	ctx := newK8sTestContext()
+	if _, err := getEventsTool(ctx, GetEventsArgs{Namespace: "helpdesk-test"}); err != nil {
+		t.Fatalf("getEventsTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		EventType: audit.EventTypeObjectiveEvidence,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 objective_evidence event, got %d", len(events))
+	}
+	if events[0].ObjectiveEvidence.Signal != "evicted" {
+		t.Errorf("Signal = %q, want evicted", events[0].ObjectiveEvidence.Signal)
+	}
+	if events[0].ObjectiveEvidence.Resource != "Pod/postgres-0" {
+		t.Errorf("Resource = %q, want Pod/postgres-0", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
 // --- get_pod_resources tests ---
 
 // injectFakeClientset injects cs under the given context key and returns cleanup.
