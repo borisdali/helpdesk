@@ -1475,6 +1475,101 @@ func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_ObjectiveEvidence_GetEventsSignal_RoundTrips mirrors
+// TestIntegration_ObjectiveEvidence_RoundTrips but with a get_events-sourced
+// signal (v0.25.0's recordEventDistressEvidence, agents/k8s/tools.go) rather
+// than get_pods'. objective_evidence's Signal column has no server-side
+// allowlist — this confirms a brand-new signal string round-trips through
+// the real store exactly like the original pod_restarted/oom_killed ones,
+// not just in the mocked gateway-package tests.
+func TestIntegration_ObjectiveEvidence_GetEventsSignal_RoundTrips(t *testing.T) {
+	traceID := fmt.Sprintf("oev-evt-%d", time.Now().UnixNano())
+	sessionID := "oev-evt-session-" + traceID
+
+	evidenceEvent := map[string]any{
+		"event_id":   fmt.Sprintf("oev-evt-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "objective_evidence",
+		"trace_id":   traceID,
+		"session":    map[string]any{"id": sessionID},
+		"objective_evidence": map[string]any{
+			"agent":    "k8s_agent",
+			"tool":     "get_events",
+			"resource": "Pod/postgres-0",
+			"signal":   "failed_scheduling",
+			"detail":   "0/1 nodes are available: 1 Insufficient memory.",
+		},
+	}
+	post(t, auditdAddr, "/v1/events", evidenceEvent)
+
+	events := getList(t, auditdAddr, "/v1/events?event_type=objective_evidence&trace_id="+traceID)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event for trace_id=%s, got %d", traceID, len(events))
+	}
+	ev, ok := events[0]["objective_evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("objective_evidence field missing or wrong shape: %v", events[0])
+	}
+	if ev["signal"] != "failed_scheduling" {
+		t.Errorf("signal = %v, want failed_scheduling", ev["signal"])
+	}
+	if ev["tool"] != "get_events" {
+		t.Errorf("tool = %v, want get_events", ev["tool"])
+	}
+	if ev["resource"] != "Pod/postgres-0" {
+		t.Errorf("resource = %v, want Pod/postgres-0", ev["resource"])
+	}
+}
+
+// TestIntegration_FaultStabilityCert_VersioningHistoryRegression_RoundTrip
+// confirms the three v0.25.0 additions through a real auditd binary and real
+// SQL storage — new columns and a new table added via the idempotent
+// migrate() pattern are exactly what TestIntegration_FaultStabilityCert_CleanFields_RoundTrip's
+// doc comment already identifies this layer as being for: the kind of bug a
+// mocked gateway-package test structurally cannot catch.
+func TestIntegration_FaultStabilityCert_VersioningHistoryRegression_RoundTrip(t *testing.T) {
+	faultID := fmt.Sprintf("fs-versioning-%d", time.Now().UnixNano())
+	model := "claude-sonnet-4-6"
+
+	earning := map[string]any{
+		"fault_id": faultID, "fault_name": "Versioning Round-Trip Test",
+		"diagnosis_model": model, "n_runs": 5, "pass_rate": 1.0, "is_stable": true,
+		"is_clean": true, "attribution_consistent": true,
+		"playbook_version": "3.0", "playbook_updated_at": "2026-08-01T00:00:00Z",
+	}
+	resp1 := post(t, auditdAddr, "/v1/fleet/fault-stability", earning)
+	if regressed, _ := resp1["regressed"].(bool); regressed {
+		t.Error("regressed on first-ever cert: want false")
+	}
+
+	got := get(t, auditdAddr, "/v1/fleet/fault-stability/"+faultID)
+	if pv, _ := got["playbook_version"].(string); pv != "3.0" {
+		t.Errorf("playbook_version = %v, want 3.0", got["playbook_version"])
+	}
+	if pu, _ := got["playbook_updated_at"].(string); pu == "" {
+		t.Error("playbook_updated_at: got empty, want a timestamp")
+	}
+
+	noLongerEarning := map[string]any{
+		"fault_id": faultID, "diagnosis_model": model, "n_runs": 5,
+		"is_stable": true, "is_clean": false, "warning_count": 3, "attribution_consistent": true,
+	}
+	resp2 := post(t, auditdAddr, "/v1/fleet/fault-stability", noLongerEarning)
+	if regressed, _ := resp2["regressed"].(bool); !regressed {
+		t.Errorf("regressed on CLEAN=false upsert: got %v, want true", resp2["regressed"])
+	}
+
+	historyResp := get(t, auditdAddr, "/v1/fleet/fault-stability/"+faultID+"/history?diagnosis_model="+model+"&limit=10")
+	history, _ := historyResp["history"].([]any)
+	if len(history) != 2 {
+		t.Fatalf("history entries: got %d, want 2 (one per upsert)", len(history))
+	}
+	first, _ := history[0].(map[string]any)
+	if clean, _ := first["is_clean"].(bool); clean {
+		t.Error("most recent history entry: want is_clean=false")
+	}
+}
+
 // TestIntegration_VerifyTrace_QueryContract validates the server-side contract
 // that client.VerifyTrace depends on: tool_execution events must be queryable
 // by trace_id + since, with action_class at the top level and tool.name nested.
