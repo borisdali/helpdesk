@@ -360,6 +360,64 @@ func TestFaultStabilityHandlers_History(t *testing.T) {
 	}
 }
 
+func TestFaultStabilityHandlers_History_RespectsCustomLimit(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+	for i := 1; i <= 5; i++ {
+		upsertCert(t, srv, map[string]any{
+			"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+			"n_runs": i, "is_stable": true,
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit=2", nil)
+	req.SetPathValue("faultID", "k8s-oomkilled")
+	rec := httptest.NewRecorder()
+	srv.handleHistory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		History []audit.FaultStabilityCert `json:"history"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.History) != 2 {
+		t.Fatalf("got %d entries with limit=2, want 2", len(result.History))
+	}
+}
+
+func TestFaultStabilityHandlers_History_InvalidLimit_FallsBackToDefault(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+	for i := 1; i <= 3; i++ {
+		upsertCert(t, srv, map[string]any{
+			"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+			"n_runs": i, "is_stable": true,
+		})
+	}
+
+	for _, limit := range []string{"abc", "-5", "0"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit="+limit, nil)
+		req.SetPathValue("faultID", "k8s-oomkilled")
+		rec := httptest.NewRecorder()
+		srv.handleHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("limit=%q: got %d, want 200; body: %s", limit, rec.Code, rec.Body.String())
+		}
+		var result struct {
+			History []audit.FaultStabilityCert `json:"history"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+			t.Fatalf("limit=%q: decode: %v", limit, err)
+		}
+		// Falls back to the default (10) rather than erroring or returning
+		// zero rows — all 3 seeded entries must come back.
+		if len(result.History) != 3 {
+			t.Errorf("limit=%q: got %d entries, want 3 (default limit should not exclude them)", limit, len(result.History))
+		}
+	}
+}
+
 func TestFaultStabilityHandlers_History_MissingDiagnosisModel(t *testing.T) {
 	srv := newFaultStabilityServer(t)
 

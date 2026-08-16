@@ -606,6 +606,108 @@ CREATE TABLE fault_stability_cert (
 	}
 }
 
+// TestFaultStabilityStore_Migrate_VersioningColumns is the realistic upgrade
+// path a current customer actually hits: a v0.24.0 database already has the
+// attribution and CLEAN columns (unlike the pre-v0.21.0 schema the other two
+// migration tests simulate), but not playbook_version/playbook_updated_at.
+// TestUpsert_PlaybookVersionRoundTrips alone doesn't cover this — it always
+// runs against a freshly created schema via newFaultStabilityStore, so the
+// ALTER TABLE ADD COLUMN path for these two specific columns was never
+// actually exercised until this test.
+func TestFaultStabilityStore_Migrate_VersioningColumns(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_versioning.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// v0.24.0 schema: composite PK, attribution columns, CLEAN columns —
+	// everything except playbook_version/playbook_updated_at.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create v0.24.0 schema: %v", err)
+	}
+	// Seed a v0.24.0-era row to verify it survives migration untouched.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert (fault_id, fault_name, n_runs, is_stable, diagnosis_model, is_clean)
+         VALUES ('db-old-fault', 'Old Fault', 5, 1, 'test-model', 1)`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pre-existing v0.24.0 row must survive, with the new columns defaulting
+	// to empty/unknown rather than erroring or losing the row.
+	old, err := fs.GetByFaultAndModel(context.Background(), "db-old-fault", "test-model")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (old row): %v", err)
+	}
+	if old.FaultName != "Old Fault" {
+		t.Errorf("FaultName after migration: got %q, want Old Fault", old.FaultName)
+	}
+	if !old.IsClean {
+		t.Error("IsClean after migration: want true (pre-existing v0.24.0 data)")
+	}
+	if old.PlaybookVersion != "" {
+		t.Errorf("PlaybookVersion on a pre-migration row: got %q, want empty (unknown, not fabricated)", old.PlaybookVersion)
+	}
+
+	// New rows can use the versioning fields after migration.
+	updatedAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	cert := &FaultStabilityCert{
+		FaultID: "db-new-fault", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true,
+		PlaybookVersion: "2.1", PlaybookUpdatedAt: updatedAt,
+	}
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration: %v", err)
+	}
+	got, err := fs.GetByFaultAndModel(context.Background(), cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel after migration: %v", err)
+	}
+	if got.PlaybookVersion != "2.1" {
+		t.Errorf("PlaybookVersion: got %q, want 2.1", got.PlaybookVersion)
+	}
+	if !got.PlaybookUpdatedAt.Equal(updatedAt) {
+		t.Errorf("PlaybookUpdatedAt: got %v, want %v", got.PlaybookUpdatedAt, updatedAt)
+	}
+
+	// The history table must also exist post-migration (createSchema never
+	// ran on this store — only migrate() did, mirroring the standalone-store
+	// pattern this whole test file uses).
+	history, err := fs.GetHistory(context.Background(), "db-new-fault", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory after migration: %v", err)
+	}
+	if len(history) != 1 {
+		t.Errorf("history entries after migration: got %d, want 1", len(history))
+	}
+}
+
 // TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent verifies that
 // calling migrate() on a fully-migrated database (all attribution columns
 // already present) does not fail.
@@ -974,6 +1076,34 @@ func TestUpsert_Regressed_FalseWhenStayingTrustEarning(t *testing.T) {
 	}
 	if regressed {
 		t.Error("expected regressed=false — cert stayed trust-earning across recertification")
+	}
+}
+
+// TestUpsert_Regressed_FalseOnRecovery covers the improvement direction
+// explicitly: a fault that wasn't earning trust and now does is not a
+// regression (the opposite of one) — worth its own test, not just an
+// implication of the boolean logic, since a naive "did EarnsTrust() change"
+// check (rather than the specific true→false direction) would have wrongly
+// flagged this as a regression too.
+func TestUpsert_Regressed_FalseOnRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	notEarning := &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: false}
+	if _, err := store.Upsert(ctx, notEarning); err != nil {
+		t.Fatalf("Upsert (not earning): %v", err)
+	}
+
+	nowEarning := &FaultStabilityCert{
+		FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5,
+		IsStable: true, IsClean: true, AttributionConsistent: true,
+	}
+	regressed, err := store.Upsert(ctx, nowEarning)
+	if err != nil {
+		t.Fatalf("Upsert (now earning): %v", err)
+	}
+	if regressed {
+		t.Error("expected regressed=false — this is a recovery (not-earning → earning), the opposite of a regression")
 	}
 }
 

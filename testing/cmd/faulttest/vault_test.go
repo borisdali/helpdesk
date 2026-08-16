@@ -3712,6 +3712,75 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 	}
 }
 
+// TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup is the
+// integration gap TestPostStabilityCert_PostsCorrectPayload deliberately
+// sidesteps (that test makes the version lookup fail on purpose, to isolate
+// the cert payload assertions from the extra GET). This one proves the
+// actual wiring: when fetchPlaybookVersion finds an active version, it
+// reaches the POST payload as playbook_version/playbook_updated_at.
+func TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"playbooks":[{"version":"2.3","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if gotBody["playbook_version"] != "2.3" {
+		t.Errorf("playbook_version = %v, want 2.3", gotBody["playbook_version"])
+	}
+	if gotBody["playbook_updated_at"] != "2026-08-01T00:00:00Z" {
+		t.Errorf("playbook_updated_at = %v, want 2026-08-01T00:00:00Z", gotBody["playbook_updated_at"])
+	}
+}
+
+// TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails proves the
+// negative case symmetrically: when the lookup can't find an active
+// version, the payload simply omits both fields rather than sending empty
+// strings — auditd's Upsert then correctly treats this cert as
+// "unknown version" (see FaultStabilityCert.PlaybookVersion's doc comment)
+// rather than persisting a fabricated empty value indistinguishable from a
+// real one.
+func TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"playbooks":[]}`)
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if _, ok := gotBody["playbook_version"]; ok {
+		t.Errorf("playbook_version present in payload = %v, want field omitted entirely", gotBody["playbook_version"])
+	}
+	if _, ok := gotBody["playbook_updated_at"]; ok {
+		t.Errorf("playbook_updated_at present in payload = %v, want field omitted entirely", gotBody["playbook_updated_at"])
+	}
+}
+
 func TestPostStabilityCert_SendsAuth(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
