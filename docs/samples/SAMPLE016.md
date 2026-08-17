@@ -221,12 +221,12 @@ HTTP status: 200
 
 Wow. This single run gives us a genuine two-for-one: both `target_drift` and `mismatch` fired together!
 
-The transcript's chain-of-thought mentions `get_baseline` narratively ("Let me check the database statistics to verify there are no uncommitted transactions holding locks"), but `narrated_not_confirmed: ["get_baseline"]` means no matching   `tool_execution` event exists for that call. This is a real, live [fabrication-risk](https://github.com/borisdali/helpdesk/blob/main/docs/MUTATION_TOOLS.md#59-fabrication-risk-visibility-checkfabricationrisk) hit on top of the drift. Both correctly detected and both correctly persisted as separate, independently-attributable events. That's live evidence with two orthogonal signals confirmed in one shot rather than one at a time.
+The transcript's chain-of-thought mentions `get_baseline` narratively ("Let me check the database statistics to verify there are no uncommitted transactions holding locks"), but `narrated_not_confirmed: ["get_baseline"]` means no matching   `tool_execution` event exists for that call. This is a real, live [fabrication-risk](../MUTATION_TOOLS.md#59-fabrication-risk-visibility-checkfabricationrisk) hit on top of the drift. Both correctly detected and both correctly persisted as separate, independently-attributable events. That's live evidence with two orthogonal signals confirmed in one shot rather than one at a time.
 
 
 ## 4. `target_drift` feeding the CLEAN cert
 
-See [here](https://github.com/borisdali/helpdesk/blob/main/docs/ATTRIBUTION_CERTS.md#9-the-clean-axis) for the background on CLEAN cert, not to be confused with the [STABLE](https://github.com/borisdali/helpdesk/blob/main/docs/CONSISTENCY.md) cert.
+See [here](../ATTRIBUTION_CERTS.md#9-the-clean-axis) for the background on CLEAN cert, not to be confused with the [STABLE](../CONSISTENCY.md) cert.
 
 As you can see from the above link, the CLEAN cert covers five distinct signals. `target_drift` is one of them (number four to be exact). Let's run a fault injection test that produces a drift through the `faulttest`'s calibration mode. But before we do, there's a snag :-(
 
@@ -234,7 +234,7 @@ The problem is that `target_drift` only fires when a tool call genuinely execute
 
 That's very much intentional because a fault should isolate one failure mode, not accidentally also test a scope confusion. But for the purpose of our test, that means that no stock fault, run can run unmodified to produce drift. Instead, we need a fault whose prompt does the opposite of what's intended for normal faults in the catalog.
 
-The solution we came up with is custom/private catalog! This is NOT a hack. It's a fully supported feature, but it's the first time we use it in the sample transcripts. Private/custom catalogs is a feature of aiHelpDesk that serves as an extension point, allowing customers to plug-in their own faults through a separate, private catalog. And it comes handy here!
+The solution we came up with is a custom/private catalog! This is NOT a hack. It's a fully supported feature — see [Customer fault catalogs](../FAULTTEST.md#9-customer-fault-catalogs) for the full reference (writing a catalog file, validating it, running it, filtering by source) — but it's the first time we use it in the sample transcripts. Private/custom catalogs is a feature of aiHelpDesk that serves as an extension point, allowing customers to plug-in their own faults through a separate, private catalog. And it comes handy here!
 
 Let's see how this works:
 
