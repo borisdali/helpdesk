@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[Show Your Work: Michael and the Night the Page Stopped Being a Guessing Game](...)**
+- **[How the Page Stopped Being a Guessing Game](https://itnext.io/show-your-work-how-the-page-stopped-being-a-guessing-game-0e80fa3f35c9)**
   Trust, but verify at 2am: the page that told the truth
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
@@ -234,7 +234,7 @@ The problem is that `target_drift` only fires when a tool call genuinely execute
 
 That's very much intentional because a fault should isolate one failure mode, not accidentally also test a scope confusion. But for the purpose of our test, that means that no stock fault, run can run unmodified to produce drift. Instead, we need a fault whose prompt does the opposite of what's intended for normal faults in the catalog.
 
-The solution we came up with is custom/private catalog! It's a feature of aiHelpDesk that serves as an extension point, allowing customers to plug-in their own faults through a separate, private catalog. And it comes handy here!
+The solution we came up with is custom/private catalog! This is NOT a hack. It's a fully supported feature, but it's the first time we use it in the sample transcripts. Private/custom catalogs is a feature of aiHelpDesk that serves as an extension point, allowing customers to plug-in their own faults through a separate, private catalog. And it comes handy here!
 
 Let's see how this works:
 
@@ -245,7 +245,7 @@ So what we've done is copying aside the original `db-max-connections` fault from
 
 So we changed the prompt. How? Stock version pins the target. Ours does the opposite by naming the primary target via the `{{connection_string}}` template variable (substituted from `--agent-conn`) then explicitly suggesting a second, real, resolvable target (pg-cluster-minkube-local) as something worth double-checking.
 
-This is the hack.And it's the same nudge phrasing that worked in the earlier manual curl test. Again, not a new approach, just porting the one we'd already validated into a form of `--repeat N` for the automatic run.
+This is a hack! And it's the same nudge phrasing that worked in the earlier manual curl test. Again, not a new approach, just porting the one we'd already validated into a form of `--repeat N` for the automatic run.
 
 Everything else is schema boilerplate. `id`, `category: database`, `diagnosis_playbook_series_id: pbs_connection_triage` and the evaluation block just satisfy the Failure struct's shape (checked against real entries in failures.yaml so it'd parse correctly). Evaluation isn't load-bearing for what we're testing here. It's just the expected-tools/keywords scaffolding `faulttest`'s own scoring uses generically.
 
