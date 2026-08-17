@@ -2285,6 +2285,61 @@ func TestProxyToAuditd_NoQueryString_URLUnchanged(t *testing.T) {
 	}
 }
 
+// TestProxyToAuditd_RoutesWithPreexistingManualQueryForwarding_NoDoubleAppend
+// is the regression test for a real bug found live (2026-08-17): several
+// routes predate proxyToAuditd's generic query-string forwarding and had
+// their own hand-rolled "path += '?' + r.URL.RawQuery" workaround for the
+// exact same gap. Once proxyToAuditd started forwarding the query string
+// itself, every one of those routes silently double-appended it —
+// "?series_id=X" became "?series_id=X?series_id=X", which net/url parses as
+// a single query key whose value is "X?series_id=X", matching nothing in
+// auditd. This surfaced live as `vault list`/handlePlaybookList reporting a
+// playbook as MISSING even though auditd's own seeding logs confirmed it
+// existed. Covers every route that had its own manual append before the
+// fix — the redundant logic was removed from all of them, not just the one
+// found live, and this test is what should catch any future regression.
+func TestProxyToAuditd_RoutesWithPreexistingManualQueryForwarding_NoDoubleAppend(t *testing.T) {
+	var gotQuery string
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"playbooks":[],"runs":[],"results":[]}`)) //nolint:errcheck
+	}))
+	defer auditSrv.Close()
+
+	gw := &Gateway{auditURL: auditSrv.URL}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	cases := []struct {
+		name      string
+		path      string
+		wantQuery string
+	}{
+		{"handlePlaybookList", "/api/v1/fleet/playbooks?series_id=pbs_connection_remediate", "series_id=pbs_connection_remediate"},
+		{"playbooks/{id}/runs", "/api/v1/fleet/playbooks/pb_x/runs?limit=5", "limit=5"},
+		{"playbook-runs list", "/api/v1/fleet/playbook-runs?outcome=resolved", "outcome=resolved"},
+		{"playbook-runs/{id}/feedback", "/api/v1/fleet/playbook-runs/plr_x/feedback?type=at_gate", "type=at_gate"},
+		{"tool-results", "/api/v1/tool-results?tool_name=get_pods", "tool_name=get_pods"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotQuery = ""
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+			}
+			if gotQuery != tc.wantQuery {
+				t.Errorf("query string forwarded to auditd = %q, want %q (a doubled query would look like %q?%q)",
+					gotQuery, tc.wantQuery, tc.wantQuery, tc.wantQuery)
+			}
+		})
+	}
+}
+
 func TestHandleRegisterEphemeralDB_MissingFields(t *testing.T) {
 	gw := &Gateway{auditor: audit.NewGatewayAuditor(&testAuditor{})}
 	mux := http.NewServeMux()
