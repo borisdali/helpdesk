@@ -388,7 +388,13 @@ A cert can also go stale against the *playbook* rather than the clock — the pl
   ⚠ cert was earned against playbook version 1.3, current version is 1.4 — consider re-running --repeat to refresh
 ```
 
-The first line means the cert was posted before v0.25.0 added version tracking — treated as "unknown," never as "fresh." The second means the cert is genuinely out of date against a real playbook edit made since it was earned.
+The first line means the cert was posted before v0.25.0 added version tracking — treated as "unknown," never as "fresh." The second means the cert is genuinely out of date against a real playbook edit made since it was earned. When the cert also has the specific playbook version ID it was earned against (not just the human version number), the stale-version warning is followed by a ready-to-run comparison:
+
+```
+    See what changed: faulttest vault diff pb_be8b5667 pb_31575294
+```
+
+— chaining directly into [`vault diff`](#vault-diff) instead of leaving "the playbook changed" as an assertion with no way to act on it. Omitted (only the plain warning above shows) when either ID is unknown — e.g. a cert earned before this field existed.
 
 **Cert history.** Once a fault+model pair has been recertified at least twice, a trend section follows the cert block — not just today's verdict, but whether it's held steady or when and how it changed:
 

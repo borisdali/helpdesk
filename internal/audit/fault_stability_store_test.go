@@ -675,12 +675,15 @@ CREATE TABLE fault_stability_cert (
 	if old.PlaybookVersion != "" {
 		t.Errorf("PlaybookVersion on a pre-migration row: got %q, want empty (unknown, not fabricated)", old.PlaybookVersion)
 	}
+	if old.PlaybookID != "" {
+		t.Errorf("PlaybookID on a pre-migration row: got %q, want empty (unknown, not fabricated)", old.PlaybookID)
+	}
 
 	// New rows can use the versioning fields after migration.
 	updatedAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	cert := &FaultStabilityCert{
 		FaultID: "db-new-fault", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true,
-		PlaybookVersion: "2.1", PlaybookUpdatedAt: updatedAt,
+		PlaybookVersion: "2.1", PlaybookUpdatedAt: updatedAt, PlaybookID: "pb_31575294",
 	}
 	if _, err := fs.Upsert(context.Background(), cert); err != nil {
 		t.Fatalf("Upsert after migration: %v", err)
@@ -694,6 +697,9 @@ CREATE TABLE fault_stability_cert (
 	}
 	if !got.PlaybookUpdatedAt.Equal(updatedAt) {
 		t.Errorf("PlaybookUpdatedAt: got %v, want %v", got.PlaybookUpdatedAt, updatedAt)
+	}
+	if got.PlaybookID != "pb_31575294" {
+		t.Errorf("PlaybookID: got %q, want pb_31575294", got.PlaybookID)
 	}
 
 	// The history table must also exist post-migration (createSchema never
@@ -949,6 +955,7 @@ func TestUpsert_PlaybookVersionRoundTrips(t *testing.T) {
 		IsStable:          true,
 		PlaybookVersion:   "1.3",
 		PlaybookUpdatedAt: updatedAt,
+		PlaybookID:        "pb_be8b5667",
 	}
 	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -963,6 +970,9 @@ func TestUpsert_PlaybookVersionRoundTrips(t *testing.T) {
 	}
 	if !got.PlaybookUpdatedAt.Equal(updatedAt) {
 		t.Errorf("PlaybookUpdatedAt = %v, want %v", got.PlaybookUpdatedAt, updatedAt)
+	}
+	if got.PlaybookID != "pb_be8b5667" {
+		t.Errorf("PlaybookID = %q, want pb_be8b5667", got.PlaybookID)
 	}
 }
 
@@ -988,6 +998,9 @@ func TestUpsert_PlaybookVersionEmpty_TreatedAsUnknownNotZeroValue(t *testing.T) 
 	}
 	if !got.PlaybookUpdatedAt.IsZero() {
 		t.Errorf("PlaybookUpdatedAt = %v, want zero value", got.PlaybookUpdatedAt)
+	}
+	if got.PlaybookID != "" {
+		t.Errorf("PlaybookID = %q, want empty", got.PlaybookID)
 	}
 }
 

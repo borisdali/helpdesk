@@ -374,19 +374,22 @@ func TestFetchPlaybookVersion_SelectsActiveVersion(t *testing.T) {
 		// not array order (the inactive one is listed first deliberately).
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"playbooks": []map[string]any{
-				{"version": "1.2", "is_active": false, "updated_at": "2026-01-01T00:00:00Z"},
-				{"version": "1.3", "is_active": true, "updated_at": "2026-08-01T12:00:00Z"},
+				{"playbook_id": "pb_old0000", "version": "1.2", "is_active": false, "updated_at": "2026-01-01T00:00:00Z"},
+				{"playbook_id": "pb_31575294", "version": "1.3", "is_active": true, "updated_at": "2026-08-01T12:00:00Z"},
 			},
 		})
 	}))
 	defer srv.Close()
 
-	version, updatedAt := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
 	if version != "1.3" {
 		t.Errorf("version = %q, want 1.3 (the active one, not array[0])", version)
 	}
 	if updatedAt != "2026-08-01T12:00:00Z" {
 		t.Errorf("updatedAt = %q, want 2026-08-01T12:00:00Z", updatedAt)
+	}
+	if playbookID != "pb_31575294" {
+		t.Errorf("playbookID = %q, want pb_31575294 (the active one, not array[0])", playbookID)
 	}
 }
 
@@ -399,18 +402,18 @@ func TestFetchPlaybookVersion_NoActiveVersion_ReturnsEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	version, updatedAt := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
-	if version != "" || updatedAt != "" {
-		t.Errorf("got (%q, %q), want (\"\", \"\") when no active version exists", version, updatedAt)
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
+	if version != "" || updatedAt != "" || playbookID != "" {
+		t.Errorf("got (%q, %q, %q), want (\"\", \"\", \"\") when no active version exists", version, updatedAt, playbookID)
 	}
 }
 
 func TestFetchPlaybookVersion_EmptyGatewayURLOrSeriesID_NoRequest(t *testing.T) {
-	if v, u := fetchPlaybookVersion("", "key", "pbs_x"); v != "" || u != "" {
-		t.Errorf("empty gatewayURL: got (%q, %q), want empty", v, u)
+	if v, u, id := fetchPlaybookVersion("", "key", "pbs_x"); v != "" || u != "" || id != "" {
+		t.Errorf("empty gatewayURL: got (%q, %q, %q), want empty", v, u, id)
 	}
-	if v, u := fetchPlaybookVersion("http://example.invalid", "key", ""); v != "" || u != "" {
-		t.Errorf("empty seriesID: got (%q, %q), want empty", v, u)
+	if v, u, id := fetchPlaybookVersion("http://example.invalid", "key", ""); v != "" || u != "" || id != "" {
+		t.Errorf("empty seriesID: got (%q, %q, %q), want empty", v, u, id)
 	}
 }
 
@@ -420,9 +423,9 @@ func TestFetchPlaybookVersion_ServerError_ReturnsEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	version, updatedAt := fetchPlaybookVersion(srv.URL, "", "pbs_x")
-	if version != "" || updatedAt != "" {
-		t.Errorf("got (%q, %q), want empty on server error", version, updatedAt)
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_x")
+	if version != "" || updatedAt != "" || playbookID != "" {
+		t.Errorf("got (%q, %q, %q), want empty on server error", version, updatedAt, playbookID)
 	}
 }
 
@@ -3877,7 +3880,7 @@ func TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodGet:
-			fmt.Fprint(w, `{"playbooks":[{"version":"2.3","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"2.3","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
 		case http.MethodPost:
 			json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
 			w.WriteHeader(http.StatusNoContent)
@@ -3896,6 +3899,9 @@ func TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup(t *testing.T
 	}
 	if gotBody["playbook_updated_at"] != "2026-08-01T00:00:00Z" {
 		t.Errorf("playbook_updated_at = %v, want 2026-08-01T00:00:00Z", gotBody["playbook_updated_at"])
+	}
+	if gotBody["playbook_id"] != "pb_31575294" {
+		t.Errorf("playbook_id = %v, want pb_31575294", gotBody["playbook_id"])
 	}
 }
 
@@ -3931,6 +3937,9 @@ func TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails(t *testing.T)
 	}
 	if _, ok := gotBody["playbook_updated_at"]; ok {
 		t.Errorf("playbook_updated_at present in payload = %v, want field omitted entirely", gotBody["playbook_updated_at"])
+	}
+	if _, ok := gotBody["playbook_id"]; ok {
+		t.Errorf("playbook_id present in payload = %v, want field omitted entirely", gotBody["playbook_id"])
 	}
 }
 
@@ -5177,6 +5186,72 @@ func TestPrintFaultStabilityCert_ShowsStalenessWarning_WhenVersionDiffers(t *tes
 
 	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
 		t.Errorf("expected staleness warning in output:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_ShowsVaultDiffHint_WhenBothPlaybookIDsKnown
+// verifies item 10.4c: when the cert's stored playbook_id and the currently
+// active playbook_id are both known and differ, the staleness warning is
+// followed by a ready-to-run `vault diff <id-then> <id-now>` line instead of
+// leaving "the playbook changed" as an unactionable assertion.
+func TestPrintFaultStabilityCert_ShowsVaultDiffHint_WhenBothPlaybookIDsKnown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+				"playbook_id": "pb_be8b5667",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "faulttest vault diff pb_be8b5667 pb_31575294") {
+		t.Errorf("expected vault diff hint in output:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_NoVaultDiffHint_WhenPlaybookIDUnknown verifies
+// the negative case: a cert that predates playbook-ID tracking (no
+// playbook_id stored, even though playbook_version is) still shows the plain
+// staleness warning but not a diff hint pointing at an unknown ID.
+func TestPrintFaultStabilityCert_NoVaultDiffHint_WhenPlaybookIDUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			// No playbook_id in the stored cert — a pre-item-10.4c cert.
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
+		t.Errorf("expected the plain staleness warning to still show:\n%s", out)
+	}
+	if strings.Contains(out, "vault diff") {
+		t.Errorf("expected no vault diff hint when the cert has no stored playbook_id:\n%s", out)
 	}
 }
 

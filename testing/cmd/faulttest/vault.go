@@ -248,22 +248,24 @@ type playbookGatewayInfo struct {
 }
 
 // fetchPlaybookVersion queries the gateway for a playbook series' currently
-// active version and last-updated timestamp — used to stamp a fault
-// stability cert with what it was earned against (see postStabilityCert)
-// and, separately, to detect staleness later (see printFaultStabilityCert's
-// "cert may be stale" warning). A series can have more than one version on
-// record (only one active); this explicitly selects IsActive rather than
-// assuming array order, unlike fetchPlaybookInfo's [0] shortcut above.
-// Returns ("", "") on any error or when no active version is found — callers
-// should treat that as "unknown," not "empty string is meaningful."
-func fetchPlaybookVersion(gatewayURL, apiKey, seriesID string) (version, updatedAt string) {
+// active version, last-updated timestamp, and concrete pb_* ID — used to
+// stamp a fault stability cert with what it was earned against (see
+// postStabilityCert) and, separately, to detect staleness later (see
+// printFaultStabilityCert's "cert may be stale" warning) and point directly
+// at `vault diff <id-then> <id-now>` when both IDs are known. A series can
+// have more than one version on record (only one active); this explicitly
+// selects IsActive rather than assuming array order, unlike
+// fetchPlaybookInfo's [0] shortcut above.
+// Returns ("", "", "") on any error or when no active version is found —
+// callers should treat that as "unknown," not "empty string is meaningful."
+func fetchPlaybookVersion(gatewayURL, apiKey, seriesID string) (version, updatedAt, playbookID string) {
 	if gatewayURL == "" || seriesID == "" {
-		return "", ""
+		return "", "", ""
 	}
 	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?series_id=" + seriesID
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -271,28 +273,29 @@ func fetchPlaybookVersion(gatewayURL, apiKey, seriesID string) (version, updated
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", ""
+		return "", "", ""
 	}
 	var result struct {
 		Playbooks []struct {
-			Version   string `json:"version"`
-			IsActive  bool   `json:"is_active"`
-			UpdatedAt string `json:"updated_at"`
+			PlaybookID string `json:"playbook_id"`
+			Version    string `json:"version"`
+			IsActive   bool   `json:"is_active"`
+			UpdatedAt  string `json:"updated_at"`
 		} `json:"playbooks"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	for _, pb := range result.Playbooks {
 		if pb.IsActive {
-			return pb.Version, pb.UpdatedAt
+			return pb.Version, pb.UpdatedAt, pb.PlaybookID
 		}
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
@@ -462,6 +465,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	WarningDistribution     map[string]int `json:"warning_distribution"`
 	PlaybookVersion         string         `json:"playbook_version"`
 	PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
+	PlaybookID              string         `json:"playbook_id"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -504,6 +508,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		WarningDistribution     map[string]int `json:"warning_distribution"`
 		PlaybookVersion         string         `json:"playbook_version"`
 		PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
+		PlaybookID              string         `json:"playbook_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
@@ -1566,12 +1571,17 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	// Playbook-version staleness (v0.25.0): a cert doesn't just age against
 	// the clock (the 30-day check above) — the playbook it was earned
 	// against can also change out from under it. cert.PlaybookVersion=="" is
-	// treated as "unknown" (pre-v0.25.0 cert), not silently as "fresh."
+	// treated as "unknown" (pre-v0.25.0 cert), not silently as "fresh." When
+	// both the cert's stored PlaybookID and the current one are known, point
+	// directly at `vault diff` instead of just asserting "it changed."
 	if cert.PlaybookSeriesID != "" {
 		if cert.PlaybookVersion == "" {
 			fmt.Println("  ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits")
-		} else if currentVersion, _ := fetchPlaybookVersion(gatewayURL, apiKey, cert.PlaybookSeriesID); currentVersion != "" && currentVersion != cert.PlaybookVersion {
+		} else if currentVersion, _, currentPlaybookID := fetchPlaybookVersion(gatewayURL, apiKey, cert.PlaybookSeriesID); currentVersion != "" && currentVersion != cert.PlaybookVersion {
 			fmt.Printf("  ⚠ cert was earned against playbook version %s, current version is %s — consider re-running --repeat to refresh\n", cert.PlaybookVersion, currentVersion)
+			if cert.PlaybookID != "" && currentPlaybookID != "" && cert.PlaybookID != currentPlaybookID {
+				fmt.Printf("    See what changed: faulttest vault diff %s %s\n", cert.PlaybookID, currentPlaybookID)
+			}
 		}
 	}
 	if cert.PrimaryAttribution != "" && cert.PrimaryAttribution != attributionUnknown {
@@ -3590,9 +3600,10 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 	// all," and staleness detection already treats an empty stored version
 	// as "unknown, not fresh" (see FaultStabilityCert.PlaybookVersion).
 	if f.DiagnosisPlaybookSeriesID != "" {
-		if version, updatedAt := fetchPlaybookVersion(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID); version != "" {
+		if version, updatedAt, playbookID := fetchPlaybookVersion(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID); version != "" {
 			payload["playbook_version"] = version
 			payload["playbook_updated_at"] = updatedAt
+			payload["playbook_id"] = playbookID
 		}
 	}
 	body, err := json.Marshal(payload)

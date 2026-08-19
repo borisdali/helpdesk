@@ -522,11 +522,11 @@ func TestGatewayFaultStability_AttributionRoundtrip(t *testing.T) {
 }
 
 // TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip verifies
-// the three v0.25.0 additions through a real gateway→auditd round-trip:
-// playbook_version/playbook_updated_at survive POST→GET, an append-only
-// history entry is recorded on every upsert (not just the latest-snapshot
-// row), and Upsert's "regressed" field correctly reports the transition
-// from earning trust (STABLE+CLEAN+attribution-consistent) to not.
+// the v0.25.0 additions through a real gateway→auditd round-trip:
+// playbook_version/playbook_updated_at/playbook_id survive POST→GET, an
+// append-only history entry is recorded on every upsert (not just the
+// latest-snapshot row), and Upsert's "regressed" field correctly reports the
+// transition from earning trust (STABLE+CLEAN+attribution-consistent) to not.
 func TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip(t *testing.T) {
 	cfg := LoadConfig()
 	if !IsGatewayReachable(cfg.GatewayURL) {
@@ -545,6 +545,7 @@ func TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip(t *testing.
 		"diagnosis_model": model, "n_runs": 5, "pass_rate": 1.0, "is_stable": true,
 		"is_clean": true, "attribution_consistent": true,
 		"playbook_version": "1.4", "playbook_updated_at": "2026-08-01T00:00:00Z",
+		"playbook_id": "pb_e2e_versioning",
 	}
 	code, resp1, err := client.FaultStabilityUpsertWithBody(ctx, earning)
 	if err != nil {
@@ -574,6 +575,9 @@ func TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip(t *testing.
 	}
 	if pu, _ := got["playbook_updated_at"].(string); pu == "" {
 		t.Error("playbook_updated_at: got empty, want a timestamp")
+	}
+	if pid, _ := got["playbook_id"].(string); pid != "pb_e2e_versioning" {
+		t.Errorf("playbook_id: got %q, want pb_e2e_versioning", pid)
 	}
 
 	// Second upsert: same fault+model, now failing CLEAN — must report

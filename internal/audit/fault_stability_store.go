@@ -58,6 +58,13 @@ type FaultStabilityCert struct {
 	// "unknown," not "fresh."
 	PlaybookVersion   string    `json:"playbook_version,omitempty"`
 	PlaybookUpdatedAt time.Time `json:"playbook_updated_at,omitempty"`
+	// PlaybookID is the concrete pb_* version ID (as opposed to PlaybookVersion's
+	// human version number, e.g. "1.3") the cert was earned against — captured
+	// so a staleness warning can point directly at `vault diff <id-then>
+	// <id-now>` instead of just asserting "the playbook changed" with no way
+	// to act on it. Same non-key treatment as PlaybookVersion; empty means
+	// unknown (pre-this-field cert), not "no playbook."
+	PlaybookID string `json:"playbook_id,omitempty"`
 }
 
 // EarnsTrust reports whether this cert clears the same three-condition bar
@@ -116,6 +123,7 @@ CREATE TABLE IF NOT EXISTS fault_stability_cert (
     warning_distribution      TEXT    NOT NULL DEFAULT '{}',
     playbook_version          TEXT    NOT NULL DEFAULT '',
     playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    playbook_id               TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (fault_id, diagnosis_model)
 )`)
 	if err != nil {
@@ -167,6 +175,7 @@ CREATE TABLE IF NOT EXISTS fault_stability_cert_history (
     warning_distribution      TEXT    NOT NULL DEFAULT '{}',
     playbook_version          TEXT    NOT NULL DEFAULT '',
     playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    playbook_id               TEXT    NOT NULL DEFAULT '',
     recorded_at               TEXT    NOT NULL DEFAULT ''
 )`)
 	if err != nil {
@@ -325,6 +334,7 @@ func (s *FaultStabilityStore) addVersioningColumnsSQLite() error {
 	versionCols := []string{
 		`ALTER TABLE fault_stability_cert ADD COLUMN playbook_version    TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE fault_stability_cert ADD COLUMN playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN playbook_id         TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range versionCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -389,6 +399,7 @@ func (s *FaultStabilityStore) migratePostgres() error {
 	versionCols := []string{
 		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS playbook_version    TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert ADD COLUMN IF NOT EXISTS playbook_id         TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range versionCols {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -448,7 +459,7 @@ func (s *FaultStabilityStore) Upsert(ctx context.Context, cert *FaultStabilityCe
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
 	prior, err := scanCert(tx.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), cert.FaultID, cert.DiagnosisModel))
 	switch {
 	case err == nil:
@@ -463,8 +474,8 @@ FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), cert.Fau
 INSERT INTO fault_stability_cert
     (fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
      primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version,
-     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     fault_name                = excluded.fault_name,
     playbook_series_id        = excluded.playbook_series_id,
@@ -483,14 +494,15 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
     is_clean                  = excluded.is_clean,
     warning_distribution      = excluded.warning_distribution,
     playbook_version          = excluded.playbook_version,
-    playbook_updated_at       = excluded.playbook_updated_at`),
+    playbook_updated_at       = excluded.playbook_updated_at,
+    playbook_id               = excluded.playbook_id`),
 		cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
 		cert.NRuns, cert.PassRate, cert.ConfRangePP,
 		stableInt, testedAtStr,
 		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
 		cert.JudgeSpread, cert.TaxonomyVersion,
 		cert.WarningCount, cleanInt, string(warnDistJSON),
-		cert.PlaybookVersion, playbookUpdatedAtStr,
+		cert.PlaybookVersion, playbookUpdatedAtStr, cert.PlaybookID,
 	); err != nil {
 		return false, fmt.Errorf("upsert cert: %w", err)
 	}
@@ -500,15 +512,15 @@ ON CONFLICT(fault_id, diagnosis_model) DO UPDATE SET
 INSERT INTO fault_stability_cert_history
     (id, fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at,
      primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version,
-     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, recorded_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+     warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id, recorded_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		historyID, cert.FaultID, cert.FaultName, cert.PlaybookSeriesID, cert.JudgeModel, cert.DiagnosisModel,
 		cert.NRuns, cert.PassRate, cert.ConfRangePP,
 		stableInt, testedAtStr,
 		cert.PrimaryAttribution, attrConsistentInt, string(attrDistJSON),
 		cert.JudgeSpread, cert.TaxonomyVersion,
 		cert.WarningCount, cleanInt, string(warnDistJSON),
-		cert.PlaybookVersion, playbookUpdatedAtStr, testedAtStr,
+		cert.PlaybookVersion, playbookUpdatedAtStr, cert.PlaybookID, testedAtStr,
 	); err != nil {
 		return false, fmt.Errorf("insert cert history: %w", err)
 	}
@@ -524,7 +536,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultID(ctx context.Context, faultID string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), faultID)
 	return scanCert(row)
 }
@@ -533,7 +545,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC LIMIT 1`), 
 // Returns sql.ErrNoRows when none has been recorded.
 func (s *FaultStabilityStore) GetByFaultAndModel(ctx context.Context, faultID, model string) (*FaultStabilityCert, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID, model)
 	return scanCert(row)
 }
@@ -549,7 +561,7 @@ FROM fault_stability_cert WHERE fault_id = ? AND diagnosis_model = ?`), faultID,
 // vacuously."
 func (s *FaultStabilityStore) GetBySeriesAndModel(ctx context.Context, seriesID, model string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert WHERE playbook_series_id = ? AND diagnosis_model = ?`), seriesID, model)
 	if err != nil {
 		return nil, err
@@ -562,7 +574,7 @@ FROM fault_stability_cert WHERE playbook_series_id = ? AND diagnosis_model = ?`)
 // When only one model has ever been used the slice has one element.
 func (s *FaultStabilityStore) ListByFaultID(ctx context.Context, faultID string) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 	if err != nil {
 		return nil, err
@@ -574,7 +586,7 @@ FROM fault_stability_cert WHERE fault_id = ? ORDER BY tested_at DESC`), faultID)
 // ListAll returns all stability certs, ordered by fault_id then by tested_at desc.
 func (s *FaultStabilityStore) ListAll(ctx context.Context) ([]*FaultStabilityCert, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert ORDER BY fault_id, tested_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list fault stability certs: %w", err)
@@ -595,7 +607,7 @@ func (s *FaultStabilityStore) GetHistory(ctx context.Context, faultID, model str
 		limit = 10
 	}
 	rows, err := s.db.QueryContext(ctx, rebind(s.isPostgres, `
-SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at
+SELECT fault_id, fault_name, playbook_series_id, model, diagnosis_model, n_runs, pass_rate, conf_range_pp, is_stable, tested_at, primary_attribution, attribution_consistent, attribution_distribution, judge_spread, taxonomy_version, warning_count, is_clean, warning_distribution, playbook_version, playbook_updated_at, playbook_id
 FROM fault_stability_cert_history WHERE fault_id = ? AND diagnosis_model = ? ORDER BY recorded_at DESC LIMIT ?`), faultID, model, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get cert history: %w", err)
@@ -625,7 +637,7 @@ func scanCert(s certScanner) (*FaultStabilityCert, error) {
 		&cert.PrimaryAttribution, &attrConsistentInt, &attrDistJSON,
 		&cert.JudgeSpread, &cert.TaxonomyVersion,
 		&cert.WarningCount, &cleanInt, &warnDistJSON,
-		&cert.PlaybookVersion, &playbookUpdatedAtStr,
+		&cert.PlaybookVersion, &playbookUpdatedAtStr, &cert.PlaybookID,
 	); err != nil {
 		return nil, err
 	}

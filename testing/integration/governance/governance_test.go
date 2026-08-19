@@ -1522,7 +1522,7 @@ func TestIntegration_ObjectiveEvidence_GetEventsSignal_RoundTrips(t *testing.T) 
 }
 
 // TestIntegration_FaultStabilityCert_VersioningHistoryRegression_RoundTrip
-// confirms the three v0.25.0 additions through a real auditd binary and real
+// confirms the v0.25.0 additions through a real auditd binary and real
 // SQL storage — new columns and a new table added via the idempotent
 // migrate() pattern are exactly what TestIntegration_FaultStabilityCert_CleanFields_RoundTrip's
 // doc comment already identifies this layer as being for: the kind of bug a
@@ -1536,6 +1536,7 @@ func TestIntegration_FaultStabilityCert_VersioningHistoryRegression_RoundTrip(t 
 		"diagnosis_model": model, "n_runs": 5, "pass_rate": 1.0, "is_stable": true,
 		"is_clean": true, "attribution_consistent": true,
 		"playbook_version": "3.0", "playbook_updated_at": "2026-08-01T00:00:00Z",
+		"playbook_id": "pb_integration_test",
 	}
 	resp1 := post(t, auditdAddr, "/v1/fleet/fault-stability", earning)
 	if regressed, _ := resp1["regressed"].(bool); regressed {
@@ -1548,6 +1549,9 @@ func TestIntegration_FaultStabilityCert_VersioningHistoryRegression_RoundTrip(t 
 	}
 	if pu, _ := got["playbook_updated_at"].(string); pu == "" {
 		t.Error("playbook_updated_at: got empty, want a timestamp")
+	}
+	if pid, _ := got["playbook_id"].(string); pid != "pb_integration_test" {
+		t.Errorf("playbook_id = %v, want pb_integration_test", got["playbook_id"])
 	}
 
 	noLongerEarning := map[string]any{
