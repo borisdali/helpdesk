@@ -66,8 +66,14 @@ spec:
                 {{- if .Values.recertify.categories }}
                 - --categories={{ .Values.recertify.categories }}
                 {{- end }}
+                {{- if .Values.faulttest.catalog }}
+                - --catalog=/etc/faulttest/catalog.yaml
+                {{- end }}
                 {{- if .Values.recertify.judge }}
                 - --judge
+                {{- end }}
+                {{- if .Values.recertify.notifyURL }}
+                - --notify-url={{ .Values.recertify.notifyURL }}
                 {{- end }}
                 {{- if .Values.infrastructure }}
                 - --infra-config=/etc/helpdesk/infrastructure.json
@@ -97,6 +103,12 @@ spec:
                   subPath: infrastructure.json
                   readOnly: true
                 {{- end }}
+                {{- if .Values.faulttest.catalog }}
+                - name: faulttest-catalog
+                  mountPath: /etc/faulttest/catalog.yaml
+                  subPath: catalog.yaml
+                  readOnly: true
+                {{- end }}
                 - name: reports
                   mountPath: /reports
           volumes:
@@ -104,6 +116,11 @@ spec:
             - name: infra-config
               configMap:
                 name: {{ $fullname }}-config
+            {{- end }}
+            {{- if .Values.faulttest.catalog }}
+            - name: faulttest-catalog
+              configMap:
+                name: {{ $fullname }}-faulttest-catalog
             {{- end }}
             - name: reports
               emptyDir: {}

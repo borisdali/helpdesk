@@ -707,3 +707,230 @@ func TestFleetRunnerScheduledJob(t *testing.T) {
 		t.Errorf("job-definition volume configMap name = %q, want test-fleet-job-vacuum-all", cmName)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Faulttest custom catalog (--catalog) mounting
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestFaulttestCatalogConfigMap_AbsentByDefault verifies that no catalog
+// ConfigMap is rendered and no --catalog arg appears when faulttest.catalog
+// is unset (the default), even with faulttest.enabled=true.
+func TestFaulttestCatalogConfigMap_AbsentByDefault(t *testing.T) {
+	objects := render(t, "faulttest.enabled=true", "faulttest.ids=db-wal-disk-full-k8s")
+
+	if _, ok := objects["ConfigMap/test-faulttest-catalog"]; ok {
+		t.Error("unexpected ConfigMap/test-faulttest-catalog when faulttest.catalog is unset")
+	}
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog when faulttest.catalog is unset", args)
+	}
+}
+
+// TestFaulttestCatalogConfigMap_CreatedWhenSet verifies that setting
+// faulttest.catalog creates the shared ConfigMap with the raw content, and
+// that the faulttest Job gets both the --catalog arg and the matching
+// volume/mount.
+func TestFaulttestCatalogConfigMap_CreatedWhenSet(t *testing.T) {
+	objects := render(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	cm, ok := objects["ConfigMap/test-faulttest-catalog"]
+	if !ok {
+		t.Fatal("ConfigMap/test-faulttest-catalog not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	catalogYAML, _ := data["catalog.yaml"].(string)
+	if !strings.Contains(catalogYAML, "custom-target-drift-nudge") {
+		t.Errorf("catalog.yaml content = %q, want it to contain the fault ID", catalogYAML)
+	}
+
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog=/etc/faulttest/catalog.yaml", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Fatal("faulttest container has no volumeMounts")
+	}
+	mounts, _ := container["volumeMounts"].([]any)
+	var found bool
+	for _, m := range mounts {
+		mount, _ := m.(map[string]any)
+		if mount["name"] == "faulttest-catalog" {
+			found = true
+			if mount["mountPath"] != "/etc/faulttest/catalog.yaml" {
+				t.Errorf("faulttest-catalog mountPath = %v, want /etc/faulttest/catalog.yaml", mount["mountPath"])
+			}
+		}
+	}
+	if !found {
+		t.Error("faulttest-catalog volumeMount not found")
+	}
+}
+
+// TestRecertifyCatalogAndNotifyURL verifies that recertify.notifyURL and the
+// shared faulttest.catalog both propagate into the recertify CronJob's args
+// and volume mounts — the fix for item 10.3 (recertify previously had no way
+// to reach a custom fault or fire the regression webhook).
+func TestRecertifyCatalogAndNotifyURL(t *testing.T) {
+	objects := render(t,
+		"recertify.enabled=true",
+		"recertify.notifyURL=http://alertmanager.monitoring.svc:9093/webhook",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	cj, ok := objects["CronJob/test-recertify"]
+	if !ok {
+		t.Fatal("CronJob/test-recertify not found")
+	}
+	spec, _ := cj["spec"].(map[string]any)
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	if !hasArg(args, "--notify-url=http://alertmanager.monitoring.svc:9093/webhook") {
+		t.Errorf("args %v missing --notify-url", args)
+	}
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog=/etc/faulttest/catalog.yaml", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Fatal("recertify container has no volumeMounts")
+	}
+}
+
+// TestRecertifyNoCatalogOrNotifyURLByDefault verifies neither --catalog nor
+// --notify-url appear when their values are left at the default empty string.
+func TestRecertifyNoCatalogOrNotifyURLByDefault(t *testing.T) {
+	objects := render(t, "recertify.enabled=true")
+
+	cj, ok := objects["CronJob/test-recertify"]
+	if !ok {
+		t.Fatal("CronJob/test-recertify not found")
+	}
+	spec, _ := cj["spec"].(map[string]any)
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog by default", args)
+	}
+	if hasArg(args, "--notify-url") {
+		t.Errorf("args %v should NOT contain --notify-url by default", args)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-shot vault-query Job
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestVaultQueryJobDisabledByDefault verifies no vault-query Job is rendered
+// when vaultQuery.enabled=false (the default).
+func TestVaultQueryJobDisabledByDefault(t *testing.T) {
+	objects := render(t)
+	if _, ok := objects["Job/test-vault-query"]; ok {
+		t.Error("unexpected Job/test-vault-query with default values (vaultQuery.enabled=false)")
+	}
+}
+
+// TestVaultQueryJobEnabled verifies the vault-query Job renders with the
+// correct subcommand/target/gateway args, no RBAC (read-only, unlike the
+// mutating faulttest Job), and the catalog volume mount when set.
+func TestVaultQueryJobEnabled(t *testing.T) {
+	objects := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=accuracy",
+		"vaultQuery.target=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	job, ok := objects["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+
+	if _, hasSA := podSpec["serviceAccountName"]; hasSA {
+		t.Error("vault-query Job should not set a serviceAccountName — it's read-only, no RBAC needed")
+	}
+
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	wantArgs := []string{"vault", "accuracy", "custom-target-drift-nudge"}
+	for i, want := range wantArgs {
+		if i >= len(args) || args[i] != want {
+			t.Errorf("args[%d] = %v, want %q (full args: %v)", i, args, want, args)
+		}
+	}
+	if !hasArg(args, "--gateway=http://test-gateway:") {
+		t.Errorf("args %v missing --gateway", args)
+	}
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Error("vault-query container should have the catalog volumeMount when faulttest.catalog is set")
+	}
+}
+
+// TestVaultQueryJobEnabled_NoTargetOrCatalog verifies the target positional
+// arg and catalog mount are both omitted when unset — some vault subcommands
+// (e.g. list with no args) don't take a positional target.
+func TestVaultQueryJobEnabled_NoTargetOrCatalog(t *testing.T) {
+	objects := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+	)
+
+	job, ok := objects["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	wantArgs := []string{"vault", "list"}
+	for i, want := range wantArgs {
+		if i >= len(args) || args[i] != want {
+			t.Errorf("args[%d] = %v, want %q (full args: %v)", i, args, want, args)
+		}
+	}
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog when faulttest.catalog is unset", args)
+	}
+	if hasVolumeMounts(container) {
+		t.Error("vault-query container should have no volumeMounts when faulttest.catalog is unset")
+	}
+}

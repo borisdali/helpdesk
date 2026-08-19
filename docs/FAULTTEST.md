@@ -1400,6 +1400,36 @@ faulttest list --catalog my-faults.yaml --source custom --categories database
 faulttest list --source builtin
 ```
 
+### 9.6 Running a custom catalog from Helm
+
+The chart mounts your catalog file automatically — no hand-crafted Job manifest needed. Set `faulttest.catalog` via `--set-file`, pointing at the same file you'd otherwise pass to `--catalog` directly:
+
+```bash
+helm upgrade --install helpdesk deploy/helm/helpdesk \
+  --set faulttest.enabled=true \
+  --set faulttest.ids=my-slow-query-storm \
+  --set-file faulttest.catalog=my-faults.yaml \
+  ...
+```
+
+One values key serves three consumers — set it once and it's available to whichever of these you use:
+
+- **`faulttest.enabled=true`** — the one-off fault-test Job (`faulttest run`).
+- **`recertify.enabled=true`** — the scheduled recertification CronJob (`faulttest run --repeat N`), so custom faults can earn STABLE/CLEAN certs on the same cadence as built-in ones. Pair with `recertify.notifyURL` to get the [cert-regression webhook](CONSISTENCY.md#73-cert-history-and-regression-alerts) from unattended recerts, not just interactive runs.
+- **`vaultQuery.enabled=true`** — a lightweight, read-only Job for one-shot `vault` queries against a custom fault ID without needing `--infra-config` or any RBAC:
+
+  ```bash
+  helm upgrade --install helpdesk deploy/helm/helpdesk \
+    --set vaultQuery.enabled=true \
+    --set vaultQuery.subcommand=accuracy \
+    --set vaultQuery.target=my-slow-query-storm \
+    --set-file faulttest.catalog=my-faults.yaml \
+    ...
+  kubectl -n helpdesk-system logs -f job/helpdesk-vault-query
+  ```
+
+  See [`vault accuracy`](VAULT.md#vault-accuracy) for what the output means, and [`vault list`/`versions`/`incidents`/etc.](VAULT.md) for other subcommands `vaultQuery.subcommand` accepts.
+
 ---
 
 ## 10. Extending the built-in catalog

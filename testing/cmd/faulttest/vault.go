@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/testing/faultlib"
 )
 
@@ -510,23 +511,19 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	return &cert
 }
 
-// certHistoryEntry is one snapshot from fetchCertHistory — only the fields
-// printFaultStabilityCert's history section actually displays, not the full
-// cert shape fetchStabilityCert decodes.
-type certHistoryEntry struct {
-	NRuns                 int    `json:"n_runs"`
-	IsStable              bool   `json:"is_stable"`
-	IsClean               bool   `json:"is_clean"`
-	AttributionConsistent bool   `json:"attribution_consistent"`
-	TestedAt              string `json:"tested_at"`
-}
-
 // fetchCertHistory calls GET .../fault-stability/{faultID}/history — the
 // trend fetchStabilityCert alone can't answer, since that endpoint only ever
 // returns the latest snapshot. Returns nil on any error or when the fault
 // has never been certified; a single-entry result is a normal "certified
 // once so far" state, not an error.
-func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []certHistoryEntry {
+//
+// Decodes directly into audit.FaultStabilityCert (the same type the server
+// stores and returns) rather than a hand-rolled subset — a mirror struct is
+// what let HasTargetDrift silently go missing from journeySummary until a
+// coverage review caught it; decoding the full type means printCertHistory
+// can show *why* a cert changed (warning_distribution/playbook_version/
+// taxonomy_version deltas), not just that it did.
+func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []audit.FaultStabilityCert {
 	if gatewayURL == "" || faultID == "" || model == "" {
 		return nil
 	}
@@ -549,7 +546,7 @@ func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []ce
 		return nil
 	}
 	var result struct {
-		History []certHistoryEntry `json:"history"`
+		History []audit.FaultStabilityCert `json:"history"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil
@@ -1626,7 +1623,7 @@ func printCertHistory(gatewayURL, apiKey, faultID, diagnosisModel string) {
 	}
 	fmt.Println()
 	fmt.Printf("Cert history (last %d)\n", len(history))
-	for _, h := range history {
+	for i, h := range history {
 		verdict := "UNSTABLE"
 		if h.IsStable {
 			verdict = "STABLE"
@@ -1639,12 +1636,94 @@ func printCertHistory(gatewayURL, apiKey, faultID, diagnosisModel string) {
 		if h.AttributionConsistent {
 			consistent = "consistent"
 		}
-		when := h.TestedAt
-		if t, err := time.Parse(time.RFC3339Nano, h.TestedAt); err == nil {
-			when = t.Format("2006-01-02 15:04 MST")
+		fmt.Printf("  %-22s %-8s %-5s attr=%-10s (%d runs)\n",
+			h.TestedAt.Format("2006-01-02 15:04 MST"), verdict, clean, consistent, h.NRuns)
+		if i+1 < len(history) {
+			if changes := diffCertHistoryEntries(h, history[i+1]); len(changes) > 0 {
+				fmt.Printf("      ↳ changed since %s: %s\n",
+					history[i+1].TestedAt.Format("2006-01-02 15:04 MST"), strings.Join(changes, "; "))
+			}
 		}
-		fmt.Printf("  %-22s %-8s %-5s attr=%-10s (%d runs)\n", when, verdict, clean, consistent, h.NRuns)
 	}
+}
+
+// diffCertHistoryEntries compares two adjacent cert-history rows (newer,
+// older) and returns human-readable descriptions of what changed between
+// them — the "why" a raw side-by-side listing can't answer on its own, and
+// the mechanism that gives printCertHistory an actual trend instead of just
+// a flat list of snapshots. Empty result means nothing this function checks
+// differed between the two certs.
+func diffCertHistoryEntries(newer, older audit.FaultStabilityCert) []string {
+	var changes []string
+	switch {
+	case older.EarnsTrust() && !newer.EarnsTrust():
+		changes = append(changes, "trust regressed (was STABLE+CLEAN+attribution-consistent)")
+	case !older.EarnsTrust() && newer.EarnsTrust():
+		changes = append(changes, "trust earned (now STABLE+CLEAN+attribution-consistent)")
+	}
+	if newer.IsStable != older.IsStable {
+		oldLabel, newLabel := "UNSTABLE", "UNSTABLE"
+		if older.IsStable {
+			oldLabel = "STABLE"
+		}
+		if newer.IsStable {
+			newLabel = "STABLE"
+		}
+		changes = append(changes, fmt.Sprintf("stability: %s→%s", oldLabel, newLabel))
+	}
+	if newer.IsClean != older.IsClean {
+		oldLabel, newLabel := "DIRTY", "DIRTY"
+		if older.IsClean {
+			oldLabel = "CLEAN"
+		}
+		if newer.IsClean {
+			newLabel = "CLEAN"
+		}
+		changes = append(changes, fmt.Sprintf("clean: %s→%s", oldLabel, newLabel))
+	}
+	if newer.AttributionConsistent != older.AttributionConsistent {
+		oldLabel, newLabel := "split", "split"
+		if older.AttributionConsistent {
+			oldLabel = "consistent"
+		}
+		if newer.AttributionConsistent {
+			newLabel = "consistent"
+		}
+		changes = append(changes, fmt.Sprintf("attribution: %s→%s", oldLabel, newLabel))
+	}
+	if d := diffCountMap(older.WarningDistribution, newer.WarningDistribution); d != "" {
+		changes = append(changes, "warning_distribution: "+d)
+	}
+	if older.PlaybookVersion != "" && newer.PlaybookVersion != "" && older.PlaybookVersion != newer.PlaybookVersion {
+		changes = append(changes, fmt.Sprintf("playbook_version: %s→%s", older.PlaybookVersion, newer.PlaybookVersion))
+	}
+	if older.TaxonomyVersion != "" && newer.TaxonomyVersion != "" && older.TaxonomyVersion != newer.TaxonomyVersion {
+		changes = append(changes, fmt.Sprintf("taxonomy_version: %s→%s", older.TaxonomyVersion, newer.TaxonomyVersion))
+	}
+	return changes
+}
+
+// diffCountMap compares two count maps (e.g. warning_distribution across two
+// certs) and returns a comma-joined, sorted "key old→new" list for every key
+// whose count differs — including keys present in only one map, treated as 0
+// in the other. Empty string when nothing differs.
+func diffCountMap(older, newer map[string]int) string {
+	keys := map[string]bool{}
+	for k := range older {
+		keys[k] = true
+	}
+	for k := range newer {
+		keys[k] = true
+	}
+	var parts []string
+	for k := range keys {
+		o, n := older[k], newer[k]
+		if o != n {
+			parts = append(parts, fmt.Sprintf("%s %d→%d", k, o, n))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
 }
 
 // vaultAccuracyAll is the no-arg (or --ids) mode: scans catalog faults that have a

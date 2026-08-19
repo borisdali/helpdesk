@@ -1,0 +1,12 @@
+{{- if .Values.faulttest.catalog }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "helpdesk.fullname" . }}-faulttest-catalog
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "helpdesk.labels" . | nindent 4 }}
+    app.kubernetes.io/component: faulttest
+data:
+  catalog.yaml: {{ .Values.faulttest.catalog | quote }}
+{{- end }}

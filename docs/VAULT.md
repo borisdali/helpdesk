@@ -381,6 +381,29 @@ If the cert is older than 30 days, a warning is shown beneath it:
   [WARN] cert is older than 30 days — consider re-running --repeat to refresh
 ```
 
+A cert can also go stale against the *playbook* rather than the clock — the playbook it was earned against may have since been edited. One of these appears instead, right below the age warning:
+
+```
+  ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits
+  ⚠ cert was earned against playbook version 1.3, current version is 1.4 — consider re-running --repeat to refresh
+```
+
+The first line means the cert was posted before v0.25.0 added version tracking — treated as "unknown," never as "fresh." The second means the cert is genuinely out of date against a real playbook edit made since it was earned.
+
+**Cert history.** Once a fault+model pair has been recertified at least twice, a trend section follows the cert block — not just today's verdict, but whether it's held steady or when and how it changed:
+
+```
+Cert history (last 3)
+  2026-08-19 03:15 UTC   STABLE   DIRTY  attr=consistent (5 runs)
+      ↳ changed since 2026-08-19 00:15: trust regressed (was STABLE+CLEAN+attribution-consistent); clean: CLEAN→DIRTY; warning_distribution: mismatch 0→5
+  2026-08-19 00:15 UTC   STABLE   CLEAN  attr=consistent (5 runs)
+  2026-08-14 19:14 UTC   STABLE   CLEAN  attr=consistent (5 runs)
+```
+
+Each row is one recertification, newest first. The `↳` line under a row — when present — explains what changed since the row below it: `IsStable`/`IsClean`/`AttributionConsistent` flips, `warning_distribution` deltas (which specific signal appeared, disappeared, or changed count), and `playbook_version`/`taxonomy_version` changes. A row with no `↳` line means nothing tracked here changed since the previous cert. The section is silently omitted below two recorded certs — there's no trend to show yet.
+
+> **Not to be confused with [`vault history`](#vault-history)**, a different, unrelated command — this section is the *stability cert's* own recertification trend for one fault; `vault history` lists every stored *version of a playbook* (authoring/provenance lineage, `pb_` IDs, `from=` trace). Same word, different axis.
+
 The overall accuracy rate is `correct / total` across both feedback times; nil verdicts are excluded. The breakdown section appears whenever at least one feedback type has data, letting you compare the signal quality: at-gate feedback is uncontaminated by knowledge of whether the fix worked, while post-incident feedback can be influenced by hindsight.
 
 With no argument, lists all catalog faults that have a diagnosis playbook series and shows a table with per-type counts:
@@ -1328,6 +1351,8 @@ faulttest vault history <series-id> \
 ```
 
 Lists **every stored version** of a playbook series — active, inactive, system and generated — regardless of whether any runs have been recorded against them. This is the complete provenance ledger for a series and the primary way to discover playbook IDs for `vault diff <id1> <id2>`.
+
+> **Not to be confused with the "Cert history" section** printed by [`vault accuracy`](#vault-accuracy) — that's the *stability cert's* own recertification trend for one fault (STABLE/CLEAN/attribution over time). This command is playbook-version provenance instead. Same word, different axis.
 
 ```
 Version history for pbs_connection_remediate — 2 version(s)

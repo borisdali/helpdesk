@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"helpdesk/internal/audit"
 )
 
 // ── passRateOf ────────────────────────────────────────────────────────────
@@ -465,6 +467,157 @@ func TestFetchCertHistory_MissingRequiredArgs_NoRequest(t *testing.T) {
 	}
 	if h := fetchCertHistory("http://example.invalid", "key", "k8s-oomkilled", "", 10); h != nil {
 		t.Errorf("empty model: got %v, want nil", h)
+	}
+}
+
+// ── diffCertHistoryEntries / diffCountMap ───────────────────────────────────
+
+func TestDiffCertHistoryEntries_NoChanges_ReturnsEmpty(t *testing.T) {
+	c := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true, PlaybookVersion: "1.0", TaxonomyVersion: "2.0"}
+	if got := diffCertHistoryEntries(c, c); len(got) != 0 {
+		t.Errorf("identical certs: got %v, want no changes", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_TrustRegressed(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "trust regressed") {
+		t.Errorf("got %v, want a \"trust regressed\" entry", got)
+	}
+	if !containsSubstring(got, "clean: CLEAN→DIRTY") {
+		t.Errorf("got %v, want a clean:CLEAN→DIRTY entry", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_TrustEarned(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "trust earned") {
+		t.Errorf("got %v, want a \"trust earned\" entry", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_StabilityAndAttributionFlip(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: false, IsClean: true, AttributionConsistent: false}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "stability: UNSTABLE→STABLE") {
+		t.Errorf("got %v, want stability: UNSTABLE→STABLE", got)
+	}
+	if !containsSubstring(got, "attribution: split→consistent") {
+		t.Errorf("got %v, want attribution: split→consistent", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_WarningDistributionDelta(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true, WarningDistribution: map[string]int{"target_drift": 5, "mismatch": 0}}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true, WarningDistribution: map[string]int{"target_drift": 5, "mismatch": 3}}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "warning_distribution: mismatch 0→3") {
+		t.Errorf("got %v, want warning_distribution: mismatch 0→3 (target_drift unchanged, shouldn't appear)", got)
+	}
+	for _, c := range got {
+		if strings.Contains(c, "target_drift") {
+			t.Errorf("got %v, unchanged key target_drift should not appear in diff", got)
+		}
+	}
+}
+
+func TestDiffCertHistoryEntries_PlaybookVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
+	// Both non-empty and differ: reported.
+	older := audit.FaultStabilityCert{PlaybookVersion: "1.3"}
+	newer := audit.FaultStabilityCert{PlaybookVersion: "1.4"}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "playbook_version: 1.3→1.4") {
+		t.Errorf("got %v, want playbook_version: 1.3→1.4", got)
+	}
+
+	// Older is empty (pre-version-tracking cert): not reported — nothing to compare against.
+	older2 := audit.FaultStabilityCert{PlaybookVersion: ""}
+	newer2 := audit.FaultStabilityCert{PlaybookVersion: "1.4"}
+	got2 := diffCertHistoryEntries(newer2, older2)
+	if containsSubstring(got2, "playbook_version") {
+		t.Errorf("got %v, want no playbook_version entry when older version is unknown", got2)
+	}
+}
+
+func TestDiffCountMap(t *testing.T) {
+	tests := []struct {
+		name        string
+		older, newer map[string]int
+		want        string
+	}{
+		{"both empty", nil, nil, ""},
+		{"identical", map[string]int{"a": 1}, map[string]int{"a": 1}, ""},
+		{"value changed", map[string]int{"a": 1}, map[string]int{"a": 2}, "a 1→2"},
+		{"key added", map[string]int{}, map[string]int{"b": 3}, "b 0→3"},
+		{"key removed", map[string]int{"c": 2}, map[string]int{}, "c 2→0"},
+		{"multiple, sorted", map[string]int{"z": 1, "a": 1}, map[string]int{"z": 2, "a": 2}, "a 1→2, z 1→2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := diffCountMap(tt.older, tt.newer); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func containsSubstring(entries []string, substr string) bool {
+	for _, e := range entries {
+		if strings.Contains(e, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPrintCertHistory_ShowsDiffLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"history": []map[string]any{
+				{"n_runs": 5, "is_stable": true, "is_clean": false, "attribution_consistent": true, "tested_at": "2026-08-19T00:15:00Z", "warning_distribution": map[string]int{"mismatch": 5}},
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-14T19:14:00Z", "warning_distribution": map[string]int{"mismatch": 0}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printCertHistory(srv.URL, "", "custom-target-drift-nudge", "claude-haiku-4-5-20251001")
+	})
+	if !strings.Contains(out, "Cert history (last 2)") {
+		t.Errorf("output missing history header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "trust regressed") {
+		t.Errorf("output missing trust-regressed diff line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "mismatch 0→5") {
+		t.Errorf("output missing warning_distribution delta, got:\n%s", out)
+	}
+}
+
+func TestPrintCertHistory_NoDiffLine_WhenNothingChanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"history": []map[string]any{
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-19T00:15:00Z"},
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-14T19:14:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printCertHistory(srv.URL, "", "db-lock-contention", "claude-haiku-4-5-20251001")
+	})
+	if strings.Contains(out, "↳") {
+		t.Errorf("output should have no diff line when nothing changed, got:\n%s", out)
 	}
 }
 
