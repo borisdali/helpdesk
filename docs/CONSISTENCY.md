@@ -197,8 +197,9 @@ time being invisible (only "what does it say right now," never "did it change, a
 |-------|------|-------------|
 | `playbook_version` | string | The playbook's `version` field at the moment this cert was earned, fetched from the gateway at cert-post time. Empty for certs recorded before v0.25.0 — treated as "unknown," never as "fresh." |
 | `playbook_updated_at` | timestamp | The playbook's `updated_at` at the same moment, for the same staleness comparison. |
+| `playbook_id` | string | The playbook's concrete `pb_*` version ID at the same moment — as opposed to `playbook_version`'s human-readable number, this is the exact ID `vault diff` takes as an argument. Same non-key treatment and "empty means unknown" semantics as the other two. |
 
-Neither field is part of the composite primary key — editing a playbook does not fork the cert
+None of the three is part of the composite primary key — editing a playbook does not fork the cert
 into a new row, it just leaves the existing row referencing a version that's no longer current.
 `vault accuracy <fault-id>` compares the stored `playbook_version` against the playbook's live
 current version on every lookup and warns when they differ:
@@ -207,7 +208,15 @@ current version on every lookup and warns when they differ:
   ⚠ cert was earned against playbook version 1.2, current version is 1.4 — consider re-running --repeat to refresh
 ```
 
-or, for a cert that predates this field entirely:
+When `playbook_id` is also known on both sides (the cert's stored ID and the currently active
+one), that warning is followed by a ready-to-run comparison instead of leaving "the playbook
+changed" as an assertion with nothing to act on:
+
+```
+    See what changed: faulttest vault diff pb_be8b5667 pb_31575294
+```
+
+or, for a cert that predates version tracking entirely:
 
 ```
   ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits
@@ -618,13 +627,18 @@ right now":
 ```
 Cert history (last 3)
   2026-08-01 12:00 UTC  STABLE   DIRTY attr=consistent (5 runs)
+      ↳ changed since 2026-07-15 09:30: trust regressed (was STABLE+CLEAN+attribution-consistent); clean: CLEAN→DIRTY; warning_distribution: mismatch 0→5
   2026-07-15 09:30 UTC  STABLE   CLEAN attr=consistent (5 runs)
   2026-07-01 14:00 UTC  STABLE   CLEAN attr=consistent (5 runs)
 ```
 
-Most recent first. A single row (a fault certified exactly once so far) is a normal state, not
-shown as a section — there's no trend yet to display. Query it directly without going through
-`vault accuracy`:
+Most recent first. Each row's `↳` line (when present) reports *why* it differs from the row below
+it — stability/clean/attribution-consistency flips, `warning_distribution` deltas, and
+`playbook_version`/`taxonomy_version` changes — computed client-side from the full cert rows the
+history endpoint already returns, not a separate lookup. A row with no `↳` line held steady
+against the one before it. A single row (a fault certified exactly once so far) is a normal
+state, not shown as a section — there's no trend yet to display. Query it directly without going
+through `vault accuracy`:
 
 ```bash
 curl "$GW/api/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit=10" \

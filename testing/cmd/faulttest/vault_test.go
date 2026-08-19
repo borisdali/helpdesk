@@ -529,6 +529,24 @@ func TestDiffCertHistoryEntries_WarningDistributionDelta(t *testing.T) {
 	}
 }
 
+func TestDiffCertHistoryEntries_TaxonomyVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
+	// Both non-empty and differ: reported.
+	older := audit.FaultStabilityCert{TaxonomyVersion: "2.0"}
+	newer := audit.FaultStabilityCert{TaxonomyVersion: "2.1"}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "taxonomy_version: 2.0→2.1") {
+		t.Errorf("got %v, want taxonomy_version: 2.0→2.1", got)
+	}
+
+	// Older is empty: not reported — nothing to compare against.
+	older2 := audit.FaultStabilityCert{TaxonomyVersion: ""}
+	newer2 := audit.FaultStabilityCert{TaxonomyVersion: "2.1"}
+	got2 := diffCertHistoryEntries(newer2, older2)
+	if containsSubstring(got2, "taxonomy_version") {
+		t.Errorf("got %v, want no taxonomy_version entry when older is unknown", got2)
+	}
+}
+
 func TestDiffCertHistoryEntries_PlaybookVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
 	// Both non-empty and differ: reported.
 	older := audit.FaultStabilityCert{PlaybookVersion: "1.3"}
@@ -5252,6 +5270,42 @@ func TestPrintFaultStabilityCert_NoVaultDiffHint_WhenPlaybookIDUnknown(t *testin
 	}
 	if strings.Contains(out, "vault diff") {
 		t.Errorf("expected no vault diff hint when the cert has no stored playbook_id:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_NoVaultDiffHint_WhenCurrentPlaybookIDUnknown
+// covers the reverse asymmetry: the cert DOES have a stored playbook_id, but
+// the live lookup's active playbook entry has none (e.g. a gateway/auditd
+// version skew, or a malformed response) — the hint must still stay
+// suppressed rather than printing a diff against an empty ID.
+func TestPrintFaultStabilityCert_NoVaultDiffHint_WhenCurrentPlaybookIDUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			// Active version has no playbook_id in this response.
+			fmt.Fprint(w, `{"playbooks":[{"version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+				"playbook_id": "pb_be8b5667",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
+		t.Errorf("expected the plain staleness warning to still show:\n%s", out)
+	}
+	if strings.Contains(out, "vault diff") {
+		t.Errorf("expected no vault diff hint when the current playbook_id is unknown:\n%s", out)
 	}
 }
 

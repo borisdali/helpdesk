@@ -55,6 +55,33 @@ func render(t *testing.T, setFlags ...string) map[string]map[string]any {
 	return parseManifests(t, string(out))
 }
 
+// renderRaw is like render but returns the raw multi-document YAML text
+// instead of parsing it into a dedup-by-name map — needed to detect an
+// accidental duplicate resource definition (parseManifests's map would
+// silently collapse two ConfigMap/same-name documents into one entry,
+// hiding exactly the bug a shared-template design is supposed to prevent).
+func renderRaw(t *testing.T, setFlags ...string) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not in PATH; skipping Helm chart tests")
+	}
+
+	args := []string{"template", "test", chartPath(t)}
+	for _, f := range setFlags {
+		if strings.HasPrefix(f, "setjson:") {
+			args = append(args, "--set-json", strings.TrimPrefix(f, "setjson:"))
+		} else {
+			args = append(args, "--set", f)
+		}
+	}
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
 // parseManifests splits multi-document YAML produced by `helm template` and
 // returns objects indexed by "Kind/name".
 func parseManifests(t *testing.T, data string) map[string]map[string]any {
@@ -121,6 +148,28 @@ func containerEnvMap(container map[string]any) map[string]string {
 		}
 	}
 	return result
+}
+
+// containerEnvSecretRef returns the (secretName, secretKey) a container's
+// named env var is sourced from via secretKeyRef, and ok=false if the env
+// var isn't present or isn't secret-backed.
+func containerEnvSecretRef(container map[string]any, envName string) (secretName, secretKey string, ok bool) {
+	env, _ := container["env"].([]any)
+	for _, e := range env {
+		entry, _ := e.(map[string]any)
+		if entry["name"] != envName {
+			continue
+		}
+		valueFrom, _ := entry["valueFrom"].(map[string]any)
+		ref, _ := valueFrom["secretKeyRef"].(map[string]any)
+		if ref == nil {
+			return "", "", false
+		}
+		name, _ := ref["name"].(string)
+		key, _ := ref["key"].(string)
+		return name, key, true
+	}
+	return "", "", false
 }
 
 // hasArg returns true if any element of args has the given prefix.
@@ -788,6 +837,58 @@ func TestFaulttestCatalogConfigMap_CreatedWhenSet(t *testing.T) {
 	}
 }
 
+// TestFaulttestCatalogConfigMap_SharedAcrossAllThreeConsumers is the actual
+// scenario the shared-ConfigMap design (item 9/10.3) was built for: all
+// three consumers (faulttest, recertify, vaultQuery) enabled at once with
+// the same faulttest.catalog value must produce exactly one ConfigMap
+// resource, not one per consumer. Uses renderRaw + a raw string count
+// specifically because render()'s dedup-by-name map would silently hide a
+// real duplication bug (two ConfigMap/same-name documents collapse to one
+// map entry either way).
+func TestFaulttestCatalogConfigMap_SharedAcrossAllThreeConsumers(t *testing.T) {
+	raw := renderRaw(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+		"recertify.enabled=true",
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+	)
+
+	// Count documents (not raw substring occurrences — the volume block in
+	// each of the 3 consumers also references "name: test-faulttest-catalog"
+	// via configMap.name, which would inflate a naive substring count to 4)
+	// whose kind is ConfigMap and whose metadata.name is the catalog's name.
+	configMapDocs := 0
+	for _, doc := range strings.Split(raw, "\n---") {
+		var obj map[string]any
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil || obj == nil {
+			continue
+		}
+		kind, _ := obj["kind"].(string)
+		meta, _ := obj["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
+		if kind == "ConfigMap" && name == "test-faulttest-catalog" {
+			configMapDocs++
+		}
+	}
+	if configMapDocs != 1 {
+		t.Errorf("found %d ConfigMap/test-faulttest-catalog document(s) in rendered output, want exactly 1 (one shared ConfigMap, not one per consumer)", configMapDocs)
+	}
+
+	objects := parseManifests(t, raw)
+	if _, ok := objects["ConfigMap/test-faulttest-catalog"]; !ok {
+		t.Fatal("ConfigMap/test-faulttest-catalog not found with all three consumers enabled")
+	}
+	// All three consumers must still each get their own volume/mount wired
+	// to that one ConfigMap.
+	for _, key := range []string{"Job/test-faulttest", "CronJob/test-recertify", "Job/test-vault-query"} {
+		if _, ok := objects[key]; !ok {
+			t.Errorf("%s not found", key)
+		}
+	}
+}
+
 // TestRecertifyCatalogAndNotifyURL verifies that recertify.notifyURL and the
 // shared faulttest.catalog both propagate into the recertify CronJob's args
 // and volume mounts — the fix for item 10.3 (recertify previously had no way
@@ -899,6 +1000,51 @@ func TestVaultQueryJobEnabled(t *testing.T) {
 	}
 	if !hasVolumeMounts(container) {
 		t.Error("vault-query container should have the catalog volumeMount when faulttest.catalog is set")
+	}
+}
+
+// TestVaultQueryJobGatewayAPIKeySecret verifies HELPDESK_CLIENT_API_KEY is
+// wired to vaultQuery.gatewayAPIKeySecret via secretKeyRef when set, and
+// absent entirely (not even as an empty entry) when unset.
+func TestVaultQueryJobGatewayAPIKeySecret(t *testing.T) {
+	withSecret := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+		"vaultQuery.gatewayAPIKeySecret=my-gateway-key",
+	)
+	job, ok := withSecret["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+
+	name, key, ok := containerEnvSecretRef(container, "HELPDESK_CLIENT_API_KEY")
+	if !ok {
+		t.Fatal("HELPDESK_CLIENT_API_KEY not found as a secretKeyRef-backed env var")
+	}
+	if name != "my-gateway-key" {
+		t.Errorf("secretKeyRef.name = %q, want my-gateway-key", name)
+	}
+	if key != "api-key" {
+		t.Errorf("secretKeyRef.key = %q, want api-key (default)", key)
+	}
+
+	withoutSecret := render(t, "vaultQuery.enabled=true", "vaultQuery.subcommand=list")
+	jobNoSecret, ok := withoutSecret["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found (no secret)")
+	}
+	specNoSecret, _ := jobNoSecret["spec"].(map[string]any)
+	tmplNoSecret, _ := specNoSecret["template"].(map[string]any)
+	podSpecNoSecret, _ := tmplNoSecret["spec"].(map[string]any)
+	containersNoSecret, _ := podSpecNoSecret["containers"].([]any)
+	containerNoSecret := containersNoSecret[0].(map[string]any)
+	if _, _, ok := containerEnvSecretRef(containerNoSecret, "HELPDESK_CLIENT_API_KEY"); ok {
+		t.Error("HELPDESK_CLIENT_API_KEY should not be present when vaultQuery.gatewayAPIKeySecret is unset")
 	}
 }
 

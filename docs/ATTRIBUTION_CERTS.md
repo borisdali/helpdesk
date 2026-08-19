@@ -248,7 +248,7 @@ When `vault cert-compare` shows a regression — a fault that was STABLE under t
 
 1. **Model change** — `diagnosis_model` field. The new model weights produce different output distributions. This is the most common cause and the one `cert-compare` was built to detect.
 
-2. **Playbook change** — `playbook_id` / `version`. New guidance text, modified escalation conditions or a different tool ordering in the playbook can shift pass rates independently of the model. Check whether a new playbook version was activated between the two cert runs.
+2. **Playbook change** — `playbook_id` / `version`. New guidance text, modified escalation conditions or a different tool ordering in the playbook can shift pass rates independently of the model. Check whether a new playbook version was activated between the two cert runs — [`vault accuracy`](VAULT.md#vault-accuracy)'s Cert History section reports this directly (a `playbook_version`/`taxonomy_version` change between two recertifications shows up as a `↳ changed since ...` line), and its staleness warning prints a ready-to-run `faulttest vault diff <id-then> <id-now>` when the cert's stored playbook ID and the currently active one are both known.
 
 3. **Taxonomy major bump** — `taxonomy_version` field. A breaking taxonomy change (class split/merge/rename) means the old cert's attribution column is not comparable. The outcome stability verdict is still valid, but a cert under taxonomy v2 may classify runs differently from v1 — which can expose runs that previously passed as UNKNOWN under the new classes. This shows up as `⚠ TAXONOMY MAJOR` in cert-compare.
 
