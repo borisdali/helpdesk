@@ -12,6 +12,7 @@
 package helm_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -1078,5 +1079,35 @@ func TestVaultQueryJobEnabled_NoTargetOrCatalog(t *testing.T) {
 	}
 	if hasVolumeMounts(container) {
 		t.Error("vault-query container should have no volumeMounts when faulttest.catalog is unset")
+	}
+}
+
+// TestVaultQueryJob_NilVaultQueryValue_DoesNotPanic is a regression test for
+// a real bug caught during live manual testing (2026-08-19): `helm upgrade
+// --reuse-values` reuses a previously deployed release's stored values
+// as-is — it does NOT fall back to the new chart's values.yaml defaults for
+// keys that didn't exist in that old release. vaultQuery is a brand-new
+// top-level key, so upgrading any pre-existing release (with no vaultQuery.*
+// ever explicitly --set) makes .Values.vaultQuery genuinely nil, not an
+// empty map — {{ if .Values.vaultQuery.enabled }} then panics with "nil
+// pointer evaluating interface{}.enabled" before the outer {{ if
+// .Values.vaultQuery }} nil-guard was added. render()'s normal --set-based
+// tests can't reproduce this (they always start from the chart's own
+// complete values.yaml, where vaultQuery is always a real map) — this test
+// explicitly overrides it to null via -f to simulate the missing-key state
+// a real --reuse-values upgrade produces.
+func TestVaultQueryJob_NilVaultQueryValue_DoesNotPanic(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not in PATH; skipping Helm chart tests")
+	}
+
+	valuesFile := filepath.Join(t.TempDir(), "nil-vaultquery.yaml")
+	if err := os.WriteFile(valuesFile, []byte("vaultQuery: null\n"), 0o644); err != nil {
+		t.Fatalf("write temp values file: %v", err)
+	}
+
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "-f", valuesFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed with vaultQuery explicitly nil (simulating a pre-vaultQuery release reused via --reuse-values): %v\n%s", err, out)
 	}
 }

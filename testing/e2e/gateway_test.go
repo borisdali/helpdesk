@@ -488,8 +488,11 @@ func TestGatewayFaultStability_AttributionRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FaultStabilityUpsert: %v", err)
 	}
-	if code != http.StatusNoContent {
-		t.Fatalf("POST fault-stability: got HTTP %d, want 204", code)
+	// v0.25.0 changed this endpoint's success response from a bare 204 to 200
+	// with a {"regressed": bool} body (see Upsert's regression-detection
+	// return value) — 204 was the pre-v0.25.0 contract.
+	if code != http.StatusOK {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 200", code)
 	}
 
 	got, err := client.FaultStabilityGet(ctx, faultID)

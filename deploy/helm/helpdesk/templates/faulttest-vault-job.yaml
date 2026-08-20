@@ -1,3 +1,4 @@
+{{- if .Values.vaultQuery }}
 {{- if .Values.vaultQuery.enabled }}
 {{- if not .Values.vaultQuery.subcommand }}
   {{- fail "vaultQuery.subcommand is required when vaultQuery.enabled=true — e.g. --set vaultQuery.subcommand=accuracy --set vaultQuery.target=db-lock-contention" }}
@@ -76,4 +77,5 @@ spec:
           configMap:
             name: {{ $fullname }}-faulttest-catalog
       {{- end }}
+{{- end }}
 {{- end }}

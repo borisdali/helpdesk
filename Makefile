@@ -393,6 +393,16 @@ e2e: image
 	HELPDESK_IDENTITY_PROVIDER=none docker compose -f deploy/docker-compose/docker-compose.yaml down -v 2>/dev/null || true
 	@echo "Starting full stack..."
 	HELPDESK_IDENTITY_PROVIDER=none HELPDESK_BASE_URL=http://localhost:8080 docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait
+	@echo "Verifying localhost:8080 actually reaches this stack (not a stale process holding the port)..."
+	@health="$$(curl -sf http://localhost:8080/health)"; \
+	actual="$$(printf '%s' "$$health" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"; \
+	if [ -z "$$actual" ] || [ "$$actual" != "$(VERSION)" ]; then \
+		echo "ERROR: localhost:8080 did not answer as this build (got version '$$actual', want '$(VERSION)')."; \
+		echo "  Something else is bound to :8080 -- a stale kubectl port-forward, another docker-compose project, etc. -- not this stack's gateway."; \
+		echo "  On macOS/Docker Desktop this can happen silently: the container's own healthcheck (which docker compose --wait is watching) never touches the host's port 8080, so it reports Healthy even when the host port is actually owned by something else."; \
+		echo "  Find the culprit with: lsof -i :8080  (or) ps aux | grep -i port-forward"; \
+		exit 1; \
+	fi
 	@echo "Running E2E tests..."
 	-E2E_USER=alice@example.com go test -tags e2e -timeout 300s -v ./testing/e2e/... 2>&1 | tee $(E2E_LOG)
 	@$(SUMMARY_CMD) $(E2E_LOG)
