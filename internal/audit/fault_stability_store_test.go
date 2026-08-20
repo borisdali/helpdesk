@@ -714,6 +714,136 @@ CREATE TABLE fault_stability_cert (
 	}
 }
 
+// TestFaultStabilityStore_Migrate_HistoryTableMissingPlaybookID is a
+// regression test for a real bug found via live testing (2026-08-20): a
+// long-running deployment whose fault_stability_cert_history table was
+// first created (via ensureCertHistoryTable's CREATE TABLE IF NOT EXISTS)
+// back when the CREATE TABLE literal only had playbook_version/
+// playbook_updated_at — before playbook_id was added to that literal —
+// never got playbook_id backfilled onto the already-existing table. CREATE
+// TABLE IF NOT EXISTS is a no-op against an existing table; only an
+// explicit ALTER TABLE actually retrofits a column. Unlike
+// TestFaultStabilityStore_Migrate_VersioningColumns (which never seeds a
+// pre-existing history table, so ensureCertHistoryTable always creates it
+// fresh with every current column — never exercising this path), this test
+// specifically pre-seeds a history table missing playbook_id to reproduce
+// the exact live failure: "table fault_stability_cert_history has no
+// column named playbook_id".
+func TestFaultStabilityStore_Migrate_HistoryTableMissingPlaybookID(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_history_playbook_id.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// Composite-PK, fully-attributed, fully-CLEAN cert table already at the
+	// v0.25.0 playbook_version/playbook_updated_at stage.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread               REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create cert table: %v", err)
+	}
+	// The history table, pre-existing (created by an older binary), also at
+	// the playbook_version/playbook_updated_at stage — missing playbook_id,
+	// exactly like the live deployment that surfaced this bug.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert_history (
+    id                        TEXT    NOT NULL PRIMARY KEY,
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    recorded_at               TEXT    NOT NULL DEFAULT ''
+)`); err != nil {
+		t.Fatalf("create pre-existing history table (missing playbook_id): %v", err)
+	}
+	// Seed a pre-existing history row to verify it survives migration untouched.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert_history (id, fault_id, fault_name, n_runs, is_stable, diagnosis_model, is_clean, recorded_at)
+         VALUES ('csh_old0000', 'db-old-fault', 'Old Fault', 5, 1, 'test-model', 1, '2026-08-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed history row: %v", err)
+	}
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// The exact live failure: Upsert must succeed (not error with "table
+	// fault_stability_cert_history has no column named playbook_id") now
+	// that migrate() has backfilled the column.
+	cert := &FaultStabilityCert{
+		FaultID: "custom-target-drift-nudge", DiagnosisModel: "claude-synthetic-test", NRuns: 5,
+		IsStable: true, IsClean: false, AttributionConsistent: true,
+		PlaybookVersion: "0.1-stale", PlaybookID: "pb_stale0000",
+	}
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration (this is the exact live-found bug): %v", err)
+	}
+
+	history, err := fs.GetHistory(context.Background(), "custom-target-drift-nudge", "claude-synthetic-test", 10)
+	if err != nil {
+		t.Fatalf("GetHistory after migration: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history entries: got %d, want 1", len(history))
+	}
+	if history[0].PlaybookID != "pb_stale0000" {
+		t.Errorf("history[0].PlaybookID: got %q, want pb_stale0000", history[0].PlaybookID)
+	}
+
+	// The pre-existing (unrelated) history row must survive migration with
+	// PlaybookID defaulting to empty, not lost or erroring.
+	oldHistory, err := fs.GetHistory(context.Background(), "db-old-fault", "test-model", 10)
+	if err != nil {
+		t.Fatalf("GetHistory (pre-existing row): %v", err)
+	}
+	if len(oldHistory) != 1 {
+		t.Fatalf("pre-existing history entries: got %d, want 1", len(oldHistory))
+	}
+	if oldHistory[0].PlaybookID != "" {
+		t.Errorf("pre-existing history row PlaybookID: got %q, want empty (unknown, not fabricated)", oldHistory[0].PlaybookID)
+	}
+}
+
 // TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent verifies that
 // calling migrate() on a fully-migrated database (all attribution columns
 // already present) does not fail.

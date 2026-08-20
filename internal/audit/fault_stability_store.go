@@ -343,6 +343,35 @@ func (s *FaultStabilityStore) addVersioningColumnsSQLite() error {
 			}
 		}
 	}
+	return s.addHistoryVersioningColumnsSQLite()
+}
+
+// addHistoryVersioningColumnsSQLite backfills the versioning columns onto
+// fault_stability_cert_history for deployments where that table was already
+// created (via ensureCertHistoryTable's CREATE TABLE IF NOT EXISTS) by an
+// older binary that predates one or more of these columns. CREATE TABLE IF
+// NOT EXISTS is a no-op against an existing table, so it can never retrofit
+// a column onto a database that already has the table — only an explicit
+// ALTER TABLE, mirroring addVersioningColumnsSQLite's main-table treatment,
+// actually backfills it. Confirmed missing live (2026-08-20): a real
+// long-running deployment whose history table was first created back when
+// only playbook_version/playbook_updated_at existed in the CREATE TABLE
+// literal failed with "table fault_stability_cert_history has no column
+// named playbook_id" the moment playbook_id was added to the struct/INSERT
+// without a matching history-table migration.
+func (s *FaultStabilityStore) addHistoryVersioningColumnsSQLite() error {
+	versionCols := []string{
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN playbook_version    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN playbook_id         TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range versionCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
+				return fmt.Errorf("cert history migrate: %s: %w", stmt, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -404,6 +433,24 @@ func (s *FaultStabilityStore) migratePostgres() error {
 	for _, stmt := range versionCols {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("cert migrate postgres: %s: %w", stmt, err)
+		}
+	}
+
+	// Same versioning columns, backfilled onto fault_stability_cert_history
+	// for the identical reason as addHistoryVersioningColumnsSQLite: CREATE
+	// TABLE IF NOT EXISTS never retrofits a column onto a table that already
+	// exists, and a deployment whose history table predates one of these
+	// columns needs an explicit ALTER TABLE to pick it up. Confirmed missing
+	// live against a real SQLite deployment (2026-08-20); fixed identically
+	// here for Postgres before the same gap surfaces there.
+	historyVersionCols := []string{
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN IF NOT EXISTS playbook_version    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN IF NOT EXISTS playbook_updated_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE fault_stability_cert_history ADD COLUMN IF NOT EXISTS playbook_id         TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range historyVersionCols {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("cert history migrate postgres: %s: %w", stmt, err)
 		}
 	}
 	return nil
