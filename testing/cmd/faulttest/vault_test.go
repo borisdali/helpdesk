@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"helpdesk/internal/audit"
 )
 
 // ── passRateOf ────────────────────────────────────────────────────────────
@@ -364,6 +366,380 @@ func TestFetchActivePlaybook_InvalidJSON(t *testing.T) {
 }
 
 // ── fetchPlaybookInfo ─────────────────────────────────────────────────────
+
+func TestFetchPlaybookVersion_SelectsActiveVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Two versions on record — only the active one should be selected,
+		// not array order (the inactive one is listed first deliberately).
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"playbooks": []map[string]any{
+				{"playbook_id": "pb_old0000", "version": "1.2", "is_active": false, "updated_at": "2026-01-01T00:00:00Z"},
+				{"playbook_id": "pb_31575294", "version": "1.3", "is_active": true, "updated_at": "2026-08-01T12:00:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
+	if version != "1.3" {
+		t.Errorf("version = %q, want 1.3 (the active one, not array[0])", version)
+	}
+	if updatedAt != "2026-08-01T12:00:00Z" {
+		t.Errorf("updatedAt = %q, want 2026-08-01T12:00:00Z", updatedAt)
+	}
+	if playbookID != "pb_31575294" {
+		t.Errorf("playbookID = %q, want pb_31575294 (the active one, not array[0])", playbookID)
+	}
+}
+
+func TestFetchPlaybookVersion_NoActiveVersion_ReturnsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"playbooks": []map[string]any{{"version": "1.2", "is_active": false}},
+		})
+	}))
+	defer srv.Close()
+
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_connection_triage")
+	if version != "" || updatedAt != "" || playbookID != "" {
+		t.Errorf("got (%q, %q, %q), want (\"\", \"\", \"\") when no active version exists", version, updatedAt, playbookID)
+	}
+}
+
+func TestFetchPlaybookVersion_EmptyGatewayURLOrSeriesID_NoRequest(t *testing.T) {
+	if v, u, id := fetchPlaybookVersion("", "key", "pbs_x"); v != "" || u != "" || id != "" {
+		t.Errorf("empty gatewayURL: got (%q, %q, %q), want empty", v, u, id)
+	}
+	if v, u, id := fetchPlaybookVersion("http://example.invalid", "key", ""); v != "" || u != "" || id != "" {
+		t.Errorf("empty seriesID: got (%q, %q, %q), want empty", v, u, id)
+	}
+}
+
+func TestFetchPlaybookVersion_ServerError_ReturnsEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	version, updatedAt, playbookID := fetchPlaybookVersion(srv.URL, "", "pbs_x")
+	if version != "" || updatedAt != "" || playbookID != "" {
+		t.Errorf("got (%q, %q, %q), want empty on server error", version, updatedAt, playbookID)
+	}
+}
+
+func TestFetchCertHistory_DecodesEntries(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path + "?" + r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"history": []map[string]any{
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-01T00:00:00Z"},
+				{"n_runs": 5, "is_stable": true, "is_clean": false, "attribution_consistent": true, "tested_at": "2026-07-01T00:00:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	history := fetchCertHistory(srv.URL, "", "k8s-oomkilled", "claude-sonnet-4-6", 10)
+	if len(history) != 2 {
+		t.Fatalf("got %d entries, want 2", len(history))
+	}
+	if !history[0].IsClean || history[1].IsClean {
+		t.Errorf("expected [clean, dirty] order matching server response, got IsClean=[%v, %v]", history[0].IsClean, history[1].IsClean)
+	}
+	if !strings.Contains(gotPath, "/fault-stability/k8s-oomkilled/history") {
+		t.Errorf("request path = %q, want it to contain /fault-stability/k8s-oomkilled/history", gotPath)
+	}
+	if !strings.Contains(gotPath, "diagnosis_model=claude-sonnet-4-6") {
+		t.Errorf("request path = %q, want diagnosis_model query param", gotPath)
+	}
+	if !strings.Contains(gotPath, "limit=10") {
+		t.Errorf("request path = %q, want limit query param", gotPath)
+	}
+}
+
+func TestFetchCertHistory_MissingRequiredArgs_NoRequest(t *testing.T) {
+	if h := fetchCertHistory("", "key", "k8s-oomkilled", "claude-sonnet-4-6", 10); h != nil {
+		t.Errorf("empty gatewayURL: got %v, want nil", h)
+	}
+	if h := fetchCertHistory("http://example.invalid", "key", "", "claude-sonnet-4-6", 10); h != nil {
+		t.Errorf("empty faultID: got %v, want nil", h)
+	}
+	if h := fetchCertHistory("http://example.invalid", "key", "k8s-oomkilled", "", 10); h != nil {
+		t.Errorf("empty model: got %v, want nil", h)
+	}
+}
+
+// ── diffCertHistoryEntries / diffCountMap ───────────────────────────────────
+
+func TestDiffCertHistoryEntries_NoChanges_ReturnsEmpty(t *testing.T) {
+	c := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true, PlaybookVersion: "1.0", TaxonomyVersion: "2.0"}
+	if got := diffCertHistoryEntries(c, c); len(got) != 0 {
+		t.Errorf("identical certs: got %v, want no changes", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_TrustRegressed(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "trust regressed") {
+		t.Errorf("got %v, want a \"trust regressed\" entry", got)
+	}
+	if !containsSubstring(got, "clean: CLEAN→DIRTY") {
+		t.Errorf("got %v, want a clean:CLEAN→DIRTY entry", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_TrustEarned(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "trust earned") {
+		t.Errorf("got %v, want a \"trust earned\" entry", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_StabilityAndAttributionFlip(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: false, IsClean: true, AttributionConsistent: false}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "stability: UNSTABLE→STABLE") {
+		t.Errorf("got %v, want stability: UNSTABLE→STABLE", got)
+	}
+	if !containsSubstring(got, "attribution: split→consistent") {
+		t.Errorf("got %v, want attribution: split→consistent", got)
+	}
+}
+
+func TestDiffCertHistoryEntries_WarningDistributionDelta(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true, WarningDistribution: map[string]int{"target_drift": 5, "mismatch": 0}}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true, WarningDistribution: map[string]int{"target_drift": 5, "mismatch": 3}}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "warning_distribution: mismatch 0→3") {
+		t.Errorf("got %v, want warning_distribution: mismatch 0→3 (target_drift unchanged, shouldn't appear)", got)
+	}
+	for _, c := range got {
+		if strings.Contains(c, "target_drift") {
+			t.Errorf("got %v, unchanged key target_drift should not appear in diff", got)
+		}
+	}
+}
+
+func TestDiffCertHistoryEntries_TaxonomyVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
+	// Both non-empty and differ: reported.
+	older := audit.FaultStabilityCert{TaxonomyVersion: "2.0"}
+	newer := audit.FaultStabilityCert{TaxonomyVersion: "2.1"}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "taxonomy_version: 2.0→2.1") {
+		t.Errorf("got %v, want taxonomy_version: 2.0→2.1", got)
+	}
+
+	// Older is empty: not reported — nothing to compare against.
+	older2 := audit.FaultStabilityCert{TaxonomyVersion: ""}
+	newer2 := audit.FaultStabilityCert{TaxonomyVersion: "2.1"}
+	got2 := diffCertHistoryEntries(newer2, older2)
+	if containsSubstring(got2, "taxonomy_version") {
+		t.Errorf("got %v, want no taxonomy_version entry when older is unknown", got2)
+	}
+}
+
+func TestDiffCertHistoryEntries_PlaybookVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
+	// Both non-empty and differ: reported.
+	older := audit.FaultStabilityCert{PlaybookVersion: "1.3"}
+	newer := audit.FaultStabilityCert{PlaybookVersion: "1.4"}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "playbook_version: 1.3→1.4") {
+		t.Errorf("got %v, want playbook_version: 1.3→1.4", got)
+	}
+
+	// Older is empty (pre-version-tracking cert): not reported — nothing to compare against.
+	older2 := audit.FaultStabilityCert{PlaybookVersion: ""}
+	newer2 := audit.FaultStabilityCert{PlaybookVersion: "1.4"}
+	got2 := diffCertHistoryEntries(newer2, older2)
+	if containsSubstring(got2, "playbook_version") {
+		t.Errorf("got %v, want no playbook_version entry when older version is unknown", got2)
+	}
+}
+
+func TestDiffCountMap(t *testing.T) {
+	tests := []struct {
+		name        string
+		older, newer map[string]int
+		want        string
+	}{
+		{"both empty", nil, nil, ""},
+		{"identical", map[string]int{"a": 1}, map[string]int{"a": 1}, ""},
+		{"value changed", map[string]int{"a": 1}, map[string]int{"a": 2}, "a 1→2"},
+		{"key added", map[string]int{}, map[string]int{"b": 3}, "b 0→3"},
+		{"key removed", map[string]int{"c": 2}, map[string]int{}, "c 2→0"},
+		{"multiple, sorted", map[string]int{"z": 1, "a": 1}, map[string]int{"z": 2, "a": 2}, "a 1→2, z 1→2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := diffCountMap(tt.older, tt.newer); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func containsSubstring(entries []string, substr string) bool {
+	for _, e := range entries {
+		if strings.Contains(e, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPrintCertHistory_ShowsDiffLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"history": []map[string]any{
+				{"n_runs": 5, "is_stable": true, "is_clean": false, "attribution_consistent": true, "tested_at": "2026-08-19T00:15:00Z", "warning_distribution": map[string]int{"mismatch": 5}},
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-14T19:14:00Z", "warning_distribution": map[string]int{"mismatch": 0}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printCertHistory(srv.URL, "", "custom-target-drift-nudge", "claude-haiku-4-5-20251001")
+	})
+	if !strings.Contains(out, "Cert history (last 2)") {
+		t.Errorf("output missing history header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "trust regressed") {
+		t.Errorf("output missing trust-regressed diff line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "mismatch 0→5") {
+		t.Errorf("output missing warning_distribution delta, got:\n%s", out)
+	}
+}
+
+func TestPrintCertHistory_NoDiffLine_WhenNothingChanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"history": []map[string]any{
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-19T00:15:00Z"},
+				{"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true, "tested_at": "2026-08-14T19:14:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printCertHistory(srv.URL, "", "db-lock-contention", "claude-haiku-4-5-20251001")
+	})
+	if strings.Contains(out, "↳") {
+		t.Errorf("output should have no diff line when nothing changed, got:\n%s", out)
+	}
+}
+
+func TestPostCertRegressionAlert_PostsCorrectPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+	cr := CleanReport{N: 5, WarningCount: 1}
+	attr := &attributionSummary{AttributionConsistent: false}
+
+	postCertRegressionAlert(srv.URL, "claude-sonnet-4-6", f, sr, cr, attr)
+
+	if gotBody["event"] != "cert_regression" {
+		t.Errorf("event = %v, want cert_regression", gotBody["event"])
+	}
+	if gotBody["fault_id"] != "k8s-oomkilled" {
+		t.Errorf("fault_id = %v, want k8s-oomkilled", gotBody["fault_id"])
+	}
+	if gotBody["diagnosis_model"] != "claude-sonnet-4-6" {
+		t.Errorf("diagnosis_model = %v, want claude-sonnet-4-6", gotBody["diagnosis_model"])
+	}
+	if gotBody["attribution_consistent"] != false {
+		t.Errorf("attribution_consistent = %v, want false", gotBody["attribution_consistent"])
+	}
+	if gotBody["is_clean"] != false {
+		t.Errorf("is_clean = %v, want false (WarningCount=1)", gotBody["is_clean"])
+	}
+}
+
+func TestPostStabilityCert_Regressed_FiresNotifyWebhook(t *testing.T) {
+	var notifyReceived bool
+	notifySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		notifyReceived = true
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		if body["event"] != "cert_regression" {
+			t.Errorf("notify payload event = %v, want cert_regression", body["event"])
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer notifySrv.Close()
+
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{"playbooks":[]}`)) //nolint:errcheck
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]bool{"regressed": true}) //nolint:errcheck
+		}
+	}))
+	defer gatewaySrv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: gatewaySrv.URL, DiagnosisModel: "claude-sonnet-4-6", NotifyURL: notifySrv.URL}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if !notifyReceived {
+		t.Error("expected the regression notify webhook to fire when auditd reports regressed=true")
+	}
+}
+
+func TestPostStabilityCert_NotRegressed_NoNotifyWebhook(t *testing.T) {
+	var notifyReceived bool
+	notifySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		notifyReceived = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer notifySrv.Close()
+
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			w.Write([]byte(`{"playbooks":[]}`)) //nolint:errcheck
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]bool{"regressed": false}) //nolint:errcheck
+		}
+	}))
+	defer gatewaySrv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: gatewaySrv.URL, DiagnosisModel: "claude-sonnet-4-6", NotifyURL: notifySrv.URL}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if notifyReceived {
+		t.Error("expected no notify webhook call when auditd reports regressed=false")
+	}
+}
 
 func TestFetchPlaybookInfo_DecodesBreakdown(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3457,6 +3833,16 @@ func TestFetchStabilityCert_SendsAuth(t *testing.T) {
 func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// postStabilityCert also does a GET .../playbooks?series_id=... to
+		// stamp the cert with the playbook's current version — respond with
+		// "no version found" so that lookup fails gracefully, same as it
+		// would against a real gateway when the series has no active
+		// version on record, and only the POST below is captured/asserted.
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"playbooks":[]}`)) //nolint:errcheck
+			return
+		}
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
 		}
@@ -3497,6 +3883,81 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 	}
 	if gotBody["n_runs"] != float64(5) {
 		t.Errorf("n_runs = %v, want 5", gotBody["n_runs"])
+	}
+}
+
+// TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup is the
+// integration gap TestPostStabilityCert_PostsCorrectPayload deliberately
+// sidesteps (that test makes the version lookup fail on purpose, to isolate
+// the cert payload assertions from the extra GET). This one proves the
+// actual wiring: when fetchPlaybookVersion finds an active version, it
+// reaches the POST payload as playbook_version/playbook_updated_at.
+func TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"2.3","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if gotBody["playbook_version"] != "2.3" {
+		t.Errorf("playbook_version = %v, want 2.3", gotBody["playbook_version"])
+	}
+	if gotBody["playbook_updated_at"] != "2026-08-01T00:00:00Z" {
+		t.Errorf("playbook_updated_at = %v, want 2026-08-01T00:00:00Z", gotBody["playbook_updated_at"])
+	}
+	if gotBody["playbook_id"] != "pb_31575294" {
+		t.Errorf("playbook_id = %v, want pb_31575294", gotBody["playbook_id"])
+	}
+}
+
+// TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails proves the
+// negative case symmetrically: when the lookup can't find an active
+// version, the payload simply omits both fields rather than sending empty
+// strings — auditd's Upsert then correctly treats this cert as
+// "unknown version" (see FaultStabilityCert.PlaybookVersion's doc comment)
+// rather than persisting a fabricated empty value indistinguishable from a
+// real one.
+func TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			fmt.Fprint(w, `{"playbooks":[]}`)
+		case http.MethodPost:
+			json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
+	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
+
+	postStabilityCert(context.Background(), cfg, f, sr, CleanReport{}, nil)
+
+	if _, ok := gotBody["playbook_version"]; ok {
+		t.Errorf("playbook_version present in payload = %v, want field omitted entirely", gotBody["playbook_version"])
+	}
+	if _, ok := gotBody["playbook_updated_at"]; ok {
+		t.Errorf("playbook_updated_at present in payload = %v, want field omitted entirely", gotBody["playbook_updated_at"])
+	}
+	if _, ok := gotBody["playbook_id"]; ok {
+		t.Errorf("playbook_id present in payload = %v, want field omitted entirely", gotBody["playbook_id"])
 	}
 }
 
@@ -4713,8 +5174,241 @@ func TestPrintFaultStabilityCert_ShowsWarningTypesLine(t *testing.T) {
 		printFaultStabilityCert(srv.URL, "", "k8s-crashloop", "")
 	})
 
-	if !strings.Contains(out, "Warning types : objective_evidence=1, protocol_violation=1") {
+	if !strings.Contains(out, "Warning types : objective_evidence=1(varies), protocol_violation=1(varies)") {
 		t.Errorf("expected Warning types line in output:\n%s", out)
+	}
+}
+
+// ── v0.25.0: playbook-version staleness + cert history display ────────────
+
+func TestPrintFaultStabilityCert_ShowsStalenessWarning_WhenVersionDiffers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
+		t.Errorf("expected staleness warning in output:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_ShowsVaultDiffHint_WhenBothPlaybookIDsKnown
+// verifies item 10.4c: when the cert's stored playbook_id and the currently
+// active playbook_id are both known and differ, the staleness warning is
+// followed by a ready-to-run `vault diff <id-then> <id-now>` line instead of
+// leaving "the playbook changed" as an unactionable assertion.
+func TestPrintFaultStabilityCert_ShowsVaultDiffHint_WhenBothPlaybookIDsKnown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+				"playbook_id": "pb_be8b5667",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "faulttest vault diff pb_be8b5667 pb_31575294") {
+		t.Errorf("expected vault diff hint in output:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_NoVaultDiffHint_WhenPlaybookIDUnknown verifies
+// the negative case: a cert that predates playbook-ID tracking (no
+// playbook_id stored, even though playbook_version is) still shows the plain
+// staleness warning but not a diff hint pointing at an unknown ID.
+func TestPrintFaultStabilityCert_NoVaultDiffHint_WhenPlaybookIDUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"playbook_id":"pb_31575294","version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			// No playbook_id in the stored cert — a pre-item-10.4c cert.
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
+		t.Errorf("expected the plain staleness warning to still show:\n%s", out)
+	}
+	if strings.Contains(out, "vault diff") {
+		t.Errorf("expected no vault diff hint when the cert has no stored playbook_id:\n%s", out)
+	}
+}
+
+// TestPrintFaultStabilityCert_NoVaultDiffHint_WhenCurrentPlaybookIDUnknown
+// covers the reverse asymmetry: the cert DOES have a stored playbook_id, but
+// the live lookup's active playbook entry has none (e.g. a gateway/auditd
+// version skew, or a malformed response) — the hint must still stay
+// suppressed rather than printing a diff against an empty ID.
+func TestPrintFaultStabilityCert_NoVaultDiffHint_WhenCurrentPlaybookIDUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			// Active version has no playbook_id in this response.
+			fmt.Fprint(w, `{"playbooks":[{"version":"1.4","is_active":true,"updated_at":"2026-08-01T00:00:00Z"}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+				"playbook_id": "pb_be8b5667",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "cert was earned against playbook version 1.2, current version is 1.4") {
+		t.Errorf("expected the plain staleness warning to still show:\n%s", out)
+	}
+	if strings.Contains(out, "vault diff") {
+		t.Errorf("expected no vault diff hint when the current playbook_id is unknown:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_NoStalenessWarning_WhenVersionMatches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/playbooks"):
+			fmt.Fprint(w, `{"playbooks":[{"version":"1.2","is_active":true}]}`)
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage", "playbook_version": "1.2",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if strings.Contains(out, "cert was earned against playbook version") {
+		t.Errorf("expected no staleness warning when versions match:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsUnknownVersionWarning_WhenNeverStamped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[]}`)
+		default:
+			// No playbook_version field at all — a pre-v0.25.0 cert.
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true,
+				"playbook_series_id": "pbs_k8s_pod_crash_triage",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "playbook version unknown") {
+		t.Errorf("expected 'version unknown' warning for a pre-v0.25.0 cert:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_ShowsHistorySection_WhenMultipleEntries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[
+				{"n_runs":5,"is_stable":true,"is_clean":true,"attribution_consistent":true,"tested_at":"2026-08-01T00:00:00Z"},
+				{"n_runs":5,"is_stable":true,"is_clean":false,"attribution_consistent":true,"tested_at":"2026-07-01T00:00:00Z"}
+			]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true, "diagnosis_model": "claude-sonnet-4-6",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if !strings.Contains(out, "Cert history (last 2)") {
+		t.Errorf("expected a Cert history section:\n%s", out)
+	}
+	if !strings.Contains(out, "STABLE") || !strings.Contains(out, "CLEAN") || !strings.Contains(out, "DIRTY") {
+		t.Errorf("expected both a CLEAN and a DIRTY entry in the history section:\n%s", out)
+	}
+}
+
+func TestPrintFaultStabilityCert_NoHistorySection_WhenOnlyOneEntry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/history"):
+			fmt.Fprint(w, `{"history":[{"n_runs":5,"is_stable":true,"tested_at":"2026-08-01T00:00:00Z"}]}`)
+		default:
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"fault_id": "k8s-oomkilled", "n_runs": 5, "is_stable": true, "diagnosis_model": "claude-sonnet-4-6",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printFaultStabilityCert(srv.URL, "", "k8s-oomkilled", "")
+	})
+
+	if strings.Contains(out, "Cert history") {
+		t.Errorf("expected no Cert history section when there's only one entry so far:\n%s", out)
 	}
 }
 

@@ -573,6 +573,58 @@ func (c *GatewayClient) FaultStabilityList(ctx context.Context) ([]map[string]an
 	return wrapper.Certs, nil
 }
 
+// FaultStabilityUpsertWithBody is FaultStabilityUpsert's sibling that also
+// decodes the response body — needed for v0.25.0's "regressed" field, which
+// FaultStabilityUpsert's plain (int, error) signature has no way to surface.
+// A separate method rather than changing FaultStabilityUpsert's signature:
+// additive, doesn't touch the two existing callers that only need the code.
+func (c *GatewayClient) FaultStabilityUpsertWithBody(ctx context.Context, body map[string]any) (int, map[string]any, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/v1/fleet/fault-stability", bytes.NewReader(data))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.userID != "" {
+		req.Header.Set("X-User", c.userID)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("POST /api/v1/fleet/fault-stability: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read response body: %w", err)
+	}
+	var result map[string]any
+	// A pre-v0.25.0 gateway/auditd returns an empty 204 body — decode
+	// failure there is expected, not an error; callers check len(raw)==0
+	// or the absence of "regressed" to detect this, same CI-safety pattern
+	// as TestGatewayFaultStability_AttributionRoundtrip's schema-not-yet-
+	// deployed skip.
+	_ = json.Unmarshal(raw, &result) //nolint:errcheck
+	return resp.StatusCode, result, nil
+}
+
+// FaultStabilityHistory calls GET /api/v1/fleet/fault-stability/{faultID}/history.
+func (c *GatewayClient) FaultStabilityHistory(ctx context.Context, faultID, diagnosisModel string, limit int) ([]map[string]any, error) {
+	raw, err := c.get(ctx, fmt.Sprintf("/api/v1/fleet/fault-stability/%s/history?diagnosis_model=%s&limit=%d", faultID, diagnosisModel, limit))
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		History []map[string]any `json:"history"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, fmt.Errorf("decode fault stability history: %w", err)
+	}
+	return wrapper.History, nil
+}
+
 // SetJudgeVerdict calls POST /api/v1/fleet/playbooks/{id}/judge-verdict.
 // Returns the HTTP status code.
 func (c *GatewayClient) SetJudgeVerdict(ctx context.Context, playbookID string, body map[string]any) (int, error) {

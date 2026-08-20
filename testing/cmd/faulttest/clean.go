@@ -81,13 +81,37 @@ func buildCleanReport(f Failure, results []EvalResult) CleanReport {
 // warningDistributionString renders a WarningDistribution map in the same
 // "k=v, k=v" style as the existing attribution Distribution line
 // (testing/cmd/faulttest/vault.go), sorted for deterministic output.
-func warningDistributionString(dist map[string]int) string {
+//
+// Each entry is annotated against n (the cert's total run count), mirroring
+// the existing attr=X(consistent/split) convention for attribution:
+//   - count == n  → "(predictable)": the signal fired on every run, so it's
+//     structurally baked into this fault/playbook/model combination, not
+//     fixable by prompting — chasing it with guidance changes is a dead end;
+//     approval_mode: manual (or accepting the non-CLEAN cert) is the honest
+//     response, not more tuning.
+//   - 0 < count < n → "(varies)": the signal is inconsistent across
+//     otherwise-identical runs, which is the case actually worth
+//     investigating (something about the run, not the fault, decides it).
+//
+// n <= 0 (should not happen in practice — dist is only ever populated
+// alongside at least one run) skips annotation entirely rather than divide
+// by a meaningless total.
+func warningDistributionString(dist map[string]int, n int) string {
 	if len(dist) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(dist))
 	for k, v := range dist {
-		parts = append(parts, fmt.Sprintf("%s=%d", k, v))
+		part := fmt.Sprintf("%s=%d", k, v)
+		if n > 0 {
+			switch {
+			case v == n:
+				part += "(predictable)"
+			case v > 0:
+				part += "(varies)"
+			}
+		}
+		parts = append(parts, part)
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ", ")
@@ -105,7 +129,7 @@ func (r CleanReport) isClean() bool {
 // StabilityReport.Print — called alongside it, not as a replacement.
 func (r CleanReport) Print() {
 	fmt.Printf("    Warnings:     %d/%d run(s) tripped a verified warning signal\n", r.WarningCount, r.N)
-	if dist := warningDistributionString(r.WarningDistribution); dist != "" {
+	if dist := warningDistributionString(r.WarningDistribution, r.N); dist != "" {
 		fmt.Printf("    Warning types: %s\n", dist)
 	}
 	if r.isClean() {

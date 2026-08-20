@@ -389,13 +389,16 @@ func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
 		"is_stable":          true,
 	}
 
-	// POST — upsert.
+	// POST — upsert. v0.25.0 changed the success response from 204 No
+	// Content to 200 OK with a JSON body (carrying the new "regressed"
+	// field) — the endpoint stayed backward-compatible in spirit (still a
+	// plain success), just with a body now.
 	code, err := client.FaultStabilityUpsert(ctx, cert)
 	if err != nil {
 		t.Fatalf("FaultStabilityUpsert: %v", err)
 	}
-	if code != http.StatusNoContent {
-		t.Fatalf("POST fault-stability: got HTTP %d, want 204", code)
+	if code != http.StatusOK {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 200", code)
 	}
 
 	// GET — verify round-trip through gateway→auditd.
@@ -442,7 +445,7 @@ func TestGatewayFaultStabilityRoundtrip(t *testing.T) {
 		"pass_rate": 0.9,
 		"is_stable": true,
 	}
-	if code, err = client.FaultStabilityUpsert(ctx, updated); err != nil || code != http.StatusNoContent {
+	if code, err = client.FaultStabilityUpsert(ctx, updated); err != nil || code != http.StatusOK {
 		t.Fatalf("second upsert: code=%d err=%v", code, err)
 	}
 	got2, err := client.FaultStabilityGet(ctx, faultID)
@@ -485,8 +488,11 @@ func TestGatewayFaultStability_AttributionRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FaultStabilityUpsert: %v", err)
 	}
-	if code != http.StatusNoContent {
-		t.Fatalf("POST fault-stability: got HTTP %d, want 204", code)
+	// v0.25.0 changed this endpoint's success response from a bare 204 to 200
+	// with a {"regressed": bool} body (see Upsert's regression-detection
+	// return value) — 204 was the pre-v0.25.0 contract.
+	if code != http.StatusOK {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 200", code)
 	}
 
 	got, err := client.FaultStabilityGet(ctx, faultID)
@@ -515,6 +521,96 @@ func TestGatewayFaultStability_AttributionRoundtrip(t *testing.T) {
 	}
 	if ad, ok := got["attribution_distribution"].(map[string]any); !ok || len(ad) == 0 {
 		t.Errorf("attribution_distribution: got %v, want non-empty map", got["attribution_distribution"])
+	}
+}
+
+// TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip verifies
+// the v0.25.0 additions through a real gateway→auditd round-trip:
+// playbook_version/playbook_updated_at/playbook_id survive POST→GET, an
+// append-only history entry is recorded on every upsert (not just the
+// latest-snapshot row), and Upsert's "regressed" field correctly reports the
+// transition from earning trust (STABLE+CLEAN+attribution-consistent) to not.
+func TestGatewayFaultStability_VersioningHistoryRegression_Roundtrip(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("Gateway not reachable at %s", cfg.GatewayURL)
+	}
+
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const faultID = "e2e-test-fault-versioning"
+	const model = "claude-sonnet-4-6"
+
+	earning := map[string]any{
+		"fault_id": faultID, "fault_name": "E2E versioning test",
+		"diagnosis_model": model, "n_runs": 5, "pass_rate": 1.0, "is_stable": true,
+		"is_clean": true, "attribution_consistent": true,
+		"playbook_version": "1.4", "playbook_updated_at": "2026-08-01T00:00:00Z",
+		"playbook_id": "pb_e2e_versioning",
+	}
+	code, resp1, err := client.FaultStabilityUpsertWithBody(ctx, earning)
+	if err != nil {
+		t.Fatalf("FaultStabilityUpsertWithBody (1st): %v", err)
+	}
+	if code != http.StatusOK {
+		t.Fatalf("POST fault-stability: got HTTP %d, want 200", code)
+	}
+
+	// Skip the rest if the gateway/auditd doesn't have the v0.25.0 schema
+	// yet — same CI-safety pattern as the attribution round-trip test.
+	regressed1, hasRegressed := resp1["regressed"]
+	if !hasRegressed {
+		t.Skip("gateway does not return a 'regressed' field — deploy v0.25.0 and restart to exercise this test")
+	}
+	if regressed1 != false {
+		t.Errorf("regressed on first-ever cert: got %v, want false (no prior state to regress from)", regressed1)
+	}
+
+	// playbook_version / playbook_updated_at round-trip.
+	got, err := client.FaultStabilityGet(ctx, faultID)
+	if err != nil {
+		t.Fatalf("FaultStabilityGet: %v", err)
+	}
+	if pv, _ := got["playbook_version"].(string); pv != "1.4" {
+		t.Errorf("playbook_version: got %q, want 1.4", pv)
+	}
+	if pu, _ := got["playbook_updated_at"].(string); pu == "" {
+		t.Error("playbook_updated_at: got empty, want a timestamp")
+	}
+	if pid, _ := got["playbook_id"].(string); pid != "pb_e2e_versioning" {
+		t.Errorf("playbook_id: got %q, want pb_e2e_versioning", pid)
+	}
+
+	// Second upsert: same fault+model, now failing CLEAN — must report
+	// regressed=true, and it must be visible in the history log.
+	noLongerEarning := map[string]any{
+		"fault_id": faultID, "diagnosis_model": model, "n_runs": 5,
+		"is_stable": true, "is_clean": false, "warning_count": 2, "attribution_consistent": true,
+		"playbook_version": "1.4", "playbook_updated_at": "2026-08-01T00:00:00Z",
+	}
+	_, resp2, err := client.FaultStabilityUpsertWithBody(ctx, noLongerEarning)
+	if err != nil {
+		t.Fatalf("FaultStabilityUpsertWithBody (2nd): %v", err)
+	}
+	if regressed2, _ := resp2["regressed"].(bool); !regressed2 {
+		t.Errorf("regressed on the CLEAN=false upsert: got %v, want true", resp2["regressed"])
+	}
+
+	// History must show both upserts, most recent first.
+	history, err := client.FaultStabilityHistory(ctx, faultID, model, 10)
+	if err != nil {
+		t.Fatalf("FaultStabilityHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history entries: got %d, want 2 (one per upsert)", len(history))
+	}
+	if clean, _ := history[0]["is_clean"].(bool); clean {
+		t.Error("most recent history entry: want is_clean=false")
+	}
+	if clean, _ := history[1]["is_clean"].(bool); !clean {
+		t.Error("oldest history entry: want is_clean=true")
 	}
 }
 

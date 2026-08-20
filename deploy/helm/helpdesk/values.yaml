@@ -445,6 +445,13 @@ faulttest:
   # Empty = all categories.
   categories: ""
 
+  # Customer fault catalog content to layer on top of the built-in catalog
+  # (--catalog), set via --set-file faulttest.catalog=my-faults.yaml. Rendered
+  # into one shared ConfigMap consumed by this Job, the recertify CronJob, and
+  # the vault-query Job — set it once here regardless of which of those you
+  # use. See docs/FAULTTEST.md#9-customer-fault-catalogs.
+  catalog: ""
+
   # Kubernetes context for kubectl commands in inject/teardown scripts.
   # Leave empty to use the in-cluster default (recommended for cluster-internal Jobs).
   context: ""
@@ -577,6 +584,12 @@ recertify:
   # Categories to certify, comma-separated. Empty = all external-compatible categories.
   categories: ""
 
+  # Webhook URL for cert-regression notification (--notify-url). POSTed a
+  # CertRegressionAlert the moment a recert flips a fault+model from earning
+  # trust (STABLE+CLEAN+attribution-consistent) to no longer earning it — the
+  # one place unattended recertification can actually reach that alert.
+  notifyURL: ""
+
   # Connection string for the test database. Required.
   # Example: "host=test-postgres.helpdesk.svc port=5432 dbname=testdb user=postgres"
   conn: ""
@@ -596,6 +609,29 @@ recertify:
     name: ""        # Leave empty to skip
     key: "password"
     envVar: "PGPASSWORD"
+
+  # Gateway API key Secret — same format as faulttest.gatewayAPIKeySecret.
+  gatewayAPIKeySecret: ""
+  gatewayAPIKeyKey: "api-key"
+
+# ── One-shot vault query Job ──────────────────────────────────────────────────
+# Runs a single read-only `faulttest vault <subcommand>` query in-cluster and
+# prints the result to Job logs — the Helm-native way to check accuracy/list/
+# versions/etc. without hand-crafting a Pod manifest. Read-only: no RBAC needed.
+vaultQuery:
+  # Set to true to run the vault-query Job on the next helm install/upgrade.
+  enabled: false
+
+  # vault subcommand to run: accuracy, list, versions, incidents, journey,
+  # drift, calibration, judge-accuracy, cert-compare. Required when enabled=true.
+  subcommand: ""
+
+  # Positional argument for the subcommand — a fault ID or series ID.
+  # Some subcommands (e.g. list with no target) work with this left empty.
+  target: ""
+
+  # How long (seconds) to retain the completed Job before auto-deletion.
+  ttlSecondsAfterFinished: 3600
 
   # Gateway API key Secret — same format as faulttest.gatewayAPIKeySecret.
   gatewayAPIKeySecret: ""

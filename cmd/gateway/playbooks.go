@@ -31,6 +31,9 @@ func (g *Gateway) proxyToAuditd(w http.ResponseWriter, r *http.Request, auditPat
 		return
 	}
 	url := strings.TrimSuffix(g.auditURL, "/") + auditPath
+	if r.URL.RawQuery != "" {
+		url += "?" + r.URL.RawQuery
+	}
 
 	// Build forwarded request.
 	var body io.Reader
@@ -77,11 +80,7 @@ func (g *Gateway) handlePlaybookCreate(w http.ResponseWriter, r *http.Request) {
 // handlePlaybookList proxies GET /api/v1/fleet/playbooks → auditd, forwarding
 // query parameters (active_only, include_system, series_id).
 func (g *Gateway) handlePlaybookList(w http.ResponseWriter, r *http.Request) {
-	path := "/v1/fleet/playbooks"
-	if r.URL.RawQuery != "" {
-		path += "?" + r.URL.RawQuery
-	}
-	g.proxyToAuditd(w, r, path)
+	g.proxyToAuditd(w, r, "/v1/fleet/playbooks")
 }
 
 // handlePlaybookGet proxies GET /api/v1/fleet/playbooks/{id} → auditd.
@@ -778,12 +777,28 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			if lowConfidenceForceGate(prev.diagReport) {
 				gateReasons = append(gateReasons, "low_confidence")
 			}
-			if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
-				gateReasons = append(gateReasons, "objective_evidence:"+reason)
-				appendObjectiveEvidenceSignal(extra, reason)
+			if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
+				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(reasons, ","))
+				for _, r := range reasons {
+					appendObjectiveEvidenceSignal(extra, r)
+				}
 			}
 			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
 				gateReasons = append(gateReasons, "trust_not_earned")
+				// len(chain) > 1 means prev was itself reached via chaining —
+				// it is not the top-level playbook the caller originally
+				// requested. A known, documented gap (docs/CONSISTENCY.md's
+				// "Certification scope" section): fault_stability_cert is
+				// only ever posted against a fault's designated entry-point
+				// series, never an intermediate hop, so a chain-only
+				// playbook can permanently fail this gate no matter how many
+				// --repeat runs exercise it. The gateway has no fault-catalog
+				// access to *prove* that's what's happening here — this is a
+				// contextual hint pointing at the likely cause, not a
+				// certainty claim.
+				if len(chain) > 1 {
+					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — if it never appears as any fault's own diagnosis_playbook_series_id in your catalog, it has no path to earn its own certification; see docs/CONSISTENCY.md's \"Certification scope\" section"
+				}
 			}
 			if len(gateReasons) > 0 {
 				req.GateEscalation = true
@@ -1245,24 +1260,44 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 	return true // primary hypothesis not marked — treat as uncertain
 }
 
-// objectiveEvidenceForceGate returns true, with a short reason string, when
-// any objective_evidence event was recorded for this hop — a deterministic,
-// code-derived distress signal (e.g. a real pod restart or OOM kill) read
-// directly from a tool's structured result, independent of what the model's
-// own text concludes about it. Unlike lowConfidenceForceGate, this does not
-// depend on the model self-reporting anything: the same tool evidence
-// produces the same gate regardless of the model's stated ESCALATE_TO or
-// CONFIDENCE. Returns false, "" when no such events were recorded — deliberately
-// scoped today to whichever tools populate objective_evidence (currently only
-// the K8s agent's get_pods; see the plan's "generic plumbing, narrow rollout"
-// scoping note before extending this to other tools).
-func objectiveEvidenceForceGate(events []audit.Event) (bool, string) {
+// objectiveEvidenceForceGate returns true, with every distinct signal found
+// (deduplicated, in first-seen order), when one or more objective_evidence
+// events were recorded for this hop — a deterministic, code-derived distress
+// signal (e.g. a real pod restart, OOM kill, eviction, or scheduling
+// failure) read directly from a tool's structured result, independent of
+// what the model's own text concludes about it. Unlike lowConfidenceForceGate,
+// this does not depend on the model self-reporting anything: the same tool
+// evidence produces the same gate regardless of the model's stated
+// ESCALATE_TO or CONFIDENCE. Returns false, nil when no such events were
+// recorded — deliberately scoped today to whichever tools populate
+// objective_evidence (currently the K8s agent's get_pods and get_events; see
+// the plan's "generic plumbing, narrow rollout" scoping note before
+// extending this to other tools).
+//
+// Collects every distinct signal rather than stopping at the first: a single
+// hop can legitimately call more than one evidence-producing tool (e.g.
+// pbs_k8s_pod_crash_triage's own guidance expects both get_pods and
+// get_events) and find real, independent evidence from each — a pod that
+// both restarted and triggered a FailedScheduling event is two facts, not
+// one. Returning only the first match would silently drop the second from
+// gate_reason, objective_evidence_signals, and the CLEAN cert's
+// warning_distribution — the exact class of bug this project's whole
+// point is to catch, not commit.
+func objectiveEvidenceForceGate(events []audit.Event) (bool, []string) {
+	var signals []string
+	seen := map[string]bool{}
 	for _, ev := range events {
-		if ev.ObjectiveEvidence != nil && ev.ObjectiveEvidence.Signal != "" {
-			return true, ev.ObjectiveEvidence.Signal
+		if ev.ObjectiveEvidence == nil || ev.ObjectiveEvidence.Signal == "" {
+			continue
 		}
+		sig := ev.ObjectiveEvidence.Signal
+		if seen[sig] {
+			continue
+		}
+		seen[sig] = true
+		signals = append(signals, sig)
 	}
-	return false, ""
+	return len(signals) > 0, signals
 }
 
 // protocolViolation reports whether hop violated the triage response
@@ -1343,11 +1378,13 @@ func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb 
 		return false
 	}
 
-	if fire, reason := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
+	if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
 		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
 			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
-			hop.playbookSeriesID, hop.agentName, reason))
-		appendObjectiveEvidenceSignal(extra, reason)
+			hop.playbookSeriesID, hop.agentName, strings.Join(reasons, ", ")))
+		for _, r := range reasons {
+			appendObjectiveEvidenceSignal(extra, r)
+		}
 	}
 
 	if protocolViolation(pb.PlaybookType, hop) {
@@ -1461,7 +1498,7 @@ func (g *Gateway) trustNotYetEarnedForceGate(seriesID string) bool {
 		return true
 	}
 	for _, c := range certs {
-		if !c.IsStable || !c.IsClean {
+		if !c.EarnsTrust() {
 			return true
 		}
 	}

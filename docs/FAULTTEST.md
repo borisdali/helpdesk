@@ -508,6 +508,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--gate-escalation` | `FAULTTEST_GATE_ESCALATION` | `false` | Send `gate_escalation=true` on playbook run requests. The gateway intercepts the `ESCALATE_TO` signal at the phase boundary and opens a pending gate instead of auto-escalating. Combine with `--emit-and-wait` for non-interactive environments. |
 | `--emit-and-wait` | `FAULTTEST_EMIT_AND_WAIT` | `false` | Replace `/dev/tty` prompts with HTTP polling. Gate: polls `GET /api/v1/fleet/playbook-runs/{id}` every 15 s until resolved externally. Step: long-polls auditd `GET /v1/approvals/{id}/wait`. Required for Kubernetes Jobs and Docker containers where `/dev/tty` is unavailable. Requires `--approval-mode manual` and an external resolver (e.g. the Decision Hub or the git webhook adapter). |
 | `--report-dir` | — | `.` | Directory to write the JSON report (useful when running in a container with a mounted volume) |
+| `--notify-url` | — | — | Webhook URL (e.g. a Slack incoming webhook) POSTed to on run completion with the full JSON `Report`. As of v0.25.0, also used for `cert_regression` alerts (distinguished by a top-level `"event"` field, absent on the end-of-run report) — fired immediately when a `--repeat N` recertification detects a fault+model losing trust-earning status, not just once the whole run finishes. See [CONSISTENCY.md §7.3](CONSISTENCY.md#73-cert-history-and-regression-alerts). |
 
 ¹ Default is `true` when running the standalone binary (no source tree detected). Default is `false` when running from the source tree (e.g. `go run ./testing/cmd/faulttest`). Override explicitly with `--external=false`.
 
@@ -1398,6 +1399,36 @@ faulttest list --catalog my-faults.yaml --source custom --categories database
 # Validate the built-in catalog passes all checks (should always be true)
 faulttest list --source builtin
 ```
+
+### 9.6 Running a custom catalog from Helm
+
+The chart mounts your catalog file automatically — no hand-crafted Job manifest needed. Set `faulttest.catalog` via `--set-file`, pointing at the same file you'd otherwise pass to `--catalog` directly:
+
+```bash
+helm upgrade --install helpdesk deploy/helm/helpdesk \
+  --set faulttest.enabled=true \
+  --set faulttest.ids=my-slow-query-storm \
+  --set-file faulttest.catalog=my-faults.yaml \
+  ...
+```
+
+One values key serves three consumers — set it once and it's available to whichever of these you use:
+
+- **`faulttest.enabled=true`** — the one-off fault-test Job (`faulttest run`).
+- **`recertify.enabled=true`** — the scheduled recertification CronJob (`faulttest run --repeat N`), so custom faults can earn STABLE/CLEAN certs on the same cadence as built-in ones. Pair with `recertify.notifyURL` to get the [cert-regression webhook](CONSISTENCY.md#73-cert-history-and-regression-alerts) from unattended recerts, not just interactive runs.
+- **`vaultQuery.enabled=true`** — a lightweight, read-only Job for one-shot `vault` queries against a custom fault ID without needing `--infra-config` or any RBAC:
+
+  ```bash
+  helm upgrade --install helpdesk deploy/helm/helpdesk \
+    --set vaultQuery.enabled=true \
+    --set vaultQuery.subcommand=accuracy \
+    --set vaultQuery.target=my-slow-query-storm \
+    --set-file faulttest.catalog=my-faults.yaml \
+    ...
+  kubectl -n helpdesk-system logs -f job/helpdesk-vault-query
+  ```
+
+  See [`vault accuracy`](VAULT.md#vault-accuracy) for what the output means, and [`vault list`/`versions`/`incidents`/etc.](VAULT.md) for other subcommands `vaultQuery.subcommand` accepts.
 
 ---
 

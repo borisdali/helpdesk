@@ -48,8 +48,8 @@ func TestFaultStabilityHandlers_UpsertAndGet(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.handleUpsert(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("POST: got %d, want 204", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST: got %d, want 200", rec.Code)
 	}
 
 	// GET by fault ID.
@@ -132,7 +132,7 @@ func TestFaultStabilityHandlers_List(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.handleUpsert(rec, req)
-		if rec.Code != http.StatusNoContent {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("POST %s: got %d", faultID, rec.Code)
 		}
 	}
@@ -189,7 +189,7 @@ func TestFaultStabilityHandlers_Upsert_Overwrites(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.handleUpsert(rec, req)
-		if rec.Code != http.StatusNoContent {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("POST: got %d", rec.Code)
 		}
 	}
@@ -231,7 +231,7 @@ func TestFaultStabilityHandlers_List_MultiModel(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		srv.handleUpsert(rec, req)
-		if rec.Code != http.StatusNoContent {
+		if rec.Code != http.StatusOK {
 			t.Fatalf("POST %s/%s: got %d", faultID, model, rec.Code)
 		}
 	}
@@ -272,5 +272,184 @@ func TestFaultStabilityHandlers_List_MultiModel(t *testing.T) {
 	}
 	if stable["claude-sonnet-4-6"] {
 		t.Error("claude-sonnet-4-6 cert for db-lock-contention: want IsStable=false")
+	}
+}
+
+func upsertCert(t *testing.T, srv *faultStabilityServer, payload map[string]any) {
+	t.Helper()
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/fault-stability", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleUpsert(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFaultStabilityHandlers_Upsert_ResponseBody_RegressedField(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	// First cert: earns trust.
+	body1, _ := json.Marshal(map[string]any{
+		"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+		"n_runs": 5, "is_stable": true, "is_clean": true, "attribution_consistent": true,
+	})
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/fleet/fault-stability", bytes.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	srv.handleUpsert(rec1, req1)
+	var resp1 struct {
+		Regressed bool `json:"regressed"`
+	}
+	if err := json.NewDecoder(rec1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode response 1: %v", err)
+	}
+	if resp1.Regressed {
+		t.Error("first-ever cert: expected regressed=false in response body")
+	}
+
+	// Second cert: stops earning trust.
+	body2, _ := json.Marshal(map[string]any{
+		"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+		"n_runs": 5, "is_stable": true, "is_clean": false, "attribution_consistent": true, "warning_count": 1,
+	})
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/fleet/fault-stability", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	srv.handleUpsert(rec2, req2)
+	var resp2 struct {
+		Regressed bool `json:"regressed"`
+	}
+	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("decode response 2: %v", err)
+	}
+	if !resp2.Regressed {
+		t.Error("cert going CLEAN=false after previously earning trust: expected regressed=true in response body")
+	}
+}
+
+func TestFaultStabilityHandlers_History(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	for i := 1; i <= 3; i++ {
+		upsertCert(t, srv, map[string]any{
+			"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+			"n_runs": i, "is_stable": true,
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6", nil)
+	req.SetPathValue("faultID", "k8s-oomkilled")
+	rec := httptest.NewRecorder()
+	srv.handleHistory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET history: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		History []audit.FaultStabilityCert `json:"history"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.History) != 3 {
+		t.Fatalf("got %d history entries, want 3", len(result.History))
+	}
+	if result.History[0].NRuns != 3 {
+		t.Errorf("most recent entry NRuns = %d, want 3", result.History[0].NRuns)
+	}
+}
+
+func TestFaultStabilityHandlers_History_RespectsCustomLimit(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+	for i := 1; i <= 5; i++ {
+		upsertCert(t, srv, map[string]any{
+			"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+			"n_runs": i, "is_stable": true,
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit=2", nil)
+	req.SetPathValue("faultID", "k8s-oomkilled")
+	rec := httptest.NewRecorder()
+	srv.handleHistory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		History []audit.FaultStabilityCert `json:"history"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.History) != 2 {
+		t.Fatalf("got %d entries with limit=2, want 2", len(result.History))
+	}
+}
+
+func TestFaultStabilityHandlers_History_InvalidLimit_FallsBackToDefault(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+	for i := 1; i <= 3; i++ {
+		upsertCert(t, srv, map[string]any{
+			"fault_id": "k8s-oomkilled", "diagnosis_model": "claude-sonnet-4-6",
+			"n_runs": i, "is_stable": true,
+		})
+	}
+
+	for _, limit := range []string{"abc", "-5", "0"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit="+limit, nil)
+		req.SetPathValue("faultID", "k8s-oomkilled")
+		rec := httptest.NewRecorder()
+		srv.handleHistory(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("limit=%q: got %d, want 200; body: %s", limit, rec.Code, rec.Body.String())
+		}
+		var result struct {
+			History []audit.FaultStabilityCert `json:"history"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+			t.Fatalf("limit=%q: decode: %v", limit, err)
+		}
+		// Falls back to the default (10) rather than erroring or returning
+		// zero rows — all 3 seeded entries must come back.
+		if len(result.History) != 3 {
+			t.Errorf("limit=%q: got %d entries, want 3 (default limit should not exclude them)", limit, len(result.History))
+		}
+	}
+}
+
+func TestFaultStabilityHandlers_History_MissingDiagnosisModel(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/k8s-oomkilled/history", nil)
+	req.SetPathValue("faultID", "k8s-oomkilled")
+	rec := httptest.NewRecorder()
+	srv.handleHistory(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want 400 when diagnosis_model is omitted", rec.Code)
+	}
+}
+
+func TestFaultStabilityHandlers_History_NeverCertified_ReturnsEmptyArray(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/db-never-tested/history?diagnosis_model=claude-sonnet-4-6", nil)
+	req.SetPathValue("faultID", "db-never-tested")
+	rec := httptest.NewRecorder()
+	srv.handleHistory(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var result struct {
+		History []audit.FaultStabilityCert `json:"history"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.History == nil {
+		t.Error("expected an empty array, got null (breaks strict JSON clients expecting an array type)")
+	}
+	if len(result.History) != 0 {
+		t.Errorf("got %d entries, want 0", len(result.History))
 	}
 }

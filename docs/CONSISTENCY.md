@@ -13,10 +13,12 @@ certification you run before a playbook enters the live rotation and re-run when
 model or playbook changes significantly.
 
 As of v0.24.0, this is no longer only operator discipline: the gateway itself enforces it for
-real (non-faulttest) incidents. A playbook whose series has no `STABLE`+`CLEAN` cert on record
-for the current model is gated by default (`gate_reason: "trust_not_earned"`) rather than
+real (non-faulttest) incidents. A playbook whose series has no `STABLE`+`CLEAN`+attribution-consistent
+cert on record for the current model is gated by default (`gate_reason: "trust_not_earned"`) rather than
 auto-chaining — see [PLAYBOOKS.md's warning signals reference](PLAYBOOKS.md#warning-signals-reference)
-and [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+and [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis). Attribution consistency joined
+this gate in v0.25.0 — see [ATTRIBUTION_CERTS.md §9's "Gating real incidents"](ATTRIBUTION_CERTS.md#9-the-clean-axis)
+for the live-confirmed gap that motivated it.
 
 This page describes the Consistency Certification system: what it certifies, how it works
 mechanically, how it relates to the other quality signals in the flywheel and how to run
@@ -31,6 +33,7 @@ it on each deployment platform.
 3. [What a stability cert contains](#3-what-a-stability-cert-contains)
    - [Attribution fields (v0.21.0)](#attribution-fields-v0210)
    - [CLEAN axis fields (v0.24.0)](#clean-axis-fields-v0240)
+   - [Versioning & history fields (v0.25.0)](#versioning--history-fields-v0250)
 4. [STABLE vs. UNSTABLE: the criteria](#4-stable-vs-unstable-the-criteria)
 5. [Running a certification](#5-running-a-certification)
    - [From source (make recertify)](#51-from-source-make-recertify)
@@ -41,6 +44,7 @@ it on each deployment platform.
 7. [Viewing certification results](#7-viewing-certification-results)
    - [vault list — STABLE column](#71-vault-list--stable-column)
    - [vault accuracy — full cert detail](#72-vault-accuracy--full-cert-detail)
+   - [Cert history and regression alerts](#73-cert-history-and-regression-alerts)
 8. [When to re-certify](#8-when-to-re-certify)
 9. [Relationship to other quality signals](#9-relationship-to-other-quality-signals)
 
@@ -127,13 +131,41 @@ In practice, a typical workflow is:
 4. Let real incidents or `faulttest` gateway runs accumulate accuracy data.
 5. When the model or playbook changes significantly: re-certify before promoting the new version.
 
+### Certification scope: entry-point playbooks only (known gap)
+
+A `fault_stability_cert` is always attributed to a **fault's designated entry-point series**
+(`diagnosis_playbook_series_id` in the catalog) — never to an intermediate playbook reached
+partway through a chain. Concretely: a fault whose entry point is `pbs_connection_triage`, but
+whose chain runs `pbs_connection_triage → pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage`,
+only ever certifies `pbs_connection_triage`. The two downstream hops never earn a cert of their
+own, no matter how many `--repeat` batches exercise them as part of that chain.
+
+This matters because `trustNotYetEarnedForceGate` checks the **currently-completing hop's own
+series** before allowing it to chain onward — so a mid-chain playbook that structurally can never
+earn its own cert will permanently fail the trust gate on any real (non-`faulttest`) incident,
+with no `--repeat` run able to fix it. If a gate response's `gate_reason` includes
+`trust_not_earned` alongside a `trust_gate_note` explaining the hop was reached via chaining,
+this is very likely why — check whether the blocked series is ever any fault's own
+`diagnosis_playbook_series_id` in your catalog (`faulttest list` shows this column). If it's
+only ever reached as a downstream hop, no amount of recertification will resolve the gate.
+
+Workaround today: run the affected chain-only playbook through `faulttest` with
+`--gate-escalation` and `--approval-mode=force`/`manual` review rather than relying on
+auto-chaining for that specific hop, or add a dedicated fault to your catalog whose entry point
+*is* the chain-only playbook (so it earns its own cert directly). A structural fix — certifying
+every distinct series a chain actually passes through, not just the fault's declared entry
+point — is scoped for a future release; see the `v0.25` release notes for status.
+
 ---
 
 ## 3. What a stability cert contains
 
 Each certification run posts a `FaultStabilityCert` record to auditd via
 `POST /api/v1/fleet/fault-stability` (proxied through the Gateway). Upserts overwrite the
-previous cert for the same `fault_id` — one cert per fault, always the latest run.
+previous cert for the same `(fault_id, diagnosis_model)` — the cert table itself always holds
+just the latest run. As of v0.25.0, every upsert *also* appends a snapshot to an append-only
+history log rather than only overwriting — see
+[Versioning & history fields](#versioning--history-fields-v0250) below.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -177,7 +209,62 @@ Three additional columns capture a fourth, independent axis — whether any run 
 | `is_clean` | bool | `true` only when `warning_count == 0` — zero-tolerance, no percentage threshold |
 | `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). Shown via `vault accuracy`'s `Warning types:` line; not shown in `vault list`. |
 
-`is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires both `is_stable` and `is_clean` across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended.
+`is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires `is_stable`, `is_clean`, *and* `attribution_consistent` (§3) across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended — the same three-condition bar is exposed as `FaultStabilityCert.EarnsTrust()` so both the gateway's real-time gate and the cert store's own regression detection (below) read the identical fact, not two independently-maintained copies of it.
+
+### Versioning & history fields (v0.25.0)
+
+Answers a question a snapshot cert alone can't: *does a certified playbook still hold a month
+later?* Two new columns plus one new table close the two real gaps this required — a playbook
+being edited out from under an existing cert with nothing to flag it, and a cert's trend over
+time being invisible (only "what does it say right now," never "did it change, and when").
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `playbook_version` | string | The playbook's `version` field at the moment this cert was earned, fetched from the gateway at cert-post time. Empty for certs recorded before v0.25.0 — treated as "unknown," never as "fresh." |
+| `playbook_updated_at` | timestamp | The playbook's `updated_at` at the same moment, for the same staleness comparison. |
+| `playbook_id` | string | The playbook's concrete `pb_*` version ID at the same moment — as opposed to `playbook_version`'s human-readable number, this is the exact ID `vault diff` takes as an argument. Same non-key treatment and "empty means unknown" semantics as the other two. |
+
+None of the three is part of the composite primary key — editing a playbook does not fork the cert
+into a new row, it just leaves the existing row referencing a version that's no longer current.
+`vault accuracy <fault-id>` compares the stored `playbook_version` against the playbook's live
+current version on every lookup and warns when they differ:
+
+```
+  ⚠ cert was earned against playbook version 1.2, current version is 1.4 — consider re-running --repeat to refresh
+```
+
+When `playbook_id` is also known on both sides (the cert's stored ID and the currently active
+one), that warning is followed by a ready-to-run comparison instead of leaving "the playbook
+changed" as an assertion with nothing to act on:
+
+```
+    See what changed: faulttest vault diff pb_be8b5667 pb_31575294
+```
+
+or, for a cert that predates version tracking entirely:
+
+```
+  ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits
+```
+
+**`fault_stability_cert_history`** is a separate, append-only table — every `Upsert` writes the
+new snapshot to `fault_stability_cert` (overwriting, as before) *and* appends an identical
+snapshot, timestamped, to this table (never overwriting). Same columns as the cert itself, keyed
+the same way by `(fault_id, diagnosis_model)`, queried via `GET
+/api/v1/fleet/fault-stability/{faultID}/history?diagnosis_model=<model>&limit=<n>` (default limit
+10, most recent first). See [§7.3](#73-cert-history-and-regression-alerts) for how this surfaces
+in `vault accuracy`.
+
+**Regression detection.** `Upsert` is transactional: it reads the fault+model's prior cert (if
+any) before writing the new one, and reports whether the pair straddled a transition from
+`EarnsTrust()==true` to `EarnsTrust()==false` — i.e. whether this specific recertification is the
+moment a playbook stopped meeting the STABLE+CLEAN+attribution-consistent bar it previously met.
+Never having earned trust isn't a regression *from* trust (there's no prior state to fall from),
+and staying not-earning isn't either — only an actual trust → no-trust transition counts. When
+`faulttest run --repeat N` detects this, it fires the same `--notify-url` webhook mechanism
+already used for end-of-run reports (see [§7.3](#73-cert-history-and-regression-alerts)), but
+immediately — a trust regression is worth knowing about the moment it's found, not after every
+other fault in a possibly-long batch finishes.
 
 ---
 
@@ -529,11 +616,23 @@ rather than returning early — the consistency signal is available independentl
 
 When `Clean` is `no`, a `Warning types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
-the five signals fired:
+the five signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
+count: `(predictable)` when the signal fired on *every* run (structurally baked into this
+fault/playbook/model combination — not fixable by prompting, chasing it with guidance changes is
+a dead end) vs. `(varies)` when it fired on some but not all otherwise-identical runs (the case
+actually worth investigating):
 
 ```
   Clean         : no  (2/5 run(s) tripped a verified warning signal)
-  Warning types : objective_evidence:pod_restarted=1, protocol_violation=1
+  Warning types : objective_evidence:pod_restarted=1(varies), protocol_violation=1(varies)
+```
+
+A predictable signal looks like this instead — worth knowing at a glance that no amount of
+re-running or prompt tuning will change it:
+
+```
+  Clean         : no  (5/5 run(s) tripped a verified warning signal)
+  Warning types : target_drift=5(predictable)
 ```
 
 If the cert is older than 30 days, a warning is shown:
@@ -541,6 +640,62 @@ If the cert is older than 30 days, a warning is shown:
 ```
   [WARN] cert is older than 30 days — consider re-running --repeat to refresh
 ```
+
+---
+
+### 7.3 Cert history and regression alerts
+
+`vault accuracy <fault-id>` appends a trend section whenever more than one recertification is on
+record — the direct answer to "does it still hold a month later," not just "what does it say
+right now":
+
+```
+Cert history (last 3)
+  2026-08-01 12:00 UTC  STABLE   DIRTY attr=consistent (5 runs)
+      ↳ changed since 2026-07-15 09:30: trust regressed (was STABLE+CLEAN+attribution-consistent); clean: CLEAN→DIRTY; warning_distribution: mismatch 0→5
+  2026-07-15 09:30 UTC  STABLE   CLEAN attr=consistent (5 runs)
+  2026-07-01 14:00 UTC  STABLE   CLEAN attr=consistent (5 runs)
+```
+
+Most recent first. Each row's `↳` line (when present) reports *why* it differs from the row below
+it — stability/clean/attribution-consistency flips, `warning_distribution` deltas, and
+`playbook_version`/`taxonomy_version` changes — computed client-side from the full cert rows the
+history endpoint already returns, not a separate lookup. A row with no `↳` line held steady
+against the one before it. A single row (a fault certified exactly once so far) is a normal
+state, not shown as a section — there's no trend yet to display. Query it directly without going
+through `vault accuracy`:
+
+```bash
+curl "$GW/api/v1/fleet/fault-stability/k8s-oomkilled/history?diagnosis_model=claude-sonnet-4-6&limit=10" \
+  -H "Authorization: Bearer $KEY" | jq '.history'
+```
+
+**Regression alerts.** When a `faulttest run --repeat N` recertification is the moment a
+fault+model transitions from earning trust to not (see
+[Versioning & history fields](#versioning--history-fields-v0250) above), and `--notify-url` is
+set, faulttest POSTs immediately — not waiting for the rest of the batch:
+
+```json
+{
+  "event": "cert_regression",
+  "fault_id": "k8s-oomkilled",
+  "fault_name": "OOMKilled",
+  "diagnosis_model": "claude-sonnet-4-6",
+  "is_stable": true,
+  "is_clean": false,
+  "attribution_consistent": true,
+  "warning_count": 2,
+  "n_runs": 5,
+  "tested_at": "2026-08-15T12:00:00Z"
+}
+```
+
+This is a distinct event from the end-of-run `Report` notification `--notify-url` already posts
+(see the `--notify-url` row in [FAULTTEST.md's CLI reference](FAULTTEST.md#52-run)) — both use
+the exact same webhook URL and POST-JSON mechanics, but a `cert_regression` alert can fire
+mid-batch, the moment the regression is detected, rather than only once the full run completes. A
+webhook consumer distinguishes the two by the top-level `event` field (absent on the end-of-run
+report).
 
 ---
 
@@ -552,10 +707,11 @@ following changes should trigger a re-certification run:
 | Trigger | Why |
 |---------|-----|
 | **Model upgrade** | Different model weights produce different output distributions. A playbook STABLE under `claude-sonnet-4-6` may be UNSTABLE under a newer release — or may become more stable. The cert records the `diagnosis_model` field so `vault accuracy` can surface that a cert was issued against a different model than the one currently in use. |
-| **Significant playbook edit** | Adding or removing hypothesis format fields, changing escalation conditions, or rewording diagnostic guidance can shift confidence and pass rates materially. Minor wording edits typically don't require re-certification. |
+| **Significant playbook edit** | Adding or removing hypothesis format fields, changing escalation conditions, or rewording diagnostic guidance can shift confidence and pass rates materially. As of v0.25.0 this is no longer purely a judgment call: `vault accuracy` compares the cert's stored `playbook_version` against the playbook's live current version and warns automatically when they diverge — see [Versioning & history fields](#versioning--history-fields-v0250). |
 | **Significant infrastructure change** | If the agent's tool catalog changes (new tools added, existing tools removed) or the database configuration drifts significantly from the state at certification time, prior certs may no longer reflect real-world behaviour. |
 | **Cert age > 30 days** | Shown as a warning in `vault accuracy`. Not a hard expiry — a STABLE cert doesn't automatically become invalid — but a prompt to re-verify on a realistic schedule. |
 | **Taxonomy major bump** | Classes in `root_cause_classes` were split, merged, or renamed (version bumped from 1.x to 2.0). Attribution from prior certs is non-comparable under the new taxonomy. Re-run the cert suite under the new taxonomy before using attribution columns for model gating. |
+| **Cert regression alert fired** | A recertification detected the fault+model transitioning from earning trust to not — see [Cert history and regression alerts](#73-cert-history-and-regression-alerts). Not a "should I" — this is the flywheel's own signal that something already changed for the worse; investigate before the next real incident hits this playbook unattended. |
 
 The recommended cadence for established deployments is a weekly CronJob (see [Kubernetes](#54-kubernetes-job--cronjob))
 covering all external-compatible faults. This is approximately 85 LLM calls against 17 faults

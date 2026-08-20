@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/testing/faultlib"
 )
 
@@ -246,6 +247,57 @@ type playbookGatewayInfo struct {
 	avgRecoverySecs float64
 }
 
+// fetchPlaybookVersion queries the gateway for a playbook series' currently
+// active version, last-updated timestamp, and concrete pb_* ID — used to
+// stamp a fault stability cert with what it was earned against (see
+// postStabilityCert) and, separately, to detect staleness later (see
+// printFaultStabilityCert's "cert may be stale" warning) and point directly
+// at `vault diff <id-then> <id-now>` when both IDs are known. A series can
+// have more than one version on record (only one active); this explicitly
+// selects IsActive rather than assuming array order, unlike
+// fetchPlaybookInfo's [0] shortcut above.
+// Returns ("", "", "") on any error or when no active version is found —
+// callers should treat that as "unknown," not "empty string is meaningful."
+func fetchPlaybookVersion(gatewayURL, apiKey, seriesID string) (version, updatedAt, playbookID string) {
+	if gatewayURL == "" || seriesID == "" {
+		return "", "", ""
+	}
+	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks?series_id=" + seriesID
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", "", ""
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", ""
+	}
+	var result struct {
+		Playbooks []struct {
+			PlaybookID string `json:"playbook_id"`
+			Version    string `json:"version"`
+			IsActive   bool   `json:"is_active"`
+			UpdatedAt  string `json:"updated_at"`
+		} `json:"playbooks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", ""
+	}
+	for _, pb := range result.Playbooks {
+		if pb.IsActive {
+			return pb.Version, pb.UpdatedAt, pb.PlaybookID
+		}
+	}
+	return "", "", ""
+}
+
 // fetchPlaybookInfo queries the gateway for a playbook series and returns existence
 // status plus inline run stats in a single HTTP call.
 func fetchPlaybookInfo(gatewayURL, apiKey, seriesID string) playbookGatewayInfo {
@@ -411,6 +463,9 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	WarningCount            int            `json:"warning_count"`
 	IsClean                 bool           `json:"is_clean"`
 	WarningDistribution     map[string]int `json:"warning_distribution"`
+	PlaybookVersion         string         `json:"playbook_version"`
+	PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
+	PlaybookID              string         `json:"playbook_id"`
 } {
 	if gatewayURL == "" {
 		return nil
@@ -451,11 +506,57 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		WarningCount            int            `json:"warning_count"`
 		IsClean                 bool           `json:"is_clean"`
 		WarningDistribution     map[string]int `json:"warning_distribution"`
+		PlaybookVersion         string         `json:"playbook_version"`
+		PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
+		PlaybookID              string         `json:"playbook_id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&cert); err != nil {
 		return nil
 	}
 	return &cert
+}
+
+// fetchCertHistory calls GET .../fault-stability/{faultID}/history — the
+// trend fetchStabilityCert alone can't answer, since that endpoint only ever
+// returns the latest snapshot. Returns nil on any error or when the fault
+// has never been certified; a single-entry result is a normal "certified
+// once so far" state, not an error.
+//
+// Decodes directly into audit.FaultStabilityCert (the same type the server
+// stores and returns) rather than a hand-rolled subset — a mirror struct is
+// what let HasTargetDrift silently go missing from journeySummary until a
+// coverage review caught it; decoding the full type means printCertHistory
+// can show *why* a cert changed (warning_distribution/playbook_version/
+// taxonomy_version deltas), not just that it did.
+func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []audit.FaultStabilityCert {
+	if gatewayURL == "" || faultID == "" || model == "" {
+		return nil
+	}
+	reqURL := fmt.Sprintf("%s/api/v1/fleet/fault-stability/%s/history?diagnosis_model=%s&limit=%d",
+		strings.TrimSuffix(gatewayURL, "/"), faultID, neturl.QueryEscape(model), limit)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var result struct {
+		History []audit.FaultStabilityCert `json:"history"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	return result.History
 }
 
 // scanFlag returns the value of --flag=val or --flag val from a []string,
@@ -1442,7 +1543,7 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 		cleanVerdict = fmt.Sprintf("no  (%d/%d run(s) tripped a verified warning signal)", cert.WarningCount, cert.NRuns)
 	}
 	fmt.Printf("  Clean         : %s\n", cleanVerdict)
-	if dist := warningDistributionString(cert.WarningDistribution); dist != "" {
+	if dist := warningDistributionString(cert.WarningDistribution, cert.NRuns); dist != "" {
 		fmt.Printf("  Warning types : %s\n", dist)
 	}
 	if cert.PlaybookSeriesID != "" {
@@ -1466,6 +1567,22 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	if currentModel != "" && cert.DiagnosisModel != "" && cert.DiagnosisModel != currentModel {
 		fmt.Printf("  ⚠ cert was issued for %s but current agent model is %s\n", cert.DiagnosisModel, currentModel)
 		fmt.Printf("    Run: faulttest run --repeat N --agent-model %s ... to re-certify\n", currentModel)
+	}
+	// Playbook-version staleness (v0.25.0): a cert doesn't just age against
+	// the clock (the 30-day check above) — the playbook it was earned
+	// against can also change out from under it. cert.PlaybookVersion=="" is
+	// treated as "unknown" (pre-v0.25.0 cert), not silently as "fresh." When
+	// both the cert's stored PlaybookID and the current one are known, point
+	// directly at `vault diff` instead of just asserting "it changed."
+	if cert.PlaybookSeriesID != "" {
+		if cert.PlaybookVersion == "" {
+			fmt.Println("  ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits")
+		} else if currentVersion, _, currentPlaybookID := fetchPlaybookVersion(gatewayURL, apiKey, cert.PlaybookSeriesID); currentVersion != "" && currentVersion != cert.PlaybookVersion {
+			fmt.Printf("  ⚠ cert was earned against playbook version %s, current version is %s — consider re-running --repeat to refresh\n", cert.PlaybookVersion, currentVersion)
+			if cert.PlaybookID != "" && currentPlaybookID != "" && cert.PlaybookID != currentPlaybookID {
+				fmt.Printf("    See what changed: faulttest vault diff %s %s\n", cert.PlaybookID, currentPlaybookID)
+			}
+		}
 	}
 	if cert.PrimaryAttribution != "" && cert.PrimaryAttribution != attributionUnknown {
 		fmt.Println()
@@ -1501,6 +1618,122 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 			fmt.Printf("  Judge spread   : %.2f\n", cert.JudgeSpread)
 		}
 	}
+	printCertHistory(gatewayURL, apiKey, cert.FaultID, cert.DiagnosisModel)
+}
+
+// printCertHistory prints the "does it still hold" trend directly answering
+// the question a stability cert alone can't: not just today's verdict, but
+// whether it has held steady across every recertification, or when and how
+// it changed. Silently no-ops when there's only one entry (today's cert IS
+// the whole history so far — not worth a section for that) or none at all.
+func printCertHistory(gatewayURL, apiKey, faultID, diagnosisModel string) {
+	history := fetchCertHistory(gatewayURL, apiKey, faultID, diagnosisModel, 10)
+	if len(history) < 2 {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("Cert history (last %d)\n", len(history))
+	for i, h := range history {
+		verdict := "UNSTABLE"
+		if h.IsStable {
+			verdict = "STABLE"
+		}
+		clean := "DIRTY"
+		if h.IsClean {
+			clean = "CLEAN"
+		}
+		consistent := "split"
+		if h.AttributionConsistent {
+			consistent = "consistent"
+		}
+		fmt.Printf("  %-22s %-8s %-5s attr=%-10s (%d runs)\n",
+			h.TestedAt.Format("2006-01-02 15:04 MST"), verdict, clean, consistent, h.NRuns)
+		if i+1 < len(history) {
+			if changes := diffCertHistoryEntries(h, history[i+1]); len(changes) > 0 {
+				fmt.Printf("      ↳ changed since %s: %s\n",
+					history[i+1].TestedAt.Format("2006-01-02 15:04 MST"), strings.Join(changes, "; "))
+			}
+		}
+	}
+}
+
+// diffCertHistoryEntries compares two adjacent cert-history rows (newer,
+// older) and returns human-readable descriptions of what changed between
+// them — the "why" a raw side-by-side listing can't answer on its own, and
+// the mechanism that gives printCertHistory an actual trend instead of just
+// a flat list of snapshots. Empty result means nothing this function checks
+// differed between the two certs.
+func diffCertHistoryEntries(newer, older audit.FaultStabilityCert) []string {
+	var changes []string
+	switch {
+	case older.EarnsTrust() && !newer.EarnsTrust():
+		changes = append(changes, "trust regressed (was STABLE+CLEAN+attribution-consistent)")
+	case !older.EarnsTrust() && newer.EarnsTrust():
+		changes = append(changes, "trust earned (now STABLE+CLEAN+attribution-consistent)")
+	}
+	if newer.IsStable != older.IsStable {
+		oldLabel, newLabel := "UNSTABLE", "UNSTABLE"
+		if older.IsStable {
+			oldLabel = "STABLE"
+		}
+		if newer.IsStable {
+			newLabel = "STABLE"
+		}
+		changes = append(changes, fmt.Sprintf("stability: %s→%s", oldLabel, newLabel))
+	}
+	if newer.IsClean != older.IsClean {
+		oldLabel, newLabel := "DIRTY", "DIRTY"
+		if older.IsClean {
+			oldLabel = "CLEAN"
+		}
+		if newer.IsClean {
+			newLabel = "CLEAN"
+		}
+		changes = append(changes, fmt.Sprintf("clean: %s→%s", oldLabel, newLabel))
+	}
+	if newer.AttributionConsistent != older.AttributionConsistent {
+		oldLabel, newLabel := "split", "split"
+		if older.AttributionConsistent {
+			oldLabel = "consistent"
+		}
+		if newer.AttributionConsistent {
+			newLabel = "consistent"
+		}
+		changes = append(changes, fmt.Sprintf("attribution: %s→%s", oldLabel, newLabel))
+	}
+	if d := diffCountMap(older.WarningDistribution, newer.WarningDistribution); d != "" {
+		changes = append(changes, "warning_distribution: "+d)
+	}
+	if older.PlaybookVersion != "" && newer.PlaybookVersion != "" && older.PlaybookVersion != newer.PlaybookVersion {
+		changes = append(changes, fmt.Sprintf("playbook_version: %s→%s", older.PlaybookVersion, newer.PlaybookVersion))
+	}
+	if older.TaxonomyVersion != "" && newer.TaxonomyVersion != "" && older.TaxonomyVersion != newer.TaxonomyVersion {
+		changes = append(changes, fmt.Sprintf("taxonomy_version: %s→%s", older.TaxonomyVersion, newer.TaxonomyVersion))
+	}
+	return changes
+}
+
+// diffCountMap compares two count maps (e.g. warning_distribution across two
+// certs) and returns a comma-joined, sorted "key old→new" list for every key
+// whose count differs — including keys present in only one map, treated as 0
+// in the other. Empty string when nothing differs.
+func diffCountMap(older, newer map[string]int) string {
+	keys := map[string]bool{}
+	for k := range older {
+		keys[k] = true
+	}
+	for k := range newer {
+		keys[k] = true
+	}
+	var parts []string
+	for k := range keys {
+		o, n := older[k], newer[k]
+		if o != n {
+			parts = append(parts, fmt.Sprintf("%s %d→%d", k, o, n))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
 }
 
 // vaultAccuracyAll is the no-arg (or --ids) mode: scans catalog faults that have a
@@ -3358,6 +3591,21 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		payload["judge_spread"] = attr.JudgeSpread
 		payload["taxonomy_version"] = attr.TaxonomyVersion
 	}
+	// Stamp the cert with the playbook version it was actually earned
+	// against, so a later playbook edit can be detected as staleness
+	// (printFaultStabilityCert's "cert may be stale" warning) instead of the
+	// cert silently continuing to display as current. Best-effort: a lookup
+	// failure leaves these fields empty rather than blocking the cert post —
+	// "version unknown" is a strictly better failure mode than "no cert at
+	// all," and staleness detection already treats an empty stored version
+	// as "unknown, not fresh" (see FaultStabilityCert.PlaybookVersion).
+	if f.DiagnosisPlaybookSeriesID != "" {
+		if version, updatedAt, playbookID := fetchPlaybookVersion(cfg.GatewayURL, cfg.GatewayAPIKey, f.DiagnosisPlaybookSeriesID); version != "" {
+			payload["playbook_version"] = version
+			payload["playbook_updated_at"] = updatedAt
+			payload["playbook_id"] = playbookID
+		}
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		slog.Warn("fault stability: failed to marshal cert", "fault_id", f.ID, "err", err)
@@ -3379,10 +3627,21 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		slog.Warn("fault stability: POST failed", "fault_id", f.ID, "err", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		slog.Warn("fault stability: unexpected status", "fault_id", f.ID, "status", resp.StatusCode)
 		return
+	}
+	var respBody struct {
+		Regressed bool `json:"regressed"`
+	}
+	// Absent/empty body (e.g. a pre-v0.25.0 auditd returning 204) leaves
+	// Regressed at its zero value — decode errors are deliberately silent,
+	// same "best-effort, never block the cert" posture as the version stamp
+	// above.
+	json.NewDecoder(resp.Body).Decode(&respBody) //nolint:errcheck
+	if respBody.Regressed && cfg.NotifyURL != "" {
+		postCertRegressionAlert(cfg.NotifyURL, cfg.DiagnosisModel, f, sr, cr, attr)
 	}
 	verdict := "UNSTABLE"
 	if sr.isStable() {
@@ -3393,6 +3652,72 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 		cleanVerdict = "CLEAN"
 	}
 	slog.Info("fault stability cert posted", "fault_id", f.ID, "verdict", verdict, "clean", cleanVerdict, "warning_count", cr.WarningCount, "n_runs", sr.N)
+}
+
+// CertRegressionAlert is the webhook payload posted to --notify-url the
+// moment a recertification flips a fault+model from previously earning
+// trust (STABLE+CLEAN+attribution-consistent — the exact bar
+// trustNotYetEarnedForceGate requires) to no longer earning it. Deliberately
+// fired immediately, per-fault, rather than folded into the end-of-run
+// Report notification postNotify already sends — a trust regression is
+// worth knowing about the moment it's detected, not after every other fault
+// in a possibly-long --repeat batch finishes.
+type CertRegressionAlert struct {
+	Event                 string `json:"event"`
+	FaultID               string `json:"fault_id"`
+	FaultName             string `json:"fault_name"`
+	DiagnosisModel        string `json:"diagnosis_model"`
+	IsStable              bool   `json:"is_stable"`
+	IsClean               bool   `json:"is_clean"`
+	AttributionConsistent bool   `json:"attribution_consistent"`
+	WarningCount          int    `json:"warning_count"`
+	NRuns                 int    `json:"n_runs"`
+	TestedAt              string `json:"tested_at"`
+}
+
+// postCertRegressionAlert POSTs a CertRegressionAlert to notifyURL, reusing
+// the exact same webhook mechanics as postNotify (same client timeout,
+// same "log and move on" error handling — a failed notification must never
+// fail the faulttest run itself).
+func postCertRegressionAlert(notifyURL, diagnosisModel string, f Failure, sr StabilityReport, cr CleanReport, attr *attributionSummary) {
+	alert := CertRegressionAlert{
+		Event:          "cert_regression",
+		FaultID:        sr.FailureID,
+		FaultName:      sr.FailureName,
+		DiagnosisModel: diagnosisModel,
+		IsStable:       sr.isStable(),
+		IsClean:        cr.isClean(),
+		WarningCount:   cr.WarningCount,
+		NRuns:          sr.N,
+		TestedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	if attr != nil {
+		alert.AttributionConsistent = attr.AttributionConsistent
+	}
+	body, err := json.Marshal(alert)
+	if err != nil {
+		slog.Warn("cert regression: failed to marshal alert", "fault_id", f.ID, "err", err)
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, notifyURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("cert regression: failed to build request", "url", notifyURL, "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("cert regression: HTTP request failed", "url", notifyURL, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+	if resp.StatusCode >= 300 {
+		slog.Warn("cert regression: webhook returned non-2xx", "status", resp.StatusCode, "url", notifyURL)
+		return
+	}
+	slog.Warn("cert regression: alert sent — playbook no longer earns trust", "fault_id", f.ID, "diagnosis_model", diagnosisModel)
 }
 
 // ── vault versions ────────────────────────────────────────────────────────────

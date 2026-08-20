@@ -12,6 +12,7 @@
 package helm_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -53,6 +54,33 @@ func render(t *testing.T, setFlags ...string) map[string]map[string]any {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
 	return parseManifests(t, string(out))
+}
+
+// renderRaw is like render but returns the raw multi-document YAML text
+// instead of parsing it into a dedup-by-name map — needed to detect an
+// accidental duplicate resource definition (parseManifests's map would
+// silently collapse two ConfigMap/same-name documents into one entry,
+// hiding exactly the bug a shared-template design is supposed to prevent).
+func renderRaw(t *testing.T, setFlags ...string) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not in PATH; skipping Helm chart tests")
+	}
+
+	args := []string{"template", "test", chartPath(t)}
+	for _, f := range setFlags {
+		if strings.HasPrefix(f, "setjson:") {
+			args = append(args, "--set-json", strings.TrimPrefix(f, "setjson:"))
+		} else {
+			args = append(args, "--set", f)
+		}
+	}
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed: %v\n%s", err, out)
+	}
+	return string(out)
 }
 
 // parseManifests splits multi-document YAML produced by `helm template` and
@@ -121,6 +149,28 @@ func containerEnvMap(container map[string]any) map[string]string {
 		}
 	}
 	return result
+}
+
+// containerEnvSecretRef returns the (secretName, secretKey) a container's
+// named env var is sourced from via secretKeyRef, and ok=false if the env
+// var isn't present or isn't secret-backed.
+func containerEnvSecretRef(container map[string]any, envName string) (secretName, secretKey string, ok bool) {
+	env, _ := container["env"].([]any)
+	for _, e := range env {
+		entry, _ := e.(map[string]any)
+		if entry["name"] != envName {
+			continue
+		}
+		valueFrom, _ := entry["valueFrom"].(map[string]any)
+		ref, _ := valueFrom["secretKeyRef"].(map[string]any)
+		if ref == nil {
+			return "", "", false
+		}
+		name, _ := ref["name"].(string)
+		key, _ := ref["key"].(string)
+		return name, key, true
+	}
+	return "", "", false
 }
 
 // hasArg returns true if any element of args has the given prefix.
@@ -705,5 +755,359 @@ func TestFleetRunnerScheduledJob(t *testing.T) {
 	cmRef, _ := jobDefVolume["configMap"].(map[string]any)
 	if cmName, _ := cmRef["name"].(string); cmName != "test-fleet-job-vacuum-all" {
 		t.Errorf("job-definition volume configMap name = %q, want test-fleet-job-vacuum-all", cmName)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Faulttest custom catalog (--catalog) mounting
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestFaulttestCatalogConfigMap_AbsentByDefault verifies that no catalog
+// ConfigMap is rendered and no --catalog arg appears when faulttest.catalog
+// is unset (the default), even with faulttest.enabled=true.
+func TestFaulttestCatalogConfigMap_AbsentByDefault(t *testing.T) {
+	objects := render(t, "faulttest.enabled=true", "faulttest.ids=db-wal-disk-full-k8s")
+
+	if _, ok := objects["ConfigMap/test-faulttest-catalog"]; ok {
+		t.Error("unexpected ConfigMap/test-faulttest-catalog when faulttest.catalog is unset")
+	}
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog when faulttest.catalog is unset", args)
+	}
+}
+
+// TestFaulttestCatalogConfigMap_CreatedWhenSet verifies that setting
+// faulttest.catalog creates the shared ConfigMap with the raw content, and
+// that the faulttest Job gets both the --catalog arg and the matching
+// volume/mount.
+func TestFaulttestCatalogConfigMap_CreatedWhenSet(t *testing.T) {
+	objects := render(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	cm, ok := objects["ConfigMap/test-faulttest-catalog"]
+	if !ok {
+		t.Fatal("ConfigMap/test-faulttest-catalog not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	catalogYAML, _ := data["catalog.yaml"].(string)
+	if !strings.Contains(catalogYAML, "custom-target-drift-nudge") {
+		t.Errorf("catalog.yaml content = %q, want it to contain the fault ID", catalogYAML)
+	}
+
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog=/etc/faulttest/catalog.yaml", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Fatal("faulttest container has no volumeMounts")
+	}
+	mounts, _ := container["volumeMounts"].([]any)
+	var found bool
+	for _, m := range mounts {
+		mount, _ := m.(map[string]any)
+		if mount["name"] == "faulttest-catalog" {
+			found = true
+			if mount["mountPath"] != "/etc/faulttest/catalog.yaml" {
+				t.Errorf("faulttest-catalog mountPath = %v, want /etc/faulttest/catalog.yaml", mount["mountPath"])
+			}
+		}
+	}
+	if !found {
+		t.Error("faulttest-catalog volumeMount not found")
+	}
+}
+
+// TestFaulttestCatalogConfigMap_SharedAcrossAllThreeConsumers is the actual
+// scenario the shared-ConfigMap design (item 9/10.3) was built for: all
+// three consumers (faulttest, recertify, vaultQuery) enabled at once with
+// the same faulttest.catalog value must produce exactly one ConfigMap
+// resource, not one per consumer. Uses renderRaw + a raw string count
+// specifically because render()'s dedup-by-name map would silently hide a
+// real duplication bug (two ConfigMap/same-name documents collapse to one
+// map entry either way).
+func TestFaulttestCatalogConfigMap_SharedAcrossAllThreeConsumers(t *testing.T) {
+	raw := renderRaw(t,
+		"faulttest.enabled=true",
+		"faulttest.ids=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+		"recertify.enabled=true",
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+	)
+
+	// Count documents (not raw substring occurrences — the volume block in
+	// each of the 3 consumers also references "name: test-faulttest-catalog"
+	// via configMap.name, which would inflate a naive substring count to 4)
+	// whose kind is ConfigMap and whose metadata.name is the catalog's name.
+	configMapDocs := 0
+	for _, doc := range strings.Split(raw, "\n---") {
+		var obj map[string]any
+		if err := yaml.Unmarshal([]byte(doc), &obj); err != nil || obj == nil {
+			continue
+		}
+		kind, _ := obj["kind"].(string)
+		meta, _ := obj["metadata"].(map[string]any)
+		name, _ := meta["name"].(string)
+		if kind == "ConfigMap" && name == "test-faulttest-catalog" {
+			configMapDocs++
+		}
+	}
+	if configMapDocs != 1 {
+		t.Errorf("found %d ConfigMap/test-faulttest-catalog document(s) in rendered output, want exactly 1 (one shared ConfigMap, not one per consumer)", configMapDocs)
+	}
+
+	objects := parseManifests(t, raw)
+	if _, ok := objects["ConfigMap/test-faulttest-catalog"]; !ok {
+		t.Fatal("ConfigMap/test-faulttest-catalog not found with all three consumers enabled")
+	}
+	// All three consumers must still each get their own volume/mount wired
+	// to that one ConfigMap.
+	for _, key := range []string{"Job/test-faulttest", "CronJob/test-recertify", "Job/test-vault-query"} {
+		if _, ok := objects[key]; !ok {
+			t.Errorf("%s not found", key)
+		}
+	}
+}
+
+// TestRecertifyCatalogAndNotifyURL verifies that recertify.notifyURL and the
+// shared faulttest.catalog both propagate into the recertify CronJob's args
+// and volume mounts — the fix for item 10.3 (recertify previously had no way
+// to reach a custom fault or fire the regression webhook).
+func TestRecertifyCatalogAndNotifyURL(t *testing.T) {
+	objects := render(t,
+		"recertify.enabled=true",
+		"recertify.notifyURL=http://alertmanager.monitoring.svc:9093/webhook",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	cj, ok := objects["CronJob/test-recertify"]
+	if !ok {
+		t.Fatal("CronJob/test-recertify not found")
+	}
+	spec, _ := cj["spec"].(map[string]any)
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	if !hasArg(args, "--notify-url=http://alertmanager.monitoring.svc:9093/webhook") {
+		t.Errorf("args %v missing --notify-url", args)
+	}
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog=/etc/faulttest/catalog.yaml", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Fatal("recertify container has no volumeMounts")
+	}
+}
+
+// TestRecertifyNoCatalogOrNotifyURLByDefault verifies neither --catalog nor
+// --notify-url appear when their values are left at the default empty string.
+func TestRecertifyNoCatalogOrNotifyURLByDefault(t *testing.T) {
+	objects := render(t, "recertify.enabled=true")
+
+	cj, ok := objects["CronJob/test-recertify"]
+	if !ok {
+		t.Fatal("CronJob/test-recertify not found")
+	}
+	spec, _ := cj["spec"].(map[string]any)
+	jobTemplate, _ := spec["jobTemplate"].(map[string]any)
+	jobSpec, _ := jobTemplate["spec"].(map[string]any)
+	podTemplate, _ := jobSpec["template"].(map[string]any)
+	podSpec, _ := podTemplate["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog by default", args)
+	}
+	if hasArg(args, "--notify-url") {
+		t.Errorf("args %v should NOT contain --notify-url by default", args)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-shot vault-query Job
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestVaultQueryJobDisabledByDefault verifies no vault-query Job is rendered
+// when vaultQuery.enabled=false (the default).
+func TestVaultQueryJobDisabledByDefault(t *testing.T) {
+	objects := render(t)
+	if _, ok := objects["Job/test-vault-query"]; ok {
+		t.Error("unexpected Job/test-vault-query with default values (vaultQuery.enabled=false)")
+	}
+}
+
+// TestVaultQueryJobEnabled verifies the vault-query Job renders with the
+// correct subcommand/target/gateway args, no RBAC (read-only, unlike the
+// mutating faulttest Job), and the catalog volume mount when set.
+func TestVaultQueryJobEnabled(t *testing.T) {
+	objects := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=accuracy",
+		"vaultQuery.target=custom-target-drift-nudge",
+		"faulttest.catalog=failures:\\n  - id: custom-target-drift-nudge\\n",
+	)
+
+	job, ok := objects["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+
+	if _, hasSA := podSpec["serviceAccountName"]; hasSA {
+		t.Error("vault-query Job should not set a serviceAccountName — it's read-only, no RBAC needed")
+	}
+
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	wantArgs := []string{"vault", "accuracy", "custom-target-drift-nudge"}
+	for i, want := range wantArgs {
+		if i >= len(args) || args[i] != want {
+			t.Errorf("args[%d] = %v, want %q (full args: %v)", i, args, want, args)
+		}
+	}
+	if !hasArg(args, "--gateway=http://test-gateway:") {
+		t.Errorf("args %v missing --gateway", args)
+	}
+	if !hasArg(args, "--catalog=/etc/faulttest/catalog.yaml") {
+		t.Errorf("args %v missing --catalog", args)
+	}
+	if !hasVolumeMounts(container) {
+		t.Error("vault-query container should have the catalog volumeMount when faulttest.catalog is set")
+	}
+}
+
+// TestVaultQueryJobGatewayAPIKeySecret verifies HELPDESK_CLIENT_API_KEY is
+// wired to vaultQuery.gatewayAPIKeySecret via secretKeyRef when set, and
+// absent entirely (not even as an empty entry) when unset.
+func TestVaultQueryJobGatewayAPIKeySecret(t *testing.T) {
+	withSecret := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+		"vaultQuery.gatewayAPIKeySecret=my-gateway-key",
+	)
+	job, ok := withSecret["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+
+	name, key, ok := containerEnvSecretRef(container, "HELPDESK_CLIENT_API_KEY")
+	if !ok {
+		t.Fatal("HELPDESK_CLIENT_API_KEY not found as a secretKeyRef-backed env var")
+	}
+	if name != "my-gateway-key" {
+		t.Errorf("secretKeyRef.name = %q, want my-gateway-key", name)
+	}
+	if key != "api-key" {
+		t.Errorf("secretKeyRef.key = %q, want api-key (default)", key)
+	}
+
+	withoutSecret := render(t, "vaultQuery.enabled=true", "vaultQuery.subcommand=list")
+	jobNoSecret, ok := withoutSecret["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found (no secret)")
+	}
+	specNoSecret, _ := jobNoSecret["spec"].(map[string]any)
+	tmplNoSecret, _ := specNoSecret["template"].(map[string]any)
+	podSpecNoSecret, _ := tmplNoSecret["spec"].(map[string]any)
+	containersNoSecret, _ := podSpecNoSecret["containers"].([]any)
+	containerNoSecret := containersNoSecret[0].(map[string]any)
+	if _, _, ok := containerEnvSecretRef(containerNoSecret, "HELPDESK_CLIENT_API_KEY"); ok {
+		t.Error("HELPDESK_CLIENT_API_KEY should not be present when vaultQuery.gatewayAPIKeySecret is unset")
+	}
+}
+
+// TestVaultQueryJobEnabled_NoTargetOrCatalog verifies the target positional
+// arg and catalog mount are both omitted when unset — some vault subcommands
+// (e.g. list with no args) don't take a positional target.
+func TestVaultQueryJobEnabled_NoTargetOrCatalog(t *testing.T) {
+	objects := render(t,
+		"vaultQuery.enabled=true",
+		"vaultQuery.subcommand=list",
+	)
+
+	job, ok := objects["Job/test-vault-query"]
+	if !ok {
+		t.Fatal("Job/test-vault-query not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	container := containers[0].(map[string]any)
+	args := containerArgs(container)
+	wantArgs := []string{"vault", "list"}
+	for i, want := range wantArgs {
+		if i >= len(args) || args[i] != want {
+			t.Errorf("args[%d] = %v, want %q (full args: %v)", i, args, want, args)
+		}
+	}
+	if hasArg(args, "--catalog") {
+		t.Errorf("args %v should NOT contain --catalog when faulttest.catalog is unset", args)
+	}
+	if hasVolumeMounts(container) {
+		t.Error("vault-query container should have no volumeMounts when faulttest.catalog is unset")
+	}
+}
+
+// TestVaultQueryJob_NilVaultQueryValue_DoesNotPanic is a regression test for
+// a real bug caught during live manual testing (2026-08-19): `helm upgrade
+// --reuse-values` reuses a previously deployed release's stored values
+// as-is — it does NOT fall back to the new chart's values.yaml defaults for
+// keys that didn't exist in that old release. vaultQuery is a brand-new
+// top-level key, so upgrading any pre-existing release (with no vaultQuery.*
+// ever explicitly --set) makes .Values.vaultQuery genuinely nil, not an
+// empty map — {{ if .Values.vaultQuery.enabled }} then panics with "nil
+// pointer evaluating interface{}.enabled" before the outer {{ if
+// .Values.vaultQuery }} nil-guard was added. render()'s normal --set-based
+// tests can't reproduce this (they always start from the chart's own
+// complete values.yaml, where vaultQuery is always a real map) — this test
+// explicitly overrides it to null via -f to simulate the missing-key state
+// a real --reuse-values upgrade produces.
+func TestVaultQueryJob_NilVaultQueryValue_DoesNotPanic(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not in PATH; skipping Helm chart tests")
+	}
+
+	valuesFile := filepath.Join(t.TempDir(), "nil-vaultquery.yaml")
+	if err := os.WriteFile(valuesFile, []byte("vaultQuery: null\n"), 0o644); err != nil {
+		t.Fatalf("write temp values file: %v", err)
+	}
+
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "-f", valuesFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template failed with vaultQuery explicitly nil (simulating a pre-vaultQuery release reused via --reuse-values): %v\n%s", err, out)
 	}
 }

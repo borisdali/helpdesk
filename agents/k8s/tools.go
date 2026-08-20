@@ -732,7 +732,59 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 		"event_type":    args.EventType,
 	}, result.Count, err, duration)
 
+	if err == nil {
+		recordEventDistressEvidence(ctx, result)
+	}
+
 	return result, err
+}
+
+// recordEventDistressEvidence records a deterministic objective_evidence
+// audit event for any Kubernetes event carrying real evidence of resource
+// distress — eviction, scheduling failure, or node pressure — read directly
+// off the typed GetEventsResult before it is ever summarized/truncated for
+// the general tool_execution audit event (recordClientGoAudit above only
+// stores "returned N items", not the event details) or handed to the LLM as
+// text. Mirrors recordPodDistressEvidence's exact pattern (get_pods, above)
+// — this is the second real source feeding the same objective_evidence
+// mechanism, not a new one; see that function's doc comment for the full
+// rationale and objectiveEvidenceForceGate (cmd/gateway/playbooks.go) for
+// how the signal is consumed.
+//
+// Only a small, deliberately fixed vocabulary of Warning-type Reason values
+// is treated as distress — most Warning/Normal events (BackOff, Pulled,
+// Scheduled, Created, Started, ...) are routine noise for this purpose, not
+// evidence a human should be forced to review. Extend this list only when a
+// new Reason is confirmed to carry the same "real, code-derived, worth a
+// forced gate" weight as these.
+func recordEventDistressEvidence(ctx context.Context, result GetEventsResult) {
+	if toolAuditor == nil {
+		return
+	}
+	for _, ev := range result.Events {
+		if ev.Type != "Warning" {
+			continue
+		}
+		var signal string
+		switch ev.Reason {
+		case "Evicted":
+			signal = "evicted"
+		case "FailedScheduling":
+			signal = "failed_scheduling"
+		case "NodeHasDiskPressure":
+			signal = "disk_pressure"
+		case "NodeHasMemoryPressure":
+			signal = "memory_pressure"
+		default:
+			continue
+		}
+		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
+			Tool:     "get_events",
+			Resource: ev.Object,
+			Signal:   signal,
+			Detail:   ev.Message,
+		})
+	}
 }
 
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {

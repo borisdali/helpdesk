@@ -40,7 +40,7 @@ action.
 **The distinction that matters:** a _productivity_ agent improves your team's throughput.
 An _accountability_ agent certifies that what was done was correct, safe and defensible.
 Those are different products, different architectures and different buyer moments.
-aiHelpDesk is the second kind, exclusively.
+aiHelpDesk is the second kind, exclusively (see [here](https://levelup.gitconnected.com/your-ai-is-already-in-production-is-it-governed-aihelpdesk-positioning-ecc6a758695c#8d44) for more on this distinction).
 
 ---
 
@@ -51,11 +51,11 @@ it's the same fear every DBA and SRE brings to this evaluation, usually unspoken
 AI can diagnose and fix this, what's left for me?*
 
 Not every shop has DBAs and DBA teams. If yours does, it's likely that you are an
-enterprise customer with a decent number and size of database fleet and DBAs typically
+enterprise customer with a decent number and size of databases in your fleet and DBAs typically
 play an important, often critical, role in your overall IT organization. Being paged for
 2am [incidents](INCIDENTS.md) is typically not the most pleasant part of that job and
 making critical decisions at 2am is not the best recipe for keeping data safe, nor does it
-help anyone be lucid the next day. Offload that function. Incident management, real and
+help anyone to be lucid on the next day. Offload that function. Incident management, real and
 proactive, is better handled by AI — but not any AI. Responsible, accountable AI, trusted
 not blindly but on a track record you can inspect yourself, see the
 [Bill of Rights](CUSTOMER_RIGHTS.md).
@@ -85,7 +85,7 @@ higher-value work" is the sentence every automation vendor says and it usually m
   function, not a redundant one. A reviewer is not less senior than the person whose work
   they're reviewing.
 
-We won't pretend that our reframe dissolves the whole fear. Automation does change headcount
+See [here](https://itnext.io/your-dba-isnt-being-automated-they-re-being-promoted-6a12e5492f0e) for more on this point, but we won't pretend that our reframe dissolves the whole fear. Automation does change headcount
 trajectories in aggregate, over time and if you've sat through a few vendor pitches
 you've heard "you'll be elevated, not replaced" before — sometimes from people who didn't
 mean it. What we can promise is narrower and more testable: the part of the job that made

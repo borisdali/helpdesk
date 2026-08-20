@@ -38,7 +38,7 @@ func TestFaultStabilityStore_UpsertAndGet(t *testing.T) {
 		ConfRangePP:      4,
 		IsStable:         true,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestFaultStabilityStore_Upsert_Overwrites(t *testing.T) {
 		PassRate: 0.67,
 		IsStable: false,
 	}
-	if err := store.Upsert(ctx, first); err != nil {
+	if _, err := store.Upsert(ctx, first); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestFaultStabilityStore_Upsert_Overwrites(t *testing.T) {
 		PassRate: 1.0,
 		IsStable: true,
 	}
-	if err := store.Upsert(ctx, second); err != nil {
+	if _, err := store.Upsert(ctx, second); err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func TestFaultStabilityStore_IsStable_False_RoundTrip(t *testing.T) {
 		PassRate: 0.33,
 		IsStable: false,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultID(ctx, cert.FaultID)
@@ -157,7 +157,7 @@ func TestFaultStabilityStore_ListAll(t *testing.T) {
 		{FaultID: "db-long-running-query", NRuns: 5, IsStable: true},
 	}
 	for _, c := range certs {
-		if err := store.Upsert(ctx, c); err != nil {
+		if _, err := store.Upsert(ctx, c); err != nil {
 			t.Fatalf("Upsert %s: %v", c.FaultID, err)
 		}
 	}
@@ -250,7 +250,7 @@ CREATE TABLE fault_stability_cert (
 		NRuns:          5,
 		IsStable:       true,
 	}
-	if err := fs.Upsert(context.Background(), cert); err != nil {
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
 		t.Fatalf("Upsert after migrate: %v", err)
 	}
 	got, err := fs.GetByFaultID(context.Background(), "db-new-fault")
@@ -286,10 +286,10 @@ func TestFaultStabilityStore_MultiModel_Coexist(t *testing.T) {
 		PassRate:       0.67,
 		IsStable:       false,
 	}
-	if err := store.Upsert(ctx, sonnet); err != nil {
+	if _, err := store.Upsert(ctx, sonnet); err != nil {
 		t.Fatalf("Upsert sonnet: %v", err)
 	}
-	if err := store.Upsert(ctx, haiku); err != nil {
+	if _, err := store.Upsert(ctx, haiku); err != nil {
 		t.Fatalf("Upsert haiku: %v", err)
 	}
 
@@ -320,7 +320,7 @@ func TestFaultStabilityStore_MultiModel_Coexist(t *testing.T) {
 	// Upserting the sonnet cert again must update only its row, not the haiku row.
 	sonnet.PassRate = 0.8
 	sonnet.IsStable = false
-	if err := store.Upsert(ctx, sonnet); err != nil {
+	if _, err := store.Upsert(ctx, sonnet); err != nil {
 		t.Fatalf("Upsert sonnet (update): %v", err)
 	}
 	updated, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-sonnet-4-6")
@@ -364,7 +364,7 @@ func TestFaultStabilityStore_ListByFaultID(t *testing.T) {
 		{FaultID: "db-lock-contention", DiagnosisModel: "claude-haiku-4-5-20251001", NRuns: 3, IsStable: false},
 		{FaultID: "db-max-connections", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true},
 	} {
-		if err := store.Upsert(ctx, c); err != nil {
+		if _, err := store.Upsert(ctx, c); err != nil {
 			t.Fatalf("Upsert %s/%s: %v", c.FaultID, c.DiagnosisModel, err)
 		}
 	}
@@ -408,7 +408,7 @@ func TestFaultStabilityStore_TestedAt_Preserved(t *testing.T) {
 		IsStable: true,
 		TestedAt: fixed,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultID(ctx, cert.FaultID)
@@ -442,7 +442,7 @@ func TestFaultStabilityCert_AttributionFields_Roundtrip(t *testing.T) {
 		TaxonomyVersion:         "1.0",
 	}
 
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -488,7 +488,7 @@ func TestFaultStabilityCert_AttributionConsistent_True(t *testing.T) {
 		PrimaryAttribution:    "row-level-lock-contention",
 		TaxonomyVersion:       "1.0",
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -514,7 +514,7 @@ func TestFaultStabilityCert_AttributionDistribution_Empty(t *testing.T) {
 		IsStable:       false,
 		// No attribution fields set.
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -591,7 +591,7 @@ CREATE TABLE fault_stability_cert (
 		PrimaryAttribution: "connection-pool-saturation",
 		TaxonomyVersion:    "1.0",
 	}
-	if err := fs.Upsert(context.Background(), cert); err != nil {
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
 		t.Fatalf("Upsert after migration: %v", err)
 	}
 	got, err := fs.GetByFaultAndModel(context.Background(), cert.FaultID, cert.DiagnosisModel)
@@ -603,6 +603,244 @@ CREATE TABLE fault_stability_cert (
 	}
 	if got.TaxonomyVersion != "1.0" {
 		t.Errorf("TaxonomyVersion: got %q, want 1.0", got.TaxonomyVersion)
+	}
+}
+
+// TestFaultStabilityStore_Migrate_VersioningColumns is the realistic upgrade
+// path a current customer actually hits: a v0.24.0 database already has the
+// attribution and CLEAN columns (unlike the pre-v0.21.0 schema the other two
+// migration tests simulate), but not playbook_version/playbook_updated_at.
+// TestUpsert_PlaybookVersionRoundTrips alone doesn't cover this — it always
+// runs against a freshly created schema via newFaultStabilityStore, so the
+// ALTER TABLE ADD COLUMN path for these two specific columns was never
+// actually exercised until this test.
+func TestFaultStabilityStore_Migrate_VersioningColumns(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_versioning.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// v0.24.0 schema: composite PK, attribution columns, CLEAN columns —
+	// everything except playbook_version/playbook_updated_at.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create v0.24.0 schema: %v", err)
+	}
+	// Seed a v0.24.0-era row to verify it survives migration untouched.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert (fault_id, fault_name, n_runs, is_stable, diagnosis_model, is_clean)
+         VALUES ('db-old-fault', 'Old Fault', 5, 1, 'test-model', 1)`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pre-existing v0.24.0 row must survive, with the new columns defaulting
+	// to empty/unknown rather than erroring or losing the row.
+	old, err := fs.GetByFaultAndModel(context.Background(), "db-old-fault", "test-model")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (old row): %v", err)
+	}
+	if old.FaultName != "Old Fault" {
+		t.Errorf("FaultName after migration: got %q, want Old Fault", old.FaultName)
+	}
+	if !old.IsClean {
+		t.Error("IsClean after migration: want true (pre-existing v0.24.0 data)")
+	}
+	if old.PlaybookVersion != "" {
+		t.Errorf("PlaybookVersion on a pre-migration row: got %q, want empty (unknown, not fabricated)", old.PlaybookVersion)
+	}
+	if old.PlaybookID != "" {
+		t.Errorf("PlaybookID on a pre-migration row: got %q, want empty (unknown, not fabricated)", old.PlaybookID)
+	}
+
+	// New rows can use the versioning fields after migration.
+	updatedAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	cert := &FaultStabilityCert{
+		FaultID: "db-new-fault", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true,
+		PlaybookVersion: "2.1", PlaybookUpdatedAt: updatedAt, PlaybookID: "pb_31575294",
+	}
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration: %v", err)
+	}
+	got, err := fs.GetByFaultAndModel(context.Background(), cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel after migration: %v", err)
+	}
+	if got.PlaybookVersion != "2.1" {
+		t.Errorf("PlaybookVersion: got %q, want 2.1", got.PlaybookVersion)
+	}
+	if !got.PlaybookUpdatedAt.Equal(updatedAt) {
+		t.Errorf("PlaybookUpdatedAt: got %v, want %v", got.PlaybookUpdatedAt, updatedAt)
+	}
+	if got.PlaybookID != "pb_31575294" {
+		t.Errorf("PlaybookID: got %q, want pb_31575294", got.PlaybookID)
+	}
+
+	// The history table must also exist post-migration (createSchema never
+	// ran on this store — only migrate() did, mirroring the standalone-store
+	// pattern this whole test file uses).
+	history, err := fs.GetHistory(context.Background(), "db-new-fault", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory after migration: %v", err)
+	}
+	if len(history) != 1 {
+		t.Errorf("history entries after migration: got %d, want 1", len(history))
+	}
+}
+
+// TestFaultStabilityStore_Migrate_HistoryTableMissingPlaybookID is a
+// regression test for a real bug found via live testing (2026-08-20): a
+// long-running deployment whose fault_stability_cert_history table was
+// first created (via ensureCertHistoryTable's CREATE TABLE IF NOT EXISTS)
+// back when the CREATE TABLE literal only had playbook_version/
+// playbook_updated_at — before playbook_id was added to that literal —
+// never got playbook_id backfilled onto the already-existing table. CREATE
+// TABLE IF NOT EXISTS is a no-op against an existing table; only an
+// explicit ALTER TABLE actually retrofits a column. Unlike
+// TestFaultStabilityStore_Migrate_VersioningColumns (which never seeds a
+// pre-existing history table, so ensureCertHistoryTable always creates it
+// fresh with every current column — never exercising this path), this test
+// specifically pre-seeds a history table missing playbook_id to reproduce
+// the exact live failure: "table fault_stability_cert_history has no
+// column named playbook_id".
+func TestFaultStabilityStore_Migrate_HistoryTableMissingPlaybookID(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_history_playbook_id.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// Composite-PK, fully-attributed, fully-CLEAN cert table already at the
+	// v0.25.0 playbook_version/playbook_updated_at stage.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread               REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create cert table: %v", err)
+	}
+	// The history table, pre-existing (created by an older binary), also at
+	// the playbook_version/playbook_updated_at stage — missing playbook_id,
+	// exactly like the live deployment that surfaced this bug.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert_history (
+    id                        TEXT    NOT NULL PRIMARY KEY,
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    recorded_at               TEXT    NOT NULL DEFAULT ''
+)`); err != nil {
+		t.Fatalf("create pre-existing history table (missing playbook_id): %v", err)
+	}
+	// Seed a pre-existing history row to verify it survives migration untouched.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert_history (id, fault_id, fault_name, n_runs, is_stable, diagnosis_model, is_clean, recorded_at)
+         VALUES ('csh_old0000', 'db-old-fault', 'Old Fault', 5, 1, 'test-model', 1, '2026-08-01T00:00:00Z')`,
+	); err != nil {
+		t.Fatalf("seed history row: %v", err)
+	}
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// The exact live failure: Upsert must succeed (not error with "table
+	// fault_stability_cert_history has no column named playbook_id") now
+	// that migrate() has backfilled the column.
+	cert := &FaultStabilityCert{
+		FaultID: "custom-target-drift-nudge", DiagnosisModel: "claude-synthetic-test", NRuns: 5,
+		IsStable: true, IsClean: false, AttributionConsistent: true,
+		PlaybookVersion: "0.1-stale", PlaybookID: "pb_stale0000",
+	}
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration (this is the exact live-found bug): %v", err)
+	}
+
+	history, err := fs.GetHistory(context.Background(), "custom-target-drift-nudge", "claude-synthetic-test", 10)
+	if err != nil {
+		t.Fatalf("GetHistory after migration: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history entries: got %d, want 1", len(history))
+	}
+	if history[0].PlaybookID != "pb_stale0000" {
+		t.Errorf("history[0].PlaybookID: got %q, want pb_stale0000", history[0].PlaybookID)
+	}
+
+	// The pre-existing (unrelated) history row must survive migration with
+	// PlaybookID defaulting to empty, not lost or erroring.
+	oldHistory, err := fs.GetHistory(context.Background(), "db-old-fault", "test-model", 10)
+	if err != nil {
+		t.Fatalf("GetHistory (pre-existing row): %v", err)
+	}
+	if len(oldHistory) != 1 {
+		t.Fatalf("pre-existing history entries: got %d, want 1", len(oldHistory))
+	}
+	if oldHistory[0].PlaybookID != "" {
+		t.Errorf("pre-existing history row PlaybookID: got %q, want empty (unknown, not fabricated)", oldHistory[0].PlaybookID)
 	}
 }
 
@@ -643,7 +881,7 @@ func TestFaultStabilityStore_Migrate_AttributionColumns_Idempotent(t *testing.T)
 		NRuns:              3,
 		PrimaryAttribution: "connection-pool-saturation",
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert after idempotent migrate: %v", err)
 	}
 }
@@ -662,7 +900,7 @@ func TestFaultStabilityCert_CleanFields_Roundtrip(t *testing.T) {
 		WarningCount:   2,
 		IsClean:        false,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -692,7 +930,7 @@ func TestFaultStabilityCert_CleanFields_ZeroValueIsClean(t *testing.T) {
 		WarningCount:   0,
 		IsClean:        true,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -717,7 +955,7 @@ func TestFaultStabilityCert_WarningDistribution_Roundtrip(t *testing.T) {
 		IsClean:             false,
 		WarningDistribution: dist,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -742,7 +980,7 @@ func TestFaultStabilityCert_WarningDistribution_Empty(t *testing.T) {
 		NRuns:          5,
 		IsClean:        true,
 	}
-	if err := store.Upsert(ctx, cert); err != nil {
+	if _, err := store.Upsert(ctx, cert); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
@@ -772,7 +1010,7 @@ func TestGetBySeriesAndModel_MultipleFaultsSameSeries(t *testing.T) {
 		{FaultID: "k8s-oomkilled", PlaybookSeriesID: "pbs_k8s_pod_crash_triage", DiagnosisModel: "claude-opus-4-8", NRuns: 5, IsStable: true, IsClean: true},
 	}
 	for _, c := range certs {
-		if err := store.Upsert(ctx, c); err != nil {
+		if _, err := store.Upsert(ctx, c); err != nil {
 			t.Fatalf("Upsert(%s, %s): %v", c.FaultID, c.DiagnosisModel, err)
 		}
 	}
@@ -806,5 +1044,295 @@ func TestGetBySeriesAndModel_NoneRecorded(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected 0 certs for a never-tested series, got %d", len(got))
+	}
+}
+
+// ── EarnsTrust ───────────────────────────────────────────────────────────────
+
+func TestEarnsTrust(t *testing.T) {
+	cases := []struct {
+		name string
+		cert *FaultStabilityCert
+		want bool
+	}{
+		{"nil cert", nil, false},
+		{"all three true", &FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true}, true},
+		{"not stable", &FaultStabilityCert{IsStable: false, IsClean: true, AttributionConsistent: true}, false},
+		{"not clean", &FaultStabilityCert{IsStable: true, IsClean: false, AttributionConsistent: true}, false},
+		{"not attribution-consistent", &FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: false}, false},
+		{"none true", &FaultStabilityCert{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cert.EarnsTrust(); got != tc.want {
+				t.Errorf("EarnsTrust() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Upsert: playbook-version stamping, regression detection, history ────────
+
+func TestUpsert_PlaybookVersionRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	updatedAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	cert := &FaultStabilityCert{
+		FaultID:           "k8s-oomkilled",
+		DiagnosisModel:    "claude-sonnet-4-6",
+		NRuns:             5,
+		IsStable:          true,
+		PlaybookVersion:   "1.3",
+		PlaybookUpdatedAt: updatedAt,
+		PlaybookID:        "pb_be8b5667",
+	}
+	if _, err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := store.GetByFaultAndModel(ctx, "k8s-oomkilled", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if got.PlaybookVersion != "1.3" {
+		t.Errorf("PlaybookVersion = %q, want 1.3", got.PlaybookVersion)
+	}
+	if !got.PlaybookUpdatedAt.Equal(updatedAt) {
+		t.Errorf("PlaybookUpdatedAt = %v, want %v", got.PlaybookUpdatedAt, updatedAt)
+	}
+	if got.PlaybookID != "pb_be8b5667" {
+		t.Errorf("PlaybookID = %q, want pb_be8b5667", got.PlaybookID)
+	}
+}
+
+func TestUpsert_PlaybookVersionEmpty_TreatedAsUnknownNotZeroValue(t *testing.T) {
+	// A cert that never had a version stamped (pre-v0.25.0, or a lookup
+	// failure at post time) must round-trip as an empty string / zero
+	// time.Time, not panic or silently coerce to some other value — callers
+	// (printFaultStabilityCert's staleness warning) depend on being able to
+	// distinguish "never set" from "explicitly empty."
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{FaultID: "db-lock-contention", DiagnosisModel: "claude-sonnet-4-6", NRuns: 3, IsStable: true}
+	if _, err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, "db-lock-contention", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if got.PlaybookVersion != "" {
+		t.Errorf("PlaybookVersion = %q, want empty", got.PlaybookVersion)
+	}
+	if !got.PlaybookUpdatedAt.IsZero() {
+		t.Errorf("PlaybookUpdatedAt = %v, want zero value", got.PlaybookUpdatedAt)
+	}
+	if got.PlaybookID != "" {
+		t.Errorf("PlaybookID = %q, want empty", got.PlaybookID)
+	}
+}
+
+func TestUpsert_Regressed_FalseOnFirstEverCert(t *testing.T) {
+	// Never having earned trust isn't a regression *from* trust — there's no
+	// prior state to have fallen from. Distinct from trustNotYetEarnedForceGate
+	// (gateway-side), which does treat "never certified" as "not earned" —
+	// two different questions asked of the same fact.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{FaultID: "db-lock-contention", DiagnosisModel: "claude-sonnet-4-6", NRuns: 3, IsStable: false}
+	regressed, err := store.Upsert(ctx, cert)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if regressed {
+		t.Error("expected regressed=false on the very first cert for this fault+model")
+	}
+}
+
+func TestUpsert_Regressed_TrueWhenTrustEarningCertStopsEarningTrust(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	earning := &FaultStabilityCert{
+		FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5,
+		IsStable: true, IsClean: true, AttributionConsistent: true,
+	}
+	if regressed, err := store.Upsert(ctx, earning); err != nil {
+		t.Fatalf("Upsert (earning): %v", err)
+	} else if regressed {
+		t.Error("expected regressed=false when the fault first earns trust (no prior state to regress from)")
+	}
+
+	noLongerEarning := &FaultStabilityCert{
+		FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5,
+		IsStable: true, IsClean: false, AttributionConsistent: true, WarningCount: 2,
+	}
+	regressed, err := store.Upsert(ctx, noLongerEarning)
+	if err != nil {
+		t.Fatalf("Upsert (no longer earning): %v", err)
+	}
+	if !regressed {
+		t.Error("expected regressed=true when a previously trust-earning cert becomes CLEAN=false")
+	}
+}
+
+func TestUpsert_Regressed_FalseWhenAlreadyNotEarningTrust(t *testing.T) {
+	// A cert that wasn't earning trust yesterday and still isn't today
+	// hasn't regressed — it never recovered, which is a different (and, per
+	// the design, not separately alerted-on) fact.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	unstable := &FaultStabilityCert{FaultID: "db-lock-contention", DiagnosisModel: "claude-sonnet-4-6", NRuns: 3, IsStable: false}
+	if _, err := store.Upsert(ctx, unstable); err != nil {
+		t.Fatalf("Upsert (1st): %v", err)
+	}
+	stillUnstable := &FaultStabilityCert{FaultID: "db-lock-contention", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: false}
+	regressed, err := store.Upsert(ctx, stillUnstable)
+	if err != nil {
+		t.Fatalf("Upsert (2nd): %v", err)
+	}
+	if regressed {
+		t.Error("expected regressed=false — cert was already not earning trust, nothing changed for the worse")
+	}
+}
+
+func TestUpsert_Regressed_FalseWhenStayingTrustEarning(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := func(n int) *FaultStabilityCert {
+		return &FaultStabilityCert{
+			FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: n,
+			IsStable: true, IsClean: true, AttributionConsistent: true,
+		}
+	}
+	if _, err := store.Upsert(ctx, cert(5)); err != nil {
+		t.Fatalf("Upsert (1st): %v", err)
+	}
+	regressed, err := store.Upsert(ctx, cert(10))
+	if err != nil {
+		t.Fatalf("Upsert (2nd): %v", err)
+	}
+	if regressed {
+		t.Error("expected regressed=false — cert stayed trust-earning across recertification")
+	}
+}
+
+// TestUpsert_Regressed_FalseOnRecovery covers the improvement direction
+// explicitly: a fault that wasn't earning trust and now does is not a
+// regression (the opposite of one) — worth its own test, not just an
+// implication of the boolean logic, since a naive "did EarnsTrust() change"
+// check (rather than the specific true→false direction) would have wrongly
+// flagged this as a regression too.
+func TestUpsert_Regressed_FalseOnRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	notEarning := &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: false}
+	if _, err := store.Upsert(ctx, notEarning); err != nil {
+		t.Fatalf("Upsert (not earning): %v", err)
+	}
+
+	nowEarning := &FaultStabilityCert{
+		FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5,
+		IsStable: true, IsClean: true, AttributionConsistent: true,
+	}
+	regressed, err := store.Upsert(ctx, nowEarning)
+	if err != nil {
+		t.Fatalf("Upsert (now earning): %v", err)
+	}
+	if regressed {
+		t.Error("expected regressed=false — this is a recovery (not-earning → earning), the opposite of a regression")
+	}
+}
+
+func TestUpsert_AppendsHistoryRow(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	for i := 1; i <= 3; i++ {
+		cert := &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: i, IsStable: true}
+		if _, err := store.Upsert(ctx, cert); err != nil {
+			t.Fatalf("Upsert #%d: %v", i, err)
+		}
+	}
+
+	history, err := store.GetHistory(ctx, "k8s-oomkilled", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("expected 3 history entries (one per Upsert), got %d", len(history))
+	}
+	// Latest cert table row still only holds the single most recent snapshot —
+	// history is additive, not a replacement for the fast-lookup shape.
+	latest, err := store.GetByFaultAndModel(ctx, "k8s-oomkilled", "claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if latest.NRuns != 3 {
+		t.Errorf("latest cert NRuns = %d, want 3 (most recent Upsert)", latest.NRuns)
+	}
+}
+
+func TestUpsert_History_DifferentModel_SeparateHistory(t *testing.T) {
+	// History is scoped per (fault_id, diagnosis_model), same as the cert
+	// itself — a different model's recertifications must not bleed into
+	// this model's trend.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	if _, err := store.Upsert(ctx, &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true}); err != nil {
+		t.Fatalf("Upsert (sonnet): %v", err)
+	}
+	if _, err := store.Upsert(ctx, &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-haiku-4-5", NRuns: 5, IsStable: true}); err != nil {
+		t.Fatalf("Upsert (haiku): %v", err)
+	}
+
+	sonnetHistory, err := store.GetHistory(ctx, "k8s-oomkilled", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory (sonnet): %v", err)
+	}
+	if len(sonnetHistory) != 1 {
+		t.Errorf("sonnet history: got %d entries, want 1 (haiku's Upsert must not appear here)", len(sonnetHistory))
+	}
+}
+
+func TestGetHistory_RespectsLimit(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	for i := 1; i <= 5; i++ {
+		if _, err := store.Upsert(ctx, &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: i, IsStable: true}); err != nil {
+			t.Fatalf("Upsert #%d: %v", i, err)
+		}
+	}
+	history, err := store.GetHistory(ctx, "k8s-oomkilled", "claude-sonnet-4-6", 2)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 entries (limit=2), got %d", len(history))
+	}
+	// Most recent first: the last two Upserts had NRuns=4 and NRuns=5.
+	if history[0].NRuns != 5 || history[1].NRuns != 4 {
+		t.Errorf("expected most-recent-first order [5, 4], got [%d, %d]", history[0].NRuns, history[1].NRuns)
+	}
+}
+
+func TestGetHistory_NeverCertified_ReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	history, err := store.GetHistory(ctx, "db-never-tested", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("expected 0 history entries, got %d", len(history))
 	}
 }
