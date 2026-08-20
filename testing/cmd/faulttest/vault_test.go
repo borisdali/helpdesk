@@ -689,10 +689,10 @@ func TestPostStabilityCert_Regressed_FiresNotifyWebhook(t *testing.T) {
 
 	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet:
+		switch r.Method {
+		case http.MethodGet:
 			w.Write([]byte(`{"playbooks":[]}`)) //nolint:errcheck
-		case r.Method == http.MethodPost:
+		case http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]bool{"regressed": true}) //nolint:errcheck
 		}
@@ -720,10 +720,10 @@ func TestPostStabilityCert_NotRegressed_NoNotifyWebhook(t *testing.T) {
 
 	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodGet:
+		switch r.Method {
+		case http.MethodGet:
 			w.Write([]byte(`{"playbooks":[]}`)) //nolint:errcheck
-		case r.Method == http.MethodPost:
+		case http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]bool{"regressed": false}) //nolint:errcheck
 		}
