@@ -785,6 +785,20 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			}
 			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
 				gateReasons = append(gateReasons, "trust_not_earned")
+				// len(chain) > 1 means prev was itself reached via chaining —
+				// it is not the top-level playbook the caller originally
+				// requested. A known, documented gap (docs/CONSISTENCY.md's
+				// "Certification scope" section): fault_stability_cert is
+				// only ever posted against a fault's designated entry-point
+				// series, never an intermediate hop, so a chain-only
+				// playbook can permanently fail this gate no matter how many
+				// --repeat runs exercise it. The gateway has no fault-catalog
+				// access to *prove* that's what's happening here — this is a
+				// contextual hint pointing at the likely cause, not a
+				// certainty claim.
+				if len(chain) > 1 {
+					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — if it never appears as any fault's own diagnosis_playbook_series_id in your catalog, it has no path to earn its own certification; see docs/CONSISTENCY.md's \"Certification scope\" section"
+				}
 			}
 			if len(gateReasons) > 0 {
 				req.GateEscalation = true

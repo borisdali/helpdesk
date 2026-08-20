@@ -131,6 +131,31 @@ In practice, a typical workflow is:
 4. Let real incidents or `faulttest` gateway runs accumulate accuracy data.
 5. When the model or playbook changes significantly: re-certify before promoting the new version.
 
+### Certification scope: entry-point playbooks only (known gap)
+
+A `fault_stability_cert` is always attributed to a **fault's designated entry-point series**
+(`diagnosis_playbook_series_id` in the catalog) — never to an intermediate playbook reached
+partway through a chain. Concretely: a fault whose entry point is `pbs_connection_triage`, but
+whose chain runs `pbs_connection_triage → pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage`,
+only ever certifies `pbs_connection_triage`. The two downstream hops never earn a cert of their
+own, no matter how many `--repeat` batches exercise them as part of that chain.
+
+This matters because `trustNotYetEarnedForceGate` checks the **currently-completing hop's own
+series** before allowing it to chain onward — so a mid-chain playbook that structurally can never
+earn its own cert will permanently fail the trust gate on any real (non-`faulttest`) incident,
+with no `--repeat` run able to fix it. If a gate response's `gate_reason` includes
+`trust_not_earned` alongside a `trust_gate_note` explaining the hop was reached via chaining,
+this is very likely why — check whether the blocked series is ever any fault's own
+`diagnosis_playbook_series_id` in your catalog (`faulttest list` shows this column). If it's
+only ever reached as a downstream hop, no amount of recertification will resolve the gate.
+
+Workaround today: run the affected chain-only playbook through `faulttest` with
+`--gate-escalation` and `--approval-mode=force`/`manual` review rather than relying on
+auto-chaining for that specific hop, or add a dedicated fault to your catalog whose entry point
+*is* the chain-only playbook (so it earns its own cert directly). A structural fix — certifying
+every distinct series a chain actually passes through, not just the fault's declared entry
+point — is scoped for a future release; see the `v0.25` release notes for status.
+
 ---
 
 ## 3. What a stability cert contains

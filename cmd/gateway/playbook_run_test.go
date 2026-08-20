@@ -4635,6 +4635,9 @@ func TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook(t *testing.T) {
 	if resp["gate_reason"] != "trust_not_earned" {
 		t.Errorf("gate_reason = %q, want trust_not_earned", resp["gate_reason"])
 	}
+	if _, present := resp["trust_gate_note"]; present {
+		t.Errorf("trust_gate_note = %v, want absent — this is the primary/entry hop (chain length 1), not a chained-in one, so the chain-only-playbook hint should not fire", resp["trust_gate_note"])
+	}
 }
 
 // TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet mirrors the
@@ -4671,6 +4674,143 @@ func TestHandlePlaybookRun_TrustGate_SkippedWhenSkipTrustGateSet(t *testing.T) {
 	}
 	if resp["status"] == "pending_gate" {
 		t.Error("status = pending_gate, but skip_trust_gate was set — trust gate should not have fired")
+	}
+}
+
+// mockChainTrustGateAuditd is a small dedicated mock (not the shared
+// newMockChainAuditd — that helper's fault-stability default response is a
+// bare "[]", which happens to fail JSON-unmarshal into fetchFaultStabilityCerts'
+// {certs:[...]} shape and so always reads as "no cert," making it unusable
+// for a test that needs hop1 to have a genuinely EARNED cert while hop2 has
+// none) for TestHandlePlaybookRun_TrustGate_ChainedHop_HasNote. Routes
+// fault-stability lookups by series_id so hop1's own series can return a
+// real STABLE+CLEAN+attribution-consistent cert while hop2's returns none.
+func mockChainTrustGateAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries map[string]*audit.Playbook, earnedSeries string) *httptest.Server {
+	t.Helper()
+	var runCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/fault-stability":
+			if r.URL.Query().Get("series_id") == earnedSeries {
+				json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+					"certs": []*audit.FaultStabilityCert{{
+						FaultID: "chain-trust-fault", DiagnosisModel: "claude-sonnet-4-6",
+						IsStable: true, IsClean: true, AttributionConsistent: true,
+					}},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"certs": []*audit.FaultStabilityCert{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if pb, ok := bySeries[r.URL.Query().Get("series_id")]; ok {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pb}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			id := strings.TrimPrefix(r.URL.Path, "/v1/fleet/playbooks/")
+			if pb, ok := byID[id]; ok {
+				json.NewEncoder(w).Encode(pb) //nolint:errcheck
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			runCount++
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": fmt.Sprintf("plr_chaintrust%02d", runCount)}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHandlePlaybookRun_TrustGate_ChainedHop_HasNote is the end-to-end
+// counterpart to TestHandlePlaybookRun_TrustGate_ForcesGate_UnearnedPlaybook's
+// trust_gate_note absence check. trustNotYetEarnedForceGate evaluates the
+// CURRENTLY-COMPLETING hop's own trust before letting IT hand off further —
+// so to exercise hop2's own (unearned) trust check, hop2 must itself attempt
+// a third hop (mirroring TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate's
+// exact 3-playbook shape): hop1 (triage) has an earned cert and passes its
+// own check, chaining to hop2 (sysadmin); hop2 has no cert of its own, so
+// when IT tries to hand off to hop3 (remediate), its own trust check fires
+// with trust_gate_note present — the "chain-only playbook may have no path
+// to certification" hint (docs/CONSISTENCY.md's "Certification scope"
+// section), which only applies once len(chain) > 1, i.e. the gated hop was
+// itself reached via chaining rather than requested directly. hop3 must
+// never be invoked — the gate stops the chain before that fetch.
+func TestHandlePlaybookRun_TrustGate_ChainedHop_HasNote(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_trustchain_triage", SeriesID: "pbs_trustchain_triage",
+		Name: "Trust Chain Triage", ExecutionMode: "agent", AgentName: "trustchain_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_trustchain_sysadmin", SeriesID: "pbs_trustchain_sysadmin",
+		Name: "Trust Chain Sysadmin", ExecutionMode: "agent", AgentName: "trustchain_sysadmin_agent", IsActive: true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID: "pb_trustchain_remediate", SeriesID: "pbs_trustchain_remediate",
+		Name: "Trust Chain Remediate", ExecutionMode: "agent", AgentName: "trustchain_remediate_agent", IsActive: true,
+	}
+
+	auditSrv := mockChainTrustGateAuditd(t,
+		map[string]*audit.Playbook{"pb_trustchain_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_trustchain_sysadmin":  pbSysadmin,
+			"pbs_trustchain_remediate": pbRemediate,
+		},
+		"pbs_trustchain_triage", // hop1's series has an earned cert; hop2's (the gated one) does not
+	)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.SetDiagnosisModel("claude-sonnet-4-6")
+	_, dbCard := mockA2AServerWithText(t, "trustchain_db_agent",
+		"HYPOTHESIS_1: db-level issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_trustchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "trustchain_sysadmin_agent",
+		"HYPOTHESIS_1: pod recovered after restart | CONFIDENCE: 0.90 | EVIDENCE: \"restart_count=2\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod recovered\nTRANSITION_TO: pbs_trustchain_remediate\n")
+	_, remediateCard := mockA2AServerWithText(t, "trustchain_remediate_agent", "FINDINGS: should never be reached\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"trustchain_db_agent":        dbCard,
+		"trustchain_sysadmin_agent":  sysadminCard,
+		"trustchain_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — hop2's own unearned trust check did not fire; body: %s", resp["status"], rec.Body.String())
+	}
+	if resp["gate_reason"] != "trust_not_earned" {
+		t.Errorf("gate_reason = %q, want trust_not_earned", resp["gate_reason"])
+	}
+	if resp["transition_target"] != "pbs_trustchain_remediate" {
+		t.Errorf("transition_target = %q, want pbs_trustchain_remediate — must reflect hop2's own signal", resp["transition_target"])
+	}
+	note, _ := resp["trust_gate_note"].(string)
+	if note == "" {
+		t.Fatalf("trust_gate_note is absent, want the chain-only-playbook hint present — hop2 was reached via chaining (chain length 2 at the time of its own gate check); body: %s", rec.Body.String())
+	}
+	if !strings.Contains(note, "reached via chaining") {
+		t.Errorf("trust_gate_note = %q, want it to mention the hop was reached via chaining", note)
 	}
 }
 
