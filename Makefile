@@ -396,8 +396,8 @@ e2e: image
 	@echo "Verifying localhost:8080 actually reaches this stack (not a stale process holding the port)..."
 	@health="$$(curl -sf http://localhost:8080/health)"; \
 	actual="$$(printf '%s' "$$health" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"; \
-	if [ -z "$$actual" ] || [ "$$actual" != "$(VERSION)" ]; then \
-		echo "ERROR: localhost:8080 did not answer as this build (got version '$$actual', want '$(VERSION)')."; \
+	if [ -z "$$actual" ] || [ "$$actual" != "$(IMAGE_TAG)" ]; then \
+		echo "ERROR: localhost:8080 did not answer as this build (got version '$$actual', want '$(IMAGE_TAG)')."; \
 		echo "  Something else is bound to :8080 -- a stale kubectl port-forward, another docker-compose project, etc. -- not this stack's gateway."; \
 		echo "  On macOS/Docker Desktop this can happen silently: the container's own healthcheck (which docker compose --wait is watching) never touches the host's port 8080, so it reports Healthy even when the host port is actually owned by something else."; \
 		echo "  Find the culprit with: lsof -i :8080  (or) ps aux | grep -i port-forward"; \
