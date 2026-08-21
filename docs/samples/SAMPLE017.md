@@ -16,11 +16,9 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on K8s, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE013.md) for VM/Bare Metal, the source and Docker/Podman respectively (although not the exact commands shown on this page).
 
-The five sections below showcase feature-by-feature the new deterministic safeguards introduced in  aiHelpDesk [v0.25 release](https://github.com/borisdali/helpdesk/releases/tag/v0.25.0):
+In this transcript we pick five areas from the aiHelpDesk [v0.25 release](https://github.com/borisdali/helpdesk/releases/tag/v0.25.0) release: adding [`AttributionConsistent`](VAULT.md#vault-accuracy) to the trust gate, objective evidence for `get_events` tool and predictable/varies annotation, cert history diff and the new cert history section in `vault accuracy`.
 
-
-
-
+Here we go:
 
 
 ## 1. Re-verification: trust gate and `AttributionConsistent`
@@ -246,7 +244,150 @@ The `--gate-escalation` that we introduced earlier still works exactly as before
 Now the `trustNotYetEarnedForceGate` mechanism itself (checking STABLE+CLEAN, unconditionally, regardless of whether the caller requested `gate_escalation`) was introduced in v0.24. That's the adaptive gate. What v0.25 did was add `AttributionConsistent` as a third required condition to that already-mandatory check and thus closing a real gap where a cert could be STABLE+CLEAN but attribution-inconsistent and still incorrectly pass. We refer to this phenomenon as the model disagreeing with itself on root cause across runs. So the gate has been mandatory since v0.24, but v0.25 made the bar it checks stricter.
 
 
-## 3. Cert history diff lines + `vault diff` hint in one combined test
+## 3. Objective evidence for `get_events` tool
+
+Force a real `FailedScheduling` event (the fastest, most reliable of the four new signals to trigger, no sustained resource pressure needed, just an impossible request):
+
+```
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-test patch statefulset postgres -p \
+>     '{"spec":{"template":{"spec":{"containers":[{"name":"postgres","resources":{"requests":{"memory":"500Gi","cpu":"100m"},"limits":{"memory":"500Gi","cpu":"500m"}}}]}}}}'
+statefulset.apps/postgres patched
+
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-test get events --field-selector reason=FailedScheduling --sort-by='.lastTimestamp' | tail -3
+LAST SEEN   TYPE      REASON             OBJECT           MESSAGE
+6s          Warning   FailedScheduling   pod/postgres-0   0/1 nodes are available: 1 Insufficient memory. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling.
+```
+
+And since we now see the `FailedScheduling` event, let's trigger triage:
+
+```
+[boris@ ~/helpdesk]$ curl -s -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" -H "X-Purpose: diagnostic" \
+>        -X POST http://localhost:8080/api/v1/fleet/playbooks/pbs_k8s_pod_crash_triage/run \
+>        -H "Content-Type: application/json" \
+>        -d '{"context": "The database pod in namespace helpdesk-test wont schedule. Please investigate."}' \
+>        -o /tmp/failed_scheduling_test.json -w "\nHTTP status: %{http_code}\n"
+
+HTTP status: 200
+
+[boris@ ~/helpdesk]$ jq '{findings, objective_evidence_signals, gate_reason, gate_type, tool_calls, evidence_warnings, warnings, mismatch, narrated_not_confirmed}' /tmp/failed_scheduling_test.json
+{
+  "findings": "Pod postgres-0 cannot schedule due to memory request of 500Gi far exceeding node capacity of 7Gi; this is a manifest misconfiguration; action=reduce_memory_request_in_statefulset",
+  "objective_evidence_signals": [
+    "failed_scheduling"
+  ],
+  "gate_reason": null,
+  "gate_type": null,
+  "tool_calls": [
+    "get_pods",
+    "describe_pod",
+    "get_events",
+    "get_nodes",
+    "get_node_status",
+    "get_pod_resources"
+  ],
+  "evidence_warnings": [
+    "hop \"pbs_k8s_pod_crash_triage\" (agent k8s_agent) recorded objective evidence (failed_scheduling) but did not escalate or transition"
+  ],
+  "warnings": [
+    "no connection_string specified — agent will need to ask which database to investigate"
+  ],
+  "mismatch": true,
+  "narrated_not_confirmed": [
+    "describe_pod"
+  ]
+}
+```
+
+See objective_evidence_signals to include "failed_scheduling". Cleanup afterward (restore the real limits and force a fresh pod, same as before):
+
+Note `objective_evidence_signals: ["failed_scheduling"]`, with `get_events` genuinely called against a real `FailedScheduling` event. The `recordEventDistressEvidence` mapping works correctly end-to-end, live, through the in-cluster k8s-agent.
+
+You may question the gate_reason/gate_type coming back as null despite the evidence firing. Well, this is actually correct, not a miss. The force-gate path (which would set `gate_reason`) only runs inside the chain loop, which only executes when a hop proposes a real `TRANSITION_TO/ESCALATE_TO`. Here the agent correctly diagnosed the problem (`action=reduce_memory_request_in_statefulset`) but didn't propose a further playbook handoff, so instead, the warn-only counterpart fired, visible in evidence_warnings. Note this:
+
+```
+   "hop \"pbs_k8s_pod_crash_triage\" (agent k8s_agent) recorded objective evidence (failed_scheduling) but did not escalate or transition"
+```
+
+That's `recordSignalLessWarnings` doing exactly its documented job. No Decision Hub entry (there's no next-hop to gate approval for), just a visible flag on the response so the signal that isn't silently lost. 
+Oh and a bonus, unplanned confirmation: `mismatch: true` / `narrated_not_confirmed: ["describe_pod"]` — a live fabrication-risk catch riding along on the same run, same mechanism we verified back earlier. 
+
+
+## 4. Predictable vs. inconsistent annotation
+
+See [here](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the background for `predictable` vs. `varies` (`varies` is the name we chose for inconsistent, changing from one run to the next... or the next after that). Now assuming the certs from `custom-target-drift-nudge` and `custom-k8s-oomkill-signal` posted earlier are still in auditd, just re-query them... by creating a Pod that runs `vault accuracy` for the custom/private catalog: 
+
+
+```
+[boris@ ~/helpdesk]$ cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vault-check-annotation
+  namespace: helpdesk-system
+  labels:
+    app.kubernetes.io/component: faulttest-adhoc
+spec:
+  restartPolicy: Never
+  containers:
+    - name: vault-check-annotation
+      image: helpdesk:latest
+      imagePullPolicy: Never
+      command: ["/usr/local/bin/faulttest"]
+      args:
+        - vault
+        - accuracy
+        - custom-target-drift-nudge
+        - --gateway=http://helpdesk-gateway:8080
+        - --catalog=/etc/faulttest/target_drift_catalog.yaml
+      env:
+        - name: HELPDESK_CLIENT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gateway-api-key
+              key: api-key
+      volumeMounts:
+        - name: catalog
+          mountPath: /etc/faulttest/target_drift_catalog.yaml
+          subPath: target_drift_catalog.yaml
+          readOnly: true
+  volumes:
+    - name: catalog
+      configMap:
+        name: target-drift-catalog
+EOF
+pod/vault-check-annotation created
+
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-system logs vault-check-annotation
+
+  Gateway: http://helpdesk-gateway:8080  ·  version: v0.24.0-12-g2213442-2213442  ·  host: helpdesk-gateway-584db96dfb-w7s5r
+
+  Diagnosis accuracy for series: pbs_connection_triage
+
+    No feedback submitted yet.
+    Run a fault test and submit feedback after recovery to populate this report.
+
+    Tip: run `faulttest vault accuracy` (no args) to list all series with feedback.
+
+  Triage consistency
+    Fault         : custom-target-drift-nudge  (Max connections exhausted (target-drift nudge variant))
+    Verdict       : STABLE
+    Runs          : 5
+    Pass rate     : 100%
+    Conf range    : 0pp  (primary hypothesis, passing runs only)
+    Clean         : no  (5/5 run(s) tripped a verified warning signal)
+    Warning types : mismatch=3(varies), target_drift=5(predictable)
+    Playbook      : pbs_connection_triage
+    Diagnosis model: claude-haiku-4-5-20251001
+    Tested at     : 2026-08-14 19:14 UTC  (3 days ago)
+    ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits
+```
+
+  Expect the Warning types: line to now show target_drift=5(predictable) — the (predictable)/(varies) suffix wasn't there before today, since it's purely a display-layer change on data that already existed.
+
+Ah, note `Warning types : mismatch=3(varies), target_drift=5(predictable)`. The exact new annotation, correctly applied! And a bonus, unplanned confirmation: the `⚠ playbook version unknown — cert predates version tracking` warning also fired correctly. This cert has no `playbook_version` at all (posted before v0.25.0 existed), so that's a live, free confirmation of item 2.1's "unknown version" case too, no extra setup required.
+
+
+## 5. Cert history diff lines + `vault diff` hint in one combined test
 
 This release v0.25 and this transcript continues off where we left off in v0.24 and the [previous transcript](SAMPLE016.md), so it may make sense to glance of that first if you are not familiar with it.
 
