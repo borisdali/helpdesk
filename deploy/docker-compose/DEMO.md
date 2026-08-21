@@ -1,6 +1,6 @@
 # aiHelpDesk: 10-Minute Demo
 
-See aiHelpDesk's governed AI incident response in action: a real [fault injected](../../docs/FAULTTEST.md)
+See aiHelpDesk's governed AI incident response in action: a real fault [injected](../../docs/FAULTTEST.md)
 into a real PostgreSQL instance, an AI agent that diagnoses it, a [step-approval gate](../../docs/PLAYBOOKS.md#step-approval-gate)
 that surfaces before any destructive action and a tamper-proof [audit trail](../../docs/AUDIT.md)
 of everything that happened.
@@ -66,7 +66,7 @@ To override: `export DEMO_MODEL_VENDOR=anthropic DEMO_MODEL_NAME=claude-sonnet-4
 docker compose -f docker-compose.demo.yaml up -d
 ```
 
-Or, if to avoid typing -`docker-compose.demo.yaml` all the time, set an env var for it (although keep in mind that this doesn't work for the legacy `docker-compose`... which you shouldn't be using anyway):
+Or, if to avoid typing `-f docker-compose.demo.yaml` all the time, set an env var for it (although keep in mind that this doesn't work for the legacy `docker-compose` setups... which you shouldn't be using anyway):
 
 ```
 export COMPOSE_FILE=docker-compose.demo.yaml
