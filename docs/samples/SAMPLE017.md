@@ -420,7 +420,7 @@ Good, now let's post the "newer, dirty" synthetic cert with the same `fault_id` 
 And now we are ready to re-run the `vault-accuracy` Pod (this fault ID is in the mounted `target-drift-catalog` ConfigMap, so it resolves correctly this time).
 
 
-## 4. `vault accuracy`: new cert history section (with diff and trend)
+## 6. `vault accuracy`: new cert history section (with diff and trend)
 
 
 ```
@@ -509,7 +509,7 @@ That's a complete, clean pass with every piece rendering exactly as designed in 
 
 
 
-## 5. `vault diff`
+## 7. `vault diff`
 
 ```
 [boris@ ~/helpdesk]$ kubectl -n helpdesk-system apply -f - <<'EOF'
