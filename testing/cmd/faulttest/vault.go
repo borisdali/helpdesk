@@ -5538,11 +5538,11 @@ func vaultDiff(args []string) {
 		fmt.Println()
 	}
 
-	cfg := &HarnessConfig{
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		JudgeVendor: judgeVendor,
 		JudgeModel:  judgeModel,
 		JudgeAPIKey: judgeAPIKey,
-	}
+	}}
 	completer, err := newJudgeCompleter(context.Background(), cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Judge error: could not initialize LLM: %v\n", err)

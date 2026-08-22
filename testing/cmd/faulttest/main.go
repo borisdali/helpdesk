@@ -1086,7 +1086,7 @@ func cmdValidate(args []string) {
 	}
 
 	// Load the built-in catalog to check for duplicate IDs.
-	builtinCat, err := loadActiveCatalog(&HarnessConfig{CatalogPath: cfg.CatalogPath})
+	builtinCat, err := loadActiveCatalog(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{CatalogPath: cfg.CatalogPath}})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading built-in catalog: %v\n", err)
 		os.Exit(1)

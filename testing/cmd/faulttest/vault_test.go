@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/testing/faultlib"
 )
 
 // ── passRateOf ────────────────────────────────────────────────────────────
@@ -567,9 +568,9 @@ func TestDiffCertHistoryEntries_PlaybookVersionChange_OnlyWhenBothNonEmpty(t *te
 
 func TestDiffCountMap(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		older, newer map[string]int
-		want        string
+		want         string
 	}{
 		{"both empty", nil, nil, ""},
 		{"identical", map[string]int{"a": 1}, map[string]int{"a": 1}, ""},
@@ -699,7 +700,10 @@ func TestPostStabilityCert_Regressed_FiresNotifyWebhook(t *testing.T) {
 	}))
 	defer gatewaySrv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: gatewaySrv.URL, DiagnosisModel: "claude-sonnet-4-6", NotifyURL: notifySrv.URL}
+	cfg := &HarnessConfig{
+		HarnessConfig:  faultlib.HarnessConfig{GatewayURL: gatewaySrv.URL, NotifyURL: notifySrv.URL},
+		DiagnosisModel: "claude-sonnet-4-6",
+	}
 	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled"}
 	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
 
@@ -730,7 +734,10 @@ func TestPostStabilityCert_NotRegressed_NoNotifyWebhook(t *testing.T) {
 	}))
 	defer gatewaySrv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: gatewaySrv.URL, DiagnosisModel: "claude-sonnet-4-6", NotifyURL: notifySrv.URL}
+	cfg := &HarnessConfig{
+		HarnessConfig:  faultlib.HarnessConfig{GatewayURL: gatewaySrv.URL, NotifyURL: notifySrv.URL},
+		DiagnosisModel: "claude-sonnet-4-6",
+	}
 	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled"}
 	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
 
@@ -3852,9 +3859,8 @@ func TestPostStabilityCert_PostsCorrectPayload(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &HarnessConfig{
-		GatewayURL:     srv.URL,
+		HarnessConfig:  faultlib.HarnessConfig{GatewayURL: srv.URL, JudgeModel: "claude-opus-4-8"},
 		DiagnosisModel: "claude-sonnet-4-6",
-		JudgeModel:     "claude-opus-4-8",
 	}
 	f := Failure{
 		ID:                        "db-max-connections",
@@ -3906,7 +3912,7 @@ func TestPostStabilityCert_StampsPlaybookVersion_OnSuccessfulLookup(t *testing.T
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}, DiagnosisModel: "claude-sonnet-4-6"}
 	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
 	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
 
@@ -3944,7 +3950,7 @@ func TestPostStabilityCert_NoPlaybookVersionFields_WhenLookupFails(t *testing.T)
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL, DiagnosisModel: "claude-sonnet-4-6"}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}, DiagnosisModel: "claude-sonnet-4-6"}
 	f := Failure{ID: "k8s-oomkilled", Name: "OOMKilled", DiagnosisPlaybookSeriesID: "pbs_k8s_pod_crash_triage"}
 	sr := StabilityReport{FailureID: "k8s-oomkilled", FailureName: "OOMKilled", N: 5, PassCount: 5}
 
@@ -3969,7 +3975,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "tok-stability"}}
 	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 	if gotAuth != "Bearer tok-stability" {
 		t.Errorf("Authorization = %q, want Bearer tok-stability", gotAuth)
@@ -3978,7 +3984,7 @@ func TestPostStabilityCert_SendsAuth(t *testing.T) {
 
 func TestPostStabilityCert_NoopWhenEmptyGateway(t *testing.T) {
 	// Should not panic or dial anything when GatewayURL is empty.
-	cfg := &HarnessConfig{GatewayURL: ""}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: ""}}
 	postStabilityCert(context.Background(), cfg, Failure{}, StabilityReport{}, CleanReport{}, nil)
 }
 
@@ -3988,7 +3994,7 @@ func TestPostStabilityCert_ToleratesServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	// Should log a warning but not panic.
 	postStabilityCert(context.Background(), cfg, Failure{ID: "x"}, StabilityReport{N: 1}, CleanReport{}, nil)
 }
@@ -4605,7 +4611,7 @@ func TestPostStabilityCert_AttributionPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	attr := &attributionSummary{
 		PrimaryAttribution:      "connection-pool-saturation",
 		AttributionConsistent:   true,
@@ -4641,7 +4647,7 @@ func TestPostStabilityCert_CleanPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	// Non-zero-value CleanReport — the existing payload tests all pass
 	// CleanReport{} (the Go zero value), which would still "pass" even if
 	// the warning_count/is_clean wiring in postStabilityCert were silently
@@ -4676,7 +4682,7 @@ func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	cr := buildCleanReport(Failure{ID: "db-lock-contention"}, []EvalResult{
 		{Passed: true}, {Passed: true}, {Passed: true},
 	})
@@ -4701,7 +4707,7 @@ func TestPostStabilityCert_NilAttribution_NoExtraFields(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3}, CleanReport{}, nil)
 
 	if _, ok := gotBody["primary_attribution"]; ok {

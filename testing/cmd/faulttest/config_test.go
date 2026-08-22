@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helpdesk/playbooks"
+	"helpdesk/testing/faultlib"
 )
 
 const builtinMinimum = 33
@@ -191,12 +192,12 @@ func TestFilterFailures_SourceFilter(t *testing.T) {
 		},
 	}
 
-	builtin := FilterFailures(cat, &HarnessConfig{SourceFilter: "builtin"})
+	builtin := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: "builtin"}})
 	if len(builtin) != 2 {
 		t.Errorf("SourceFilter=builtin: got %d, want 2", len(builtin))
 	}
 
-	custom := FilterFailures(cat, &HarnessConfig{SourceFilter: "custom"})
+	custom := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: "custom"}})
 	if len(custom) != 1 {
 		t.Errorf("SourceFilter=custom: got %d, want 1", len(custom))
 	}
@@ -204,7 +205,7 @@ func TestFilterFailures_SourceFilter(t *testing.T) {
 		t.Errorf("SourceFilter=custom: got ID %q, want c1", custom[0].ID)
 	}
 
-	all := FilterFailures(cat, &HarnessConfig{SourceFilter: ""})
+	all := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: ""}})
 	if len(all) != 3 {
 		t.Errorf("SourceFilter='': got %d, want 3", len(all))
 	}
@@ -247,7 +248,7 @@ func TestFilterFailures_ByCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"database"}}})
 	if len(result) != 2 {
 		t.Errorf("FilterFailures([database]) = %d failures, want 2", len(result))
 	}
@@ -268,7 +269,7 @@ func TestFilterFailures_ByID(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{FailureIDs: []string{"db-2"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{FailureIDs: []string{"db-2"}}})
 	if len(result) != 1 {
 		t.Fatalf("FilterFailures([db-2]) = %d failures, want 1", len(result))
 	}
@@ -288,7 +289,10 @@ func TestFilterFailures_ByCategoryAndID(t *testing.T) {
 	}
 
 	// ID filter takes precedence; category also matches.
-	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}, FailureIDs: []string{"k8s-1"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
+		Categories: []string{"database"},
+		FailureIDs: []string{"k8s-1"},
+	}})
 	if len(result) != 3 {
 		t.Errorf("FilterFailures([database], [k8s-1]) = %d failures, want 3", len(result))
 	}
@@ -304,7 +308,7 @@ func TestFilterFailures_ExcludeIDs(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{ExcludeIDs: []string{"k8s-1"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ExcludeIDs: []string{"k8s-1"}}})
 	if len(result) != 2 {
 		t.Fatalf("FilterFailures(exclude k8s-1) = %d failures, want 2", len(result))
 	}
@@ -327,10 +331,10 @@ func TestFilterFailures_ExcludeIDs_WinsOverCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		Categories: []string{"kubernetes"},
 		ExcludeIDs: []string{"k8s-1"},
-	})
+	}})
 	if len(result) != 1 {
 		t.Fatalf("FilterFailures(category=kubernetes, exclude=k8s-1) = %d failures, want 1", len(result))
 	}
@@ -349,7 +353,7 @@ func TestFilterFailures_External(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{External: true})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{External: true}})
 	if len(result) != 2 {
 		t.Errorf("FilterFailures(external=true) = %d, want 2", len(result))
 	}
@@ -363,31 +367,31 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 	}
 
 	// Filter by database category should return at least 16 failures.
-	dbFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
+	dbFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"database"}}})
 	if len(dbFailures) < 16 {
 		t.Errorf("database category count = %d, want >= 16", len(dbFailures))
 	}
 
 	// Filter by kubernetes category should return at least 9 failures.
-	k8sFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"kubernetes"}})
+	k8sFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"kubernetes"}}})
 	if len(k8sFailures) < 9 {
 		t.Errorf("kubernetes category count = %d, want >= 9", len(k8sFailures))
 	}
 
 	// Filter by host category should return at least 2 failures.
-	hostFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"host"}})
+	hostFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"host"}}})
 	if len(hostFailures) < 2 {
 		t.Errorf("host category count = %d, want >= 2", len(hostFailures))
 	}
 
 	// Filter by compound category should return at least 2 failures.
-	compoundFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"compound"}})
+	compoundFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"compound"}}})
 	if len(compoundFailures) < 2 {
 		t.Errorf("compound category count = %d, want >= 2", len(compoundFailures))
 	}
 
 	// External filter: only external_compat faults.
-	extFailures := FilterFailures(catalog, &HarnessConfig{External: true})
+	extFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{External: true}})
 	for _, f := range extFailures {
 		if !f.ExternalCompat {
 			t.Errorf("external filter returned non-compatible fault %q", f.ID)
@@ -434,7 +438,7 @@ func TestFilterFailures_AutoDB(t *testing.T) {
 		t.Fatalf("LoadCatalog error: %v", err)
 	}
 
-	autoFaults := FilterFailures(cat, &HarnessConfig{AutoDB: true})
+	autoFaults := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AutoDB: true}})
 	for _, f := range autoFaults {
 		if !f.IsAutoDBCompat() {
 			t.Errorf("auto-db filter returned non-auto-db-compat fault %q", f.ID)
@@ -457,11 +461,11 @@ func TestFilterFailures_AutoDB(t *testing.T) {
 }
 
 func TestResolvePrompt(t *testing.T) {
-	cfg := &HarnessConfig{
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		ConnStr:        "host=db.example.com port=5432 dbname=prod",
 		ReplicaConnStr: "host=replica.example.com port=5432 dbname=prod",
 		KubeContext:    "gke_prod",
-	}
+	}}
 
 	prompt := "Connect to {{connection_string}} and check replica at {{replica_connection_string}} in context {{kube_context}}"
 	result := ResolvePrompt(prompt, cfg)
@@ -473,9 +477,7 @@ func TestResolvePrompt(t *testing.T) {
 }
 
 func TestResolvePrompt_NoPlaceholders(t *testing.T) {
-	cfg := &HarnessConfig{
-		ConnStr: "host=db.example.com",
-	}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ConnStr: "host=db.example.com"}}
 
 	prompt := "Simple prompt with no placeholders"
 	result := ResolvePrompt(prompt, cfg)

@@ -38,127 +38,47 @@ type (
 	DiagnosisSpec   = faultlib.DiagnosisSpec
 )
 
-// HarnessConfig holds runtime configuration for the test harness.
+// HarnessConfig holds runtime configuration for the test harness. Embeds
+// faultlib.HarnessConfig (item 7 dedup, v0.26) rather than duplicating its
+// ~34 fields — this package previously carried a fully independent copy,
+// hand-mapped field-by-field into faultlib.HarnessConfig via a since-deleted
+// toLFConfig. That mapping had already silently drifted: faultlib's
+// GatewayPollInterval had no counterpart here at all, making it permanently
+// unconfigurable from this CLI (always defaulting to 15s) with no compiler
+// error to catch the gap. Embedding makes that class of drift a compile
+// error instead of a silent one — a field added to faultlib.HarnessConfig is
+// automatically available here too, and vice versa there's nothing to keep
+// in sync.
+//
+// Only 5 fields below are genuinely CLI-only concerns faultlib.Runner/
+// Injector/Remediator never need: Repeat/ReportPerFault (the CLI's own
+// --repeat outer loop and per-fault reporting), DiagnosisModel (a cert
+// annotation, not consumed by faultlib), SysadminAPIKey (a header this CLI
+// sets on its own registration calls, not part of any faultlib request),
+// and RemediationJudgeEnabled (gates a judge call this CLI's own evaluator
+// makes directly, not something faultlib.Remediator triggers).
 type HarnessConfig struct {
-	CatalogPath      string
-	TestingDir       string
-	ConnStr          string
-	ReplicaConnStr   string
-	AgentConnStr     string // overrides ConnStr in prompt {{connection_string}} when set
-	DBAgentURL       string
-	K8sAgentURL      string
-	SysadminAgentURL string
-	OrchestratorURL  string
-	KubeContext      string
-	Categories       []string
-	FailureIDs       []string
-	// ExcludeIDs removes specific failure IDs from the run, applied after
-	// Categories/FailureIDs filtering. A denylist, unlike FailureIDs —
-	// useful for "run everything except this one slow fault" without
-	// enumerating every other fault ID.
-	ExcludeIDs []string
+	faultlib.HarnessConfig
 
-	// External enables external PG mode: only external_compat faults are run,
-	// and ExternalInject/ExternalTeardown specs are used instead of Inject/Teardown.
-	External bool
-	// AutoDB instructs faulttest to spin up a temporary Docker PostgreSQL and use
-	// it as the injection target. Implies External=true. Only auto-db-compat faults run.
-	AutoDB bool
-	// AutoDBContainerName is the docker container name for the auto-db instance
-	// (e.g. "faulttest-auto-db-deadbeef"). Set by main after startAutoDBContainer
-	// returns; exposed as $FAULTTEST_CONTAINER to shell_exec inject/teardown scripts.
-	AutoDBContainerName string
 	// Repeat is the number of inject→triage→teardown cycles to run per fault.
 	// Values > 1 enable stability testing: remediation is skipped and a
 	// StabilityReport is printed after all cycles complete. Default 1.
 	Repeat int
-	// RemediateEnabled runs the remediation phase after injection + diagnosis.
-	RemediateEnabled bool
-	// GatewayURL is the helpdesk gateway base URL for playbook/agent remediation.
-	GatewayURL string
-	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
-	GatewayAPIKey string
-	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
-	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account auth).
-	// Create a service account in the sysadmin's users.yaml and pass its API key here.
-	SysadminAPIKey string
-	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
-	GatewayPurpose string
-	// ApprovalMode overrides the playbook's default approval_mode for this run.
-	// Values: "manual", "session", "auto", "force". Empty = use playbook default.
-	// Use "force" to bypass manual gates in automated/CI faulttest runs.
-	ApprovalMode string
-	// OperatorID is the user identity sent as X-User on gateway requests.
-	// Must match a user in users.yaml with roles required for the run
-	// (e.g. dba_lead or oncall_senior to bypass approval_override_roles clamping).
-	OperatorID string
-	// UsersFile is the path to users.yaml. When set and --approval-mode force is used,
-	// the harness validates that OperatorID exists as a human user in that file before
-	// calling ProceedEscalation. Prevents fake identities from appearing in the audit log.
-	UsersFile string
-	// InfraConfigPath is the path to infrastructure.json for tag safety checks.
-	InfraConfigPath string
-	// SSHHost is the default SSH target for ssh_exec faults when exec_via is empty
-	// (e.g., "ubuntu@customer-vm.example.com" or just "customer-vm").
-	// When set, ExternalInject/ExternalTeardown are used instead of Inject/Teardown.
-	SSHHost string
-	// SSHUser is the SSH username for ssh_exec faults.
-	SSHUser string
-	// SSHKeyPath is the SSH private key path for ssh_exec faults.
-	SSHKeyPath string
-
-	// CustomCatalogs is the list of additional customer catalog file paths,
-	// populated by repeated --catalog flags.
-	CustomCatalogs []string
-	// SourceFilter restricts which faults are run: "" (all), "builtin", or "custom".
-	SourceFilter string
-	// ReportDir is the directory where the JSON report is written (default: ".").
-	ReportDir string
 	// ReportPerFault writes an individual JSON report per fault in addition to the
 	// combined report. Files are named faulttest-{runID}-{faultID}.json.
 	ReportPerFault bool
-
 	// DiagnosisModel is the model used by the triage agent to generate diagnoses.
 	// Recorded as an annotation in the stability cert so the cert is self-describing.
 	// Defaults to HELPDESK_MODEL_NAME (the env var that configures the agent server).
 	DiagnosisModel string
-
-	// JudgeEnabled enables LLM-as-judge diagnosis scoring.
-	JudgeEnabled bool
+	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
+	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account auth).
+	// Create a service account in the sysadmin's users.yaml and pass its API key here.
+	SysadminAPIKey string
 	// RemediationJudgeEnabled enables LLM-as-judge remediation approach scoring.
 	// Reuses the same judge LLM config (JudgeModel/JudgeVendor/JudgeAPIKey).
 	// Only meaningful when --remediate is also set.
 	RemediationJudgeEnabled bool
-	// JudgeModel is the model name for the LLM judge (default: HELPDESK_MODEL_NAME).
-	JudgeModel string
-	// JudgeVendor is the model vendor for the LLM judge (default: HELPDESK_MODEL_VENDOR).
-	JudgeVendor string
-	// JudgeAPIKey is the API key for the LLM judge (default: HELPDESK_API_KEY).
-	JudgeAPIKey string
-
-	// AuditURL is the base URL of the audit service (e.g. "http://localhost:7070").
-	// When set, the harness queries tool execution events after each agent call
-	// to get structured tool evidence from the audit trail.
-	AuditURL string
-
-	// NotifyURL is an optional webhook URL. When set, faulttest POSTs the full
-	// JSON report to this URL after the run completes (e.g. a Slack webhook).
-	NotifyURL string
-
-	// ViaGateway routes the diagnosis call through the gateway's playbook
-	// endpoint instead of calling the agent directly, when the fault has a
-	// DiagnosisPlaybookSeriesID and GatewayURL is set.
-	// Enables a valid A/B comparison between scaffolded (normal) and
-	// crystal-ball (unguided) gateway runs.
-	ViaGateway bool
-
-	// GateEscalation sends gate_escalation=true on every PlaybookRun request so
-	// the gateway intercepts ESCALATE_TO at the phase boundary.
-	GateEscalation bool
-	// EmitAndWait replaces TTY prompts with HTTP polling when true:
-	//   - gate: polls GET /api/v1/fleet/playbook-runs/{id} until outcome changes
-	//   - step: uses the audit service long-poll instead of /dev/tty
-	EmitAndWait bool
 }
 
 // LoadCatalog reads and parses the failure catalog YAML file.

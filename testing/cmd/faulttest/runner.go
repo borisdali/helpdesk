@@ -35,45 +35,26 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 	return r.inner.Run(ctx, f)
 }
 
-// toLFConfig converts a local HarnessConfig to faultlib.HarnessConfig.
+// toLFConfig returns a live pointer to cfg's embedded faultlib.HarnessConfig
+// (HarnessConfig embeds it — item 7 dedup, v0.26). Deliberately NOT a value
+// copy: Runner/Remediator are constructed once, before the fault loop starts
+// (see main.go), and a value copy would freeze their view of cfg at that
+// moment — silently invisible to any later mutation, including the
+// execConfig-type faults (db-auth-failure, db-not-exist) that intentionally
+// swap ConnStr to a broken DSN mid-run. That was a real, live bug before
+// this change: Injector already rebuilds fresh on every Inject/Teardown call
+// specifically to see such mutations, but Runner/Remediator's own
+// hand-mapped copies never did, so faultlib.Runner.Run's ConnStr-based
+// agentConn fallback (faultlib/runner.go) could silently use the
+// pre-injection connection string instead of the fault's intended broken
+// one, whenever --agent-conn wasn't separately set. A live pointer means
+// every caller — Injector's per-call rebuild, Runner/Remediator's
+// constructed-once instances — now observes the same, always-current state.
+//
+// ServerID is resolved here (not stored on cfg directly, matching the
+// original mapping's behavior) since it depends on ConnStr/InfraConfigPath,
+// which can change between calls for the same reason above.
 func toLFConfig(cfg *HarnessConfig) *faultlib.HarnessConfig {
-	return &faultlib.HarnessConfig{
-		CatalogPath:         cfg.CatalogPath,
-		TestingDir:          cfg.TestingDir,
-		ConnStr:             cfg.ConnStr,
-		ReplicaConnStr:      cfg.ReplicaConnStr,
-		AgentConnStr:        cfg.AgentConnStr,
-		DBAgentURL:          cfg.DBAgentURL,
-		K8sAgentURL:         cfg.K8sAgentURL,
-		SysadminAgentURL:    cfg.SysadminAgentURL,
-		OrchestratorURL:     cfg.OrchestratorURL,
-		KubeContext:         cfg.KubeContext,
-		Categories:          cfg.Categories,
-		FailureIDs:          cfg.FailureIDs,
-		External:            cfg.External,
-		RemediateEnabled:    cfg.RemediateEnabled,
-		GatewayURL:          cfg.GatewayURL,
-		GatewayAPIKey:       cfg.GatewayAPIKey,
-		GatewayPurpose:      cfg.GatewayPurpose,
-		InfraConfigPath:     cfg.InfraConfigPath,
-		ServerID:            faultlib.ResolveServerID(cfg.ConnStr, cfg.InfraConfigPath),
-		AutoDBContainerName: cfg.AutoDBContainerName,
-		SSHHost:             cfg.SSHHost,
-		SSHUser:             cfg.SSHUser,
-		SSHKeyPath:          cfg.SSHKeyPath,
-		CustomCatalogs:      cfg.CustomCatalogs,
-		SourceFilter:        cfg.SourceFilter,
-		ViaGateway:          cfg.ViaGateway,
-		ApprovalMode:        cfg.ApprovalMode,
-		OperatorID:          cfg.OperatorID,
-		AuditURL:            cfg.AuditURL,
-		ReportDir:           cfg.ReportDir,
-		JudgeEnabled:        cfg.JudgeEnabled,
-		JudgeModel:          cfg.JudgeModel,
-		JudgeVendor:         cfg.JudgeVendor,
-		JudgeAPIKey:         cfg.JudgeAPIKey,
-		NotifyURL:           cfg.NotifyURL,
-		GateEscalation:      cfg.GateEscalation,
-		EmitAndWait:         cfg.EmitAndWait,
-	}
+	cfg.ServerID = faultlib.ResolveServerID(cfg.ConnStr, cfg.InfraConfigPath)
+	return &cfg.HarnessConfig
 }

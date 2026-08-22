@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"helpdesk/testing/faultlib"
 )
 
 // TestRunnerBridge_PropagatesTraceID verifies that the cmd/faulttest Runner
@@ -26,10 +28,7 @@ func TestRunnerBridge_PropagatesTraceID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewRunner(&HarnessConfig{
-		GatewayURL: srv.URL, GatewayAPIKey: "key",
-		ViaGateway: true,
-	})
+	r := NewRunner(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "key", ViaGateway: true}})
 	ctx := context.WithValue(context.Background(), ctxKeyFaultTraceID{}, "trace-xyz")
 	f := Failure{
 		ID: "test", Category: "database",
