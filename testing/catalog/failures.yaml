@@ -1994,6 +1994,12 @@ failures:
           drove the node into pressure and kubelet evicted that pod
           instead.
     timeout: 90s
+    # inject_timeout overrides the default 90s (Part B, v0.26): this fault's
+    # injection polls for a real kubelet eviction, computing its own internal
+    # deadline as (TARGET_MI/16)*3 + 300s buffer — observed live at ~20-25min
+    # on a typical test cluster (minikube/kind-sized node). 30m leaves
+    # headroom above that; raise further if ever run against a much larger node.
+    inject_timeout: 30m
     remediation:
       playbook_id: pbs_k8s_node_pressure_remediate
       namespace: helpdesk-test

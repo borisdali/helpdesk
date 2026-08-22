@@ -249,35 +249,45 @@ func TestFaultInjection(t *testing.T) {
 			// Save original conn string for config-override failures.
 			origConn := cfg.ConnStr
 
-			// 1. Ensure teardown happens — registered BEFORE Inject runs, not
-			// after, so a t.Fatalf on injection failure (which calls
-			// runtime.Goexit and unwinds the goroutine immediately) still
-			// runs teardown for whatever the failed injection already
-			// created. A defer registered after the Inject call is never
-			// reached at all when Inject itself fails, silently stranding
-			// resources — confirmed live: a failed k8s-node-memory-pressure
-			// injection left a noisy-neighbor pod running on the cluster for
-			// 36+ minutes until manually deleted.
+			// Inject + run, injection independently bounded instead of
+			// relying on one unbounded ctx and the outer `go test -timeout`
+			// as the only safety net (Part B, v0.26). On injection failure,
+			// RunFaultCycle tears down automatically before returning; see
+			// its doc comment for why this used to need a
+			// defer-registered-before-Inject dance here.
+			t.Log("Injecting failure...")
+			faultTraceID := "gotest-" + runID + "-" + f.ID
+			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
+				cfg.ConnStr = origConn
+			})
+			if cycle.InjectErr != nil {
+				if cycle.TeardownErr != nil {
+					t.Errorf("Teardown failed: %v", cycle.TeardownErr)
+				}
+				t.Fatalf("Injection failed: %v", cycle.InjectErr)
+			}
+
+			// Injection succeeded — this subtest now owns teardown, deferred
+			// (not run immediately) so it still happens after the
+			// remediation phase below, which needs the fault to remain
+			// injected. Registered only now (not unconditionally before
+			// RunFaultCycle) to avoid a double teardown on the injection
+			// failure path above, which already tore down internally.
 			defer func() {
 				t.Log("Tearing down...")
 				cfg.ConnStr = origConn
-				if err := injector.Teardown(ctx, f); err != nil {
+				if err := faultlib.TeardownFault(injector, f); err != nil {
 					t.Errorf("Teardown failed: %v", err)
 				}
 			}()
 
-			// 2. Inject failure.
-			t.Log("Injecting failure...")
-			if err := injector.Inject(ctx, f); err != nil {
-				t.Fatalf("Injection failed: %v", err)
-			}
-
-			// 3. Send prompt to agent (or gateway playbook when ViaGateway is set).
-			t.Log("Sending prompt to agent...")
-			faultTraceID := "gotest-" + runID + "-" + f.ID
+			// Reconstructed for the remediation phase below, which needs the
+			// same trace-ID-carrying context RunFaultCycle used internally
+			// for Run — WithFaultTraceID is a cheap context.WithValue wrap.
 			faultCtx := faultlib.WithFaultTraceID(ctx, faultTraceID)
 
-			resp := runner.Run(faultCtx, f)
+			// Send prompt to agent (or gateway playbook when ViaGateway is set).
+			resp := cycle.Response
 			if resp.Error != nil {
 				t.Fatalf("Agent call failed: %v", resp.Error)
 			}
@@ -533,20 +543,30 @@ func TestExternalModeInjection(t *testing.T) {
 			origConn := cfg.ConnStr
 
 			t.Logf("Injecting (external mode): %s", f.Name)
-			if err := injector.Inject(ctx, f); err != nil {
-				t.Fatalf("External inject failed: %v", err)
+			faultTraceID := "gotest-" + runID + "-" + f.ID
+			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
+				cfg.ConnStr = origConn
+			})
+			if cycle.InjectErr != nil {
+				if cycle.TeardownErr != nil {
+					t.Errorf("External teardown failed: %v", cycle.TeardownErr)
+				}
+				t.Fatalf("External inject failed: %v", cycle.InjectErr)
 			}
+
+			// Injection succeeded — no remediation phase in this test, so
+			// teardown can simply be deferred to the end of the subtest
+			// (registered only now, not unconditionally before
+			// RunFaultCycle, to avoid a double teardown on the failure path
+			// above, which already tore down internally).
 			defer func() {
 				cfg.ConnStr = origConn
-				if err := injector.Teardown(ctx, f); err != nil {
+				if err := faultlib.TeardownFault(injector, f); err != nil {
 					t.Errorf("External teardown failed: %v", err)
 				}
 			}()
 
-			faultTraceID := "gotest-" + runID + "-" + f.ID
-			faultCtx := faultlib.WithFaultTraceID(ctx, faultTraceID)
-
-			resp := runner.Run(faultCtx, f)
+			resp := cycle.Response
 			if resp.Error != nil {
 				t.Fatalf("Agent call failed: %v", resp.Error)
 			}

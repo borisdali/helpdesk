@@ -386,6 +386,29 @@ func TestTimeoutDuration(t *testing.T) {
 	}
 }
 
+func TestInjectTimeoutDuration(t *testing.T) {
+	tests := []struct {
+		name          string
+		injectTimeout string
+		want          time.Duration
+	}{
+		{"valid 30m", "30m", 30 * time.Minute},
+		{"valid 5s", "5s", 5 * time.Second},
+		{"empty defaults to 90s", "", 90 * time.Second},
+		{"invalid defaults to 90s", "not-a-duration", 90 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := Failure{InjectTimeout: tt.injectTimeout}
+			got := f.InjectTimeoutDuration()
+			if got != tt.want {
+				t.Errorf("InjectTimeoutDuration(%q) = %v, want %v", tt.injectTimeout, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEvaluate_* below restored 2026-08-22: the original "Evaluate is dead
 // code" call was wrong — testing/faulttest/faulttest_test.go (tag
 // `faulttest`) and testing/e2e/multi_agent_test.go (tag `e2e`) both call

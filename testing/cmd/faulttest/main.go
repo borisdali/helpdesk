@@ -431,31 +431,37 @@ func cmdRun(args []string) {
 			}
 			faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
 
-			// 1. Inject.
-			if err := injector.Inject(ctx, f); err != nil {
-				slog.Error("injection failed", "id", f.ID, "rep", rep+1, "err", err)
+			// 1-2. Inject + run, injection independently bounded (Part B,
+			// v0.26) instead of relying on one unbounded ctx and the outer
+			// process-level timeout as the only safety net. On injection
+			// failure, RunFaultCycle tears down automatically before
+			// returning — see its doc comment for why this used to need a
+			// duplicate Teardown call in the injection-error branch here (a
+			// real bug found and fixed live: a failed k8s-node-memory-pressure
+			// injection left a noisy-neighbor pod running on the cluster for
+			// 36+ minutes before that fix).
+			callStart := time.Now()
+			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
+				cfg.ConnStr = origConn
+			})
+			if cycle.InjectErr != nil {
+				if cycle.TeardownErr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", cycle.TeardownErr)
+				}
+				slog.Error("injection failed", "id", f.ID, "rep", rep+1, "err", cycle.InjectErr)
 				repResults = append(repResults, EvalResult{
 					FailureID:   f.ID,
 					FailureName: f.Name,
 					Category:    f.Category,
-					Error:       fmt.Sprintf("injection failed: %v", err),
+					Error:       fmt.Sprintf("injection failed: %v", cycle.InjectErr),
 				})
-				cfg.ConnStr = origConn
-				// Tear down whatever the failed injection already created —
-				// an injection can fail partway through (e.g. a resource was
-				// created, then a later step in the same script failed) and
-				// without this, that resource is silently stranded. Confirmed
-				// live: a failed k8s-node-memory-pressure injection left a
-				// noisy-neighbor pod running on the cluster for 36+ minutes.
-				if tdErr := injector.Teardown(ctx, f); tdErr != nil {
-					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", tdErr)
-				}
 				break // abort remaining reps for this fault
 			}
-
-			// 2. Run agent (record call start for audit window).
-			callStart := time.Now()
-			resp := runner.Run(faultCtx, f)
+			// Injection succeeded — teardown is deferred until step 5 below
+			// (after remediation, which needs the fault to remain injected),
+			// via an explicit call rather than defer since this is a plain
+			// for-loop, not a per-iteration closure.
+			resp := cycle.Response
 
 			if resp.CrystalBall {
 				slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
@@ -652,9 +658,11 @@ func cmdRun(args []string) {
 
 			repResults = append(repResults, evalResult)
 
-			// 5. Teardown.
+			// 5. Teardown — own fresh context + timeout (Part B, v0.26),
+			// not derived from ctx, so teardown still gets a full budget
+			// even if ctx (or the run phase's own timeout) already expired.
 			cfg.ConnStr = origConn
-			if err := injector.Teardown(ctx, f); err != nil {
+			if err := faultlib.TeardownFault(injector, f); err != nil {
 				slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", err)
 			}
 

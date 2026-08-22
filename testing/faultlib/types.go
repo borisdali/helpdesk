@@ -23,6 +23,14 @@ type Failure struct {
 	Prompt      string     `yaml:"prompt"`
 	Evaluation  EvalSpec   `yaml:"evaluation"`
 	Timeout     string     `yaml:"timeout"`
+	// InjectTimeout bounds the injection phase specifically (Part B, v0.26 —
+	// distinct from Timeout, which bounds only the agent-call/run phase).
+	// Defaults to 90s when unset (see InjectTimeoutDuration) — generous
+	// enough for every fault's inject script + any post-inject `wait:`
+	// (largest in the catalog today is 45s), except k8s-node-memory-pressure,
+	// whose injection legitimately polls for up to ~20-25 minutes waiting on
+	// a real kubelet eviction and sets an explicit override.
+	InjectTimeout string `yaml:"inject_timeout,omitempty"`
 	// GovernanceGap marks tests that document a known agent behaviour gap rather
 	// than asserting correct behaviour.  When the evaluation fails for a
 	// governance-gap test, the harness logs the gap but does NOT call t.Errorf,
@@ -82,6 +90,16 @@ func (f Failure) TimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(f.Timeout)
 	if err != nil {
 		return 120 * time.Second
+	}
+	return d
+}
+
+// InjectTimeoutDuration parses InjectTimeout into a time.Duration, defaulting
+// to 90s when unset or invalid (Part B, v0.26).
+func (f Failure) InjectTimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(f.InjectTimeout)
+	if err != nil {
+		return 90 * time.Second
 	}
 	return d
 }
@@ -316,4 +334,3 @@ type EvalResult struct {
 	// when remediation was attempted; equals DiagnosisScore (i.e. Score) when not attempted.
 	OverallScore float64 `json:"overall_score,omitempty"`
 }
-
