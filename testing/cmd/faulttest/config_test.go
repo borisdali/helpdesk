@@ -501,19 +501,26 @@ func TestTimeoutDuration_Minutes(t *testing.T) {
 	}
 }
 
+// TestTimeoutDuration_Empty and _Invalid assert faultlib's 120s default
+// (Failure is a type alias for faultlib.Failure — item 7 dedup, v0.26). This
+// package used to define its own copy of Failure/TimeoutDuration with a
+// drifted 60s default, but that copy had zero production callers — every
+// real fault-injection run always went through the (now-deleted)
+// toLFFailure conversion first, so faultlib's 120s was the only default
+// ever actually live. These tests previously asserted the dead 60s value.
 func TestTimeoutDuration_Empty(t *testing.T) {
 	f := Failure{Timeout: ""}
 	d := f.TimeoutDuration()
-	if d != 60*time.Second {
-		t.Errorf("TimeoutDuration('') = %v, want 60s default", d)
+	if d != 120*time.Second {
+		t.Errorf("TimeoutDuration('') = %v, want 120s default", d)
 	}
 }
 
 func TestTimeoutDuration_Invalid(t *testing.T) {
 	f := Failure{Timeout: "invalid"}
 	d := f.TimeoutDuration()
-	if d != 60*time.Second {
-		t.Errorf("TimeoutDuration(invalid) = %v, want 60s default", d)
+	if d != 120*time.Second {
+		t.Errorf("TimeoutDuration(invalid) = %v, want 120s default", d)
 	}
 }
 

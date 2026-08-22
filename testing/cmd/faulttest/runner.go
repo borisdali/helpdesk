@@ -30,7 +30,9 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
 		ctx = faultlib.WithFaultTraceID(ctx, id)
 	}
-	return r.inner.Run(ctx, toLFFailure(f))
+	// f is already a faultlib.Failure (Failure is a type alias — item 7
+	// dedup, v0.26); no conversion needed.
+	return r.inner.Run(ctx, f)
 }
 
 // toLFConfig converts a local HarnessConfig to faultlib.HarnessConfig.
@@ -73,56 +75,5 @@ func toLFConfig(cfg *HarnessConfig) *faultlib.HarnessConfig {
 		NotifyURL:           cfg.NotifyURL,
 		GateEscalation:      cfg.GateEscalation,
 		EmitAndWait:         cfg.EmitAndWait,
-	}
-}
-
-// toLFFailure converts a local Failure to faultlib.Failure.
-// Only the fields consumed by faultlib.Runner.Run are populated.
-// Remediation.PlaybookID is required for the fallback gate: when gate_escalation
-// is enabled and the triage agent omits TRANSITION_TO/ESCALATE_TO, the server
-// falls back to remediation_series_id (derived from this field) to create the
-// gate rather than silently bypassing the operator review step.
-func toLFFailure(f Failure) faultlib.Failure {
-	return faultlib.Failure{
-		ID:                        f.ID,
-		Category:                  f.Category,
-		Prompt:                    f.Prompt,
-		Timeout:                   f.Timeout,
-		ExternalCompat:            f.ExternalCompat,
-		DiagnosisPlaybookSeriesID: f.DiagnosisPlaybookSeriesID,
-		Inject:                    toLFInjectSpec(f.Inject),
-		Teardown:                  toLFInjectSpec(f.Teardown),
-		ExternalInject:            toLFInjectSpec(f.ExternalInject),
-		ExternalTeardown:          toLFInjectSpec(f.ExternalTeardown),
-		Remediation: faultlib.RemediationSpec{
-			PlaybookID:    f.Remediation.PlaybookID,
-			AgentName:     f.Remediation.AgentName,
-			AgentPrompt:   f.Remediation.AgentPrompt,
-			Namespace:     f.Remediation.Namespace,
-			VerifySQL:     f.Remediation.VerifySQL,
-			VerifyTimeout: f.Remediation.VerifyTimeout,
-		},
-	}
-}
-
-// toLFInjectSpec converts a local InjectSpec to faultlib.InjectSpec. The two
-// types have identical fields (kept in sync by convention); this is a
-// straight field-by-field copy.
-func toLFInjectSpec(spec InjectSpec) faultlib.InjectSpec {
-	return faultlib.InjectSpec{
-		Type:         spec.Type,
-		Script:       spec.Script,
-		ScriptInline: spec.ScriptInline,
-		ExecVia:      spec.ExecVia,
-		User:         spec.User,
-		Action:       spec.Action,
-		Service:      spec.Service,
-		Signal:       spec.Signal,
-		Overlay:      spec.Overlay,
-		Restore:      spec.Restore,
-		Target:       spec.Target,
-		Override:     spec.Override,
-		Detach:       spec.Detach,
-		Wait:         spec.Wait,
 	}
 }

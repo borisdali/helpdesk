@@ -7,122 +7,36 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"helpdesk/testing/catalog"
+	"helpdesk/testing/faultlib"
 )
 
-// Catalog is the top-level structure of catalog/failures.yaml.
-type Catalog struct {
-	Version  string    `yaml:"version"`
-	Failures []Failure `yaml:"failures"`
-}
-
-// Failure describes a single failure mode with injection and evaluation config.
-type Failure struct {
-	ID            string     `yaml:"id"`
-	Name          string     `yaml:"name"`
-	Category      string     `yaml:"category"`
-	Severity      string     `yaml:"severity"`
-	Description   string     `yaml:"description"`
-	Prerequisites string     `yaml:"prerequisites,omitempty"`
-	Inject        InjectSpec `yaml:"inject"`
-	Teardown      InjectSpec `yaml:"teardown"`
-	Prompt        string     `yaml:"prompt"`
-	Evaluation    EvalSpec   `yaml:"evaluation"`
-	Timeout       string     `yaml:"timeout"`
-	GovernanceGap bool       `yaml:"governance_gap,omitempty"`
-
-	// ExternalCompat marks faults that work against any PostgreSQL instance over
-	// libpq (no Docker/OS access required).
-	ExternalCompat bool `yaml:"external_compat,omitempty"`
-	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
-	// diagnosis. When set and --via-gateway is active, faulttest calls
-	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
-	DiagnosisPlaybookSeriesID string          `yaml:"diagnosis_playbook_series_id,omitempty"`
-	ExternalInject            InjectSpec      `yaml:"external_inject,omitempty"`
-	ExternalTeardown          InjectSpec      `yaml:"external_teardown,omitempty"`
-	Remediation               RemediationSpec `yaml:"remediation,omitempty"`
-
-	// Source is set programmatically to "builtin" or "custom". It is never
-	// read from or written to YAML — the yaml:"-" tag ensures that.
-	Source string `yaml:"-"`
-}
-
-// RemediationSpec describes how to remediate a fault and verify recovery.
-type RemediationSpec struct {
-	PlaybookID  string `yaml:"playbook_id,omitempty"`
-	AgentName   string `yaml:"agent_name,omitempty"`
-	AgentPrompt string `yaml:"agent_prompt,omitempty"`
-	// Namespace is the target Kubernetes namespace for k8s-agent playbook
-	// remediation — analogous to a connection string for DB remediation.
-	Namespace     string `yaml:"namespace,omitempty"`
-	VerifySQL     string `yaml:"verify_sql,omitempty"`
-	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
-}
-
-// IsAutoDBCompat reports whether faulttest can inject this fault against a
-// temporary Docker PostgreSQL it spins up itself (--auto-db mode).
-func (f Failure) IsAutoDBCompat() bool {
-	if !f.ExternalCompat || f.Category == "kubernetes" {
-		return false
-	}
-	t := f.ExternalInject.Type
-	if t == "" {
-		t = f.Inject.Type
-	}
-	return t != "ssh_exec"
-}
-
-// TimeoutDuration parses the timeout string into a time.Duration.
-func (f Failure) TimeoutDuration() time.Duration {
-	d, err := time.ParseDuration(f.Timeout)
-	if err != nil {
-		return 60 * time.Second
-	}
-	return d
-}
-
-// InjectSpec describes how to inject or tear down a failure.
-type InjectSpec struct {
-	Type         string `yaml:"type"`
-	Script       string `yaml:"script,omitempty"`
-	ScriptInline string `yaml:"script_inline,omitempty"`
-	// ExecVia is the container/host target for docker_exec and ssh_exec types.
-	// For ssh_exec it is the remote host in "user@host" or "host" form.
-	ExecVia string `yaml:"exec_via,omitempty"`
-	// User is the OS user to run the script as in docker_exec mode (e.g., "postgres").
-	User     string            `yaml:"user,omitempty"`
-	Action   string            `yaml:"action,omitempty"`
-	Service  string            `yaml:"service,omitempty"`
-	Signal   string            `yaml:"signal,omitempty"`
-	Overlay  string            `yaml:"overlay,omitempty"`
-	Restore  interface{}       `yaml:"restore,omitempty"`
-	Target   string            `yaml:"target,omitempty"`
-	Override map[string]string `yaml:"override,omitempty"`
-	Detach   bool              `yaml:"detach,omitempty"`
-	Wait     string            `yaml:"wait,omitempty"`
-}
-
-// EvalSpec describes how to evaluate the agent's response.
-type EvalSpec struct {
-	ExpectedTools     []string      `yaml:"expected_tools"`
-	ExpectedKeywords  KeywordSpec   `yaml:"expected_keywords"`
-	ExpectedDiagnosis DiagnosisSpec `yaml:"expected_diagnosis"`
-}
-
-// KeywordSpec defines expected keywords with synonym tolerance.
-type KeywordSpec struct {
-	AnyOf []string `yaml:"any_of"`
-}
-
-// DiagnosisSpec defines the expected diagnosis category.
-type DiagnosisSpec struct {
-	Category  string `yaml:"category"`
-	Narrative string `yaml:"narrative,omitempty"`
-}
+// Catalog, Failure, and their component types are aliases for faultlib's
+// canonical definitions (item 7 dedup, v0.26) — this package previously
+// carried a full parallel copy of each, which had already drifted from
+// faultlib's: ExpectedToolOrder was missing from this copy's EvalSpec
+// (silently dropped for any catalog fault authored against this package's
+// schema), and TimeoutDuration()'s fallback default had drifted to 60s here
+// vs. faultlib's 120s — moot in practice since faultlib.Runner.TimeoutDuration
+// was the only one ever called in production (via toLFFailure's conversion),
+// but a real trap for anyone reading this package's copy of the method.
+// Aliasing (not just importing) means every existing `Failure{...}`/`[]Failure`
+// call site in this package and its tests keeps compiling unchanged — the
+// alias makes them the literal same type as faultlib's, not just
+// structurally identical, so IsAutoDBCompat/TimeoutDuration are inherited
+// automatically and never need a local redefinition to drift again.
+type (
+	Catalog         = faultlib.Catalog
+	Failure         = faultlib.Failure
+	RemediationSpec = faultlib.RemediationSpec
+	InjectSpec      = faultlib.InjectSpec
+	EvalSpec        = faultlib.EvalSpec
+	KeywordSpec     = faultlib.KeywordSpec
+	DiagnosisSpec   = faultlib.DiagnosisSpec
+)
 
 // HarnessConfig holds runtime configuration for the test harness.
 type HarnessConfig struct {

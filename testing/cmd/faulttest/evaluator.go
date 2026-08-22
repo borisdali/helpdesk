@@ -392,15 +392,15 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	result.KeywordScore = keywordScore
 	result.ToolScore = toolScore
 
-	// Convert Failure to faultlib.Failure for the judge call.
-	// Pass structured tool names (when available) so the judge does not
-	// incorrectly penalise tools the agent called but didn't name in prose.
-	flibFailure := toFaultlibFailure(f)
+	// f is already a faultlib.Failure (Failure is a type alias — item 7
+	// dedup, v0.26); no conversion needed. Pass structured tool names (when
+	// available) so the judge does not incorrectly penalise tools the agent
+	// called but didn't name in prose.
 	var structuredToolNames []string
 	for _, tc := range resp.ToolCalls {
 		structuredToolNames = append(structuredToolNames, tc.Name)
 	}
-	judgeResult := faultlib.Judge(ctx, flibFailure, responseText, completer, model, structuredToolNames...)
+	judgeResult := faultlib.Judge(ctx, f, responseText, completer, model, structuredToolNames...)
 	result.JudgeSkipped = judgeResult.Skipped
 	result.JudgeReasoning = judgeResult.Reasoning
 	result.JudgeModel = judgeResult.Model
@@ -537,22 +537,6 @@ func extractHypothesisN(text string, n int) (label string, conf float64) {
 }
 
 func extractPrimaryConfidence(text string) float64 { _, c := extractHypothesisN(text, 1); return c }
-
-// toFaultlibFailure converts a local Failure to a faultlib.Failure for judge calls.
-func toFaultlibFailure(f Failure) faultlib.Failure {
-	return faultlib.Failure{
-		ID:          f.ID,
-		Name:        f.Name,
-		Category:    f.Category,
-		Description: f.Description,
-		Evaluation: faultlib.EvalSpec{
-			ExpectedDiagnosis: faultlib.DiagnosisSpec{
-				Category:  f.Evaluation.ExpectedDiagnosis.Category,
-				Narrative: f.Evaluation.ExpectedDiagnosis.Narrative,
-			},
-		},
-	}
-}
 
 // splitCategory breaks "connection_exhaustion" into ["connection", "exhaustion"].
 func splitCategory(category string) []string {
