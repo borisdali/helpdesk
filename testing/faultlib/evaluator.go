@@ -132,3 +132,96 @@ func SplitCategory(category string) []string {
 		return r == '_' || r == '-' || r == ' '
 	})
 }
+
+// Evaluate scores the agent's response against the failure's evaluation
+// criteria using backward-compat weights: keyword*0.50 + diagnosis*0.30 +
+// tool*0.20. Pass criteria: score >= 0.6 AND keyword check passes AND
+// ordering (if any) holds.
+//
+// Restored 2026-08-22 (item 7 dedup, v0.26 follow-up) — real callers under
+// build tags this package's own build/vet/test checks never compiled
+// (testing/faulttest, tag `faulttest`; testing/e2e, tag `e2e`). See
+// EvalResult's doc comment (types.go) for the full story. Callers needing
+// audit-tool priority, structured tool calls, or the LLM judge should use
+// cmd/faulttest's own Evaluate/EvaluateWithJudge instead — this is
+// deliberately the simple, text-only path those two build-tagged suites
+// actually use.
+func Evaluate(f Failure, responseText string) EvalResult {
+	result := EvalResult{
+		FailureID:   f.ID,
+		FailureName: f.Name,
+		Category:    f.Category,
+	}
+
+	lower := strings.ToLower(responseText)
+
+	// 1. Keyword check (50% weight).
+	keywordScore := 0.0
+	if len(f.Evaluation.ExpectedKeywords.AnyOf) > 0 {
+		for _, kw := range f.Evaluation.ExpectedKeywords.AnyOf {
+			if strings.Contains(lower, strings.ToLower(kw)) {
+				keywordScore = 1.0
+				result.KeywordPass = true
+				break
+			}
+		}
+	} else {
+		keywordScore = 1.0
+		result.KeywordPass = true
+	}
+
+	// 2. Diagnosis category check (30% weight).
+	diagnosisScore := 0.0
+	if f.Evaluation.ExpectedDiagnosis.Category != "" {
+		words := SplitCategory(f.Evaluation.ExpectedDiagnosis.Category)
+		matched := 0
+		for _, w := range words {
+			if strings.Contains(lower, strings.ToLower(w)) {
+				matched++
+			}
+		}
+		if len(words) > 0 {
+			ratio := float64(matched) / float64(len(words))
+			if ratio >= 0.5 {
+				diagnosisScore = ratio
+				result.DiagnosisPass = true
+			}
+		}
+	} else {
+		diagnosisScore = 1.0
+		result.DiagnosisPass = true
+	}
+	result.DiagnosisScore = diagnosisScore
+
+	// 3. Tool evidence check (20% weight).
+	toolScore := 0.0
+	if len(f.Evaluation.ExpectedTools) > 0 {
+		toolsFound := 0
+		for _, tool := range f.Evaluation.ExpectedTools {
+			patterns, ok := ToolPatterns[tool]
+			if !ok {
+				continue
+			}
+			for _, p := range patterns {
+				if strings.Contains(lower, strings.ToLower(p)) {
+					toolsFound++
+					break
+				}
+			}
+		}
+		toolScore = float64(toolsFound) / float64(len(f.Evaluation.ExpectedTools))
+		result.ToolEvidence = toolScore > 0.5
+	} else {
+		toolScore = 1.0
+		result.ToolEvidence = true
+	}
+
+	result.Score = keywordScore*0.5 + diagnosisScore*0.3 + toolScore*0.2
+
+	// 4. Tool ordering check (gates Passed, no weight of its own).
+	result.OrderingPass = CheckToolOrdering(f.Evaluation.ExpectedToolOrder, lower)
+
+	result.Passed = result.Score >= 0.6 && result.KeywordPass && result.OrderingPass
+
+	return result
+}

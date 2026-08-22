@@ -386,12 +386,80 @@ func TestTimeoutDuration(t *testing.T) {
 	}
 }
 
-// TestEvaluate_AllPass and TestEvaluate_KeywordFail (formerly here) tested
-// this package's own Evaluate — deleted along with it (item 7 dedup, v0.26:
-// Evaluate/EvaluateWithJudge/computeComponents were confirmed dead code, zero
-// production callers; cmd/faulttest's own Evaluate/EvaluateWithJudge are the
-// only ones actually exercised, and already had equivalent coverage under
-// the same test names in testing/cmd/faulttest/evaluator_test.go).
+// TestEvaluate_* below restored 2026-08-22: the original "Evaluate is dead
+// code" call was wrong — testing/faulttest/faulttest_test.go (tag
+// `faulttest`) and testing/e2e/multi_agent_test.go (tag `e2e`) both call
+// faultlib.Evaluate directly, invisible to a plain go build/vet/test (no
+// -tags). Evaluate itself was restored in evaluator.go; these tests close
+// the resulting 0%-coverage gap under the plain (untagged) test run that
+// codecov/CI actually measures — Evaluate's only real callers otherwise need
+// live Docker+agents+LLM infra to execute at all. EvaluateWithJudge/
+// computeComponents genuinely stayed dead (zero callers under any tag) and
+// are not restored.
+
+func TestEvaluate_AllPass(t *testing.T) {
+	f := Failure{
+		ID:       "test-1",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedTools:    []string{"check_connection"},
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"refused", "exhausted"}},
+			ExpectedDiagnosis: DiagnosisSpec{
+				Category: "connection_refused",
+			},
+		},
+	}
+	response := "The connection was refused. Cannot connect to the server."
+	result := Evaluate(f, response)
+
+	if !result.Passed {
+		t.Errorf("Evaluate should pass, got Passed=%v Score=%.2f", result.Passed, result.Score)
+	}
+	if !result.KeywordPass || !result.DiagnosisPass || !result.ToolEvidence || !result.OrderingPass {
+		t.Errorf("all component checks should pass: keyword=%v diagnosis=%v tool=%v ordering=%v",
+			result.KeywordPass, result.DiagnosisPass, result.ToolEvidence, result.OrderingPass)
+	}
+}
+
+func TestEvaluate_KeywordFail(t *testing.T) {
+	f := Failure{
+		ID:       "test-2",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"max_connections", "too many"}},
+		},
+	}
+	response := "The database is healthy and running normally."
+	result := Evaluate(f, response)
+
+	if result.KeywordPass {
+		t.Error("KeywordPass should be false")
+	}
+	if result.Passed {
+		t.Error("Evaluate should fail when keywords don't match")
+	}
+}
+
+func TestEvaluate_OrderingGatesPassed(t *testing.T) {
+	// High keyword score but wrong tool order → Passed = false.
+	f := Failure{
+		ID:       "test-3",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"pg_terminate_backend"}},
+			ExpectedToolOrder: [][]string{{"get_session_info", "terminate_connection"}},
+		},
+	}
+	// pg_terminate_backend appears BEFORE client_addr — wrong order.
+	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
+	result := Evaluate(f, response)
+	if result.OrderingPass {
+		t.Error("OrderingPass should be false — terminate evidence precedes session_info evidence")
+	}
+	if result.KeywordPass && result.Passed {
+		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f", result.Score)
+	}
+}
 
 func TestSplitCategory(t *testing.T) {
 	tests := []struct {

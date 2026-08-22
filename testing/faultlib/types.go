@@ -264,3 +264,56 @@ type HarnessConfig struct {
 	EmitAndWait bool
 }
 
+// EvalResult holds the outcome of evaluating an agent's response against a
+// failure's evaluation criteria (the backward-compat, text-only scoring path
+// — see Evaluate in evaluator.go).
+//
+// Restored 2026-08-22 (item 7 dedup, v0.26 follow-up): originally deleted as
+// "dead code, zero production callers" during the evaluator.go dedup pass —
+// that check missed build-tag-gated files, which a plain `go build`/`go vet`/
+// `go test ./...` (no -tags) never compiles. testing/faulttest/faulttest_test.go
+// (tag `faulttest`) and testing/e2e/multi_agent_test.go (tag `e2e`) both call
+// Evaluate directly, confirmed via `go vet -tags faulttest ./...` and
+// `go vet -tags e2e ./...` failing with "undefined: faultlib.Evaluate" before
+// this restore. EvaluateWithJudge stayed deleted — confirmed zero callers
+// under every build tag in this repo (faulttest, e2e, integration).
+type EvalResult struct {
+	FailureID     string  `json:"failure_id"`
+	FailureName   string  `json:"failure_name"`
+	Category      string  `json:"category"`
+	Score         float64 `json:"score"`
+	Passed        bool    `json:"passed"`
+	KeywordPass   bool    `json:"keyword_pass"`
+	DiagnosisPass bool    `json:"diagnosis_pass"`
+	ToolEvidence  bool    `json:"tool_evidence"`
+	// OrderingPass is true when all ExpectedToolOrder pairs are satisfied
+	// (tool_a evidence precedes tool_b evidence in the response text).
+	// Always true when ExpectedToolOrder is empty.
+	OrderingPass bool   `json:"ordering_pass"`
+	ResponseText string `json:"response_text"`
+	Duration     string `json:"duration"`
+	Error        string `json:"error,omitempty"`
+
+	// Judge fields (populated by EvaluateWithJudge when judge is enabled).
+	DiagnosisScore float64 `json:"diagnosis_score"` // 0.0-1.0 from judge or category match
+	JudgeReasoning string  `json:"judge_reasoning,omitempty"`
+	JudgeModel     string  `json:"judge_model,omitempty"`
+	JudgeSkipped   bool    `json:"judge_skipped,omitempty"`
+
+	// Remediation outcome fields (populated only when RemediateEnabled=true).
+	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
+	RemediationPassed    bool    `json:"remediation_passed,omitempty"`
+	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
+	RemediationError     string  `json:"remediation_error,omitempty"`
+
+	// Phase 2 scoring fields.
+	// RemediationScore is 0.0-1.0: 1.0 if recovered within half the verify timeout,
+	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	RemediationScore float64 `json:"remediation_score,omitempty"`
+	// RemediationMethod records how remediation was triggered: "playbook", "agent_prompt", or "none".
+	RemediationMethod string `json:"remediation_method,omitempty"`
+	// OverallScore combines diagnosis and remediation: DiagnosisScore*0.6 + RemediationScore*0.4
+	// when remediation was attempted; equals DiagnosisScore (i.e. Score) when not attempted.
+	OverallScore float64 `json:"overall_score,omitempty"`
+}
+
