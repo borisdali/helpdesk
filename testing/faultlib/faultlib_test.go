@@ -346,49 +346,12 @@ func TestTimeoutDuration(t *testing.T) {
 	}
 }
 
-func TestEvaluate_AllPass(t *testing.T) {
-	f := Failure{
-		ID:       "test-1",
-		Name:     "Test",
-		Category: "database",
-		Evaluation: EvalSpec{
-			ExpectedTools:     []string{"check_connection"},
-			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"refused"}},
-			ExpectedDiagnosis: DiagnosisSpec{Category: "connection_refused"},
-		},
-	}
-
-	response := "The connection was refused. Cannot connect to server."
-	result := Evaluate(f, response)
-
-	if !result.Passed {
-		t.Errorf("Evaluate should pass, got Passed=%v, Score=%.2f", result.Passed, result.Score)
-	}
-	if !result.KeywordPass {
-		t.Error("KeywordPass should be true")
-	}
-}
-
-func TestEvaluate_KeywordFail(t *testing.T) {
-	f := Failure{
-		ID:       "test-2",
-		Name:     "Test",
-		Category: "database",
-		Evaluation: EvalSpec{
-			ExpectedKeywords: KeywordSpec{AnyOf: []string{"max_connections"}},
-		},
-	}
-
-	response := "The database is running normally."
-	result := Evaluate(f, response)
-
-	if result.KeywordPass {
-		t.Error("KeywordPass should be false")
-	}
-	if result.Passed {
-		t.Error("Evaluate should fail")
-	}
-}
+// TestEvaluate_AllPass and TestEvaluate_KeywordFail (formerly here) tested
+// this package's own Evaluate — deleted along with it (item 7 dedup, v0.26:
+// Evaluate/EvaluateWithJudge/computeComponents were confirmed dead code, zero
+// production callers; cmd/faulttest's own Evaluate/EvaluateWithJudge are the
+// only ones actually exercised, and already had equivalent coverage under
+// the same test names in testing/cmd/faulttest/evaluator_test.go).
 
 func TestSplitCategory(t *testing.T) {
 	tests := []struct {
@@ -415,94 +378,16 @@ func TestSplitCategory(t *testing.T) {
 	}
 }
 
-func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
-	// get_session_info ordering pattern ("client_addr") precedes
-	// terminate_connection ordering pattern ("pg_terminate_backend").
-	// This mirrors what the agent writes after calling tools in the correct order.
-	f := Failure{
-		ID: "ordering-pass",
-		Evaluation: EvalSpec{
-			ExpectedToolOrder: [][]string{
-				{"get_session_info", "terminate_connection"},
-			},
-		},
-	}
-	response := "Session info: client_addr: 127.0.0.1, state: idle in transaction, duration: 30m. " +
-		"pg_terminate_backend(1234) returned true."
-	result := Evaluate(f, response)
-	if !result.OrderingPass {
-		t.Errorf("OrderingPass = false; expected session_info evidence to precede terminate evidence in %q", response)
-	}
-}
-
-func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
-	// terminate_connection ordering pattern ("pg_terminate_backend") appears
-	// before get_session_info ordering pattern ("client_addr") — wrong order.
-	f := Failure{
-		ID: "ordering-fail",
-		Evaluation: EvalSpec{
-			ExpectedToolOrder: [][]string{
-				{"get_session_info", "terminate_connection"},
-			},
-		},
-	}
-	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
-	result := Evaluate(f, response)
-	if result.OrderingPass {
-		t.Errorf("OrderingPass = true; expected false when terminate evidence precedes session_info evidence in %q", response)
-	}
-}
-
-func TestEvaluate_ToolOrdering_MissingTool(t *testing.T) {
-	// terminate_connection ordering pattern is absent — ordering cannot be confirmed.
-	f := Failure{
-		ID: "ordering-missing",
-		Evaluation: EvalSpec{
-			ExpectedToolOrder: [][]string{
-				{"get_session_info", "terminate_connection"},
-			},
-		},
-	}
-	response := "Session info: client_addr: 127.0.0.1, state: active."
-	result := Evaluate(f, response)
-	if result.OrderingPass {
-		t.Errorf("OrderingPass = true; expected false when one tool has no evidence in %q", response)
-	}
-}
-
-func TestEvaluate_ToolOrdering_EmptyOrder_AlwaysPasses(t *testing.T) {
-	// No ExpectedToolOrder → OrderingPass is always true (backwards compatible).
-	f := Failure{
-		ID: "ordering-none",
-		Evaluation: EvalSpec{
-			ExpectedKeywords: KeywordSpec{AnyOf: []string{"refused"}},
-		},
-	}
-	response := "Connection refused."
-	result := Evaluate(f, response)
-	if !result.OrderingPass {
-		t.Error("OrderingPass should be true when ExpectedToolOrder is empty")
-	}
-}
-
-func TestEvaluate_OrderingGatesPassed(t *testing.T) {
-	// High keyword + tool score but wrong ordering → Passed = false.
-	f := Failure{
-		ID:       "ordering-gates-passed",
-		Category: "database",
-		Evaluation: EvalSpec{
-			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"pg_terminate_backend"}},
-			ExpectedToolOrder: [][]string{{"get_session_info", "terminate_connection"}},
-		},
-	}
-	// pg_terminate_backend appears BEFORE client_addr — wrong order.
-	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
-	result := Evaluate(f, response)
-	if result.KeywordPass && result.Passed {
-		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f, KeywordPass=%v, OrderingPass=%v",
-			result.Score, result.KeywordPass, result.OrderingPass)
-	}
-}
+// TestEvaluate_ToolOrdering_Pass/_Fail/_MissingTool/_EmptyOrder_AlwaysPasses
+// and TestEvaluate_OrderingGatesPassed (formerly here) tested this package's
+// own Evaluate's ordering behavior — deleted along with Evaluate itself
+// (item 7 dedup, v0.26), but the underlying logic they verified
+// (CheckToolOrdering/FirstOrderingPatternIndex) is still exported from this
+// package and still used — see the ported equivalents in
+// testing/cmd/faulttest/evaluator_test.go, added there because
+// cmd/faulttest's own Evaluate had never gained ordering support at all
+// (OrderingPass didn't previously exist on its EvalResult) — a real
+// behavioral gap this dedup pass closed, not just a relocation.
 
 func TestCatalog_ExternalCompatFields(t *testing.T) {
 	catalogPath := findCatalog()

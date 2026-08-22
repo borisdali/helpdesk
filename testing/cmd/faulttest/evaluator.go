@@ -24,6 +24,14 @@ type EvalResult struct {
 	KeywordPass   bool   `json:"keyword_pass"`
 	DiagnosisPass bool   `json:"diagnosis_pass"`
 	ToolEvidence  bool   `json:"tool_evidence"`
+	// OrderingPass is true when all ExpectedToolOrder pairs are satisfied
+	// (tool_a evidence precedes tool_b evidence in the response text). Always
+	// true when ExpectedToolOrder is empty. Gates Passed alongside KeywordPass
+	// (item 7 dedup, v0.26 — ported from faultlib's own Evaluate, which had
+	// this consultation all along; this package's copy never did, even after
+	// Phase 1's type-alias fix made ExpectedToolOrder itself reachable from a
+	// real catalog entry — the data existed, nothing ever read it).
+	OrderingPass bool `json:"ordering_pass"`
 	// ToolEvidenceMode records how tool evidence was determined:
 	//   "structured"   — exact name matching from the tool_call_summary DataPart (Option C, ADK agents)
 	//   "text_fallback" — keyword matching against response text (Option B, non-ADK or gateway path)
@@ -150,24 +158,14 @@ func hasCleanWarning(er EvalResult) bool {
 	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch
 }
 
-// toolPatterns maps tool names to output patterns that indicate the tool was called.
-var toolPatterns = map[string][]string{
-	"check_connection":       {"connection", "connect", "reachable", "refused"},
-	"get_database_info":      {"version", "server_version", "postgresql"},
-	"get_active_connections": {"pg_stat_activity", "active", "idle", "pid", "query"},
-	"get_connection_stats":   {"max_connections", "connections", "connection_count", "numbackends"},
-	"get_database_stats":     {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
-	"get_bgwriter_stats":     {"maxwritten_clean", "buffers_backend", "checkpoints_req"},
-	"get_config_parameter":   {"setting", "parameter", "configuration"},
-	"get_replication_status": {"replication", "wal", "replay", "standby", "lag"},
-	"get_lock_info":          {"lock", "pg_locks", "granted", "waiting", "blocked"},
-	"get_table_stats":        {"n_dead_tup", "n_live_tup", "dead tuples", "autovacuum", "vacuum"},
-	"get_pods":               {"pod", "Running", "Pending", "CrashLoopBackOff", "ImagePull"},
-	"get_service":            {"ClusterIP", "LoadBalancer", "NodePort", "service"},
-	"get_endpoints":          {"endpoint", "address", "subset"},
-	"get_events":             {"event", "Warning", "Normal", "FailedScheduling", "BackOff"},
-	"describe_pod":           {"Conditions", "Container", "State", "Restart"},
-}
+// Tool-evidence text matching uses faultlib.ToolPatterns directly (item 7
+// dedup, v0.26) — this package used to carry its own, smaller copy (15
+// entries vs. faultlib's ~35+, missing DB diagnostic tools like
+// get_slow_queries/get_vacuum_status and every sysadmin tool). That drift
+// was a real, live scoring gap: any fault whose expected_tools named one of
+// the tools missing from this package's copy would always score 0 tool
+// evidence on the text-fallback path (no audit trail, no structured
+// resp.ToolCalls), since the lookup would silently miss.
 
 // scoreToolEvidence returns (toolScore float64, toolEvidence bool, toolEvidenceMode string)
 // using audit tool names when available, then structured tool calls, then text matching.
@@ -222,7 +220,7 @@ func scoreToolEvidence(f Failure, resp testutil.AgentResponse, auditTools []stri
 	sections := strings.Split(responseText, "\n---\n")
 	toolsFound := 0
 	for _, expected := range f.Evaluation.ExpectedTools {
-		patterns, ok := toolPatterns[expected]
+		patterns, ok := faultlib.ToolPatterns[expected]
 		if !ok {
 			continue
 		}
@@ -284,7 +282,7 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	// 2. Diagnosis category check (30% weight).
 	diagnosisScore := 0.0
 	if f.Evaluation.ExpectedDiagnosis.Category != "" {
-		words := splitCategory(f.Evaluation.ExpectedDiagnosis.Category)
+		words := faultlib.SplitCategory(f.Evaluation.ExpectedDiagnosis.Category)
 		matched := 0
 		for _, w := range words {
 			if strings.Contains(lower, strings.ToLower(w)) {
@@ -316,8 +314,11 @@ func Evaluate(f Failure, resp testutil.AgentResponse, auditTools ...[]string) Ev
 	// Weighted total.
 	result.Score = keywordScore*0.5 + diagnosisScore*0.3 + toolScore*0.2
 
-	// Pass criteria: score >= 0.6 AND keyword check passes.
-	result.Passed = result.Score >= 0.6 && result.KeywordPass
+	// 4. Tool ordering check (gates Passed, no weight of its own).
+	result.OrderingPass = faultlib.CheckToolOrdering(f.Evaluation.ExpectedToolOrder, lower)
+
+	// Pass criteria: score >= 0.6 AND keyword check passes AND ordering (if any) holds.
+	result.Passed = result.Score >= 0.6 && result.KeywordPass && result.OrderingPass
 
 	populateHypotheses(&result, resp, responseText)
 	return result
@@ -364,7 +365,7 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 	diagnosisScore := 0.0
 	diagnosisPass := false
 	if f.Evaluation.ExpectedDiagnosis.Category != "" {
-		words := splitCategory(f.Evaluation.ExpectedDiagnosis.Category)
+		words := faultlib.SplitCategory(f.Evaluation.ExpectedDiagnosis.Category)
 		matched := 0
 		for _, w := range words {
 			if strings.Contains(lower, strings.ToLower(w)) {
@@ -423,12 +424,15 @@ func EvaluateWithJudge(ctx context.Context, f Failure, resp testutil.AgentRespon
 		result.Score = toolScore*0.40 + judgeResult.Score*0.40 + keywordScore*0.20
 	}
 
-	// Pass criteria: score >= 0.6 AND keyword check passes.
+	// 4. Tool ordering check (gates Passed, no weight of its own).
+	result.OrderingPass = faultlib.CheckToolOrdering(f.Evaluation.ExpectedToolOrder, lower)
+
+	// Pass criteria: score >= 0.6 AND keyword check passes AND ordering (if any) holds.
 	// When judge is active, also require judgeScore >= 0.33 (score 1/3 minimum —
 	// agent must at least identify the symptom). A 0/3 judge means the agent
 	// completely missed the fault; keywords+tools alone cannot override that.
 	judgeVeto := !judgeResult.Skipped && judgeResult.Score < 0.33
-	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto
+	result.Passed = result.Score >= 0.6 && result.KeywordPass && !judgeVeto && result.OrderingPass
 
 	populateHypotheses(&result, resp, responseText)
 	return result
@@ -537,10 +541,3 @@ func extractHypothesisN(text string, n int) (label string, conf float64) {
 }
 
 func extractPrimaryConfidence(text string) float64 { _, c := extractHypothesisN(text, 1); return c }
-
-// splitCategory breaks "connection_exhaustion" into ["connection", "exhaustion"].
-func splitCategory(category string) []string {
-	return strings.FieldsFunc(category, func(r rune) bool {
-		return r == '_' || r == '-' || r == ' '
-	})
-}
