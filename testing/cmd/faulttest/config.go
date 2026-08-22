@@ -1,16 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
-	"helpdesk/testing/catalog"
+	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
 )
 
@@ -81,136 +77,53 @@ type HarnessConfig struct {
 	RemediationJudgeEnabled bool
 }
 
+// LoadCatalog, LoadBuiltinCatalog, LoadCatalogFromBytes, LoadAndMergeCatalogs,
+// and FilterFailures are thin wrappers over faultlib's implementations (item 7
+// dedup, v0.26) — this package previously carried full duplicate copies of
+// each, which had already drifted from faultlib's: FilterFailures's External
+// condition differed (this copy skipped the ExternalCompat check when AutoDB
+// was set; faultlib's never did — now merged into faultlib.FilterFailures as
+// the single implementation, so both entry points agree). ResolvePrompt was a
+// third, worse case — this copy's substitution list was missing
+// "{{server_id}}" entirely, which faultlib's had; four catalog faults
+// (testing/catalog/failures.yaml) use {{server_id}} in agent_prompt, so
+// `faulttest inject` (the only caller of this package's own ResolvePrompt —
+// the automated run loop goes through faultlib.Runner, which always called
+// faultlib.ResolvePrompt directly) printed the literal unresolved placeholder
+// to the operator instead of the resolved server name. Fixed by deleting this
+// package's copy outright.
+
 // LoadCatalog reads and parses the failure catalog YAML file.
 // Each failure's Source is stamped as "custom".
 func LoadCatalog(path string) (*Catalog, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading catalog: %v", err)
-	}
-	return LoadCatalogFromBytes(data, "custom")
+	return faultlib.LoadCatalog(path)
 }
 
 // LoadBuiltinCatalog parses the embedded built-in catalog.
 // Each failure's Source is stamped as "builtin".
 func LoadBuiltinCatalog() (*Catalog, error) {
-	return LoadCatalogFromBytes(catalog.BuiltinYAML, "builtin")
+	return faultlib.LoadBuiltinCatalog()
 }
 
 // LoadCatalogFromBytes parses YAML bytes and stamps each failure with the given
 // source label ("builtin" or "custom"). The version field check is skipped for
 // custom catalogs so customers may omit it.
 func LoadCatalogFromBytes(data []byte, source string) (*Catalog, error) {
-	var c Catalog
-	if err := yaml.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("parsing catalog: %v", err)
-	}
-	if source == "builtin" && c.Version == "" {
-		return nil, fmt.Errorf("built-in catalog missing version field")
-	}
-	for i := range c.Failures {
-		c.Failures[i].Source = source
-	}
-	return &c, nil
+	return faultlib.LoadCatalogFromBytes(data, source)
 }
 
 // LoadAndMergeCatalogs loads the built-in catalog and appends each custom
 // catalog file. All duplicate-ID errors are collected before returning.
 func LoadAndMergeCatalogs(customPaths []string) (*Catalog, error) {
-	base, err := LoadBuiltinCatalog()
-	if err != nil {
-		return nil, err
-	}
-	return mergeCustomInto(base, customPaths)
-}
-
-// mergeCustomInto appends faults from each custom file into base and returns
-// the merged catalog. All duplicate-ID errors are collected before returning.
-func mergeCustomInto(base *Catalog, paths []string) (*Catalog, error) {
-	seen := make(map[string]string) // id → source label
-	for i := range base.Failures {
-		seen[base.Failures[i].ID] = base.Failures[i].Source
-	}
-
-	var errs []string
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading custom catalog %s: %v", path, err)
-		}
-		custom, err := LoadCatalogFromBytes(data, "custom")
-		if err != nil {
-			return nil, fmt.Errorf("parsing custom catalog %s: %v", path, err)
-		}
-		for _, f := range custom.Failures {
-			if prev, dup := seen[f.ID]; dup {
-				errs = append(errs, fmt.Sprintf("duplicate fault ID %q (first seen in %s, also in %s)", f.ID, prev, path))
-				continue
-			}
-			seen[f.ID] = path
-			base.Failures = append(base.Failures, f)
-		}
-	}
-	if len(errs) > 0 {
-		return nil, fmt.Errorf("catalog merge errors:\n  %s", strings.Join(errs, "\n  "))
-	}
-	return base, nil
+	return faultlib.LoadAndMergeCatalogs(customPaths)
 }
 
 // FilterFailures returns failures matching the given categories and/or IDs.
-// When cfg.External is true, only faults marked external_compat are included.
+// When cfg.External is true, only faults marked external_compat are included
+// (skipped when cfg.AutoDB is also set). When cfg.AutoDB is true, only faults
+// marked auto-db-compatible are included.
 func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
-	categories := cfg.Categories
-	ids := cfg.FailureIDs
-
-	catSet := make(map[string]bool, len(categories))
-	for _, c := range categories {
-		catSet[c] = true
-	}
-
-	idSet := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		idSet[id] = true
-	}
-
-	excludeSet := make(map[string]bool, len(cfg.ExcludeIDs))
-	for _, id := range cfg.ExcludeIDs {
-		excludeSet[id] = true
-	}
-
-	var result []Failure
-	for _, f := range catalog.Failures {
-		// Exclude list wins over everything else — applied first so an
-		// excluded ID can never sneak back in via categories or an allowlist.
-		if excludeSet[f.ID] {
-			continue
-		}
-		// Auto-DB mode: only faults that work against a spun-up Docker PostgreSQL.
-		if cfg.AutoDB && !f.IsAutoDBCompat() {
-			continue
-		}
-		// External mode: skip faults that don't work without Docker/OS access.
-		if cfg.External && !cfg.AutoDB && !f.ExternalCompat {
-			continue
-		}
-		// Source filter: "builtin" or "custom".
-		if cfg.SourceFilter != "" && f.Source != cfg.SourceFilter {
-			continue
-		}
-
-		if len(categories) == 0 && len(ids) == 0 {
-			result = append(result, f)
-			continue
-		}
-		if len(idSet) > 0 && idSet[f.ID] {
-			result = append(result, f)
-			continue
-		}
-		if len(catSet) > 0 && catSet[f.Category] {
-			result = append(result, f)
-		}
-	}
-	return result
+	return faultlib.FilterFailures(catalog, &cfg.HarnessConfig)
 }
 
 // ResolvePrompt replaces template variables in the failure prompt.
@@ -218,27 +131,18 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 // This allows --agent-conn to decouple the injection DSN (used by psql) from
 // the identifier sent to the agent (which may be a registered alias like "test-db").
 func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
-	connStr := cfg.ConnStr
-	if cfg.AgentConnStr != "" {
-		connStr = cfg.AgentConnStr
-	}
-	r := strings.NewReplacer(
-		"{{connection_string}}", connStr,
-		"{{replica_connection_string}}", cfg.ReplicaConnStr,
-		"{{kube_context}}", cfg.KubeContext,
-	)
-	return r.Replace(prompt)
+	return faultlib.ResolvePrompt(prompt, &cfg.HarnessConfig)
 }
 
-// infraConfig is a minimal representation of infrastructure.json for tag checking
-// and alias resolution.
-type infraConfig struct {
-	DBServers map[string]struct {
-		ConnectionString string   `json:"connection_string"`
-		PasswordEnv      string   `json:"password_env"`
-		Tags             []string `json:"tags"`
-	} `json:"db_servers"`
-}
+// resolveConnAlias and checkTargetSafety load infrastructure.json via
+// internal/infra.Load (item 7 dedup, v0.26) rather than hand-rolling their own
+// JSON-parsing struct + os.ReadFile, as this package previously did — that
+// local infraConfig type was a strict subset of infra.DBServer (connection
+// string, password env, tags) already defined and already imported elsewhere
+// in this exact codebase. connStrHost stays local: it does dual DSN/URL
+// host-only extraction that internal/infra's own (unexported) connEndpoint
+// does not (host:port/dbname, DSN-only) — a genuinely different requirement,
+// not more duplication.
 
 // resolveConnAlias resolves a named infra key (e.g. "faulttest-db") to its
 // actual connection string. Returns connStr unchanged when infraConfigPath is
@@ -251,25 +155,15 @@ func resolveConnAlias(infraConfigPath, connStr string) string {
 	if strings.Contains(connStr, "=") || strings.Contains(connStr, "://") {
 		return connStr
 	}
-	data, err := os.ReadFile(infraConfigPath)
+	cfg, err := infra.Load(infraConfigPath)
 	if err != nil {
-		return connStr
-	}
-	var cfg infraConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
 		return connStr
 	}
 	srv, ok := cfg.DBServers[connStr]
 	if !ok {
 		return connStr
 	}
-	cs := srv.ConnectionString
-	if srv.PasswordEnv != "" {
-		if pw := os.Getenv(srv.PasswordEnv); pw != "" {
-			cs += " password=" + pw
-		}
-	}
-	return cs
+	return srv.ResolvedConnectionString()
 }
 
 // checkTargetSafety verifies that the target PostgreSQL host (extracted from
@@ -282,14 +176,9 @@ func checkTargetSafety(infraConfigPath, connStr string) error {
 		return nil
 	}
 
-	data, err := os.ReadFile(infraConfigPath)
+	cfg, err := infra.Load(infraConfigPath)
 	if err != nil {
 		return fmt.Errorf("reading infra config: %v", err)
-	}
-
-	var cfg infraConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parsing infra config: %v", err)
 	}
 
 	// Fast path: connStr may be a named infra key (e.g. "alloydb-on-vm").

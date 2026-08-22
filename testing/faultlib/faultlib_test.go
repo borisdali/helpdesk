@@ -307,6 +307,46 @@ func TestFilterFailures_External(t *testing.T) {
 	}
 }
 
+func TestFilterFailures_AutoDB(t *testing.T) {
+	// AutoDB-only faults must be external-compat, non-kubernetes, and not
+	// ssh_exec (IsAutoDBCompat's own definition — types.go). Item 7 dedup,
+	// v0.26: this AutoDB check used to live only in cmd/faulttest's own
+	// duplicate FilterFailures; merged here as the single implementation.
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "auto-1", Category: "database", ExternalCompat: true, Inject: InjectSpec{Type: "sql"}},
+			{ID: "not-auto-1", Category: "database", ExternalCompat: false, Inject: InjectSpec{Type: "sql"}},
+			{ID: "not-auto-k8s", Category: "kubernetes", ExternalCompat: true, Inject: InjectSpec{Type: "sql"}},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{AutoDB: true})
+	if len(result) != 1 || result[0].ID != "auto-1" {
+		t.Errorf("FilterFailures(AutoDB=true) = %v, want [auto-1]", result)
+	}
+}
+
+func TestFilterFailures_AutoDB_ExternalCheckRedundantNotConflicting(t *testing.T) {
+	// AutoDB implies ExternalCompat via IsAutoDBCompat's own definition, so
+	// a fault that survives the AutoDB filter always has ExternalCompat
+	// true — the "&& !cfg.AutoDB" guard on the External check (below) can
+	// never actually change the outcome for real catalog data, but is kept
+	// (ported faithfully from cmd/faulttest's pre-dedup logic) as a defensive
+	// guard against IsAutoDBCompat's definition changing in the future.
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "auto-1", Category: "database", ExternalCompat: true, Inject: InjectSpec{Type: "sql"}},
+		},
+	}
+
+	result := FilterFailures(catalog, &HarnessConfig{AutoDB: true, External: true})
+	if len(result) != 1 || result[0].ID != "auto-1" {
+		t.Errorf("FilterFailures(AutoDB=true, External=true) = %v, want [auto-1]", result)
+	}
+}
+
 func TestResolvePrompt(t *testing.T) {
 	cfg := &HarnessConfig{
 		ConnStr:        "host=db.example.com port=5432",

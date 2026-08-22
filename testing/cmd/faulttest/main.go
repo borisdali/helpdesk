@@ -271,7 +271,7 @@ func loadActiveCatalog(cfg *HarnessConfig) (*Catalog, error) {
 		if len(cfg.CustomCatalogs) == 0 {
 			return base, nil
 		}
-		return mergeCustomInto(base, cfg.CustomCatalogs)
+		return faultlib.MergeCustomInto(base, cfg.CustomCatalogs)
 	}
 	// Standalone binary: use embedded catalog.
 	return LoadAndMergeCatalogs(cfg.CustomCatalogs)

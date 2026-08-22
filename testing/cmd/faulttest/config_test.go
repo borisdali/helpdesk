@@ -476,6 +476,24 @@ func TestResolvePrompt(t *testing.T) {
 	}
 }
 
+func TestResolvePrompt_ServerID(t *testing.T) {
+	// Regression: this package's own ResolvePrompt used to omit
+	// {{server_id}} from its substitution list entirely (item 7 dedup,
+	// v0.26) — 4 catalog faults use it in agent_prompt, and `faulttest
+	// inject` (this package's only caller of ResolvePrompt) printed the
+	// literal placeholder instead of the resolved server name. Now a thin
+	// wrapper over faultlib.ResolvePrompt, which always had it.
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ServerID: "test-db"}}
+
+	prompt := "The database server '{{server_id}}' is not responding."
+	result := ResolvePrompt(prompt, cfg)
+
+	expected := "The database server 'test-db' is not responding."
+	if result != expected {
+		t.Errorf("ResolvePrompt result = %q, want %q", result, expected)
+	}
+}
+
 func TestResolvePrompt_NoPlaceholders(t *testing.T) {
 	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ConnStr: "host=db.example.com"}}
 
