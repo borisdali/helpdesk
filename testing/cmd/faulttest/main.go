@@ -168,7 +168,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.UsersFile, "users-file", os.Getenv("HELPDESK_USERS_FILE"), "Path to users.yaml; when set, --operator must be a known human user in that file before force-mode auto-approval is accepted (or HELPDESK_USERS_FILE)")
 
 	// Policy safety check.
-	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
+	fs.StringVar(&cfg.InfraConfigPath, "infra-config", os.Getenv("FAULTTEST_INFRA_CONFIG"), "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag (or FAULTTEST_INFRA_CONFIG)")
 
 	// Customer catalog support.
 	var extraCatalogs stringSliceFlag

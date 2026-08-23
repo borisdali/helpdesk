@@ -671,3 +671,41 @@ func TestReorderArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadConfig_InfraConfigPath_FromEnv is a regression test for a real bug
+// found during v0.26 item 6's manual testing: --infra-config had no
+// FAULTTEST_INFRA_CONFIG env-var fallback at all, unlike every other major
+// flag in this binary (--gateway/FAULTTEST_GATEWAY_URL, --api-key/
+// HELPDESK_CLIENT_API_KEY, --agent-model/HELPDESK_MODEL_NAME, ...) and unlike
+// testing/faulttest's own Go-test harness, which already read the same env
+// var correctly. Confirmed live: omitting --infra-config silently resolved
+// {{server_id}} to an empty string instead of failing loudly, producing a
+// broken prompt ("the database server ”...") that derailed the agent into
+// asking which server to check — reproduced deterministically, then fixed by
+// re-running with --infra-config explicitly set.
+func TestLoadConfig_InfraConfigPath_FromEnv(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "testing/testing.infra.json")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, nil)
+	if cfg.InfraConfigPath != "testing/testing.infra.json" {
+		t.Errorf("InfraConfigPath = %q, want the FAULTTEST_INFRA_CONFIG env var value", cfg.InfraConfigPath)
+	}
+}
+
+func TestLoadConfig_InfraConfigPath_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "testing/testing.infra.json")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, []string{"--infra-config", "/explicit/path.json"})
+	if cfg.InfraConfigPath != "/explicit/path.json" {
+		t.Errorf("InfraConfigPath = %q, want the explicit --infra-config flag value to win over the env var", cfg.InfraConfigPath)
+	}
+}
+
+func TestLoadConfig_InfraConfigPath_EmptyWhenUnset(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, nil)
+	if cfg.InfraConfigPath != "" {
+		t.Errorf("InfraConfigPath = %q, want empty when neither the flag nor the env var is set", cfg.InfraConfigPath)
+	}
+}

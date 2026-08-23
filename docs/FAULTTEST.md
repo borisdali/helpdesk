@@ -430,7 +430,9 @@ faulttest run --external \
   --db-agent http://helpdesk-gateway:8080
 ```
 
-If `--infra-config` is omitted the check is skipped. This is intentional for air-gapped or single-tenant setups where the operator knows their target. The flag is strongly recommended in any shared environment.
+If `--infra-config` is omitted the safety check is skipped. This is intentional for air-gapped or single-tenant setups where the operator knows their target. The flag is strongly recommended in any shared environment.
+
+**`--infra-config` also drives `{{server_id}}` prompt substitution**, independent of the safety check — some catalog faults' prompts reference `{{server_id}}` (the resolved name of the target from `infrastructure.json`, e.g. "staging-db"). Omitting `--infra-config` doesn't error here either: `{{server_id}}` silently resolves to an empty string, producing a prompt like `"the database server '' is unreachable"` — confirmed live to visibly derail the agent into asking which server to investigate instead of diagnosing the fault. Set `FAULTTEST_INFRA_CONFIG` once (env var, same as the flag) rather than relying on remembering `--infra-config` on every invocation — especially for local/CI runs against the bundled `testing/testing.infra.json`.
 
 ---
 
@@ -501,7 +503,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
 | `--audit-url` | — | — | auditd URL for audit-trail-based tool evidence (`ToolEvidenceMode: audit`) |
-| `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
+| `--infra-config` | `FAULTTEST_INFRA_CONFIG` | — | Path to `infrastructure.json` for the safety check **and** for resolving `{{server_id}}` in fault prompts (§4). Omitting both the flag and the env var doesn't error — it silently resolves `{{server_id}}` to an empty string, which can visibly derail the agent's response on faults that use it. Set the env var once in your shell/CI rather than remembering the flag on every invocation. |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
 | `--source` | — | all | Filter by source: `builtin` or `custom` |
