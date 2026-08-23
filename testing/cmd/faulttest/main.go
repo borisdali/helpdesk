@@ -412,8 +412,21 @@ func cmdRun(args []string) {
 		if repeatMode && cfg.RemediateEnabled {
 			slog.Warn("--remediate is disabled in --repeat mode", "repeat", nReps)
 		}
+		// Hop cert collection (v0.26 item 6) requires the gateway to actually
+		// auto-chain past the first hop, which needs --approval-mode=force
+		// (or a target playbook already configured for session/auto — see
+		// canAutoChain, cmd/gateway/playbooks.go). faulttest's own
+		// skip_trust_gate=true only bypasses the trust gate, not this check.
+		// Without it, --repeat only ever certifies the entry-point series,
+		// exactly as before this feature — warn once so that isn't mistaken
+		// for the feature being broken or absent.
+		if repeatMode && cfg.ApprovalMode != "force" {
+			slog.Warn("hop certification requires --approval-mode=force to auto-chain past the first hop; without it, --repeat only certifies the entry-point series", "approval_mode", cfg.ApprovalMode)
+		}
 
 		var repResults []EvalResult
+		hopAcc := map[string][]EvalResult{}
+		hopAttrSigs := map[string][]string{}
 
 		for rep := range nReps {
 			// Save original conn string for config-override failures; restore after each rep.
@@ -563,6 +576,23 @@ func cmdRun(args []string) {
 					faultTraceID := "ft_" + runID + "_" + f.ID
 					pushJudgeReasoning(ctx, cfg.AuditURL, cfg.GatewayAPIKey, faultTraceID,
 						agentNameFromCategory(f.Category), evalResult.JudgeReasoning, auditTools)
+				}
+			}
+
+			// Hop cert collection (v0.26 item 6): fetch this rep's incident
+			// narrative to discover which distinct playbook series the chain
+			// actually passed through — any escalation/remediation hop with
+			// the gateway's own auto-chaining already includes the full
+			// chain in one response by the time resp is available here (see
+			// the --approval-mode=force warning above); cmd/faulttest's own
+			// separate remediation-triggering code is unconditionally
+			// skipped in repeat mode, so this is the only source of
+			// downstream hop data during a --repeat batch.
+			if repeatMode && cfg.GatewayURL != "" && resp.RunID != "" {
+				if narrative, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, resp.RunID); err == nil {
+					accumulateHopResults(hopAcc, hopAttrSigs, extractHopSignatures(narrative, f.DiagnosisPlaybookSeriesID))
+				} else {
+					slog.Warn("fault stability: could not fetch incident narrative for hop certs", "run_id", resp.RunID, "err", err)
 				}
 			}
 
@@ -734,6 +764,7 @@ func cmdRun(args []string) {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
 				postStabilityCert(ctx, cfg, f, sr, cr, attrSummary)
+				postHopCerts(ctx, cfg, f, hopAcc, hopAttrSigs)
 			}
 		}
 

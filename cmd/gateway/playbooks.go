@@ -787,17 +787,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				gateReasons = append(gateReasons, "trust_not_earned")
 				// len(chain) > 1 means prev was itself reached via chaining —
 				// it is not the top-level playbook the caller originally
-				// requested. A known, documented gap (docs/CONSISTENCY.md's
-				// "Certification scope" section): fault_stability_cert is
-				// only ever posted against a fault's designated entry-point
-				// series, never an intermediate hop, so a chain-only
-				// playbook can permanently fail this gate no matter how many
-				// --repeat runs exercise it. The gateway has no fault-catalog
-				// access to *prove* that's what's happening here — this is a
-				// contextual hint pointing at the likely cause, not a
-				// certainty claim.
+				// requested. As of v0.26.0 (docs/CONSISTENCY.md's
+				// "Certification scope" section), `faulttest run --repeat N
+				// --approval-mode=force` posts a cert for every distinct
+				// series a chain passes through, not just the fault's
+				// declared entry point — so a chain-only playbook CAN now
+				// earn its own trust, it just may genuinely never have been
+				// run that way yet, or may have a real unstable/dirty
+				// record. The gateway has no fault-catalog access to *prove*
+				// which of those applies here — this is a contextual hint
+				// pointing at where to look, not a certainty claim.
 				if len(chain) > 1 {
-					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — if it never appears as any fault's own diagnosis_playbook_series_id in your catalog, it has no path to earn its own certification; see docs/CONSISTENCY.md's \"Certification scope\" section"
+					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — check `vault hop-certs <series-id>` for its actual trust record; if it has none, run `faulttest run --repeat N --approval-mode=force` through a fault whose chain passes through it; see docs/CONSISTENCY.md's \"Certification scope\" section"
 				}
 			}
 			if len(gateReasons) > 0 {

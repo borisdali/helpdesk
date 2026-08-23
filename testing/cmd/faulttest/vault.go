@@ -139,7 +139,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|suggest|suggest-update|drafts|activate|diff|discard|import>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -151,6 +151,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
 		fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
+		fmt.Fprintln(os.Stderr, "  hop-certs       Show stability certs for a playbook series, including chain-only (hop) certs")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
@@ -188,6 +189,8 @@ func cmdVault(args []string) {
 		vaultJudgeAccuracy(args[1:])
 	case "cert-compare":
 		vaultCertCompare(args[1:])
+	case "hop-certs":
+		vaultHopCerts(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -557,6 +560,104 @@ func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []au
 		return nil
 	}
 	return result.History
+}
+
+// fetchHopCerts calls GET .../fault-stability?series_id=X&model=Y — the
+// gateway's existing certs-by-series-and-model passthrough (already used
+// internally by trustNotYetEarnedForceGate via fetchFaultStabilityCerts,
+// cmd/gateway/playbooks.go; this is the same query, exposed to the CLI for
+// the first time — v0.26 item 6). Decodes directly into
+// audit.FaultStabilityCert, matching fetchCertHistory's pattern rather than
+// a hand-rolled mirror struct.
+//
+// vault list/status/drift all discover fault_ids via the catalog's own
+// Failure list, so they never surface hop certs — their fault_id is a
+// synthetic "<entry-point-fault-id>::hop:<series-id>" postHopCerts
+// constructs (hop.go), which appears nowhere in the catalog. This is the
+// only CLI path that can show them, keyed by series_id instead.
+func fetchHopCerts(gatewayURL, apiKey, seriesID, model string) []audit.FaultStabilityCert {
+	if gatewayURL == "" || seriesID == "" || model == "" {
+		return nil
+	}
+	reqURL := fmt.Sprintf("%s/api/v1/fleet/fault-stability?series_id=%s&model=%s",
+		strings.TrimSuffix(gatewayURL, "/"), neturl.QueryEscape(seriesID), neturl.QueryEscape(model))
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var result struct {
+		Certs []audit.FaultStabilityCert `json:"certs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	return result.Certs
+}
+
+// vaultHopCerts implements `faulttest vault hop-certs <series-id>` — shows
+// every fault-stability cert on record for a playbook series, including
+// synthetic hop certs postHopCerts posts for series that are never any
+// fault's own diagnosis_playbook_series_id (see hop.go). Answers the
+// question docs/CONSISTENCY.md used to have no CLI answer for: "what does
+// this chain-only playbook's own trust record look like."
+func vaultHopCerts(args []string) {
+	fs := flag.NewFlagSet("vault hop-certs", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault hop-certs")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault hop-certs <series-id> [--agent-model MODEL]")
+		os.Exit(1)
+	}
+	seriesID := fs.Args()[0]
+	model := cfg.DiagnosisModel
+	if model == "" {
+		fmt.Fprintln(os.Stderr, "Error: no diagnosis model set — pass --agent-model or set HELPDESK_MODEL_NAME")
+		os.Exit(1)
+	}
+
+	certs := fetchHopCerts(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, model)
+	fmt.Printf("\nStability certs for series %s (model: %s)\n", seriesID, model)
+	if len(certs) == 0 {
+		fmt.Println("  None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`")
+		fmt.Println("  against a fault whose chain passes through this series to generate one.")
+		return
+	}
+	for _, c := range certs {
+		verdict := "UNSTABLE"
+		if c.IsStable {
+			verdict = "STABLE"
+		}
+		cleanVerdict := "DIRTY"
+		if c.IsClean {
+			cleanVerdict = "CLEAN"
+		}
+		trust := "NOT EARNED"
+		if c.EarnsTrust() {
+			trust = "EARNED"
+		}
+		fmt.Printf("\n  Fault         : %s  (%s)\n", c.FaultID, c.FaultName)
+		fmt.Printf("  Trust         : %s\n", trust)
+		fmt.Printf("  Verdict       : %s / %s\n", verdict, cleanVerdict)
+		fmt.Printf("  Runs          : %d  (pass rate %.0f%%)\n", c.NRuns, c.PassRate*100)
+		fmt.Printf("  Attribution   : %s  consistent: %v\n", c.PrimaryAttribution, c.AttributionConsistent)
+		fmt.Printf("  Tested at     : %s\n", c.TestedAt.Format(time.RFC3339))
+	}
 }
 
 // scanFlag returns the value of --flag=val or --flag val from a []string,
