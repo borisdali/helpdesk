@@ -1475,6 +1475,73 @@ func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_FaultStabilityCert_HopCert_MultipleFaultsSameSeries_RoundTrip
+// is v0.26 item 6's one genuinely new real-stack risk: the underlying
+// "multiple fault_id rows share one playbook_series_id, GetBySeriesAndModel
+// returns all of them" mechanism is already covered twice at the unit level
+// (internal/audit's TestGetBySeriesAndModel_MultipleFaultsSameSeries at the
+// SQL-store layer, cmd/gateway's TestTrustNotYetEarnedForceGate_* at the gate
+// logic layer) — both using ordinary fault_ids. What's never been exercised
+// anywhere, at any level, is postHopCerts's actual synthetic fault_id format
+// (`<entry-point-fault-id>::hop:<series-id>`) round-tripping through a real
+// HTTP request + real SQLite INSERT/SELECT, not a mocked httptest response.
+func TestIntegration_FaultStabilityCert_HopCert_MultipleFaultsSameSeries_RoundTrip(t *testing.T) {
+	seriesID := fmt.Sprintf("pbs_hopcert_shared_%d", time.Now().UnixNano())
+	model := "claude-sonnet-4-6"
+	entryFaultID := "db-wal-disk-full-k8s"
+	hopFaultID := entryFaultID + "::hop:" + seriesID
+
+	post(t, auditdAddr, "/v1/fleet/fault-stability", map[string]any{
+		"fault_id":           entryFaultID,
+		"fault_name":         "WAL disk full",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             5,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"is_clean":           true,
+	})
+	post(t, auditdAddr, "/v1/fleet/fault-stability", map[string]any{
+		"fault_id":           hopFaultID,
+		"fault_name":         "WAL disk full (hop: " + seriesID + ")",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             3,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"is_clean":           true,
+	})
+
+	resp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model="+model)
+	certs, _ := resp["certs"].([]any)
+	if len(certs) != 2 {
+		t.Fatalf("expected 2 certs sharing series %s, got %d: %v", seriesID, len(certs), certs)
+	}
+	byFaultID := map[string]map[string]any{}
+	for _, raw := range certs {
+		c, _ := raw.(map[string]any)
+		byFaultID[fmt.Sprint(c["fault_id"])] = c
+	}
+	if byFaultID[entryFaultID] == nil {
+		t.Errorf("entry-point cert %q missing from series+model query", entryFaultID)
+	}
+	hopCert := byFaultID[hopFaultID]
+	if hopCert == nil {
+		t.Fatalf("hop cert %q missing from series+model query — the synthetic fault_id (with :: separators) did not round-trip", hopFaultID)
+	}
+	if hopCert["playbook_series_id"] != seriesID {
+		t.Errorf("hop cert playbook_series_id = %v, want %v", hopCert["playbook_series_id"], seriesID)
+	}
+
+	// The synthetic ID must also survive a direct fault_id path lookup
+	// unmangled (not silently truncated at the first ':', not requiring
+	// manual URL-escaping by the caller).
+	direct := get(t, auditdAddr, "/v1/fleet/fault-stability/"+hopFaultID)
+	if direct["fault_id"] != hopFaultID {
+		t.Errorf("direct lookup fault_id = %v, want %v", direct["fault_id"], hopFaultID)
+	}
+}
+
 // TestIntegration_ObjectiveEvidence_GetEventsSignal_RoundTrips mirrors
 // TestIntegration_ObjectiveEvidence_RoundTrips but with a get_events-sourced
 // signal (v0.25.0's recordEventDistressEvidence, agents/k8s/tools.go) rather

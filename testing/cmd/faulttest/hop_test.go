@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	"helpdesk/testing/faultlib"
@@ -445,5 +446,82 @@ func TestFetchHopCerts_EmptyArgsReturnNil(t *testing.T) {
 	}
 	if got := fetchHopCerts("http://x", "key", "pbs_x", ""); got != nil {
 		t.Error("empty model should return nil")
+	}
+}
+
+func TestFetchHopCerts_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	if got := fetchHopCerts(srv.URL, "", "pbs_x", "model"); got != nil {
+		t.Errorf("got %v, want nil on 500", got)
+	}
+}
+
+func TestFetchHopCerts_SendsAuth(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"certs": []map[string]any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchHopCerts(srv.URL, "secret-key", "pbs_x", "model")
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer secret-key")
+	}
+}
+
+func TestVaultHopCerts_CertsFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"certs": []map[string]any{
+				{
+					"fault_id":   "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect",
+					"fault_name": "WAL disk full (hop: pbs_sysadmin_docker_inspect)",
+					"is_stable":  true, "is_clean": true, "attribution_consistent": true,
+					"primary_attribution": "pbs_k8s_pod_crash_triage",
+					"n_runs":              3, "pass_rate": 1.0,
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultHopCerts([]string{"pbs_sysadmin_docker_inspect", "--gateway", srv.URL, "--agent-model", "claude-sonnet-4-6"})
+	})
+
+	if !strings.Contains(out, "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect") {
+		t.Errorf("output missing fault_id:\n%s", out)
+	}
+	if !strings.Contains(out, "EARNED") {
+		t.Errorf("output missing trust verdict (all three EarnsTrust conditions true):\n%s", out)
+	}
+	if !strings.Contains(out, "STABLE") || !strings.Contains(out, "CLEAN") {
+		t.Errorf("output missing stability/clean verdicts:\n%s", out)
+	}
+}
+
+func TestVaultHopCerts_NoneFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"certs": []map[string]any{}}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultHopCerts([]string{"pbs_never_certified", "--gateway", srv.URL, "--agent-model", "claude-sonnet-4-6"})
+	})
+
+	if !strings.Contains(out, "never been certified") {
+		t.Errorf("output missing the no-certs guidance message:\n%s", out)
+	}
+	if !strings.Contains(out, "--repeat") {
+		t.Errorf("output missing the --repeat workflow hint:\n%s", out)
 	}
 }
