@@ -2154,10 +2154,11 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 // ── printJourneyDetail: HasTargetDrift / HasMismatch rendering ────────────
 
 // TestPrintJourneyDetail_TargetDriftWarning guards against the gap found
-// during a coverage review: journeySummary (this package's own mirror of
-// audit.JourneySummary) didn't know about has_target_drift at all, so a
-// journey with real target-scope drift rendered as fully clean in this exact
-// CLI — the same tool used throughout this session to inspect journeys.
+// during a coverage review: journeySummary (formerly this package's own
+// hand-rolled mirror of audit.JourneySummary, now an alias for it — Part E,
+// v0.26) didn't know about has_target_drift at all, so a journey with real
+// target-scope drift rendered as fully clean in this exact CLI — the same
+// tool used throughout this session to inspect journeys.
 func TestPrintJourneyDetail_TargetDriftWarning(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2543,6 +2544,34 @@ func TestFetchJourneys_Found(t *testing.T) {
 	}
 	if got[1].Outcome != "abandoned" {
 		t.Errorf("Outcome = %q, want abandoned", got[1].Outcome)
+	}
+}
+
+// TestFetchJourneys_DecodesPurposeFields locks in journeySummary's fix from
+// a hand-rolled mirror to a direct audit.JourneySummary alias (Part E,
+// v0.26): the old mirror never had Purpose/PurposeNote at all, so a gateway
+// response carrying them would have silently dropped both on decode.
+func TestFetchJourneys_DecodesPurposeFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]journeySummary{ //nolint:errcheck
+			{TraceID: "tr_purpose1", Purpose: "incident_response", PurposeNote: "on-call escalation"},
+		})
+	}))
+	defer srv.Close()
+
+	got, err := fetchJourneys(srv.URL, "", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Purpose != "incident_response" {
+		t.Errorf("Purpose = %q, want incident_response", got[0].Purpose)
+	}
+	if got[0].PurposeNote != "on-call escalation" {
+		t.Errorf("PurposeNote = %q, want %q", got[0].PurposeNote, "on-call escalation")
 	}
 }
 

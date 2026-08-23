@@ -2432,32 +2432,19 @@ func vaultIncidents(args []string) {
 // ── vault journey ─────────────────────────────────────────────────────────
 
 // journeySummary mirrors audit.JourneySummary for JSON decoding.
-type journeySummary struct {
-	TraceID              string              `json:"trace_id"`
-	StartedAt            string              `json:"started_at"`
-	EndedAt              string              `json:"ended_at"`
-	DurationMs           int64               `json:"duration_ms"`
-	UserID               string              `json:"user_id,omitempty"`
-	UserQuery            string              `json:"user_query,omitempty"`
-	Agent                string              `json:"agent,omitempty"`
-	Category             string              `json:"category,omitempty"`
-	Delegations          []delegationSummary `json:"delegations,omitempty"`
-	ToolsUsed            []string            `json:"tools_used"`
-	Outcome              string              `json:"outcome,omitempty"`
-	EventCount           int                 `json:"event_count"`
-	RetryCount           int                 `json:"retry_count,omitempty"`
-	Origin               string              `json:"origin,omitempty"`
-	HasMismatch          bool                `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool                `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool                `json:"has_protocol_violation,omitempty"`
-	IncidentRunID        string              `json:"incident_run_id,omitempty"`
-}
-
-// delegationSummary mirrors audit.DelegationSummary.
-type delegationSummary struct {
-	Intent string   `json:"intent"`
-	Tools  []string `json:"tools"`
-}
+// journeySummary/delegationSummary are aliases for audit.JourneySummary/
+// audit.DelegationSummary (Part E, v0.26 — item 7's dedup pattern applied to
+// this file's own remaining mirrors) — this package previously carried a
+// hand-rolled copy of each. That mirror is what let HasTargetDrift silently
+// go missing until a coverage review caught it (see fetchCertHistory's doc
+// comment above, fixed earlier via the same underlying pattern), and it had
+// independently drifted further since: audit.JourneySummary also carries
+// Purpose/PurposeNote, which this mirror never had at all. internal/audit is
+// already a direct dependency of this file (see the import above), so
+// aliasing costs nothing and makes this class of drift a compile error
+// instead of a silent gap.
+type journeySummary = audit.JourneySummary
+type delegationSummary = audit.DelegationSummary
 
 // fetchJourneys calls GET /api/v1/governance/journeys with the given query params.
 func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journeySummary, error) {
@@ -2492,24 +2479,16 @@ func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journ
 	return summaries, nil
 }
 
-// targetDriftDetail mirrors audit.TargetDriftDetail for JSON decoding.
-type targetDriftDetail struct {
-	Tool             string `json:"tool"`
-	ConnectionString string `json:"connection_string"`
-}
-
-// delegationVerificationEvent mirrors the audit.DelegationVerification fields
-// vault journey needs to show tool/value detail instead of generic boilerplate
-// in its warning sections — a strict subset of the full struct.
-type delegationVerificationEvent struct {
-	Agent                string              `json:"agent"`
-	NarratedNotConfirmed []string            `json:"narrated_not_confirmed,omitempty"`
-	WriteConfirmed       []string            `json:"write_confirmed,omitempty"`
-	DestructiveConfirmed []string            `json:"destructive_confirmed,omitempty"`
-	TargetDrift          []string            `json:"target_drift,omitempty"`
-	TargetDriftDetail    []targetDriftDetail `json:"target_drift_detail,omitempty"`
-	ProtocolViolation    bool                `json:"protocol_violation,omitempty"`
-}
+// targetDriftDetail/delegationVerificationEvent are aliases for
+// audit.TargetDriftDetail/audit.DelegationVerification (Part E, v0.26).
+// delegationVerificationEvent previously mirrored only a strict subset of
+// the real struct's fields (the ones this file's warning-section rendering
+// happened to need) — aliasing to the full type costs nothing on the decode
+// side (unused fields are simply never read) and means any future rendering
+// need (e.g. ActionClass, ToolsConfirmed, MismatchReason) is already there
+// rather than requiring another mirror extension.
+type targetDriftDetail = audit.TargetDriftDetail
+type delegationVerificationEvent = audit.DelegationVerification
 
 // fetchDelegationVerificationEvents calls GET /api/v1/governance/events for
 // every delegation_verification event recorded on traceID — the raw events
@@ -4681,11 +4660,11 @@ type narrativeStep struct {
 	Status   string `json:"status"`
 }
 
-// narrativeJourneyRef mirrors audit.IncidentJourneyRef for JSON decoding.
-type narrativeJourneyRef struct {
-	Phase   string `json:"phase"`
-	TraceID string `json:"trace_id"`
-}
+// narrativeJourneyRef is an alias for audit.IncidentJourneyRef (Part E,
+// v0.26). Unlike narrativeEscalationHop/incidentNarrative below (which
+// mirror types in cmd/gateway, an unimportable package main), this one has
+// no such excuse — internal/audit is already a direct dependency here.
+type narrativeJourneyRef = audit.IncidentJourneyRef
 
 // narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
 type narrativeEscalationHop struct {
