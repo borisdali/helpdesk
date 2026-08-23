@@ -1482,6 +1482,12 @@ This is the deepest path in the graph: two cross-domain escalations (DB agent �
 live-verified end-to-end against a real cluster with the `db-wal-disk-full-k8s` fault (see
 [FAULTTEST.md](FAULTTEST.md)) — not just unit-tested with synthetic run data.
 
+Every playbook in this graph can now earn its own fault-stability cert — including
+`pbs_sysadmin_docker_inspect`, `pbs_db_pitr_recovery`, and `pbs_wal_disk_full`, which are only
+ever reached as downstream hops here, never a fault's own entry point. See
+[CONSISTENCY.md §Certification scope](CONSISTENCY.md#certification-scope-every-hop-in-a-chain-not-just-the-entry-point-v0260)
+and [VAULT.md's `vault hop-certs`](VAULT.md#vault-hop-certs).
+
 The agent is prompted with the escalation paths at run time:
 
 > "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"

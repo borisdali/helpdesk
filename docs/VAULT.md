@@ -35,6 +35,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault import](#vault-import)
    - [vault judge-accuracy](#vault-judge-accuracy)
    - [vault cert-compare](#vault-cert-compare)
+   - [vault hop-certs](#vault-hop-certs)
    - [vault active](#vault-active)
    - [vault history](#vault-history)
 6. [The `from-trace` Endpoint](#the-from-trace-endpoint)
@@ -1318,6 +1319,71 @@ See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the full taxonomy versionin
 **Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
 
 **Model name display.** The `claude-` vendor prefix is stripped from column headers (`claude-sonnet-4-6` → `sonnet-4-6`) to keep the table readable. Full model names are used everywhere else (summary line, pass-rate delta lines, error messages).
+
+### vault hop-certs
+
+```bash
+faulttest vault hop-certs <series-id> \
+  --gateway http://gateway:8080 \
+  --api-key $HELPDESK_API_KEY \
+  --agent-model claude-sonnet-4-6
+```
+
+Shows every fault-stability cert on record for a playbook series, including certs
+posted for it as a **chain-only hop** — a playbook that's never any fault's own
+`diagnosis_playbook_series_id`, only ever reached mid-chain via `ESCALATE_TO` or as
+the terminal remediation target. `vault list`/`status`/`drift` all iterate the
+catalog's own fault list to know which fault_ids to look up, so they never surface
+these — hop certs use a synthetic fault_id (`<entry-point-fault-id>::hop:<series-id>`)
+that appears nowhere in the catalog. This is the only command that looks certs up by
+series_id directly, so it's the one place to answer "what is this specific
+chain-only playbook's own trust record."
+
+**Prerequisite:** `faulttest run --repeat N --approval-mode=force` (or a target
+playbook already configured for `session`/`auto`) — the gateway only auto-chains
+past the first hop when the requester's approval mode allows it (`canAutoChain`).
+Without `--approval-mode=force`, a `--repeat` batch never reaches downstream hops at
+all, so no hop certs are ever posted; `faulttest` prints a one-time warning when this
+is the case.
+
+```
+Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+
+  Fault         : db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect  (WAL disk full (hop: pbs_sysadmin_docker_inspect))
+  Trust         : EARNED
+  Verdict       : STABLE / CLEAN
+  Runs          : 3  (pass rate 100%)
+  Attribution   : pbs_k8s_pod_crash_triage  consistent: true
+  Tested at     : 2026-08-22T14:03:11Z
+```
+
+If the series has never been reached by any `--repeat --approval-mode=force` batch,
+the command prints guidance instead of an empty table:
+
+```
+Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+  None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
+  against a fault whose chain passes through this series to generate one.
+```
+
+**How a hop earns Trust/STABLE/CLEAN.** Unlike an entry-point cert (text-scored
+against the fault's `expected_keywords`/`expected_diagnosis`), a hop's pass/fail is
+outcome-validity: it passed a rep if it reached a valid non-error outcome (resolved,
+escalated, or transitioned) rather than getting stuck, erroring, or being abandoned.
+Reps where a *different*, legitimate gate paused the chain (`gate_pending`) don't
+count either way — that's not this hop misbehaving. `Attribution` for a hop is
+code-derived, not LLM-classified: did it hand off to the same next target on every
+rep (for a terminal remediation hop, there's no such decision to diverge on, so it's
+trivially always consistent). See [CONSISTENCY.md §Certification
+scope](CONSISTENCY.md#certification-scope-every-hop-in-a-chain-not-just-the-entry-point-v0260)
+for the full mechanism and why this exists — every distinct series a chain actually
+passes through now earns its own cert, not just the fault's declared entry point.
+
+**Same `EarnsTrust()` bar as everywhere else.** A hop cert only unblocks
+`trustNotYetEarnedForceGate` for that series when `Trust: EARNED` — `IsStable`,
+`IsClean`, and `AttributionConsistent` all true, identical to any other cert. A
+`Trust: NOT EARNED` result here is a real finding (the hop's actual behavior across
+reps), not a structural limitation to work around.
 
 ### vault active
 
