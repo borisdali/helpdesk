@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[The AI that Un-Trusts Itself: The Page that Never Came](...)**
+- **[The AI that Un-Trusts Itself: The Page that Never Came](https://itnext.io/the-ai-that-un-trusts-itself-the-page-that-never-came-6cc9df173533)**
   How aiHelpDesk revokes its own permission before you have to ask. A story about the cert that doesn't silently go stale
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
