@@ -183,7 +183,7 @@ Again, what we expect to see here is `transition_target: "pbs_connection_remedia
      (1 row)
 ```
 
-So we've got 80 idle vs. 87 total, this time with a 7-minute window, which should comfortably outlast the multi-tool-call investigation. Let's run it now:
+So we've got 80 idle vs. 87 total and a generous 7-minute window, which should comfortably outlast the multi-tool-call investigation. Let's run it now:
 
 ```
 [boris@ ~/helpdesk]$ date; time curl -s -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" -H "X-Purpose: diagnostic" \
@@ -382,9 +382,9 @@ pod/vault-check-annotation created
     ⚠ playbook version unknown — cert predates version tracking; cannot detect staleness against playbook edits
 ```
 
-  Expect the Warning types: line to now show target_drift=5(predictable) — the (predictable)/(varies) suffix wasn't there before today, since it's purely a display-layer change on data that already existed.
+Expect the Warning types: line to now show target_drift=5(predictable). That (predictable)/(varies) suffix wasn't there before today, since it's purely a display-layer change on data that already existed.
 
-Ah, note `Warning types : mismatch=3(varies), target_drift=5(predictable)`. The exact new annotation, correctly applied! And a bonus, unplanned confirmation: the `⚠ playbook version unknown — cert predates version tracking` warning also fired correctly. This cert has no `playbook_version` at all (posted before v0.25.0 existed), so that's a live, free confirmation of item 2.1's "unknown version" case too, no extra setup required.
+Ah, indeed, see `Warning types : mismatch=3(varies), target_drift=5(predictable)`. The exact new annotation, correctly applied! And a bonus, unplanned confirmation: the `⚠ playbook version unknown — cert predates version tracking` warning also fired correctly. This cert has no `playbook_version` at all (posted before v0.25.0 existed), so that's a live, free confirmation of item 2.1's "unknown version" case too, no extra setup required.
 
 
 ## 5. Cert history diff lines + `vault diff` hint in one combined test
@@ -494,7 +494,7 @@ That's a complete, clean pass with every piece rendering exactly as designed in 
     ⚠ cert was earned against playbook version 0.1-stale, current version is 1.6 — consider re-running --repeat to refresh
 
     followed by
-    See what changed: faulttest vault diff pb_stale0000 pb_22585380 —
+    See what changed: faulttest vault diff pb_stale0000 pb_22585380
 
     Both real playbook IDs, ready to run.
 
@@ -580,7 +580,7 @@ Diff: series pbs_connection_triage
 
 ```
 
-No differences, so the two versions are identical. That's a real, complete confirmation of the whole chain. `vault diff` correctly connected to the real playbook data and printed a valid result (in this case, it happened to be "no differences," which in itself is meaningful: v1.5→v1.6 was likely a metadata-only bump, e.g. activation timestamp, source tagging, etc. Not a content change).
+No differences, so the two versions are identical. That's a bit of a boring bummer, but it's a real, complete confirmation of the whole chain. `vault diff` correctly connected to the real playbook data and printed a valid result (in this case, it happened to be "no differences," which in itself is meaningful: v1.5→v1.6 was likely a metadata-only bump, e.g. activation timestamp, source tagging, etc. Not a content change).
 
 We didn't get to see it in this particular example, but `vault diff` is capable now to print a real field-by-field diff between playbook versions: guidance text, escalation conditions, execution mode, etc., whatever actually changed.
 
