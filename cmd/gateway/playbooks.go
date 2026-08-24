@@ -500,6 +500,7 @@ type agentRunResult struct {
 	runID            string
 	playbookSeriesID string
 	agentName        string
+	toolCalls        []string // tool names called during this hop (from the a2aResponse's tool_calls field)
 }
 
 // chainEntry is one element of the per-run chain returned in API responses.
@@ -511,6 +512,23 @@ type chainEntry struct {
 	Findings         string                  `json:"findings,omitempty"`
 	Text             string                  `json:"text,omitempty"`
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
+	ToolCalls        []string                `json:"tool_calls,omitempty"`
+}
+
+// aggregateChainToolCalls returns the deduped union of ToolCalls across every
+// hop in chain, preserving first-seen order.
+func aggregateChainToolCalls(chain []chainEntry) []string {
+	var all []string
+	seen := map[string]bool{}
+	for _, entry := range chain {
+		for _, tc := range entry.ToolCalls {
+			if !seen[tc] {
+				seen[tc] = true
+				all = append(all, tc)
+			}
+		}
+	}
+	return all
 }
 
 // runAgentPlaybook executes one agent-mode playbook run and returns the parsed result.
@@ -563,6 +581,13 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 	if capture.code == http.StatusOK {
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
+			if tc, ok := respBody["tool_calls"].([]any); ok {
+				for _, v := range tc {
+					if s, ok := v.(string); ok {
+						res.toolCalls = append(res.toolCalls, s)
+					}
+				}
+			}
 			if text, ok := respBody["text"].(string); ok {
 				res.rawText = text
 				res.diagReport = parseDiagnosticReport(text)
@@ -718,6 +743,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		Findings:         primary.findings,
 		Text:             capturedText(primary.capture),
 		DiagnosticReport: primary.diagReport,
+		ToolCalls:        primary.toolCalls,
 	}}
 
 	if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, pb, primary) {
@@ -914,6 +940,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			Findings:         chained.findings,
 			Text:             capturedText(chained.capture),
 			DiagnosticReport: chained.diagReport,
+			ToolCalls:        chained.toolCalls,
 		})
 		finalReport = mergeDiagnosticReports(finalReport, chained.diagReport)
 		finalOutcome = "escalated+resolved"
@@ -1031,6 +1058,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Aggregate tool_calls across every hop in the chain (deduped) — the raw
+	// response body captured on primary.capture only reflects the first hop's
+	// own tool_call_summary, which understates (often to zero) the fault's
+	// real expected_tools when they're actually called by a later,
+	// escalated/transitioned-to hop. injectFields overrides primary.capture's
+	// own tool_calls with whatever is set here.
+	if allToolCalls := aggregateChainToolCalls(chain); len(allToolCalls) > 0 {
+		extra["tool_calls"] = allToolCalls
+	}
 	extra["chain"] = chain
 
 	injectFields(w, primary.capture, extra)

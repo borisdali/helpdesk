@@ -1255,7 +1255,15 @@ failures:
       expected_diagnosis:
         category: "shutdown"
         narrative: "The agent should identify that the PostgreSQL container or process has been stopped and is not running, and recommend restarting it."
-    timeout: 60s
+    # 60s (the old value) is enough for a single-hop response, but with
+    # --approval-mode=force the gateway auto-chains synchronously within one
+    # HTTP request — this fault's real chain (pbs_db_restart_triage ->
+    # ESCALATE_TO pbs_sysadmin_docker_inspect -> TRANSITION_TO
+    # pbs_wal_disk_full) can take 3 LLM calls to complete. Live-confirmed
+    # 2026-08-24: a 70s client timeout (60s + the 10s runViaPlaybook adds)
+    # lost 2 of 3 --repeat reps to context deadline exceeded, even though the
+    # third rep (which completed) took 65s — right at the old ceiling.
+    timeout: 180s
 
   - id: host-pg-crash
     name: "PostgreSQL process crash inside container"

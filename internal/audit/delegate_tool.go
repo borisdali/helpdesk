@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -246,7 +247,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 		// which tools the sub-agent actually executed, independent of its text
 		// response. This closes the gap where an LLM can fabricate a success
 		// message without calling any tool.
-		verif := buildDelegationVerification(auditURL, auditAPIKey, traceID, start, actionClass, event.EventID, args.Agent)
+		verif := buildDelegationVerification(auditURL, auditAPIKey, traceID, start, actionClass, event.EventID, args.Agent, response)
 		if auditor != nil {
 			verifEvent := &Event{
 				EventID:                "evt_" + uuid.New().String()[:8],
@@ -414,13 +415,15 @@ func extractResponseText(result a2a.SendMessageResult) string {
 // and returns a DelegationVerification recording what was actually executed.
 // It retries once after 200 ms to absorb async write propagation from RemoteStore.
 // Exported so the gateway can use it without duplicating the fetch logic.
-// Pass apiKey="" when auditd does not require authentication.
-func BuildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
-	return buildDelegationVerification(auditURL, auditAPIKey, traceID, since, actionClass, delegationEventID, agent)
+// Pass apiKey="" when auditd does not require authentication. responseText is
+// the agent's raw response text for this delegation — pass "" if unavailable;
+// it is only used to check for a corroborated decline (see declinedActionSignal).
+func BuildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent, responseText string) *DelegationVerification {
+	return buildDelegationVerification(auditURL, auditAPIKey, traceID, since, actionClass, delegationEventID, agent, responseText)
 }
 
 // buildDelegationVerification is the unexported implementation.
-func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent string) *DelegationVerification {
+func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since time.Time, actionClass ActionClass, delegationEventID, agent, responseText string) *DelegationVerification {
 	verif := &DelegationVerification{
 		DelegationEventID: delegationEventID,
 		Agent:             agent,
@@ -454,6 +457,20 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 		verif.Mismatch = len(verif.WriteConfirmed) == 0 && len(verif.DestructiveConfirmed) == 0
 	}
 
+	// Corroborated decline: a write/destructive mismatch can be a genuine,
+	// correct decision (the agent looked, found nothing to write, and handed
+	// off) rather than a silent failure. declinedActionSignal requires two
+	// independent structured protocol lines to agree — ACTION_TAKEN: none AND
+	// a well-formed ESCALATE_TO/TRANSITION_TO line — which is a materially
+	// stronger bar than either alone; a genuinely broken/silently-failing call
+	// is unlikely to also emit a clean, well-formed handoff line. Still
+	// self-reported text, not audit-confirmed, so this is deliberately paired
+	// with (not a replacement for) the unconditional check above.
+	if verif.Mismatch && declinedActionSignal(responseText) {
+		verif.Mismatch = false
+		verif.MismatchReason = "no write/destructive tool executed, and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
+	}
+
 	// Narrated-but-unconfirmed tool calls: orthogonal to the write/destructive-only
 	// switch above, and unconditional on actionClass — a read delegation whose model
 	// narrated calling a tool that never produced a tool_execution event is just as
@@ -470,6 +487,41 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 		}
 	}
 	return verif
+}
+
+// actionTakenNoneRe matches an ACTION_TAKEN line whose value indicates
+// nothing was done (e.g. "ACTION_TAKEN: none — escalation recommended").
+// Matches the same line format cmd/gateway/playbooks.go's parseDiagnosticReport
+// parses (leading "ACTION_TAKEN:", optional markdown bold, case-insensitive).
+var actionTakenNoneRe = regexp.MustCompile(`(?im)^\**ACTION_TAKEN:\**\s*none\b`)
+
+// escalationHandoffRe matches a well-formed ESCALATE_TO/TRANSITION_TO line
+// whose target is not "none" — i.e. the model actually signaled a handoff,
+// not just the absence of one. Matches the same line format
+// cmd/gateway/playbooks.go's parseAgentEscalation parses.
+var escalationHandoffRe = regexp.MustCompile(`(?im)^\**(?:ESCALATE_TO|TRANSITION_TO):\**\s*(\S+)`)
+
+// declinedActionSignal reports whether responseText contains BOTH an
+// ACTION_TAKEN line whose value indicates nothing was done AND a
+// well-formed ESCALATE_TO/TRANSITION_TO handoff line — the same two
+// protocol lines cmd/gateway/playbooks.go already parses for chaining.
+// Requiring both together is a materially stronger bar than either alone: a
+// genuinely broken/silently-failing call is unlikely to also emit a clean,
+// well-formed handoff line. Still a self-reported signal (not confirmed by
+// tool-execution audit events), so callers pair it with, rather than
+// substitute it for, code-derived checks.
+func declinedActionSignal(responseText string) bool {
+	if responseText == "" {
+		return false
+	}
+	if !actionTakenNoneRe.MatchString(responseText) {
+		return false
+	}
+	m := escalationHandoffRe.FindStringSubmatch(responseText)
+	if m == nil {
+		return false
+	}
+	return strings.ToLower(m[1]) != "none"
 }
 
 // fetchToolExecutionEvents queries auditd for tool_execution events in the given

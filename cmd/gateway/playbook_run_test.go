@@ -2119,6 +2119,43 @@ func TestAppendChainedText_ChainedError(t *testing.T) {
 	}
 }
 
+// TestAggregateChainToolCalls_UnionAcrossHops is a regression test for a real
+// bug found during live 3-hop escalation-chain verification: the final
+// playbook-run response's tool_calls field only ever reflected the primary
+// (first) hop's own tool_call_summary, since injectFields builds the response
+// from primary.capture's raw body. For chains where the fault's expected
+// tools are actually called by a later, escalated/transitioned-to hop (the
+// common case), this silently zeroed the tool-evidence score. Verifies
+// aggregateChainToolCalls returns the deduped union across every hop.
+func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
+	chain := []chainEntry{
+		{Step: 1, PlaybookSeriesID: "pbs_db_triage", ToolCalls: []string{"check_connection", "get_saved_snapshots"}},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
+	}
+
+	got := aggregateChainToolCalls(chain)
+	want := []string{"check_connection", "get_saved_snapshots", "check_host", "get_host_logs"}
+
+	if len(got) != len(want) {
+		t.Fatalf("aggregateChainToolCalls() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("aggregateChainToolCalls()[%d] = %q, want %q (order should be first-seen, duplicates deduped): got %v", i, got[i], w, got)
+		}
+	}
+}
+
+func TestAggregateChainToolCalls_NoToolCalls(t *testing.T) {
+	chain := []chainEntry{
+		{Step: 1, PlaybookSeriesID: "pbs_db_triage"},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect"},
+	}
+	if got := aggregateChainToolCalls(chain); len(got) != 0 {
+		t.Errorf("aggregateChainToolCalls() = %v, want empty", got)
+	}
+}
+
 // mockChainAuditd starts a mock auditd that supports a full multi-hop
 // auto-chain: primary playbook fetch by ID, chained playbook fetch by
 // series_id, run creation (unique run_id per call), and run completion
@@ -2731,6 +2768,109 @@ func TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops(t *testi
 		}
 		if !found {
 			t.Errorf("policy_denials missing entry for %q — got resource_names %v (primary hop's own denial should not be lost when the chained hop's is appended)", want, gotNames)
+		}
+	}
+}
+
+// TestHandlePlaybookRun_AutoChain_ToolCallsAggregatedAcrossHops is a regression
+// test for a real bug found during live 3-hop escalation-chain verification:
+// the final playbook-run response's tool_calls field only reflected the
+// primary (first) hop's own tool_call_summary artifact — never a chained
+// hop's — because injectFields builds the response from primary.capture's
+// raw body. Faults whose expected_tools are actually called by a later,
+// escalated-to hop (the common case: an entry-point triage hop escalates
+// before calling any of the fault's real diagnostic tools) silently scored
+// 0% tool evidence even though the tools genuinely were called downstream.
+func TestHandlePlaybookRun_AutoChain_ToolCallsAggregatedAcrossHops(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_tcchain_triage",
+		SeriesID:      "pbs_tcchain_triage",
+		Name:          "TC Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "tcchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_tcchain_sysadmin",
+		SeriesID:      "pbs_tcchain_sysadmin",
+		Name:          "TC Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "tcchain_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pbTriage)
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if r.URL.Query().Get("series_id") == "pbs_tcchain_sysadmin" {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pbSysadmin}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_tcchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	// The primary (entry-point) hop calls its own tools and escalates before
+	// ever touching the fault's real expected tools — check_host/get_host_logs
+	// are only called by the chained (sysadmin) hop.
+	_, dbCard := mockA2AServerWithTextAndToolCalls(t, "tcchain_db_agent",
+		"FINDINGS: looks like a container problem\nESCALATE_TO: pbs_tcchain_sysadmin\n",
+		[]string{"check_connection", "get_saved_snapshots"})
+	_, sysadminCard := mockA2AServerWithTextAndToolCalls(t, "tcchain_sysadmin_agent",
+		"FINDINGS: container is stopped\nESCALATE_TO: none\n",
+		[]string{"check_host", "get_host_logs"})
+	for name, card := range map[string]*a2a.AgentCard{
+		"tcchain_db_agent":       dbCard,
+		"tcchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"container stopped","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	toolCallsRaw, ok := resp["tool_calls"].([]any)
+	if !ok {
+		t.Fatalf("expected top-level tool_calls field in response, got %v — body: %s", resp["tool_calls"], rec.Body.String())
+	}
+	var got []string
+	for _, tc := range toolCallsRaw {
+		got = append(got, fmt.Sprintf("%v", tc))
+	}
+	want := []string{"check_connection", "get_saved_snapshots", "check_host", "get_host_logs"}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tool_calls missing %q (from a chained hop) — got %v; the response must aggregate tool_calls across every hop, not just the primary/first one", w, got)
 		}
 	}
 }
@@ -4058,6 +4198,58 @@ func mockA2AServerWithText(t *testing.T, agentName, responseText string) (*httpt
 						"role": "agent",
 						"parts": []map[string]any{
 							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// mockA2AServerWithTextAndToolCalls is mockA2AServerWithText plus a
+// tool_call_summary DataPart artifact, so the response carries a populated
+// tool_calls field the way a real agent's does when it actually invokes tools.
+func mockA2AServerWithTextAndToolCalls(t *testing.T, agentName, responseText string, toolCalls []string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-toolcalls-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+				"artifacts": []map[string]any{
+					{
+						"artifactId": "artifact-1",
+						"parts": []map[string]any{
+							{
+								"kind": "data",
+								"data": map[string]any{"tool_calls": toolCalls},
+								"metadata": map[string]any{
+									"helpdesk_type": "tool_call_summary",
+								},
+							},
 						},
 					},
 				},
