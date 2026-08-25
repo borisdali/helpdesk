@@ -473,8 +473,8 @@ func TestBuildPlannerToolCatalog(t *testing.T) {
 func makeTestInfra() *infra.Config {
 	return &infra.Config{
 		DBServers: map[string]infra.DBServer{
-			"prod-db-1": {Tags: []string{"production"}},
-			"prod-db-2": {Tags: []string{"production"}},
+			"prod-db-1":  {Tags: []string{"production"}},
+			"prod-db-2":  {Tags: []string{"production"}},
 			"staging-db": {Tags: []string{"staging"}},
 			"dev-db":     {Tags: []string{"development"}},
 		},
@@ -1848,6 +1848,45 @@ func TestProxyToAgent_MismatchHeader_AbsentOnRead(t *testing.T) {
 	}
 }
 
+// TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline is a regression
+// test for a real bug found during live 3-hop escalation-chain verification:
+// a write/destructive delegation with no confirmed tool execution always set
+// X-Audit-Mismatch: true, with no way to recognize a genuine, corroborated
+// decline (the agent looked, found nothing to write, and correctly escalated
+// instead of silently failing). Verifies the fix end-to-end through the real
+// proxyToAgentWithTool path — not just buildDelegationVerification directly —
+// confirming the response text's ACTION_TAKEN: none + ESCALATE_TO pair
+// correctly clears the header on the live HTTP response.
+func TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline(t *testing.T) {
+	_, card := mockA2AServerWithText(t, agentNameDB,
+		"FINDINGS: container exited cleanly, nothing to write\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "" {
+		t.Errorf("X-Audit-Mismatch = %q, want empty: response has a corroborated decline (ACTION_TAKEN: none + ESCALATE_TO)", got)
+	}
+}
+
 // TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch verifies the fix for
 // the collision the Plan agent found: manualHold (approval_mode=manual + destructive
 // delegation) is expected to suppress the write/destructive-absence mismatch, since
@@ -2090,7 +2129,7 @@ func TestCheckApprovalMode_Session_ValidSessionAllows(t *testing.T) {
 // the caller's HTTP method and request body to auditd unchanged.
 func TestGovernanceApprovalForwarding(t *testing.T) {
 	cases := []struct {
-		path     string
+		path       string
 		auditdPath string
 	}{
 		{

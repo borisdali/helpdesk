@@ -431,6 +431,27 @@ func TestBuildDelegationVerification_WriteAction_DeclinedWithHandoff_Downgraded(
 	}
 }
 
+// TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded
+// verifies the corroborated-decline downgrade applies to ActionDestructive too,
+// not just ActionWrite — the downgrade check runs after the switch statement
+// unconditional on which branch set Mismatch, but nothing had verified this for
+// the Destructive class specifically before this test.
+func TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+	})
+	responseText := "FINDINGS: container exited cleanly, no restart performed\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del14", "sysadmin_agent", responseText)
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: corroborated decline should downgrade a destructive-class mismatch the same as a write-class one")
+	}
+	if v.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
 func TestBuildDelegationVerification_WriteAction_ActionTakenNoneOnly_StillMismatch(t *testing.T) {
 	// ACTION_TAKEN: none alone, with no handoff line, is not corroborated —
 	// stays a mismatch (guards against a single self-reported line being
