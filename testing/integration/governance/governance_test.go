@@ -14,6 +14,7 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,8 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+
+	"helpdesk/internal/audit"
 )
 
 const (
@@ -781,6 +784,44 @@ func TestIntegration_AgentReasoningRoundTrip(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("event %s not found when filtering by event_type=agent_reasoning", eventID)
+	}
+}
+
+// TestIntegration_ToolAuditor_RecordToolCall_ConfirmedByDelegationVerification
+// closes a real coverage gap found while fixing a live bug this session: three
+// tools (agents/sysadmin's five diagnostic tools, agents/database's
+// get_saved_snapshots/read_uploaded_file) genuinely executed but never called
+// audit.ToolAuditor.RecordToolCall at all, so audit.BuildDelegationVerification
+// flagged them as "narrated but unconfirmed" and fired false FABRICATION RISK
+// alerts. The fix (calling RecordToolCall in each) was unit-tested by reading
+// straight back from the audit.Store (agents/sysadmin, agents/database
+// *_test.go), and BuildDelegationVerification's read side was separately unit-
+// tested against synthetic httptest fixtures (internal/audit/delegate_tool_test.go)
+// — but nothing had ever exercised the two halves together through a real
+// HTTP write (ToolAuditor -> RemoteStore -> auditd -> SQLite) followed by a
+// real HTTP read (BuildDelegationVerification's own query), which is the exact
+// production wiring an agent process uses. This is the one round trip that
+// actually would have caught the missing RecordToolCall calls, had it existed
+// before this session's live testing surfaced them.
+func TestIntegration_ToolAuditor_RecordToolCall_ConfirmedByDelegationVerification(t *testing.T) {
+	traceID := fmt.Sprintf("tr-recordcall-%d", time.Now().UnixNano())
+	since := time.Now().Add(-time.Minute)
+
+	store := audit.NewRemoteStore(auditdAddr)
+	ta := audit.NewToolAuditor(store, "sysadmin_agent", "sess_recordcall", traceID)
+	ta.RecordToolCall(context.Background(), audit.ToolCall{
+		Name:       "check_host",
+		Parameters: map[string]any{"target": "prod_db"},
+	}, audit.ToolResult{
+		Output: "running (exitcode=0)",
+	}, 15*time.Millisecond)
+
+	verif := audit.BuildDelegationVerification(auditdAddr, "", traceID, since, audit.ActionRead, "", "sysadmin_agent", "")
+	if len(verif.ToolsConfirmed) != 1 || verif.ToolsConfirmed[0] != "check_host" {
+		t.Fatalf("ToolsConfirmed = %v, want [check_host] — RecordToolCall's write did not round-trip through a real HTTP write+read", verif.ToolsConfirmed)
+	}
+	if verif.Mismatch {
+		t.Error("Mismatch = true, want false: check_host is a confirmed read tool")
 	}
 }
 
