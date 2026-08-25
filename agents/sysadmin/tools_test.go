@@ -3,12 +3,53 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/memory"
+	"google.golang.org/adk/session"
+	"google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/toolconfirmation"
+	"google.golang.org/genai"
+
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
+
+// mockToolContext implements tool.Context for testing.
+type mockToolContext struct {
+	context.Context
+}
+
+// ReadonlyContext methods
+func (mockToolContext) UserContent() *genai.Content          { return nil }
+func (mockToolContext) InvocationID() string                 { return "test-invocation" }
+func (mockToolContext) AgentName() string                    { return "test-agent" }
+func (mockToolContext) ReadonlyState() session.ReadonlyState { return nil }
+func (mockToolContext) UserID() string                       { return "test-user" }
+func (mockToolContext) AppName() string                      { return "test-app" }
+func (mockToolContext) SessionID() string                    { return "test-session" }
+func (mockToolContext) Branch() string                       { return "" }
+
+// CallbackContext methods
+func (mockToolContext) Artifacts() agent.Artifacts { return nil }
+func (mockToolContext) State() session.State       { return nil }
+
+// tool.Context methods
+func (mockToolContext) FunctionCallID() string         { return "test-call-id" }
+func (mockToolContext) Actions() *session.EventActions { return nil }
+func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (mockToolContext) RequestConfirmation(string, any) error                { return nil }
+
+func newSysadminTestContext() tool.Context {
+	return mockToolContext{context.Background()}
+}
 
 // mockRunner implements CommandRunner for testing.
 type mockRunner struct {
@@ -25,6 +66,25 @@ func withMockRunner(output string, err error) func() {
 	old := cmdRunner
 	cmdRunner = mockRunner{output: output, err: err}
 	return func() { cmdRunner = old }
+}
+
+// withRealToolAuditor swaps in a ToolAuditor backed by a real in-process
+// audit store for the duration of the test, so RecordToolCall calls can be
+// verified via store.Query rather than just checked for a lack of panic.
+func withRealToolAuditor(t *testing.T) (store *audit.Store, cleanup func()) {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "sysadmin_audit_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "sysadmin_agent", "sess_audit", "trace_audit")
+	return store, func() {
+		toolAuditor = origAuditor
+		store.Close()
+	}
 }
 
 // withDockerInfra sets up a fake infraConfig with a Docker-hosted DB and cleans up
@@ -139,6 +199,36 @@ func TestCheckHost_NoInfraConfig(t *testing.T) {
 	}
 }
 
+// TestCheckHostTool_RecordsToolExecution is a regression test for a real bug
+// found during live 3-hop escalation-chain verification: check_host (and its
+// four diagnostic-tool siblings) never called toolAuditor.RecordToolCall at
+// all — only the two write tools (restart_container/restart_service) did.
+// The tool genuinely executes ("tool ok" in the agent's own log), but with no
+// tool_execution audit event, buildDelegationVerification flags it as
+// "narrated but unconfirmed" and fires a false FABRICATION RISK CRITICAL
+// alert even though nothing was fabricated.
+func TestCheckHostTool_RecordsToolExecution(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	if _, err := checkHostTool(newSysadminTestContext(), CheckHostArgs{Target: "prod_db"}); err != nil {
+		t.Fatalf("checkHostTool: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "check_host",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no check_host tool_execution audit event found — RecordToolCall was not called")
+	}
+}
+
 // ── get_host_logs ─────────────────────────────────────────────────────────────
 
 func TestGetHostLogs_Docker(t *testing.T) {
@@ -190,6 +280,29 @@ func TestGetHostLogs_DefaultLines(t *testing.T) {
 	}
 }
 
+// TestGetHostLogsTool_RecordsToolExecution — see TestCheckHostTool_RecordsToolExecution.
+func TestGetHostLogsTool_RecordsToolExecution(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner("line1\nline2", nil)()
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	if _, err := getHostLogsTool(newSysadminTestContext(), GetHostLogsArgs{Target: "prod_db"}); err != nil {
+		t.Fatalf("getHostLogsTool: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "get_host_logs",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no get_host_logs tool_execution audit event found — RecordToolCall was not called")
+	}
+}
+
 // ── check_disk ───────────────────────────────────────────────────────────────
 
 const dfOutput = "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        50G   45G  2.0G  96% /"
@@ -236,6 +349,29 @@ func TestCheckDisk_Systemd(t *testing.T) {
 	}
 	if result.Output == "" {
 		t.Error("Output is empty")
+	}
+}
+
+// TestCheckDiskTool_RecordsToolExecution — see TestCheckHostTool_RecordsToolExecution.
+func TestCheckDiskTool_RecordsToolExecution(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner(dfOutput, nil)()
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	if _, err := checkDiskTool(newSysadminTestContext(), CheckDiskArgs{Target: "prod_db"}); err != nil {
+		t.Fatalf("checkDiskTool: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "check_disk",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no check_disk tool_execution audit event found — RecordToolCall was not called")
 	}
 }
 
@@ -298,6 +434,29 @@ func TestCheckMemory_Systemd(t *testing.T) {
 	}
 	if result.Output == "" {
 		t.Error("Output is empty")
+	}
+}
+
+// TestCheckMemoryTool_RecordsToolExecution — see TestCheckHostTool_RecordsToolExecution.
+func TestCheckMemoryTool_RecordsToolExecution(t *testing.T) {
+	withDockerInfra(t)
+	defer withMockRunner(freeOutput, nil)()
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	if _, err := checkMemoryTool(newSysadminTestContext(), CheckMemoryArgs{Target: "prod_db"}); err != nil {
+		t.Fatalf("checkMemoryTool: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "check_memory",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no check_memory tool_execution audit event found — RecordToolCall was not called")
 	}
 }
 
@@ -785,6 +944,34 @@ func TestExecInProcess_K8s_NoPodFound(t *testing.T) {
 	_, err := execInProcess(context.Background(), host, []string{"df", "-h"})
 	if err == nil {
 		t.Error("expected error when no pod found")
+	}
+}
+
+// TestReadPgLogFileTool_RecordsToolExecution — see TestCheckHostTool_RecordsToolExecution.
+func TestReadPgLogFileTool_RecordsToolExecution(t *testing.T) {
+	withDockerInfra(t)
+	old := cmdRunner
+	cmdRunner = &multiMockRunner{responses: []mockResponse{
+		{output: "postgresql-2026-04-05.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	defer func() { cmdRunner = old }()
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	if _, err := readPgLogFileTool(newSysadminTestContext(), ReadPgLogFileArgs{Target: "prod_db"}); err != nil {
+		t.Fatalf("readPgLogFileTool: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "read_pg_log_file",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no read_pg_log_file tool_execution audit event found — RecordToolCall was not called")
 	}
 }
 
