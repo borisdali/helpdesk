@@ -1940,7 +1940,23 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	// DB-agent tool that does not exist in the sysadmin tool set).
 	if req.ConnectionString != "" {
 		if pb.AgentName == agentNameSysadmin {
-			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use check_host and restart_container as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString)
+			// Only pbs_db_restart_action actually calls restart_container — the
+			// other two sysadmin playbooks (pbs_sysadmin_docker_inspect,
+			// pbs_wal_disk_full) explicitly forbid it in their own guidance and
+			// hand off to this playbook for the actual restart. Naming it here
+			// unconditionally for every sysadmin playbook was misleading (told the
+			// model it could use a tool its own playbook guidance forbade) and,
+			// found live, the direct cause of a real bug: ClassifyDelegation scans
+			// only this first line for action-class keywords, so "restart"
+			// appearing here classified every sysadmin delegation as write —
+			// including pure-diagnosis hops that never attempt one — which in turn
+			// made a genuine, corroborated decline on those hops indistinguishable
+			// from a real write-absence mismatch.
+			toolHint := "check_host"
+			if pb.SeriesID == "pbs_db_restart_action" {
+				toolHint = "check_host and restart_container"
+			}
+			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use %s as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString, toolHint)
 		} else {
 			fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
 		}

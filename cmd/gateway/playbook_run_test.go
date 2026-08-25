@@ -205,6 +205,38 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 	}
 }
 
+// TestAssembleTriagePrompt_SysadminRestartHint is a regression test for a real
+// bug found during live 3-hop escalation-chain verification: every
+// sysadmin-agent playbook's prompt unconditionally named restart_container in
+// its first line, even for pbs_sysadmin_docker_inspect/pbs_wal_disk_full,
+// whose own guidance explicitly forbids calling it. Since ClassifyDelegation
+// only scans this first line, "restart" appearing there classified every
+// sysadmin delegation as write — including pure-diagnosis hops that never
+// attempt one. Only pbs_db_restart_action, which actually calls
+// restart_container, should mention it.
+func TestAssembleTriagePrompt_SysadminRestartHint(t *testing.T) {
+	req := PlaybookRunRequest{ConnectionString: "host=localhost port=15432"}
+
+	restartPB := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: "pbs_db_restart_action"}
+	restartPrompt := assembleTriagePrompt(restartPB, req, "")
+	firstLine := strings.SplitN(restartPrompt, "\n", 2)[0]
+	if !strings.Contains(firstLine, "restart_container") {
+		t.Errorf("pbs_db_restart_action's first line = %q, want it to mention restart_container", firstLine)
+	}
+
+	for _, seriesID := range []string{"pbs_sysadmin_docker_inspect", "pbs_wal_disk_full"} {
+		pb := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: seriesID}
+		prompt := assembleTriagePrompt(pb, req, "")
+		firstLine := strings.SplitN(prompt, "\n", 2)[0]
+		if strings.Contains(firstLine, "restart_container") {
+			t.Errorf("%s's first line = %q, want no mention of restart_container (its own guidance forbids calling it)", seriesID, firstLine)
+		}
+		if !strings.Contains(firstLine, "check_host") {
+			t.Errorf("%s's first line = %q, want it to still mention check_host", seriesID, firstLine)
+		}
+	}
+}
+
 func TestAssembleTriagePrompt_NoEscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{Name: "PITR Recovery"}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
