@@ -157,7 +157,7 @@ The agent is instructed to use the server's friendly name or the server ID from 
 
 ### 4.1 R/O tools (action class: `read`)
 
-These five tools never modify system state. They do not require policy pre-checks and are always permitted in any execution mode.
+These five tools never modify system state. They do not require policy pre-checks and are always permitted in any execution mode. Each call is still recorded to the audit log via `RecordToolCall` (server ID, output, duration) — this is what lets [delegation verification](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome) confirm a genuinely-executed read tool rather than flag it as narrated-but-unconfirmed.
 
 #### `check_host`
 
@@ -402,7 +402,7 @@ ESCALATE_TO: <series_id>    # optional — only when the issue is beyond a resta
 
 These lines are parsed by the Gateway identically to how they are parsed in agent-mode database playbooks — `FINDINGS:` sets `outcome=resolved` and `findings_summary`; `ESCALATE_TO:` sets `outcome=escalated`. See [Structured escalation signal](PLAYBOOKS.md#structured-escalation-signal) for the full parsing specification.
 
-The agent is also instructed to emit `ROOT_CAUSE:` and `ACTION_TAKEN:` lines for completeness, which appear in the visible `text` returned to the operator but are not parsed by the Gateway.
+The agent is also instructed to emit `ROOT_CAUSE:` and `ACTION_TAKEN:` lines for completeness. `ROOT_CAUSE:` appears in the visible `text` but is not otherwise parsed. `ACTION_TAKEN:` is: when a write/destructive delegation has no confirmed tool execution, `declinedActionSignal` (`internal/audit/delegate_tool.go`) checks the response text for an `ACTION_TAKEN: none` line paired with a well-formed `ESCALATE_TO:`/`TRANSITION_TO:` line — both present together downgrades what would otherwise be a fabrication-risk mismatch into a corroborated, legitimate decline (e.g. a restart recommendation blocked by policy, with no write attempted). Either line alone is not sufficient. See [Delegation Verification: Zero Trust in Agent Outcome](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome) for the full mechanism.
 
 ---
 

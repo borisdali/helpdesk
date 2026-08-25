@@ -41,6 +41,7 @@ databases or your infra.
    - [Narrated-But-Unconfirmed Tool Calls (5.7)](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
    - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
    - [Fabrication-Risk Visibility (5.9)](#59-fabrication-risk-visibility-checkfabricationrisk)
+   - [Corroborated Decline (5.10)](#510-corroborated-decline-declinedactionsignal)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -789,7 +790,9 @@ After every `delegate_to_agent` call returns, the orchestrator:
    - `write_confirmed` — which of those were write-class
    - `destructive_confirmed` — which of those were destructive
    - `mismatch` — `true` when the delegation was write-or-destructive but no
-     tool of that class or stronger is in the trail (destructive satisfies write)
+     tool of that class or stronger is in the trail (destructive satisfies write) —
+     unless the agent's response corroborates a genuine decline; see
+     [§5.10](#510-corroborated-decline-declinedactionsignal)
 4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
    orchestrator LLM
 5. **Elevates the journey outcome to `unverified_claim`** when `mismatch=true`
@@ -1169,6 +1172,76 @@ exists to catch).
 `testing/cmd/faulttest/clean_test.go` — `TestBuildCleanReport_SomeWarnings`,
 `TestWarningTypesFor`, `TestHasCleanWarning` all extended with a `Mismatch`
 case.
+
+---
+
+### 5.10 Corroborated Decline (`declinedActionSignal`)
+
+§5.2's write/destructive-absence check is unconditional: no confirmed tool of
+that class or stronger means `Mismatch=true`, full stop. That's correct for a
+silent failure, but it has no way to recognize a *legitimate* decline — the
+agent investigated, found nothing that warranted a write, and correctly
+escalated or transitioned instead of acting. This was found live, not
+hypothetically: running `host-container-stopped` through the real 3-hop
+DB→sysadmin→K8s chain, the sysadmin agent's own diagnosis was sound (container
+exited cleanly, safe to restart) but `restart_container` was blocked by a
+`diagnostic`-purpose policy denial; the agent's response correctly stopped
+there with `ACTION_TAKEN: none — escalation recommended` — yet every one of
+those hops still showed `Mismatch=true`, indistinguishable from a genuine
+fabrication.
+
+**The check**: `declinedActionSignal` (`internal/audit/delegate_tool.go`)
+requires **two independent structured protocol lines to agree**, not the
+model's self-report alone — an `ACTION_TAKEN: none` line (matched
+case-insensitively, markdown-bold tolerant) *and* a well-formed
+`ESCALATE_TO:`/`TRANSITION_TO:` line with a non-`none` target, in the same
+response text. Either alone is not sufficient: `ACTION_TAKEN: none` with no
+handoff line, or a handoff line with no `ACTION_TAKEN: none`, both still
+mismatch. Requiring both together is a materially stronger bar than either
+alone — a genuinely broken or silently-failing call is unlikely to also emit a
+clean, well-formed handoff line — while still being cheaper than corroborating
+against independent tool-execution evidence (an earlier, rejected design:
+"any confirmed tool call of any class, with no unconfirmed narration" was
+replayed against the existing negative-case test,
+`TestBuildDelegationVerification_WriteAction_Mismatch`, and found to silently
+defeat the check's own purpose — that fixture is exactly "called a read tool,
+never wrote").
+
+`buildDelegationVerification` takes the agent's raw `responseText` as a
+parameter and applies the downgrade immediately after the §5.2 switch, for
+both `ActionWrite` and `ActionDestructive`:
+
+```go
+if verif.Mismatch && declinedActionSignal(responseText) {
+    verif.Mismatch = false
+    verif.MismatchReason = "no write/destructive tool executed, and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
+}
+```
+
+`MismatchReason` is the same field `manualHold` (`cmd/gateway/gateway.go`, see
+["Interaction with manual-hold destructive delegations"](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
+above) already populates for its own, narrower downgrade case
+(`approval_mode=manual` + `ActionDestructive`) — a caller can distinguish
+*why* a potential mismatch was cleared without a second field.
+
+**Both call sites are covered by one code path.** `proxyToAgentWithTool`
+already has the agent's response text in hand (from `extractResponse`) before
+calling `BuildDelegationVerification`, so the downgrade decision and the
+durable `delegation_verification` event write happen atomically, at the one
+place that matters — `checkFabricationRisk` (§5.9) never recomputes anything,
+it purely re-reads that same already-recorded event, so the live HTTP response
+and the durable audit trail can never disagree about this.
+
+**Test coverage**: `internal/audit/delegate_tool_test.go` —
+`TestBuildDelegationVerification_WriteAction_DeclinedWithHandoff_Downgraded`,
+`_ActionTakenNoneOnly_StillMismatch`, `_HandoffOnly_StillMismatch`,
+`TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded`,
+`TestDeclinedActionSignal` (table-driven regex coverage: markdown bold,
+case-insensitivity, `ESCALATE_TO: none` target).
+`cmd/gateway/gateway_test.go` —
+`TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline` (end-to-end
+through the real HTTP path, confirming the live `X-Audit-Mismatch` response
+header — not just the internal struct field — is absent).
 
 ---
 

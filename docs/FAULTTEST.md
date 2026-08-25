@@ -1218,7 +1218,7 @@ The JSON report contains one entry per fault:
 | Priority | Mode | How | When available |
 |----------|------|-----|----------------|
 | 1 | `audit` | Exact tool names from auditd's `tool_execution` events | `--audit-url` is set and auditd is reachable |
-| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` (direct A2A, not via gateway) |
+| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a gateway `/api/v1/query`, or a gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
 | 3 | `text_fallback` | Keyword pattern matching against the agent's response text | All other cases |
 
 `audit` mode is the most accurate: it queries auditd directly for `tool_execution` events in the time window of the agent call, giving exact tool names regardless of which agent or transport was used. `text_fallback` is least reliable — a tool name appearing in the response text does not prove the tool was actually called. The mode used is recorded in `tool_evidence_mode` so you can assess reliability.
