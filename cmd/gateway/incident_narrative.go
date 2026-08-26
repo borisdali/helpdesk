@@ -146,21 +146,29 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// journeyCache dedupes fetchJourneySummary calls when two chapters share a
-	// trace_id (e.g. an agent that ran triage and remediation in one session —
-	// buildJourneyRefs already merges this case for the Journeys[] list; this
-	// cache prevents fetching the same Journey twice for the flags below).
-	journeyCache := make(map[string]*audit.JourneySummary)
-	lookupJourney := func(traceID string) *audit.JourneySummary {
+	// eventsCache dedupes FetchDelegationVerificationEvents calls when two
+	// chapters share a trace_id (e.g. an agent that ran triage and remediation
+	// in one session — buildJourneyRefs already merges this case for the
+	// Journeys[] list; this cache prevents fetching the same trace's events
+	// twice for the flags below). Unlike a whole-trace Journey lookup, the raw
+	// events are further narrowed per-chapter by hopVerificationFlags below —
+	// necessary because force-mode auto-chaining can put multiple hops under
+	// one shared trace_id (chainEscalation) when the caller supplies its own
+	// X-Trace-ID, and a whole-trace aggregate can't distinguish between them
+	// (found live via the real 3-hop DB→sysadmin→K8s chain: a later hop's
+	// genuine mismatch was leaking backward onto an earlier, actually-clean
+	// hop's reported HasMismatch).
+	eventsCache := make(map[string][]audit.Event)
+	lookupTraceEvents := func(traceID string) []audit.Event {
 		if traceID == "" {
 			return nil
 		}
-		if js, ok := journeyCache[traceID]; ok {
-			return js
+		if events, ok := eventsCache[traceID]; ok {
+			return events
 		}
-		js := g.fetchJourneySummary(r.Context(), traceID)
-		journeyCache[traceID] = js
-		return js
+		events := audit.FetchDelegationVerificationEvents(g.auditURL, g.auditAPIKey, traceID, run.StartedAt)
+		eventsCache[traceID] = events
+		return events
 	}
 
 	narrative := IncidentNarrative{
@@ -178,11 +186,8 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			SawSignalLine:    run.SawSignalLine,
 		},
 	}
-	if js := lookupJourney(run.TraceID); js != nil {
-		narrative.Triage.HasMismatch = js.HasMismatch
-		narrative.Triage.HasTargetDrift = js.HasTargetDrift
-		narrative.Triage.HasProtocolViolation = js.HasProtocolViolation
-	}
+	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation =
+		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, run.CompletedAt)
 
 	// 2. Gate chapter — present when triage was an informed gate.
 	isGated := run.Outcome == audit.OutcomeTransitioned ||
@@ -250,11 +255,8 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 				TraceID:       hop.TraceID,
 				SawSignalLine: hop.SawSignalLine,
 			}
-			if js := lookupJourney(hop.TraceID); js != nil {
-				rem.HasMismatch = js.HasMismatch
-				rem.HasTargetDrift = js.HasTargetDrift
-				rem.HasProtocolViolation = js.HasProtocolViolation
-			}
+			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation =
+				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hop.CompletedAt)
 			narrative.Remediation = rem
 			predecessor = hop
 			break
@@ -277,11 +279,8 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			StartedAt:        hop.StartedAt,
 			SawSignalLine:    hop.SawSignalLine,
 		}
-		if js := lookupJourney(hop.TraceID); js != nil {
-			eh.HasMismatch = js.HasMismatch
-			eh.HasTargetDrift = js.HasTargetDrift
-			eh.HasProtocolViolation = js.HasProtocolViolation
-		}
+		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation =
+			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hop.CompletedAt)
 		if !hop.CompletedAt.IsZero() {
 			t := hop.CompletedAt
 			eh.CompletedAt = &t
@@ -338,38 +337,28 @@ func (g *Gateway) fetchGateAcknowledgedEvent(ctx context.Context, runID string) 
 	return &events[0]
 }
 
-// fetchJourneySummary fetches the Journey for traceID, used to surface
-// HasMismatch/HasTargetDrift inline on the chapter that owns this trace.
-// Returns nil on any error or when no Journey exists for this trace (e.g. the
-// trace never got a discoverable anchor event) — fail-open, matching every
-// other fetch helper in this file; callers must not treat nil as "verified
-// clean", only as "no signal available".
-//
-// GET /v1/journeys returns a bare JSON array, not an envelope — unlike
-// fetchAllRunFeedback's {"feedback": [...]} shape, decode directly into
-// []audit.JourneySummary (confirmed against cmd/auditd's handler).
-func (g *Gateway) fetchJourneySummary(ctx context.Context, traceID string) *audit.JourneySummary {
-	if g.auditURL == "" || traceID == "" {
-		return nil
+// hopVerificationFlags computes HasMismatch/HasTargetDrift/HasProtocolViolation for
+// one hop by filtering the trace's delegation_verification events to those recorded
+// within this hop's own [start, end) window — end exclusive when non-zero, unbounded
+// when zero (still-open/most-recent hop). Needed because force-mode auto-chaining
+// can put multiple hops under one shared trace_id (chainEscalation) when the caller
+// supplies its own X-Trace-ID — a whole-trace aggregate can't distinguish between
+// them; found live via the real 3-hop DB→sysadmin→K8s chain, where a later hop's
+// genuine mismatch was leaking backward onto an earlier, actually-clean hop.
+func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
+	for _, ev := range events {
+		dv := ev.DelegationVerification
+		if dv == nil || ev.Timestamp.Before(start) {
+			continue
+		}
+		if !end.IsZero() && !ev.Timestamp.Before(end) {
+			continue
+		}
+		hasMismatch = hasMismatch || dv.Mismatch
+		hasTargetDrift = hasTargetDrift || len(dv.TargetDrift) > 0
+		hasProtocolViolation = hasProtocolViolation || dv.ProtocolViolation
 	}
-	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/journeys?trace_id=" + traceID + "&limit=1"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil
-	}
-	if g.auditAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	defer resp.Body.Close()
-	var journeys []audit.JourneySummary
-	if err := json.NewDecoder(resp.Body).Decode(&journeys); err != nil || len(journeys) == 0 {
-		return nil
-	}
-	return &journeys[0]
+	return
 }
 
 // maxEscalationHops bounds how many prior_run_id hops handleGetIncident will
