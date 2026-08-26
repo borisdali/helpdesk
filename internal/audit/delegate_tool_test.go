@@ -578,6 +578,44 @@ func TestBuildDelegationVerification_WriteAction_UnrelatedPolicyDenial_StillMism
 	}
 }
 
+// TestBuildDelegationVerification_DeclinedWithHandoff_DoesNotSuppressNarrationMismatch
+// guards a real gap the existing tests didn't cover: declinedActionSignal
+// correctly downgrades the write/destructive-absence mismatch, but the model
+// separately narrated calling a DIFFERENT tool that never actually executed
+// and no policy denial explains — that is a genuinely orthogonal fabrication
+// signal (an unrelated hallucinated tool call) and must still fire, exactly
+// as the existing TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch
+// (cmd/gateway) already guards for the narrower manualHold downgrade. Uses
+// declinedActionSignal specifically, not hasActionClassDenial: the latter's
+// own trigger condition (a policy_decision deny event) is a strict subset of
+// hasPolicyDenial's coarser "any denial in the hop" condition, so whenever
+// hasActionClassDenial fires it would *also*, correctly and by existing
+// design, suppress narration-mismatch — making that combination structurally
+// untestable as an independence case. declinedActionSignal has no such
+// overlap: it never touches policyEvents at all.
+func TestBuildDelegationVerification_DeclinedWithHandoff_DoesNotSuppressNarrationMismatch(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			ToolCalls: []string{"get_session_info"}, // narrated, never executed
+		}},
+		// Deliberately no policy_decision events — narration-mismatch must not
+		// be suppressed here.
+	})
+	responseText := "FINDINGS: container exited cleanly, no restart performed\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del18", "sysadmin_agent", responseText)
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: an unrelated narrated-but-unconfirmed tool call must still fire even though the write/destructive-absence check was corroborated by ACTION_TAKEN/handoff")
+	}
+	if len(v.NarratedNotConfirmed) != 1 || v.NarratedNotConfirmed[0] != "get_session_info" {
+		t.Errorf("NarratedNotConfirmed = %v, want [get_session_info]", v.NarratedNotConfirmed)
+	}
+	if v.MismatchReason != "" {
+		t.Errorf("MismatchReason = %q, want empty — the corroborated-decline reason should not survive once the narration check re-flags Mismatch for a different cause", v.MismatchReason)
+	}
+}
+
 func TestBuildDelegationVerification_WriteAction_ActionTakenNoneOnly_StillMismatch(t *testing.T) {
 	// ACTION_TAKEN: none alone, with no handoff line, is not corroborated —
 	// stays a mismatch (guards against a single self-reported line being

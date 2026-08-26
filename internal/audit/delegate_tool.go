@@ -518,6 +518,11 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 		if !hasPolicyDenial(fetchPolicyEventsOnce()) {
 			verif.NarratedNotConfirmed = notConfirmed
 			verif.Mismatch = true
+			// Clear any reason a corroborated-decline check above may have set —
+			// MismatchReason means "why this was downgraded to non-alerting", and
+			// must not survive re-flagging Mismatch=true for a different,
+			// orthogonal cause (an unrelated hallucinated tool call).
+			verif.MismatchReason = ""
 		}
 	}
 	return verif

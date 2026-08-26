@@ -825,6 +825,49 @@ func TestIntegration_ToolAuditor_RecordToolCall_ConfirmedByDelegationVerificatio
 	}
 }
 
+// TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips is
+// the integration-level round trip for hasActionClassDenial (internal/audit/
+// delegate_tool.go): closes a gap found while adding coverage for that fix —
+// existing coverage for policy_decision events only ever validated them via
+// GET /v1/events/{eventID} (single-event lookup); the actual query
+// BuildDelegationVerification issues, GET /v1/events?event_type=
+// policy_decision&trace_id=X, had never round-tripped a real Action/Effect
+// pair through a real auditd process.
+func TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips(t *testing.T) {
+	traceID := fmt.Sprintf("tr-policydenied-%d", time.Now().UnixNano())
+	since := time.Now().Add(-time.Minute)
+
+	store := audit.NewRemoteStore(auditdAddr)
+	err := store.Record(context.Background(), &audit.Event{
+		EventID:   fmt.Sprintf("pol-%d", time.Now().UnixNano()),
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypePolicyDecision,
+		TraceID:   traceID,
+		Session:   audit.Session{ID: "sess_policydenied"},
+		PolicyDecision: &audit.PolicyDecision{
+			ResourceType: "host",
+			ResourceName: "faulttest-db-local",
+			Action:       "destructive",
+			Effect:       "deny",
+			PolicyName:   "diagnostic-readonly-enforcement",
+			Message:      "purpose \"diagnostic\" is in the blocked list",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// No tool_execution events at all — this is the "write attempted, denied,
+	// nothing executed" shape.
+	verif := audit.BuildDelegationVerification(auditdAddr, "", traceID, since, audit.ActionDestructive, "", "sysadmin_agent", "")
+	if verif.Mismatch {
+		t.Errorf("Mismatch = true, want false: a real policy_decision deny event for a destructive action, round-tripped through a real HTTP write+read, should corroborate the write-absence")
+	}
+	if verif.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
 func TestGovernance_PoliciesSummaryWithEngine(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policies.yaml")
 	if err := os.WriteFile(policyPath, []byte(minimalPolicyYAML), 0644); err != nil {

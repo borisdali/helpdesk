@@ -1274,6 +1274,22 @@ fetches `policy_decision` events lazily, on first need, and reuses the result
 for both this check and §5.7's suppression — at most one HTTP round trip per
 call regardless of how many of the two checks end up needing it.
 
+**`hasActionClassDenial` firing always also suppresses narration-mismatch for
+that hop — by construction, not coincidence.** Its own trigger condition
+(`Effect=deny` and a matching `Action`) is a strict subset of `hasPolicyDenial`'s
+coarser condition (`Effect=deny`, any `Action`) — any event that satisfies the
+former necessarily satisfies the latter too. This isn't a gap: it means a
+policy-denied write always correctly explains an unconfirmed narration in the
+same hop as well. `declinedActionSignal`'s downgrade has no such overlap — it
+never touches `policyEvents` at all — so it *can* fire independently of
+narration-mismatch, and does: found while adding test coverage for this
+section that an *unrelated* narrated-but-unconfirmed tool call left
+`MismatchReason` stale (still describing the now-irrelevant corroborated
+decline) after the narration check correctly re-set `Mismatch=true` for its
+own, different reason. Fixed by clearing `MismatchReason` in that same
+re-flagging branch — `MismatchReason` must never be non-empty when
+`Mismatch=true`, regardless of which corroboration path set it earlier.
+
 **Test coverage**: `internal/audit/delegate_tool_test.go` —
 `TestBuildDelegationVerification_WriteAction_DeclinedWithHandoff_Downgraded`,
 `_ActionTakenNoneOnly_StillMismatch`, `_HandoffOnly_StillMismatch`,
@@ -1285,12 +1301,21 @@ case-insensitivity, `ESCALATE_TO: none` target),
 `TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded`,
 `TestHasActionClassDenial` (table-driven: exact match, destructive-satisfies-write,
 write-does-not-satisfy-destructive, unrelated action class, allow effect, nil
-`PolicyDecision`).
+`PolicyDecision`),
+`TestBuildDelegationVerification_DeclinedWithHandoff_DoesNotSuppressNarrationMismatch`
+(also guards the `MismatchReason`-clearing fix above).
 `cmd/gateway/gateway_test.go` —
 `TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline`,
 `TestProxyToAgent_MismatchHeader_AbsentOnPolicyDeniedWrite` (end-to-end
 through the real HTTP path, confirming the live `X-Audit-Mismatch` response
 header — not just the internal struct field — is absent).
+`testing/integration/governance/governance_test.go` —
+`TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips` (a
+real `policy_decision` event, written and queried through a real auditd
+process via the exact `event_type=policy_decision&trace_id=X` shape
+`hasActionClassDenial` depends on — the only existing coverage for
+`policy_decision` events against a real backend validated single-event-by-ID
+lookup, never this query shape).
 
 ---
 
