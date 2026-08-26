@@ -527,8 +527,10 @@ Findings:  check_host runtime=kubectl — target is Kubernetes-managed
            ⚠ target drift — a tool call used a different connection string
 ```
 
-Absence of either line can mean either "verified clean" or "no Journey data exists for this
-chapter's trace" (fail-open by design) — not a positive attestation either way. See
+Absence of either line can mean either "verified clean" or "no delegation_verification events
+fall in this chapter's own execution window" (fail-open by design) — not a positive attestation
+either way. Computed per chapter, not per-Journey/whole-trace, so a mismatch on one hop of a
+force-mode auto-chain doesn't flag every chapter sharing that trace_id. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
 and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
 

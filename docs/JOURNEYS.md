@@ -679,8 +679,8 @@ When `mismatch=true`, several independent signals fire simultaneously:
 
 | Signal | Where | Details |
 |--------|-------|---------|
-| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object |
-| **Incident narrative chapter** | `GET /api/v1/incidents/{runID}` | `has_mismatch: true` on the TRIAGE/ESCALATION/REMEDIATION chapter that owns the flagged trace — inline, no separate Journey lookup needed; `vault incidents` prints an inline `⚠ unverified` line |
+| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object (whole-trace scope) |
+| **Incident narrative chapter** | `GET /api/v1/incidents/{runID}` | `has_mismatch: true` on the specific TRIAGE/ESCALATION/REMEDIATION chapter that hop belongs to — computed independently of the Journey object, scoped to that hop's own execution window (not the whole trace), so a mismatch on one hop of a force-mode auto-chain does not flag every chapter sharing that trace_id; inline, no separate Journey lookup needed; `vault incidents` prints an inline `⚠ unverified` line |
 | **HTTP response header** | API caller | Gateway sets `X-Audit-Mismatch: true` on the HTTP response for the offending request |
 | **Prometheus counter** | Gateway `/metrics` | `gateway_fabrication_mismatches_total{agent, action_class}` incremented |
 | **Security alert** | auditor → incident webhook | `CRITICAL` `fabrication_mismatch` when check 3 fired (write/destructive-absence, unchanged); a lower `WARNING`-level `narrated_tool_not_confirmed` alert (not forwarded to the incident webhook) when check 4 fired *without* check 3 also firing — kept off the CRITICAL path until this newer check's false-positive rate is observed on real traffic |
