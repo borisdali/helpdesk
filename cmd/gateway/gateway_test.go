@@ -1887,6 +1887,57 @@ func TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline(t *testing.T) {
 	}
 }
 
+// TestProxyToAgent_MismatchHeader_AbsentOnPolicyDeniedWrite is a regression
+// test for a real gap found during live 3-hop escalation-chain verification:
+// a terminal hop whose only write attempt is denied by policy (e.g.
+// restart_container blocked by a diagnostic-purpose policy) has nothing to
+// hand off to, so it can never satisfy the ACTION_TAKEN+handoff corroboration
+// above — even though the audit trail already proves the write was genuinely
+// attempted and blocked, not silently skipped. Verifies the real
+// policy_decision-based corroboration end-to-end: no ACTION_TAKEN/handoff
+// lines at all, just a real policy_decision deny event for the matching
+// action class.
+func TestProxyToAgent_MismatchHeader_AbsentOnPolicyDeniedWrite(t *testing.T) {
+	_, card := mockA2AServerWithText(t, agentNameDB,
+		"FINDINGS: container exited cleanly, restart blocked by policy\nROOT_CAUSE: HYPOTHESIS_1\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("event_type") == "policy_decision" {
+			json.NewEncoder(w).Encode([]any{ //nolint:errcheck
+				map[string]any{
+					"policy_decision": map[string]any{
+						"effect": "deny",
+						"action": "destructive",
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]any{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(&testAuditor{}),
+		auditURL: auditdSrv.URL,
+	}
+
+	rec := postQuery(t, gw, `{"agent":"db","message":"terminate the slow query on connection 123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("X-Audit-Mismatch"); got != "" {
+		t.Errorf("X-Audit-Mismatch = %q, want empty: a real policy_decision deny event for a destructive action is sufficient corroboration on its own", got)
+	}
+}
+
 // TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch verifies the fix for
 // the collision the Plan agent found: manualHold (approval_mode=manual + destructive
 // delegation) is expected to suppress the write/destructive-absence mismatch, since

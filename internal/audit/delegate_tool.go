@@ -457,18 +457,53 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 		verif.Mismatch = len(verif.WriteConfirmed) == 0 && len(verif.DestructiveConfirmed) == 0
 	}
 
-	// Corroborated decline: a write/destructive mismatch can be a genuine,
-	// correct decision (the agent looked, found nothing to write, and handed
-	// off) rather than a silent failure. declinedActionSignal requires two
-	// independent structured protocol lines to agree — ACTION_TAKEN: none AND
-	// a well-formed ESCALATE_TO/TRANSITION_TO line — which is a materially
-	// stronger bar than either alone; a genuinely broken/silently-failing call
-	// is unlikely to also emit a clean, well-formed handoff line. Still
-	// self-reported text, not audit-confirmed, so this is deliberately paired
-	// with (not a replacement for) the unconditional check above.
+	// policyEvents is fetched lazily and shared by both corroboration checks
+	// below — only one HTTP round trip even when both would otherwise want it.
+	var policyEvents []Event
+	var policyEventsFetched bool
+	fetchPolicyEventsOnce := func() []Event {
+		if !policyEventsFetched {
+			policyEvents = fetchPolicyDecisionEvents(auditURL, auditAPIKey, traceID, since)
+			policyEventsFetched = true
+		}
+		return policyEvents
+	}
+
+	// Corroborated decline (self-reported): a write/destructive mismatch can
+	// be a genuine, correct decision (the agent looked, found nothing to
+	// write, and handed off) rather than a silent failure.
+	// declinedActionSignal requires two independent structured protocol
+	// lines to agree — ACTION_TAKEN: none AND a well-formed
+	// ESCALATE_TO/TRANSITION_TO line — which is a materially stronger bar
+	// than either alone; a genuinely broken/silently-failing call is
+	// unlikely to also emit a clean, well-formed handoff line. Still
+	// self-reported text, not audit-confirmed, so this is deliberately
+	// paired with (not a replacement for) the unconditional check above.
 	if verif.Mismatch && declinedActionSignal(responseText) {
 		verif.Mismatch = false
 		verif.MismatchReason = "no write/destructive tool executed, and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
+	}
+
+	// Corroborated decline (policy-denied): the write/destructive action was
+	// genuinely attempted and blocked by the policy engine — a real,
+	// code-verified fact from the audit trail, not the model's self-report,
+	// so a single signal is sufficient corroboration here (unlike
+	// declinedActionSignal above, which needs two self-reported signals to
+	// agree because either alone could be fabricated). Found live: a
+	// terminal hop whose only write attempt is denied by policy (e.g.
+	// restart_container blocked by a diagnostic-purpose policy) has nothing
+	// to hand off to, so it can never satisfy declinedActionSignal's
+	// handoff-line requirement, even though the audit trail already proves
+	// nothing was silently skipped. hasActionClassDenial requires the
+	// denied Action to match this delegation's own class (destructive
+	// satisfies write, mirroring the "destructive ⊇ write" rule above) —
+	// deliberately stricter than hasPolicyDenial below, which is fine
+	// suppressing the lower-severity narrated-not-confirmed signal but too
+	// permissive (any unrelated denial in the trace) for downgrading this
+	// higher-severity mismatch.
+	if verif.Mismatch && hasActionClassDenial(fetchPolicyEventsOnce(), actionClass) {
+		verif.Mismatch = false
+		verif.MismatchReason = "no write/destructive tool executed, but the audit trail shows the matching write/destructive action was attempted and denied by policy — a genuine, code-verified block, not a silent failure"
 	}
 
 	// Narrated-but-unconfirmed tool calls: orthogonal to the write/destructive-only
@@ -480,8 +515,7 @@ func buildDelegationVerification(auditURL, auditAPIKey, traceID string, since ti
 	reasoningEvents := fetchAgentReasoningEvents(auditURL, auditAPIKey, traceID, since)
 	notConfirmed := narratedToolsNotConfirmed(reasoningEvents, verif.ToolsConfirmed)
 	if len(notConfirmed) > 0 {
-		policyEvents := fetchPolicyDecisionEvents(auditURL, auditAPIKey, traceID, since)
-		if !hasPolicyDenial(policyEvents) {
+		if !hasPolicyDenial(fetchPolicyEventsOnce()) {
 			verif.NarratedNotConfirmed = notConfirmed
 			verif.Mismatch = true
 		}
@@ -673,6 +707,35 @@ func hasPolicyDenial(policyDecisionEvents []Event) bool {
 	for _, ev := range policyDecisionEvents {
 		if ev.PolicyDecision != nil && ev.PolicyDecision.Effect == "deny" {
 			return true
+		}
+	}
+	return false
+}
+
+// hasActionClassDenial reports whether policyDecisionEvents contains a deny
+// decision whose Action matches actionClass or is at least as strong
+// (destructive satisfies a write delegation, mirroring the write/destructive-
+// absence check's own "destructive ⊇ write" rule) — i.e. the audit trail
+// shows the specific class of action this delegation needed was genuinely
+// attempted and blocked, not just that some unrelated denial happened
+// somewhere in the trace. Deliberately stricter than hasPolicyDenial above:
+// that coarser check is fine for suppressing the lower-severity
+// narrated-not-confirmed signal, but too permissive for downgrading the
+// higher-severity write/destructive-absence mismatch.
+func hasActionClassDenial(policyDecisionEvents []Event, actionClass ActionClass) bool {
+	for _, ev := range policyDecisionEvents {
+		if ev.PolicyDecision == nil || ev.PolicyDecision.Effect != "deny" {
+			continue
+		}
+		switch actionClass {
+		case ActionDestructive:
+			if ev.PolicyDecision.Action == "destructive" {
+				return true
+			}
+		case ActionWrite:
+			if ev.PolicyDecision.Action == "write" || ev.PolicyDecision.Action == "destructive" {
+				return true
+			}
 		}
 	}
 	return false

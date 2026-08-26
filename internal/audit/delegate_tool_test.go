@@ -152,6 +152,68 @@ func TestHasPolicyDenial(t *testing.T) {
 	}
 }
 
+func TestHasActionClassDenial(t *testing.T) {
+	tests := []struct {
+		name        string
+		events      []Event
+		actionClass ActionClass
+		want        bool
+	}{
+		{"no events", nil, ActionWrite, false},
+		{
+			"exact write match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}}},
+			ActionWrite, true,
+		},
+		{
+			"exact destructive match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "destructive"}}},
+			ActionDestructive, true,
+		},
+		{
+			"destructive denial satisfies a write delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "destructive"}}},
+			ActionWrite, true,
+		},
+		{
+			"write denial does NOT satisfy a destructive delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}}},
+			ActionDestructive, false,
+		},
+		{
+			"unrelated read denial does not satisfy a write delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "read"}}},
+			ActionWrite, false,
+		},
+		{
+			"allow effect is not a denial, regardless of action match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "allow", Action: "write"}}},
+			ActionWrite, false,
+		},
+		{
+			"nil PolicyDecision is skipped, not a panic",
+			[]Event{{PolicyDecision: nil}},
+			ActionWrite, false,
+		},
+		{
+			"matching denial among multiple unrelated events",
+			[]Event{
+				{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "read"}},
+				{PolicyDecision: &PolicyDecision{Effect: "allow", Action: "write"}},
+				{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}},
+			},
+			ActionWrite, true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasActionClassDenial(tt.events, tt.actionClass); got != tt.want {
+				t.Errorf("hasActionClassDenial(actionClass=%s) = %v, want %v", tt.actionClass, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFetchEventsByType_RetryBehavior guards the intentional latency-avoiding
 // design decision: fetchToolExecutionEvents retries once after 200ms (async
 // write propagation from RemoteStore is a real concern for tool_execution
@@ -449,6 +511,70 @@ func TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downg
 	}
 	if v.MismatchReason == "" {
 		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_WriteAction_PolicyDenied_Downgraded is a
+// regression test for a real gap found during live 3-hop escalation-chain
+// verification: a terminal hop (e.g. pbs_db_restart_action) whose only write
+// attempt is denied by policy has nothing to hand off to, so it can never
+// satisfy declinedActionSignal's ACTION_TAKEN+handoff requirement — even
+// though the audit trail already proves, independently of any self-report,
+// that the write was genuinely attempted and blocked, not silently skipped.
+func TestBuildDelegationVerification_WriteAction_PolicyDenied_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "destructive", Message: "purpose \"diagnostic\" is in the blocked list",
+		}},
+	})
+	// No ACTION_TAKEN/handoff lines at all — this is exactly the terminal-hop
+	// shape declinedActionSignal alone cannot corroborate.
+	responseText := "FINDINGS: container exited cleanly, restart blocked by policy\nROOT_CAUSE: HYPOTHESIS_1\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del15", "sysadmin_agent", responseText)
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: a real policy_decision deny event for a write/destructive action is sufficient corroboration on its own")
+	}
+	if v.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded
+// mirrors the WriteAction case above for ActionDestructive directly (not via
+// the destructive-satisfies-write rule).
+func TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "destructive",
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del16", "sysadmin_agent", "")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: policy-denied destructive action should downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_WriteAction_UnrelatedPolicyDenial_StillMismatch
+// guards the precision claim: hasActionClassDenial must be stricter than
+// hasPolicyDenial — an unrelated read-class denial elsewhere in the trace
+// must not corroborate a write-absence mismatch.
+func TestBuildDelegationVerification_WriteAction_UnrelatedPolicyDenial_StillMismatch(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "read", Message: "purpose required",
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del17", "sysadmin_agent", "")
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: an unrelated read-class denial must not corroborate a write-absence mismatch")
 	}
 }
 

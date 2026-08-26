@@ -41,7 +41,7 @@ databases or your infra.
    - [Narrated-But-Unconfirmed Tool Calls (5.7)](#57-narrated-but-unconfirmed-tool-calls-read-action-coverage)
    - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
    - [Fabrication-Risk Visibility (5.9)](#59-fabrication-risk-visibility-checkfabricationrisk)
-   - [Corroborated Decline (5.10)](#510-corroborated-decline-declinedactionsignal)
+   - [Corroborated Decline (5.10)](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -791,8 +791,9 @@ After every `delegate_to_agent` call returns, the orchestrator:
    - `destructive_confirmed` — which of those were destructive
    - `mismatch` — `true` when the delegation was write-or-destructive but no
      tool of that class or stronger is in the trail (destructive satisfies write) —
-     unless the agent's response corroborates a genuine decline; see
-     [§5.10](#510-corroborated-decline-declinedactionsignal)
+     unless the agent's response, or the audit trail itself, corroborates a
+     genuine decline; see
+     [§5.10](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
 4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
    orchestrator LLM
 5. **Elevates the journey outcome to `unverified_claim`** when `mismatch=true`
@@ -1175,7 +1176,7 @@ case.
 
 ---
 
-### 5.10 Corroborated Decline (`declinedActionSignal`)
+### 5.10 Corroborated Decline (`declinedActionSignal`, `hasActionClassDenial`)
 
 §5.2's write/destructive-absence check is unconditional: no confirmed tool of
 that class or stronger means `Mismatch=true`, full stop. That's correct for a
@@ -1232,14 +1233,62 @@ place that matters — `checkFabricationRisk` (§5.9) never recomputes anything,
 it purely re-reads that same already-recorded event, so the live HTTP response
 and the durable audit trail can never disagree about this.
 
+**A second, code-derived corroboration path: policy denial.**
+`declinedActionSignal` covers "the agent chose not to write and handed off
+cleanly" — but it can't cover a *terminal* hop whose only write attempt is
+denied by policy, since a terminal hop has nowhere to hand off to and so can
+never emit the `ESCALATE_TO:`/`TRANSITION_TO:` line the check requires. Found
+live on the same 3-hop chain: `pbs_db_restart_action`'s `restart_container`
+call is denied by a `diagnostic`-purpose policy on every faulttest run, and
+that playbook's guidance explicitly forbids emitting any further
+escalation/transition signal after reporting the denial — so
+`declinedActionSignal` correctly, but unhelpfully, never fires for it.
+
+`hasActionClassDenial` (`internal/audit/delegate_tool.go`) closes this by
+checking the audit trail directly rather than the model's text: does a real
+`policy_decision` event exist, within this hop's own window, with
+`Effect=deny` and `Action` matching (or stronger than) the delegation's own
+`ActionClass` — mirroring the same "destructive ⊇ write" rule as §5.2's
+absence check itself. Because this reads a policy-engine decision the model
+cannot influence or fabricate, a single signal is sufficient corroboration
+here — unlike `declinedActionSignal`, which needs two self-reported signals to
+agree precisely because either alone could be fabricated.
+
+```go
+if verif.Mismatch && hasActionClassDenial(fetchPolicyEventsOnce(), actionClass) {
+    verif.Mismatch = false
+    verif.MismatchReason = "no write/destructive tool executed, but the audit trail shows the matching write/destructive action was attempted and denied by policy — a genuine, code-verified block, not a silent failure"
+}
+```
+
+**Deliberately stricter than §5.7's `hasPolicyDenial`.** That check suppresses
+the narrated-not-confirmed signal on *any* denial in the trace, coarse by
+design — an acceptable tradeoff for a WARNING-level check. Downgrading the
+higher-severity write/destructive-absence mismatch needs more precision: an
+unrelated `read`-class denial elsewhere in the trace must not corroborate a
+missing write. `hasActionClassDenial` requires the specific denied `Action` to
+match.
+
+**Both corroboration paths share one policy-events fetch.** `buildDelegationVerification`
+fetches `policy_decision` events lazily, on first need, and reuses the result
+for both this check and §5.7's suppression — at most one HTTP round trip per
+call regardless of how many of the two checks end up needing it.
+
 **Test coverage**: `internal/audit/delegate_tool_test.go` —
 `TestBuildDelegationVerification_WriteAction_DeclinedWithHandoff_Downgraded`,
 `_ActionTakenNoneOnly_StillMismatch`, `_HandoffOnly_StillMismatch`,
 `TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded`,
 `TestDeclinedActionSignal` (table-driven regex coverage: markdown bold,
-case-insensitivity, `ESCALATE_TO: none` target).
+case-insensitivity, `ESCALATE_TO: none` target),
+`TestBuildDelegationVerification_WriteAction_PolicyDenied_Downgraded`,
+`_UnrelatedPolicyDenial_StillMismatch`,
+`TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded`,
+`TestHasActionClassDenial` (table-driven: exact match, destructive-satisfies-write,
+write-does-not-satisfy-destructive, unrelated action class, allow effect, nil
+`PolicyDecision`).
 `cmd/gateway/gateway_test.go` —
-`TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline` (end-to-end
+`TestProxyToAgent_MismatchHeader_AbsentOnCorroboratedDecline`,
+`TestProxyToAgent_MismatchHeader_AbsentOnPolicyDeniedWrite` (end-to-end
 through the real HTTP path, confirming the live `X-Audit-Mismatch` response
 header — not just the internal struct field — is absent).
 
