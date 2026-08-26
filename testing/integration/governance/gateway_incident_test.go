@@ -310,28 +310,40 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 	triageTrace := "trace-vflags-" + suffix + "-triage"
 	escalateTrace := "trace-vflags-" + suffix + "-escalate"
 
+	// Explicit, staggered started_at is required: handleGetIncident bounds each
+	// chapter's verification-flag window by the NEXT hop's own StartedAt, so
+	// two hops recorded back-to-back with no explicit started_at (both
+	// defaulting to "now" at record time, milliseconds apart) would leave no
+	// real window for the triage event — even though its trace_id is already
+	// distinct from the escalation hop's.
+	triageStart := time.Now().Add(-2 * time.Minute).UTC()
+	escalateStart := time.Now().Add(-1 * time.Minute).UTC()
+
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
 		"escalated_to":     "pbs_sysadmin_docker_inspect",
 		"findings_summary": "connection refused",
 		"trace_id":         triageTrace,
-		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+		"started_at":       triageStart.Format(time.RFC3339Nano),
+		"completed_at":     escalateStart.Format(time.RFC3339Nano),
 	})
 	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "resolved",
 		"findings_summary": "container healthy",
 		"trace_id":         escalateTrace,
-		"completed_at":     time.Now().UTC().Format(time.RFC3339),
+		"started_at":       escalateStart.Format(time.RFC3339Nano),
+		"completed_at":     time.Now().UTC().Format(time.RFC3339Nano),
 	})
 
-	// Anchor + Mismatch=true on the triage trace.
+	// Anchor + Mismatch=true on the triage trace, timestamped inside the
+	// triage hop's own window (after triageStart, before escalateStart).
 	triageAnchor := newEvent("vflags-session-"+suffix, "delegation_decision")
 	triageAnchor["trace_id"] = triageTrace
 	post(t, auditdAddr, "/v1/events", triageAnchor)
 	post(t, auditdAddr, "/v1/events", map[string]any{
 		"event_id":   fmt.Sprintf("gv-%d", time.Now().UnixNano()),
-		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"timestamp":  triageStart.Add(time.Second).Format(time.RFC3339Nano),
 		"event_type": "delegation_verification",
 		"trace_id":   triageTrace,
 		"session":    map[string]any{"id": "vflags-session-" + suffix},
@@ -389,4 +401,99 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 	}
 
 	t.Logf("verification flags surfaced correctly: triage.has_mismatch=true, escalation.has_target_drift=true")
+}
+
+// TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcrossHops
+// is the integration-level regression test for a real bug found via live 3-hop
+// escalation-chain verification: force-mode auto-chaining (chainEscalation,
+// cmd/gateway/playbooks.go) reuses the same *http.Request across every chained
+// hop, so when the caller supplies its own X-Trace-ID (as faulttest's real
+// client does), every hop in one auto-chain ends up sharing that single
+// trace_id. handleGetIncident used to fetch one whole-trace Journey per
+// trace_id and assign its flags to every chapter sharing it, so a later hop's
+// genuine mismatch leaked backward onto an earlier, actually-clean hop.
+// TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters above
+// only proves distinct trace_ids work — this test specifically shares one
+// trace_id across the escalation and remediation hops (the real
+// chainEscalation shape) and posts a single delegation_verification event
+// timestamped after the escalation hop's own completed_at, within only the
+// remediation hop's window — run against the real HTTP stack (gateway
+// process → auditd process), not mocks.
+func TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcrossHops(t *testing.T) {
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	sharedTrace := "trace-leak-" + suffix
+
+	escStart := time.Now().UTC()
+	escEnd := escStart.Add(2 * time.Second)
+	remStart := escEnd.Add(2 * time.Second)
+	mismatchAt := remStart.Add(time.Second)
+
+	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
+		"outcome":          "escalated",
+		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"findings_summary": "connection refused",
+		"trace_id":         "trace-leak-" + suffix + "-triage",
+		"completed_at":     escStart.Format(time.RFC3339Nano),
+	})
+	escalationRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+		"prior_run_id":     triageRunID,
+		"outcome":          "transitioned",
+		"transitioned_to":  "pbs_db_restart_action",
+		"findings_summary": "container exited cleanly (exitcode=0); safe to restart",
+		"trace_id":         sharedTrace,
+		"started_at":       escStart.Format(time.RFC3339Nano),
+		"completed_at":     escEnd.Format(time.RFC3339Nano),
+	})
+	remediationRunID := recordRun(t, "pbs_db_restart_action", map[string]any{
+		"prior_run_id":     escalationRunID,
+		"outcome":          "resolved",
+		"findings_summary": "restart blocked by policy",
+		"trace_id":         sharedTrace,
+		"started_at":       remStart.Format(time.RFC3339Nano),
+		"completed_at":     mismatchAt.Add(time.Second).Format(time.RFC3339Nano),
+	})
+
+	// The only delegation_verification event on the shared trace, timestamped
+	// after the escalation hop's own completed_at — outside its window, but
+	// inside the remediation hop's — mirroring the live restart_container
+	// policy-denial case.
+	post(t, auditdAddr, "/v1/events", map[string]any{
+		"event_id":   fmt.Sprintf("gv-leak-%d", time.Now().UnixNano()),
+		"timestamp":  mismatchAt.Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   sharedTrace,
+		"session":    map[string]any{"id": "leak-session-" + suffix},
+		"delegation_verification": map[string]any{
+			"agent":        "sysadmin_agent",
+			"action_class": "write",
+			"mismatch":     true,
+		},
+	})
+
+	narrative := getIncidentFromGateway(t, triageRunID)
+
+	escalations, _ := narrative["escalations"].([]any)
+	if len(escalations) != 1 {
+		t.Fatalf("escalations count = %d, want 1; escalations=%v", len(escalations), escalations)
+	}
+	hop, _ := escalations[0].(map[string]any)
+	if hop == nil || hop["run_id"] != escalationRunID {
+		t.Fatalf("escalations[0] = %v, want run_id=%s", hop, escalationRunID)
+	}
+	if hasMismatch, _ := hop["has_mismatch"].(bool); hasMismatch {
+		t.Errorf("escalations[0].has_mismatch = %v, want false — the mismatch event belongs to the later remediation hop sharing this trace_id, not this one", hop["has_mismatch"])
+	}
+
+	remediation, _ := narrative["remediation"].(map[string]any)
+	if remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if remediation["run_id"] != remediationRunID {
+		t.Errorf("remediation.run_id = %v, want %s", remediation["run_id"], remediationRunID)
+	}
+	if hasMismatch, _ := remediation["has_mismatch"].(bool); !hasMismatch {
+		t.Errorf("remediation.has_mismatch = %v, want true — its own hop genuinely mismatched", remediation["has_mismatch"])
+	}
+
+	t.Logf("shared-trace hops correctly did not leak: escalation.has_mismatch=false, remediation.has_mismatch=true")
 }

@@ -146,6 +146,25 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// hops is fetched here, ahead of the classification loop below, so each
+	// chapter's own hopVerificationFlags window can be bounded by the NEXT
+	// hop's StartedAt rather than this hop's own CompletedAt. CompletedAt is
+	// too fragile a boundary: it can be recorded with a timestamp at or
+	// before some event that still genuinely belongs to this same hop (e.g.
+	// clock/goroutine-scheduling variance), which would wrongly exclude that
+	// event — found via a real test failure after first shipping a
+	// CompletedAt-bounded version of this fix. Hops run strictly
+	// sequentially within one auto-chain, so "the next hop hadn't started
+	// yet" is a race-free boundary that doesn't depend on exactly when
+	// CompletedAt gets stamped. The last hop in the chain (whichever chapter
+	// it becomes) has no next hop, so its window stays unbounded, same as
+	// before.
+	hops := g.fetchEscalationHops(r.Context(), runID)
+	var triageWindowEnd time.Time
+	if len(hops) > 0 {
+		triageWindowEnd = hops[0].StartedAt
+	}
+
 	// eventsCache dedupes FetchDelegationVerificationEvents calls when two
 	// chapters share a trace_id (e.g. an agent that ran triage and remediation
 	// in one session — buildJourneyRefs already merges this case for the
@@ -187,7 +206,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation =
-		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, run.CompletedAt)
+		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, triageWindowEnd)
 
 	// 2. Gate chapter — present when triage was an informed gate.
 	isGated := run.Outcome == audit.OutcomeTransitioned ||
@@ -231,18 +250,22 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	// Classification stops at the first remediation hop found; a remediation
 	// run that itself further escalates is out of scope for now.
 	//
-	// Each hop also gets a lookupJourney call for HasMismatch/HasTargetDrift.
+	// Each hop also gets a lookupTraceEvents call for HasMismatch/HasTargetDrift.
 	// This is sequential, matching fetchRunSteps just below it and the rest of
 	// this file/package's convention (no goroutine fan-out anywhere in
 	// cmd/gateway) — worst case (maxEscalationHops = 20) this roughly doubles
 	// the existing per-hop round-trip count, the same risk class as the
 	// fetchRunSteps calls already here, not a new one.
-	hops := g.fetchEscalationHops(r.Context(), runID)
+	// hops was already fetched above (needed early for triageWindowEnd).
 
 	var classified []*audit.PlaybookRun
 	predecessor := run
-	for _, hop := range hops {
+	for i, hop := range hops {
 		classified = append(classified, hop)
+		var hopWindowEnd time.Time
+		if i+1 < len(hops) {
+			hopWindowEnd = hops[i+1].StartedAt
+		}
 		if predecessor.TransitionedTo != "" {
 			steps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
 			rem := &RemediationChapter{
@@ -256,7 +279,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 				SawSignalLine: hop.SawSignalLine,
 			}
 			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation =
-				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hop.CompletedAt)
+				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
 			narrative.Remediation = rem
 			predecessor = hop
 			break
@@ -280,7 +303,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			SawSignalLine:    hop.SawSignalLine,
 		}
 		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation =
-			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hop.CompletedAt)
+			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
 		if !hop.CompletedAt.IsZero() {
 			t := hop.CompletedAt
 			eh.CompletedAt = &t

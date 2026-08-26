@@ -254,23 +254,25 @@ func TestHandleGetIncident_VerificationFlags_NoEventData_FailsOpen(t *testing.T)
 }
 
 // TestHandleGetIncident_VerificationFlags_SharedTraceDedup verifies the
-// per-request events cache: when triage and remediation share one trace_id
-// (the agent ran both in a single session — the same case buildJourneyRefs
-// already merges into "triage+remediation"), handleGetIncident must fetch
-// that trace's delegation_verification events exactly once, not once per
-// chapter that references it. The mismatch event is timestamped after both
-// hops' StartedAt with neither hop setting CompletedAt (both windows stay
-// open-ended), so it correctly falls within both hops' own windows — proving
-// the legitimate single-session case still works under the time-windowed
-// design, not just the multi-hop leak fix it was added for.
+// per-request events cache: when triage and remediation share one trace_id,
+// handleGetIncident must fetch that trace's delegation_verification events
+// exactly once, not once per chapter that references it — regardless of how
+// many chapters/events end up attributed to it. Per-hop windows are disjoint
+// by construction (each hop's window ends where the next hop's begins), so a
+// shared trace_id no longer means "both chapters show the same flag" (that
+// was the pre-fix, leaking behavior) — this test uses two distinct events,
+// one per hop's own window, to prove both correct disjoint attribution AND
+// the dedup cache in the same scenario that originally exposed the leak.
 func TestHandleGetIncident_VerificationFlags_SharedTraceDedup(t *testing.T) {
 	const sharedTrace = "tr_shared01"
+	triageStart := time.Now().Add(-2 * time.Minute).UTC()
+	remediationStart := time.Now().Add(-1 * time.Minute).UTC()
 	run := &audit.PlaybookRun{
 		RunID:          "plr_shared01",
 		SeriesID:       "pbs_db_restart_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_db_restart_action",
-		StartedAt:      time.Now().UTC(),
+		StartedAt:      triageStart,
 		TraceID:        sharedTrace,
 	}
 	remediationHop := &audit.PlaybookRun{
@@ -279,16 +281,22 @@ func TestHandleGetIncident_VerificationFlags_SharedTraceDedup(t *testing.T) {
 		Outcome:    audit.OutcomeResolved,
 		PriorRunID: "plr_shared01",
 		TraceID:    sharedTrace,
-		StartedAt:  time.Now().UTC(),
+		StartedAt:  remediationStart,
 	}
 	mock := &mockIncidentAuditd{
 		triageRun:        run,
 		nextRunByPriorID: map[string]*audit.PlaybookRun{"plr_shared01": remediationHop},
 		eventsByTraceID: map[string][]audit.Event{
-			sharedTrace: {{
-				Timestamp:              remediationHop.StartedAt.Add(time.Second),
-				DelegationVerification: &audit.DelegationVerification{Mismatch: true},
-			}},
+			sharedTrace: {
+				{
+					Timestamp:              triageStart.Add(time.Second),
+					DelegationVerification: &audit.DelegationVerification{Mismatch: true},
+				},
+				{
+					Timestamp:              remediationStart.Add(time.Second),
+					DelegationVerification: &audit.DelegationVerification{TargetDrift: []string{"host=other-db"}},
+				},
+			},
 		},
 	}
 	auditSrv := mock.server(t)
@@ -303,11 +311,14 @@ func TestHandleGetIncident_VerificationFlags_SharedTraceDedup(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if !n.Triage.HasMismatch {
-		t.Error("Triage.HasMismatch = false, want true")
+	if !n.Triage.HasMismatch || n.Triage.HasTargetDrift {
+		t.Errorf("Triage flags = (mismatch=%v, drift=%v), want (true, false) — only its own hop's event", n.Triage.HasMismatch, n.Triage.HasTargetDrift)
 	}
-	if n.Remediation == nil || !n.Remediation.HasMismatch {
-		t.Errorf("Remediation.HasMismatch should also be true (shared trace), got %+v", n.Remediation)
+	if n.Remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if n.Remediation.HasMismatch || !n.Remediation.HasTargetDrift {
+		t.Errorf("Remediation flags = (mismatch=%v, drift=%v), want (false, true) — only its own hop's event, not triage's mismatch", n.Remediation.HasMismatch, n.Remediation.HasTargetDrift)
 	}
 	if got := mock.eventsRequestCount[sharedTrace]; got != 1 {
 		t.Errorf("events requests for shared trace = %d, want exactly 1 (dedup cache should prevent a second fetch)", got)
@@ -327,7 +338,7 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 		SeriesID:    "pbs_db_restart_triage",
 		Outcome:     audit.OutcomeEscalated,
 		EscalatedTo: "pbs_sysadmin_docker_inspect",
-		StartedAt:   time.Now().UTC(),
+		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 		TraceID:     "tr_indep_triage",
 	}
 	escalation := &audit.PlaybookRun{
@@ -337,7 +348,7 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 		TransitionedTo: "pbs_db_restart_action",
 		PriorRunID:     "plr_indep01",
 		TraceID:        "tr_indep_escalation",
-		StartedAt:      time.Now().UTC(),
+		StartedAt:      time.Now().Add(-2 * time.Minute).UTC(),
 	}
 	remediation := &audit.PlaybookRun{
 		RunID:      "plr_indep03",
@@ -345,7 +356,7 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 		Outcome:    audit.OutcomeResolved,
 		PriorRunID: "plr_indep02",
 		TraceID:    "tr_indep_remediation",
-		StartedAt:  time.Now().UTC(),
+		StartedAt:  time.Now().Add(-1 * time.Minute).UTC(),
 	}
 	mock := &mockIncidentAuditd{
 		triageRun: run,
@@ -1076,6 +1087,98 @@ func TestBuildJourneyRefs(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Errorf("[%d] got %+v, want %+v", i, got[i], tc.want[i])
 				}
+			}
+		})
+	}
+}
+
+// TestHopVerificationFlags exercises hopVerificationFlags directly (rather
+// than only indirectly through handleGetIncident), covering boundary and
+// aggregation cases the end-to-end incident tests don't specifically pin
+// down: window-boundary inclusivity/exclusivity, multiple events in one
+// window with mixed signals (OR-aggregation across all three flags
+// independently), and a nil DelegationVerification event being skipped
+// rather than panicking.
+func TestHopVerificationFlags(t *testing.T) {
+	base := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	start := base
+	end := base.Add(10 * time.Second)
+
+	mismatchEvent := func(ts time.Time) audit.Event {
+		return audit.Event{Timestamp: ts, DelegationVerification: &audit.DelegationVerification{Mismatch: true}}
+	}
+
+	tests := []struct {
+		name                                                 string
+		events                                               []audit.Event
+		start, end                                           time.Time
+		wantMismatch, wantTargetDrift, wantProtocolViolation bool
+	}{
+		{
+			name:   "empty events",
+			events: nil,
+			start:  start, end: end,
+		},
+		{
+			name:   "event exactly at start is included (inclusive lower bound)",
+			events: []audit.Event{mismatchEvent(start)},
+			start:  start, end: end,
+			wantMismatch: true,
+		},
+		{
+			name:   "event exactly at end is excluded (exclusive upper bound)",
+			events: []audit.Event{mismatchEvent(end)},
+			start:  start, end: end,
+			wantMismatch: false,
+		},
+		{
+			name:   "event one nanosecond before end is included",
+			events: []audit.Event{mismatchEvent(end.Add(-time.Nanosecond))},
+			start:  start, end: end,
+			wantMismatch: true,
+		},
+		{
+			name:   "event before start is excluded",
+			events: []audit.Event{mismatchEvent(start.Add(-time.Second))},
+			start:  start, end: end,
+			wantMismatch: false,
+		},
+		{
+			name:   "zero end means unbounded — a far-future event still counts",
+			events: []audit.Event{mismatchEvent(start.Add(365 * 24 * time.Hour))},
+			start:  start, end: time.Time{},
+			wantMismatch: true,
+		},
+		{
+			name: "multiple events in one window, mixed signals OR together independently",
+			events: []audit.Event{
+				{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{Mismatch: true}},
+				{Timestamp: start.Add(2 * time.Second), DelegationVerification: &audit.DelegationVerification{TargetDrift: []string{"host=x"}}},
+				{Timestamp: start.Add(3 * time.Second), DelegationVerification: &audit.DelegationVerification{ProtocolViolation: true}},
+			},
+			start: start, end: end,
+			wantMismatch: true, wantTargetDrift: true, wantProtocolViolation: true,
+		},
+		{
+			name:   "event with nil DelegationVerification is skipped, not a panic",
+			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: nil}},
+			start:  start, end: end,
+			wantMismatch: false,
+		},
+		{
+			name:   "TargetDriftDetail-only signal still sets HasTargetDrift via TargetDrift presence",
+			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{TargetDrift: []string{"host=other"}}}},
+			start:  start, end: end,
+			wantTargetDrift: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotMismatch, gotTargetDrift, gotProtocolViolation := hopVerificationFlags(tc.events, tc.start, tc.end)
+			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation {
+				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v), want (mismatch=%v, drift=%v, violation=%v)",
+					gotMismatch, gotTargetDrift, gotProtocolViolation, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation)
 			}
 		})
 	}
