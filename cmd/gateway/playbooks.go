@@ -780,8 +780,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		// nothing for the remediation playbook to act on.
 		if findingsRecommendMonitor(prev.findings) {
 			finalOutcome = "resolved"
-			finalEscalatedTo = ""
-			finalTransitionedTo = ""
+			// Only clear these when prev is still the primary hop (len(chain)==0).
+			// If a downstream hop is the one recommending monitor, the primary's
+			// own original escalated_to/transitioned_to must survive — see the
+			// len(chain) == 0 comment below for why these fields must never be
+			// overwritten by anything other than the primary's own signal.
+			if len(chain) == 0 {
+				finalEscalatedTo = ""
+				finalTransitionedTo = ""
+			}
 			break
 		}
 
@@ -863,12 +870,25 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				extra["diagnostic_report"] = prev.diagReport
 			}
 			finalOutcome = audit.OutcomeGatePending
-			if isTransition {
-				finalTransitionedTo = nextSeries
-				finalEscalatedTo = ""
-			} else {
-				finalEscalatedTo = nextSeries
-				finalTransitionedTo = ""
+			// Only set these when prev is still the primary hop (len(chain)==0).
+			// nextSeries/isTransition describe THIS hop's own handoff, but
+			// finalEscalatedTo/finalTransitionedTo get persisted onto the
+			// PRIMARY run's own record (see the len(chain)==0 comment further
+			// down, near the auto-chain success path) — a downstream hop's
+			// force-gated transition must not overwrite the primary's own
+			// original signal. Found live: a sysadmin hop's own
+			// TRANSITION_TO got force-gated on trust_not_earned, and this
+			// unconditional assignment corrupted the triage run's persisted
+			// transitioned_to, making handleGetIncident misclassify the
+			// sysadmin hop as the remediation instead of an escalation hop.
+			if len(chain) == 0 {
+				if isTransition {
+					finalTransitionedTo = nextSeries
+					finalEscalatedTo = ""
+				} else {
+					finalEscalatedTo = nextSeries
+					finalTransitionedTo = ""
+				}
 			}
 			finalFindings = prev.findings
 			finalReport = prev.diagReport
@@ -1012,7 +1032,14 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			extra["diagnostic_report"] = prev.diagReport
 		}
 		finalOutcome = audit.OutcomeGatePending
-		finalTransitionedTo = req.RemediationSeriesID
+		// Only set when prev is still the primary hop (len(chain)==0) — same
+		// leak risk as the informed-gate branch above: req.RemediationSeriesID
+		// is the CALLER's original target for the primary hop, and must not be
+		// stamped onto the primary's record as if it were a downstream hop's
+		// own omitted signal.
+		if len(chain) == 0 {
+			finalTransitionedTo = req.RemediationSeriesID
+		}
 		finalFindings = prev.findings
 		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with

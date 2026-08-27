@@ -3006,6 +3006,87 @@ func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal
+// mirrors TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
+// the findingsRecommendMonitor early-exit branch instead of the informed-gate
+// branch: hop2 (chained) both names a transition target AND has its own
+// findings recommend monitor, tripping the early-exit at chain position 1
+// (len(chain)==1, not 0). Same bug shape: playbooks.go used to clear
+// finalEscalatedTo/finalTransitionedTo unconditionally here, which would have
+// blanked out the primary's own ESCALATE_TO signal just because a downstream
+// hop's findings said "monitor".
+func TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_monchain_triage",
+		SeriesID:      "pbs_monchain_triage",
+		Name:          "Monitor Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "mon_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_monchain_sysadmin",
+		SeriesID:      "pbs_monchain_sysadmin",
+		Name:          "Monitor Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "mon_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_monchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_monchain_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "mon_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_monchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "mon_sysadmin_agent",
+		"FINDINGS: worst table dead_ratio=0.03; recommended=monitor\nTRANSITION_TO: pbs_monchain_remediate\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"mon_db_agent":       dbCard,
+		"mon_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+
+	if got := patch["escalated_to"]; got != "pbs_monchain_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_monchain_sysadmin' (its own signal, not cleared by hop2's monitor recommendation)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
+	}
+}
+
 // promptCapture records the raw request body of the most recent A2A call to
 // a mock agent, thread-safe for concurrent test use.
 type promptCapture struct {
@@ -3322,6 +3403,33 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate(t *testing.T)
 	// the chain before hop3 (remediate) is ever invoked.
 	if got := auditSrv.runCount(); got != 2 {
 		t.Errorf("runCount() = %d, want 2 — remediate agent should never have been invoked, the chain must stop at the gate", got)
+	}
+
+	// The primary (triage) run's own persisted record must still reflect its
+	// own ESCALATE_TO signal, not hop2's force-gated TRANSITION_TO — a real
+	// bug found live: hop2's TRANSITION_TO was leaking onto the primary's
+	// record, making handleGetIncident misclassify hop2 (an escalation hop)
+	// as the remediation chapter.
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+	if got := patch["escalated_to"]; got != "pbs_oevchain_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_oevchain_sysadmin' (its own signal, not hop2's)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty — hop2's force-gated TRANSITION_TO must not leak onto the primary's own record", got)
 	}
 }
 
