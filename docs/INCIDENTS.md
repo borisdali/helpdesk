@@ -353,14 +353,22 @@ Each `trace_id` links to a Journey — the complete ordered record of every tool
 
 **Verification signals surface inline on each chapter.** `has_mismatch` (a
 delegation that claimed a tool ran but the audit trail shows no matching
-execution — see [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome))
-and `has_target_drift` (a tool call that genuinely executed, just against a
+execution — see [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)),
+`has_target_drift` (a tool call that genuinely executed, just against a
 different `connection_string` than the run was invoked with — see
-[MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope))
-are computed per-Journey but attached to the triage/escalation/remediation
-chapter that owns each trace, so you don't have to separately look up the
-Journey to know a chapter's tool calls weren't fully verified. `vault
-incidents <plr_*>` prints them inline, right under a chapter's Findings:
+[MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope)),
+and `has_protocol_violation` are computed **per chapter, not per-Journey** —
+each chapter is scoped to the delegation_verification events recorded during
+that specific hop's own execution window (from its own `started_at` up to the
+next hop's `started_at`, or unbounded for the terminal hop), not to every
+event sharing that trace_id. This distinction matters because a force-mode
+auto-chain can put multiple hops under one shared trace_id (chained hops are
+genuinely separate playbook runs, often separate agents, that happen to
+inherit the same trace_id) — a whole-trace Journey lookup can't tell those
+hops apart, so an earlier fix computed these flags per-Journey and a later
+hop's mismatch could leak backward onto an earlier, actually-clean hop. `vault
+incidents <plr_*>` prints the correctly-scoped flags inline, right under a
+chapter's Findings:
 
 ```
 ── TRIAGE
@@ -379,20 +387,26 @@ curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
   | jq '{triage: {has_mismatch: .triage.has_mismatch, has_target_drift: .triage.has_target_drift}}'
 ```
 
-**Absence of a warning is not a positive attestation.** Both flags default to
-`false` when no Journey data exists for a chapter's trace at all (a Journey is
-only discoverable when its trace has an anchor event — `delegation_decision`,
-or `gateway_request` without a tool name) — the same fail-open ambiguity that
-already exists at the Journey layer, just inherited here rather than newly
-introduced. An unflagged chapter means "verified clean, or nothing to verify
-against" — not "definitely checked and clean." If you need to distinguish
-those two cases for a specific trace, query the Journey directly:
+**Absence of a warning is not a positive attestation.** All three flags
+default to `false` when no `delegation_verification` events fall within a
+chapter's own window at all — fail-open by design, same as every other fetch
+helper on this endpoint. An unflagged chapter means "verified clean, or
+nothing to verify against" — not "definitely checked and clean." To
+distinguish those two cases for a specific hop, query the raw events directly,
+scoped to that chapter's own trace_id (available on every chapter object) and
+time window (`started_at` from the chapter itself, `completed_at` — or the
+next chapter's `started_at` if this one is mid-chain — as a rough upper
+bound):
 
 ```bash
-curl -s "http://localhost:1199/v1/journeys?trace_id=tr_9a4f2b1e" \
-  | jq '.[0] | {has_mismatch, has_target_drift, event_count}'
-# event_count == 0 (or the whole array empty) means no Journey data exists —
-# distinct from a Journey that exists and is genuinely clean.
+curl -s "http://localhost:1199/v1/events?trace_id=tr_9a4f2b1e&event_type=delegation_verification" \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  | jq 'length'
+# 0 means no delegation_verification events exist anywhere on this trace at
+# all. A non-zero count doesn't guarantee one falls inside this specific
+# chapter's own window if the trace is shared with another hop — check each
+# event's own timestamp against the chapter's started_at/completed_at to be
+# certain which hop it belongs to.
 ```
 
 **Navigating from the incident to the Journey:**

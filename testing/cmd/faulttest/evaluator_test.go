@@ -3,35 +3,15 @@ package main
 import (
 	"testing"
 
+	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
 
-func TestSplitCategory(t *testing.T) {
-	tests := []struct {
-		input string
-		want  []string
-	}{
-		{"connection_exhaustion", []string{"connection", "exhaustion"}},
-		{"pod-crash-loop", []string{"pod", "crash", "loop"}},
-		{"single", []string{"single"}},
-		{"mixed_and-separated", []string{"mixed", "and", "separated"}},
-		{"", []string{}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := splitCategory(tt.input)
-			if len(got) != len(tt.want) {
-				t.Fatalf("splitCategory(%q) = %v, want %v", tt.input, got, tt.want)
-			}
-			for i, w := range tt.want {
-				if got[i] != w {
-					t.Errorf("splitCategory(%q)[%d] = %q, want %q", tt.input, i, got[i], w)
-				}
-			}
-		})
-	}
-}
+// TestSplitCategory (mixed_and-separated / empty-string cases) lived here
+// redundantly with faultlib's own TestSplitCategory (item 7 dedup, v0.26) —
+// deleted; faultlib_test.go's copy exercises the same shared
+// faultlib.SplitCategory. TestSplitCategory_DotIsNotSeparator below covers a
+// genuinely distinct edge case and is kept, redirected to faultlib.SplitCategory.
 
 func TestEvaluate_AllPass(t *testing.T) {
 	f := Failure{
@@ -88,6 +68,100 @@ func TestEvaluate_KeywordFail(t *testing.T) {
 	}
 	if result.Passed {
 		t.Error("Evaluate should fail when keywords don't match")
+	}
+}
+
+// TestEvaluate_ToolOrdering_* / TestEvaluate_OrderingGatesPassed ported from
+// faultlib_test.go (item 7 dedup, v0.26): this package's Evaluate never
+// consulted ExpectedToolOrder even after Phase 1 made the field reachable
+// from a real catalog entry — the data existed, nothing ever read it.
+
+func TestEvaluate_ToolOrdering_Pass(t *testing.T) {
+	// get_session_info ordering pattern ("client_addr") precedes
+	// terminate_connection ordering pattern ("pg_terminate_backend").
+	// This mirrors what the agent writes after calling tools in the correct order.
+	f := Failure{
+		ID: "ordering-pass",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "Session info: client_addr: 127.0.0.1, state: idle in transaction, duration: 30m. " +
+		"pg_terminate_backend(1234) returned true."
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+	if !result.OrderingPass {
+		t.Errorf("OrderingPass = false; expected session_info evidence to precede terminate evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_Fail(t *testing.T) {
+	// terminate_connection ordering pattern ("pg_terminate_backend") appears
+	// before get_session_info ordering pattern ("client_addr") — wrong order.
+	f := Failure{
+		ID: "ordering-fail",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+	if result.OrderingPass {
+		t.Errorf("OrderingPass = true; expected false when terminate evidence precedes session_info evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_MissingTool(t *testing.T) {
+	// terminate_connection ordering pattern is absent — ordering cannot be confirmed.
+	f := Failure{
+		ID: "ordering-missing",
+		Evaluation: EvalSpec{
+			ExpectedToolOrder: [][]string{
+				{"get_session_info", "terminate_connection"},
+			},
+		},
+	}
+	response := "Session info: client_addr: 127.0.0.1, state: active."
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+	if result.OrderingPass {
+		t.Errorf("OrderingPass = true; expected false when one tool has no evidence in %q", response)
+	}
+}
+
+func TestEvaluate_ToolOrdering_EmptyOrder_AlwaysPasses(t *testing.T) {
+	// No ExpectedToolOrder → OrderingPass is always true (backwards compatible).
+	f := Failure{
+		ID: "ordering-none",
+		Evaluation: EvalSpec{
+			ExpectedKeywords: KeywordSpec{AnyOf: []string{"refused"}},
+		},
+	}
+	response := "Connection refused."
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+	if !result.OrderingPass {
+		t.Error("OrderingPass should be true when ExpectedToolOrder is empty")
+	}
+}
+
+func TestEvaluate_OrderingGatesPassed(t *testing.T) {
+	// High keyword + tool score but wrong ordering → Passed = false.
+	f := Failure{
+		ID:       "ordering-gates-passed",
+		Category: "database",
+		Evaluation: EvalSpec{
+			ExpectedKeywords:  KeywordSpec{AnyOf: []string{"pg_terminate_backend"}},
+			ExpectedToolOrder: [][]string{{"get_session_info", "terminate_connection"}},
+		},
+	}
+	// pg_terminate_backend appears BEFORE client_addr — wrong order.
+	response := "pg_terminate_backend(1234) returned true. Then inspected: client_addr: 127.0.0.1."
+	result := Evaluate(f, testutil.AgentResponse{Text: response})
+	if result.KeywordPass && result.Passed {
+		t.Errorf("Passed should be false when ordering fails even if keyword passes; Score=%.2f, KeywordPass=%v, OrderingPass=%v",
+			result.Score, result.KeywordPass, result.OrderingPass)
 	}
 }
 
@@ -829,14 +903,14 @@ func TestSplitCategory_DotIsNotSeparator(t *testing.T) {
 	// "wal_accumulation.stale_slot" would produce "accumulation.stale" as a
 	// single token, hiding the "stale" word from diagnosis matching.
 	// Categories must use underscore or hyphen as separators.
-	got := splitCategory("wal_accumulation.stale_slot")
+	got := faultlib.SplitCategory("wal_accumulation.stale_slot")
 	want := []string{"wal", "accumulation.stale", "slot"} // dot stays joined
 	if len(got) != len(want) {
-		t.Fatalf("splitCategory with dot: got %v, want %v", got, want)
+		t.Fatalf("faultlib.SplitCategory with dot: got %v, want %v", got, want)
 	}
 	for i, w := range want {
 		if got[i] != w {
-			t.Errorf("splitCategory[%d] = %q, want %q", i, got[i], w)
+			t.Errorf("faultlib.SplitCategory[%d] = %q, want %q", i, got[i], w)
 		}
 	}
 }

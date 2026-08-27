@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helpdesk/playbooks"
+	"helpdesk/testing/faultlib"
 )
 
 const builtinMinimum = 33
@@ -191,12 +192,12 @@ func TestFilterFailures_SourceFilter(t *testing.T) {
 		},
 	}
 
-	builtin := FilterFailures(cat, &HarnessConfig{SourceFilter: "builtin"})
+	builtin := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: "builtin"}})
 	if len(builtin) != 2 {
 		t.Errorf("SourceFilter=builtin: got %d, want 2", len(builtin))
 	}
 
-	custom := FilterFailures(cat, &HarnessConfig{SourceFilter: "custom"})
+	custom := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: "custom"}})
 	if len(custom) != 1 {
 		t.Errorf("SourceFilter=custom: got %d, want 1", len(custom))
 	}
@@ -204,7 +205,7 @@ func TestFilterFailures_SourceFilter(t *testing.T) {
 		t.Errorf("SourceFilter=custom: got ID %q, want c1", custom[0].ID)
 	}
 
-	all := FilterFailures(cat, &HarnessConfig{SourceFilter: ""})
+	all := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{SourceFilter: ""}})
 	if len(all) != 3 {
 		t.Errorf("SourceFilter='': got %d, want 3", len(all))
 	}
@@ -247,7 +248,7 @@ func TestFilterFailures_ByCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"database"}}})
 	if len(result) != 2 {
 		t.Errorf("FilterFailures([database]) = %d failures, want 2", len(result))
 	}
@@ -268,7 +269,7 @@ func TestFilterFailures_ByID(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{FailureIDs: []string{"db-2"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{FailureIDs: []string{"db-2"}}})
 	if len(result) != 1 {
 		t.Fatalf("FilterFailures([db-2]) = %d failures, want 1", len(result))
 	}
@@ -288,7 +289,10 @@ func TestFilterFailures_ByCategoryAndID(t *testing.T) {
 	}
 
 	// ID filter takes precedence; category also matches.
-	result := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}, FailureIDs: []string{"k8s-1"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
+		Categories: []string{"database"},
+		FailureIDs: []string{"k8s-1"},
+	}})
 	if len(result) != 3 {
 		t.Errorf("FilterFailures([database], [k8s-1]) = %d failures, want 3", len(result))
 	}
@@ -304,7 +308,7 @@ func TestFilterFailures_ExcludeIDs(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{ExcludeIDs: []string{"k8s-1"}})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ExcludeIDs: []string{"k8s-1"}}})
 	if len(result) != 2 {
 		t.Fatalf("FilterFailures(exclude k8s-1) = %d failures, want 2", len(result))
 	}
@@ -327,10 +331,10 @@ func TestFilterFailures_ExcludeIDs_WinsOverCategory(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		Categories: []string{"kubernetes"},
 		ExcludeIDs: []string{"k8s-1"},
-	})
+	}})
 	if len(result) != 1 {
 		t.Fatalf("FilterFailures(category=kubernetes, exclude=k8s-1) = %d failures, want 1", len(result))
 	}
@@ -349,7 +353,7 @@ func TestFilterFailures_External(t *testing.T) {
 		},
 	}
 
-	result := FilterFailures(catalog, &HarnessConfig{External: true})
+	result := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{External: true}})
 	if len(result) != 2 {
 		t.Errorf("FilterFailures(external=true) = %d, want 2", len(result))
 	}
@@ -363,31 +367,31 @@ func TestFilterFailures_RealCatalog(t *testing.T) {
 	}
 
 	// Filter by database category should return at least 16 failures.
-	dbFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"database"}})
+	dbFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"database"}}})
 	if len(dbFailures) < 16 {
 		t.Errorf("database category count = %d, want >= 16", len(dbFailures))
 	}
 
 	// Filter by kubernetes category should return at least 9 failures.
-	k8sFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"kubernetes"}})
+	k8sFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"kubernetes"}}})
 	if len(k8sFailures) < 9 {
 		t.Errorf("kubernetes category count = %d, want >= 9", len(k8sFailures))
 	}
 
 	// Filter by host category should return at least 2 failures.
-	hostFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"host"}})
+	hostFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"host"}}})
 	if len(hostFailures) < 2 {
 		t.Errorf("host category count = %d, want >= 2", len(hostFailures))
 	}
 
 	// Filter by compound category should return at least 2 failures.
-	compoundFailures := FilterFailures(catalog, &HarnessConfig{Categories: []string{"compound"}})
+	compoundFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{Categories: []string{"compound"}}})
 	if len(compoundFailures) < 2 {
 		t.Errorf("compound category count = %d, want >= 2", len(compoundFailures))
 	}
 
 	// External filter: only external_compat faults.
-	extFailures := FilterFailures(catalog, &HarnessConfig{External: true})
+	extFailures := FilterFailures(catalog, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{External: true}})
 	for _, f := range extFailures {
 		if !f.ExternalCompat {
 			t.Errorf("external filter returned non-compatible fault %q", f.ID)
@@ -434,7 +438,7 @@ func TestFilterFailures_AutoDB(t *testing.T) {
 		t.Fatalf("LoadCatalog error: %v", err)
 	}
 
-	autoFaults := FilterFailures(cat, &HarnessConfig{AutoDB: true})
+	autoFaults := FilterFailures(cat, &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AutoDB: true}})
 	for _, f := range autoFaults {
 		if !f.IsAutoDBCompat() {
 			t.Errorf("auto-db filter returned non-auto-db-compat fault %q", f.ID)
@@ -457,11 +461,11 @@ func TestFilterFailures_AutoDB(t *testing.T) {
 }
 
 func TestResolvePrompt(t *testing.T) {
-	cfg := &HarnessConfig{
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		ConnStr:        "host=db.example.com port=5432 dbname=prod",
 		ReplicaConnStr: "host=replica.example.com port=5432 dbname=prod",
 		KubeContext:    "gke_prod",
-	}
+	}}
 
 	prompt := "Connect to {{connection_string}} and check replica at {{replica_connection_string}} in context {{kube_context}}"
 	result := ResolvePrompt(prompt, cfg)
@@ -472,10 +476,26 @@ func TestResolvePrompt(t *testing.T) {
 	}
 }
 
-func TestResolvePrompt_NoPlaceholders(t *testing.T) {
-	cfg := &HarnessConfig{
-		ConnStr: "host=db.example.com",
+func TestResolvePrompt_ServerID(t *testing.T) {
+	// Regression: this package's own ResolvePrompt used to omit
+	// {{server_id}} from its substitution list entirely (item 7 dedup,
+	// v0.26) — 4 catalog faults use it in agent_prompt, and `faulttest
+	// inject` (this package's only caller of ResolvePrompt) printed the
+	// literal placeholder instead of the resolved server name. Now a thin
+	// wrapper over faultlib.ResolvePrompt, which always had it.
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ServerID: "test-db"}}
+
+	prompt := "The database server '{{server_id}}' is not responding."
+	result := ResolvePrompt(prompt, cfg)
+
+	expected := "The database server 'test-db' is not responding."
+	if result != expected {
+		t.Errorf("ResolvePrompt result = %q, want %q", result, expected)
 	}
+}
+
+func TestResolvePrompt_NoPlaceholders(t *testing.T) {
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ConnStr: "host=db.example.com"}}
 
 	prompt := "Simple prompt with no placeholders"
 	result := ResolvePrompt(prompt, cfg)
@@ -501,19 +521,26 @@ func TestTimeoutDuration_Minutes(t *testing.T) {
 	}
 }
 
+// TestTimeoutDuration_Empty and _Invalid assert faultlib's 120s default
+// (Failure is a type alias for faultlib.Failure — item 7 dedup, v0.26). This
+// package used to define its own copy of Failure/TimeoutDuration with a
+// drifted 60s default, but that copy had zero production callers — every
+// real fault-injection run always went through the (now-deleted)
+// toLFFailure conversion first, so faultlib's 120s was the only default
+// ever actually live. These tests previously asserted the dead 60s value.
 func TestTimeoutDuration_Empty(t *testing.T) {
 	f := Failure{Timeout: ""}
 	d := f.TimeoutDuration()
-	if d != 60*time.Second {
-		t.Errorf("TimeoutDuration('') = %v, want 60s default", d)
+	if d != 120*time.Second {
+		t.Errorf("TimeoutDuration('') = %v, want 120s default", d)
 	}
 }
 
 func TestTimeoutDuration_Invalid(t *testing.T) {
 	f := Failure{Timeout: "invalid"}
 	d := f.TimeoutDuration()
-	if d != 60*time.Second {
-		t.Errorf("TimeoutDuration(invalid) = %v, want 60s default", d)
+	if d != 120*time.Second {
+		t.Errorf("TimeoutDuration(invalid) = %v, want 120s default", d)
 	}
 }
 
@@ -642,5 +669,43 @@ func TestReorderArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLoadConfig_InfraConfigPath_FromEnv is a regression test for a real bug
+// found during v0.26 item 6's manual testing: --infra-config had no
+// FAULTTEST_INFRA_CONFIG env-var fallback at all, unlike every other major
+// flag in this binary (--gateway/FAULTTEST_GATEWAY_URL, --api-key/
+// HELPDESK_CLIENT_API_KEY, --agent-model/HELPDESK_MODEL_NAME, ...) and unlike
+// testing/faulttest's own Go-test harness, which already read the same env
+// var correctly. Confirmed live: omitting --infra-config silently resolved
+// {{server_id}} to an empty string instead of failing loudly, producing a
+// broken prompt ("the database server ”...") that derailed the agent into
+// asking which server to check — reproduced deterministically, then fixed by
+// re-running with --infra-config explicitly set.
+func TestLoadConfig_InfraConfigPath_FromEnv(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "testing/testing.infra.json")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, nil)
+	if cfg.InfraConfigPath != "testing/testing.infra.json" {
+		t.Errorf("InfraConfigPath = %q, want the FAULTTEST_INFRA_CONFIG env var value", cfg.InfraConfigPath)
+	}
+}
+
+func TestLoadConfig_InfraConfigPath_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "testing/testing.infra.json")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, []string{"--infra-config", "/explicit/path.json"})
+	if cfg.InfraConfigPath != "/explicit/path.json" {
+		t.Errorf("InfraConfigPath = %q, want the explicit --infra-config flag value to win over the env var", cfg.InfraConfigPath)
+	}
+}
+
+func TestLoadConfig_InfraConfigPath_EmptyWhenUnset(t *testing.T) {
+	t.Setenv("FAULTTEST_INFRA_CONFIG", "")
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg := loadConfig(fs, nil)
+	if cfg.InfraConfigPath != "" {
+		t.Errorf("InfraConfigPath = %q, want empty when neither the flag nor the env var is set", cfg.InfraConfigPath)
 	}
 }

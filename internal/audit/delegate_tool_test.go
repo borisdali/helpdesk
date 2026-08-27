@@ -152,6 +152,68 @@ func TestHasPolicyDenial(t *testing.T) {
 	}
 }
 
+func TestHasActionClassDenial(t *testing.T) {
+	tests := []struct {
+		name        string
+		events      []Event
+		actionClass ActionClass
+		want        bool
+	}{
+		{"no events", nil, ActionWrite, false},
+		{
+			"exact write match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}}},
+			ActionWrite, true,
+		},
+		{
+			"exact destructive match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "destructive"}}},
+			ActionDestructive, true,
+		},
+		{
+			"destructive denial satisfies a write delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "destructive"}}},
+			ActionWrite, true,
+		},
+		{
+			"write denial does NOT satisfy a destructive delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}}},
+			ActionDestructive, false,
+		},
+		{
+			"unrelated read denial does not satisfy a write delegation",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "read"}}},
+			ActionWrite, false,
+		},
+		{
+			"allow effect is not a denial, regardless of action match",
+			[]Event{{PolicyDecision: &PolicyDecision{Effect: "allow", Action: "write"}}},
+			ActionWrite, false,
+		},
+		{
+			"nil PolicyDecision is skipped, not a panic",
+			[]Event{{PolicyDecision: nil}},
+			ActionWrite, false,
+		},
+		{
+			"matching denial among multiple unrelated events",
+			[]Event{
+				{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "read"}},
+				{PolicyDecision: &PolicyDecision{Effect: "allow", Action: "write"}},
+				{PolicyDecision: &PolicyDecision{Effect: "deny", Action: "write"}},
+			},
+			ActionWrite, true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasActionClassDenial(tt.events, tt.actionClass); got != tt.want {
+				t.Errorf("hasActionClassDenial(actionClass=%s) = %v, want %v", tt.actionClass, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestFetchEventsByType_RetryBehavior guards the intentional latency-avoiding
 // design decision: fetchToolExecutionEvents retries once after 200ms (async
 // write propagation from RemoteStore is a real concern for tool_execution
@@ -221,7 +283,7 @@ func TestBuildDelegationVerification_Mismatch(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del1", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del1", "postgres_database_agent", "")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: destructive delegation with no destructive tool confirmed")
@@ -241,7 +303,7 @@ func TestBuildDelegationVerification_Confirmed(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del2", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del2", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection was confirmed")
@@ -257,7 +319,7 @@ func TestBuildDelegationVerification_ReadDelegation_NeverMismatchFromToolAbsence
 	// applies to reads, and there's nothing narrated to be unconfirmed.
 	srv := serveFakeEvents(t, []Event{})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del3", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del3", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: no tools called and nothing narrated")
@@ -275,7 +337,7 @@ func TestBuildDelegationVerification_MismatchFromNarration(t *testing.T) {
 		}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del7", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del7", "postgres_database_agent", "")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: narrated tool call with no matching execution and no policy denial")
@@ -294,7 +356,7 @@ func TestBuildDelegationVerification_NarrationConfirmed_NoMismatch(t *testing.T)
 		}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del8", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del8", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: narrated tool call was actually confirmed")
@@ -317,7 +379,7 @@ func TestBuildDelegationVerification_SuppressedByPolicyDenial(t *testing.T) {
 		}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del9", "k8s_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionRead, "evt_del9", "k8s_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: policy denial explains the narrated-but-unconfirmed call")
@@ -339,7 +401,7 @@ func TestBuildDelegationVerification_NarrationMismatch_UnconditionalOnActionClas
 		}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del10", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del10", "postgres_database_agent", "")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: get_session_info was narrated but never executed")
@@ -354,7 +416,7 @@ func TestBuildDelegationVerification_NarrationMismatch_UnconditionalOnActionClas
 
 func TestBuildDelegationVerification_NoAuditURL(t *testing.T) {
 	// Empty auditURL: returns zero-value verification without mismatch.
-	v := buildDelegationVerification("", "", "tr_test", time.Now(), ActionDestructive, "evt_del4", "postgres_database_agent")
+	v := buildDelegationVerification("", "", "tr_test", time.Now(), ActionDestructive, "evt_del4", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: no auditURL means no verification possible")
@@ -370,7 +432,7 @@ func TestBuildDelegationVerification_WriteAction_Mismatch(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del5", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del5", "postgres_database_agent", "")
 
 	if !v.Mismatch {
 		t.Error("Mismatch = false, want true: write delegation with no write-or-stronger tool confirmed")
@@ -386,7 +448,7 @@ func TestBuildDelegationVerification_WriteAction_ConfirmedWrite(t *testing.T) {
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "cancel_query"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del6", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del6", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: cancel_query (write) satisfies a write delegation")
@@ -402,13 +464,211 @@ func TestBuildDelegationVerification_WriteAction_ConfirmedDestructive(t *testing
 		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "terminate_connection"}},
 	})
 
-	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del7", "postgres_database_agent")
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del7", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection (destructive) satisfies a write delegation")
 	}
 	if len(v.DestructiveConfirmed) != 1 || v.DestructiveConfirmed[0] != "terminate_connection" {
 		t.Errorf("DestructiveConfirmed = %v, want [terminate_connection]", v.DestructiveConfirmed)
+	}
+}
+
+func TestBuildDelegationVerification_WriteAction_DeclinedWithHandoff_Downgraded(t *testing.T) {
+	// Write delegation with no write/destructive tool confirmed, but the
+	// agent's own response has BOTH a well-formed ACTION_TAKEN: none line AND
+	// an ESCALATE_TO handoff — a corroborated decline, not a silent failure.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
+	})
+	responseText := "HYPOTHESIS_1: disk full | CONFIDENCE: 0.9\nROOT_CAUSE: HYPOTHESIS_1\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del11", "sysadmin_agent", responseText)
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: corroborated decline (ACTION_TAKEN: none + ESCALATE_TO) should downgrade")
+	}
+	if v.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded
+// verifies the corroborated-decline downgrade applies to ActionDestructive too,
+// not just ActionWrite — the downgrade check runs after the switch statement
+// unconditional on which branch set Mismatch, but nothing had verified this for
+// the Destructive class specifically before this test.
+func TestBuildDelegationVerification_DestructiveAction_DeclinedWithHandoff_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+	})
+	responseText := "FINDINGS: container exited cleanly, no restart performed\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del14", "sysadmin_agent", responseText)
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: corroborated decline should downgrade a destructive-class mismatch the same as a write-class one")
+	}
+	if v.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_WriteAction_PolicyDenied_Downgraded is a
+// regression test for a real gap found during live 3-hop escalation-chain
+// verification: a terminal hop (e.g. pbs_db_restart_action) whose only write
+// attempt is denied by policy has nothing to hand off to, so it can never
+// satisfy declinedActionSignal's ACTION_TAKEN+handoff requirement — even
+// though the audit trail already proves, independently of any self-report,
+// that the write was genuinely attempted and blocked, not silently skipped.
+func TestBuildDelegationVerification_WriteAction_PolicyDenied_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "destructive", Message: "purpose \"diagnostic\" is in the blocked list",
+		}},
+	})
+	// No ACTION_TAKEN/handoff lines at all — this is exactly the terminal-hop
+	// shape declinedActionSignal alone cannot corroborate.
+	responseText := "FINDINGS: container exited cleanly, restart blocked by policy\nROOT_CAUSE: HYPOTHESIS_1\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del15", "sysadmin_agent", responseText)
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: a real policy_decision deny event for a write/destructive action is sufficient corroboration on its own")
+	}
+	if v.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded
+// mirrors the WriteAction case above for ActionDestructive directly (not via
+// the destructive-satisfies-write rule).
+func TestBuildDelegationVerification_DestructiveAction_PolicyDenied_Downgraded(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "destructive",
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionDestructive, "evt_del16", "sysadmin_agent", "")
+
+	if v.Mismatch {
+		t.Error("Mismatch = true, want false: policy-denied destructive action should downgrade")
+	}
+}
+
+// TestBuildDelegationVerification_WriteAction_UnrelatedPolicyDenial_StillMismatch
+// guards the precision claim: hasActionClassDenial must be stricter than
+// hasPolicyDenial — an unrelated read-class denial elsewhere in the trace
+// must not corroborate a write-absence mismatch.
+func TestBuildDelegationVerification_WriteAction_UnrelatedPolicyDenial_StillMismatch(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_host"}},
+		{EventType: EventTypePolicyDecision, PolicyDecision: &PolicyDecision{
+			Effect: "deny", Action: "read", Message: "purpose required",
+		}},
+	})
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del17", "sysadmin_agent", "")
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: an unrelated read-class denial must not corroborate a write-absence mismatch")
+	}
+}
+
+// TestBuildDelegationVerification_DeclinedWithHandoff_DoesNotSuppressNarrationMismatch
+// guards a real gap the existing tests didn't cover: declinedActionSignal
+// correctly downgrades the write/destructive-absence mismatch, but the model
+// separately narrated calling a DIFFERENT tool that never actually executed
+// and no policy denial explains — that is a genuinely orthogonal fabrication
+// signal (an unrelated hallucinated tool call) and must still fire, exactly
+// as the existing TestProxyToAgent_ManualHold_DoesNotClearNarrationMismatch
+// (cmd/gateway) already guards for the narrower manualHold downgrade. Uses
+// declinedActionSignal specifically, not hasActionClassDenial: the latter's
+// own trigger condition (a policy_decision deny event) is a strict subset of
+// hasPolicyDenial's coarser "any denial in the hop" condition, so whenever
+// hasActionClassDenial fires it would *also*, correctly and by existing
+// design, suppress narration-mismatch — making that combination structurally
+// untestable as an independence case. declinedActionSignal has no such
+// overlap: it never touches policyEvents at all.
+func TestBuildDelegationVerification_DeclinedWithHandoff_DoesNotSuppressNarrationMismatch(t *testing.T) {
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeAgentReasoning, AgentReasoning: &AgentReasoning{
+			ToolCalls: []string{"get_session_info"}, // narrated, never executed
+		}},
+		// Deliberately no policy_decision events — narration-mismatch must not
+		// be suppressed here.
+	})
+	responseText := "FINDINGS: container exited cleanly, no restart performed\nACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del18", "sysadmin_agent", responseText)
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: an unrelated narrated-but-unconfirmed tool call must still fire even though the write/destructive-absence check was corroborated by ACTION_TAKEN/handoff")
+	}
+	if len(v.NarratedNotConfirmed) != 1 || v.NarratedNotConfirmed[0] != "get_session_info" {
+		t.Errorf("NarratedNotConfirmed = %v, want [get_session_info]", v.NarratedNotConfirmed)
+	}
+	if v.MismatchReason != "" {
+		t.Errorf("MismatchReason = %q, want empty — the corroborated-decline reason should not survive once the narration check re-flags Mismatch for a different cause", v.MismatchReason)
+	}
+}
+
+func TestBuildDelegationVerification_WriteAction_ActionTakenNoneOnly_StillMismatch(t *testing.T) {
+	// ACTION_TAKEN: none alone, with no handoff line, is not corroborated —
+	// stays a mismatch (guards against a single self-reported line being
+	// sufficient to downgrade on its own).
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
+	})
+	responseText := "ACTION_TAKEN: none — nothing more to do\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del12", "sysadmin_agent", responseText)
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: ACTION_TAKEN: none alone (no handoff line) is not a corroborated decline")
+	}
+}
+
+func TestBuildDelegationVerification_WriteAction_HandoffOnly_StillMismatch(t *testing.T) {
+	// An ESCALATE_TO line alone, with no ACTION_TAKEN: none, is not
+	// corroborated — stays a mismatch.
+	srv := serveFakeEvents(t, []Event{
+		{EventType: EventTypeToolExecution, Tool: &ToolExecution{Name: "check_connection"}},
+	})
+	responseText := "ESCALATE_TO: pbs_wal_disk_full\n"
+
+	v := buildDelegationVerification(srv.URL, "", "tr_test", time.Now().Add(-time.Minute), ActionWrite, "evt_del13", "sysadmin_agent", responseText)
+
+	if !v.Mismatch {
+		t.Error("Mismatch = false, want true: ESCALATE_TO alone (no ACTION_TAKEN: none) is not a corroborated decline")
+	}
+}
+
+func TestDeclinedActionSignal(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"empty", "", false},
+		{"both lines present, escalate", "ACTION_TAKEN: none — escalation recommended\nESCALATE_TO: pbs_wal_disk_full\n", true},
+		{"both lines present, transition", "ACTION_TAKEN: none\nTRANSITION_TO: pbs_wal_disk_full\n", true},
+		{"markdown bold", "**ACTION_TAKEN:** none\n**ESCALATE_TO:** pbs_wal_disk_full\n", true},
+		{"case insensitive prefix", "action_taken: none\nescalate_to: pbs_wal_disk_full\n", true},
+		{"action taken only", "ACTION_TAKEN: none\n", false},
+		{"handoff only", "ESCALATE_TO: pbs_wal_disk_full\n", false},
+		{"escalate target is none", "ACTION_TAKEN: none\nESCALATE_TO: none\n", false},
+		{"action taken non-none value", "ACTION_TAKEN: cancelled the query\nESCALATE_TO: pbs_wal_disk_full\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := declinedActionSignal(tt.text); got != tt.want {
+				t.Errorf("declinedActionSignal(%q) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -466,7 +726,7 @@ func TestBuildDelegationVerification_Exported(t *testing.T) {
 	})
 
 	// Exported form should return the same result as the unexported form.
-	v := BuildDelegationVerification(srv.URL, "", "tr_exp", time.Now().Add(-time.Minute), ActionDestructive, "evt_exp1", "postgres_database_agent")
+	v := BuildDelegationVerification(srv.URL, "", "tr_exp", time.Now().Add(-time.Minute), ActionDestructive, "evt_exp1", "postgres_database_agent", "")
 
 	if v.Mismatch {
 		t.Error("Mismatch = true, want false: terminate_connection is destructive → satisfies ActionDestructive")

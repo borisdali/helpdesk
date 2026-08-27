@@ -161,6 +161,16 @@ func TestEvaluateWithJudge_JudgeFields_Populated(t *testing.T) {
 	if result.DiagnosisScore != 0.67 {
 		t.Errorf("DiagnosisScore = %.2f, want 0.67 for judge score=2", result.DiagnosisScore)
 	}
+	// DiagnosisPass = judgeResult.Score >= 0.5; 0.67 clears the threshold.
+	// Regression coverage: the true side of this threshold (judge score=2/3
+	// -> DiagnosisPass=true) was previously covered only by faultlib's own
+	// (now-deleted) TestEvaluateWithJudge_DiagnosisPassThreshold — the false
+	// side survived via TestEvaluateWithJudge_PartialJudgeScore, but the true
+	// side had no assertion anywhere in this package until now (item 7
+	// dedup, v0.26 coverage audit).
+	if !result.DiagnosisPass {
+		t.Error("DiagnosisPass should be true for judge score=0.67 (>= 0.5)")
+	}
 }
 
 func TestEvaluateWithJudge_AuditTools_Priority(t *testing.T) {

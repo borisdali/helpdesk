@@ -1625,7 +1625,7 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			classifyTarget = prompt[:idx]
 		}
 		actionClass := audit.ClassifyDelegation(agentName, classifyTarget)
-		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName)
+		verif := audit.BuildDelegationVerification(g.auditURL, g.auditAPIKey, traceID, start, actionClass, "", agentName, response.Text)
 		// When approval_mode=manual the agent is expected to propose destructive
 		// actions in text without executing them — no tool call will appear in the
 		// audit trail. Treat this as expected, not as fabrication. This suppression

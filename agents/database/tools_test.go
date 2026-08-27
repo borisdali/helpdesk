@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,25 +81,27 @@ type mockToolContext struct {
 }
 
 // ReadonlyContext methods
-func (mockToolContext) UserContent() *genai.Content         { return nil }
-func (mockToolContext) InvocationID() string                { return "test-invocation" }
-func (mockToolContext) AgentName() string                   { return "test-agent" }
+func (mockToolContext) UserContent() *genai.Content          { return nil }
+func (mockToolContext) InvocationID() string                 { return "test-invocation" }
+func (mockToolContext) AgentName() string                    { return "test-agent" }
 func (mockToolContext) ReadonlyState() session.ReadonlyState { return nil }
-func (mockToolContext) UserID() string                      { return "test-user" }
-func (mockToolContext) AppName() string                     { return "test-app" }
-func (mockToolContext) SessionID() string                   { return "test-session" }
-func (mockToolContext) Branch() string                      { return "" }
+func (mockToolContext) UserID() string                       { return "test-user" }
+func (mockToolContext) AppName() string                      { return "test-app" }
+func (mockToolContext) SessionID() string                    { return "test-session" }
+func (mockToolContext) Branch() string                       { return "" }
 
 // CallbackContext methods
 func (mockToolContext) Artifacts() agent.Artifacts { return nil }
 func (mockToolContext) State() session.State       { return nil }
 
 // tool.Context methods
-func (mockToolContext) FunctionCallID() string                                      { return "test-call-id" }
-func (mockToolContext) Actions() *session.EventActions                              { return nil }
-func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) { return nil, nil }
-func (mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation        { return nil }
-func (mockToolContext) RequestConfirmation(string, any) error                       { return nil }
+func (mockToolContext) FunctionCallID() string         { return "test-call-id" }
+func (mockToolContext) Actions() *session.EventActions { return nil }
+func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, nil
+}
+func (mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
+func (mockToolContext) RequestConfirmation(string, any) error                { return nil }
 
 func newTestContext() tool.Context {
 	return mockToolContext{context.Background()}
@@ -987,9 +990,9 @@ query_preview   | COMMIT
 
 func TestParseExpandedRow(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		want   map[string]string
+		name  string
+		input string
+		want  map[string]string
 	}{
 		{
 			name: "simple record",
@@ -1189,11 +1192,11 @@ func TestFormatDuration(t *testing.T) {
 func TestFormatConnectionPlan(t *testing.T) {
 	t.Run("no open transaction", func(t *testing.T) {
 		plan := ConnectionPlan{
-			PID:        42,
-			User:       "alice",
-			Database:   "mydb",
-			ClientAddr: "10.0.0.1",
-			State:      "idle",
+			PID:               42,
+			User:              "alice",
+			Database:          "mydb",
+			ClientAddr:        "10.0.0.1",
+			State:             "idle",
 			StateDurationSecs: 15,
 		}
 		out := formatConnectionPlan(plan)
@@ -2559,7 +2562,6 @@ func mockApprovalServerForTools(t *testing.T) (string, <-chan audit.ApprovalCrea
 	return srv.URL, ch
 }
 
-
 const requireApprovalPolicy = `
 version: "1"
 policies:
@@ -3293,7 +3295,6 @@ stats_reset                   | 2026-05-13 00:00:00+00
 	}
 }
 
-
 // =============================================================================
 // get_blocking_queries
 // =============================================================================
@@ -3488,6 +3489,42 @@ func TestReadUploadedFileTool_Success(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "FATAL") {
 		t.Errorf("output = %q, want FATAL line present", result.Output)
+	}
+}
+
+// TestReadUploadedFileTool_RecordsToolExecution is a regression test for the
+// same class of bug as TestGetSavedSnapshotsTool_RecordsToolExecution:
+// readUploadedFileImpl also queries auditd directly over HTTP, bypassing the
+// shared psql-audited helper, and never called toolAuditor.RecordToolCall.
+func TestReadUploadedFileTool_RecordsToolExecution(t *testing.T) {
+	defer withMockAuditServer(http.StatusOK, "2024-01-15 10:00:00 UTC: LOG: connection received\n")()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "read_uploaded_file_audit_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "postgres_database_agent", "sess_upload", "trace_upload")
+	defer func() { toolAuditor = origAuditor }()
+
+	ctx := newTestContext()
+	if _, err := readUploadedFileTool(ctx, ReadUploadedFileArgs{UploadID: "ul_abc123"}); err != nil {
+		t.Fatalf("readUploadedFileTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "read_uploaded_file",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) == 0 {
+		t.Fatal("no read_uploaded_file tool_execution audit event found — RecordToolCall was not called")
 	}
 }
 
@@ -3799,6 +3836,58 @@ func TestGetSavedSnapshots_Success(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "alice@example.com") {
 		t.Errorf("output missing recorded_by: %s", result.Output)
+	}
+}
+
+// TestGetSavedSnapshotsTool_RecordsToolExecution is a regression test for a
+// real bug found during live 3-hop escalation-chain verification:
+// getSavedSnapshotsImpl queries auditd directly over HTTP (bypassing the
+// shared psql-audited helper that every other read tool funnels through) and
+// never called toolAuditor.RecordToolCall — so a genuinely-executed
+// get_saved_snapshots call left no tool_execution audit event, causing
+// buildDelegationVerification to flag it as "narrated but unconfirmed" and
+// fire a false FABRICATION RISK alert even though nothing was fabricated.
+func TestGetSavedSnapshotsTool_RecordsToolExecution(t *testing.T) {
+	body := mockToolResultsResponse([]map[string]any{
+		{
+			"result_id":   "res_aaa",
+			"server_name": "prod-db-1",
+			"tool_name":   "get_baseline",
+			"tool_args":   "{}",
+			"output":      "config_file | /etc/postgresql/14/main/postgresql.conf\n",
+			"recorded_by": "alice@example.com",
+			"recorded_at": "2026-03-15T10:23:00Z",
+			"success":     true,
+		},
+	})
+	defer withMockAuditServer(http.StatusOK, body)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "get_saved_snapshots_audit_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "postgres_database_agent", "sess_snap", "trace_snap")
+	defer func() { toolAuditor = origAuditor }()
+
+	ctx := newTestContext()
+	if _, err := getSavedSnapshotsTool(ctx, GetSavedSnapshotsArgs{ToolName: "get_baseline"}); err != nil {
+		t.Fatalf("getSavedSnapshotsTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "get_saved_snapshots",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) == 0 {
+		t.Fatal("no get_saved_snapshots tool_execution audit event found — RecordToolCall was not called")
 	}
 }
 

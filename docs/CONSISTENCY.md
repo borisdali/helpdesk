@@ -131,30 +131,47 @@ In practice, a typical workflow is:
 4. Let real incidents or `faulttest` gateway runs accumulate accuracy data.
 5. When the model or playbook changes significantly: re-certify before promoting the new version.
 
-### Certification scope: entry-point playbooks only (known gap)
+### Certification scope: every hop in a chain, not just the entry point (v0.26.0)
 
-A `fault_stability_cert` is always attributed to a **fault's designated entry-point series**
-(`diagnosis_playbook_series_id` in the catalog) — never to an intermediate playbook reached
-partway through a chain. Concretely: a fault whose entry point is `pbs_connection_triage`, but
-whose chain runs `pbs_connection_triage → pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage`,
-only ever certifies `pbs_connection_triage`. The two downstream hops never earn a cert of their
-own, no matter how many `--repeat` batches exercise them as part of that chain.
+A `fault_stability_cert` used to be attributed only to a **fault's designated entry-point
+series** (`diagnosis_playbook_series_id` in the catalog) — never to an intermediate or
+remediation playbook reached partway through a chain. Concretely: a fault whose entry point is
+`pbs_connection_triage`, but whose chain runs `pbs_connection_triage →
+pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage`, used to only ever certify
+`pbs_connection_triage`. The downstream hops could never earn a cert of their own, no matter how
+many `--repeat` batches exercised them as part of that chain — `pbs_sysadmin_docker_inspect`,
+concretely, never appears as any fault's own `diagnosis_playbook_series_id` anywhere.
 
-This matters because `trustNotYetEarnedForceGate` checks the **currently-completing hop's own
-series** before allowing it to chain onward — so a mid-chain playbook that structurally can never
-earn its own cert will permanently fail the trust gate on any real (non-`faulttest`) incident,
-with no `--repeat` run able to fix it. If a gate response's `gate_reason` includes
-`trust_not_earned` alongside a `trust_gate_note` explaining the hop was reached via chaining,
-this is very likely why — check whether the blocked series is ever any fault's own
-`diagnosis_playbook_series_id` in your catalog (`faulttest list` shows this column). If it's
-only ever reached as a downstream hop, no amount of recertification will resolve the gate.
+As of v0.26.0, `faulttest run --repeat N --approval-mode=force` now also fetches each rep's
+incident narrative (`GET /api/v1/incidents/{run_id}`) to discover every distinct series the
+chain actually passed through — every `Escalations[]` hop and the terminal `Remediation`
+playbook, not just the entry point — and posts a separate `fault_stability_cert` for each one,
+keyed by that hop's own series (a synthetic `fault_id` like
+`<entry-point-fault-id>::hop:<series-id>` distinguishes it from the entry point's own cert; the
+primary key is `(fault_id, diagnosis_model)`, not `playbook_series_id`, so multiple certs
+correctly share a series exactly the way `trustNotYetEarnedForceGate` already expected). A hop
+"passes" a rep when it reaches a valid non-error outcome (resolved, escalated, or transitioned —
+not stuck/unknown/abandoned); reps where a *different*, legitimate gate paused the chain
+(`gate_pending`) don't count either way. Attribution consistency for a hop is code-derived, not
+LLM-classified: did it hand off to the same next target across every rep (or, for the terminal
+remediation hop, trivially always-consistent — there's no distinct per-run decision for it to
+diverge on).
 
-Workaround today: run the affected chain-only playbook through `faulttest` with
-`--gate-escalation` and `--approval-mode=force`/`manual` review rather than relying on
-auto-chaining for that specific hop, or add a dedicated fault to your catalog whose entry point
-*is* the chain-only playbook (so it earns its own cert directly). A structural fix — certifying
-every distinct series a chain actually passes through, not just the fault's declared entry
-point — is scoped for a future release; see the `v0.25` release notes for status.
+**Prerequisite**: this requires `--approval-mode=force` (or a target playbook already configured
+for `session`/`auto`) so the gateway actually auto-chains past the first hop — `faulttest`'s
+`skip_trust_gate=true` only bypasses the *trust* gate, not this separate check (`canAutoChain`,
+`cmd/gateway/playbooks.go`). Without it, `--repeat` still only certifies the entry-point series,
+same as before this feature; `faulttest` warns once when this is the case.
+
+**Discoverability**: `vault list`/`status`/`drift` iterate the catalog's own fault list, so they
+never surface hop certs (their synthetic fault_id appears nowhere in the catalog). Use
+`vault hop-certs <series-id>` to look up every cert on record for a series directly, entry-point
+or hop.
+
+If a gate response's `gate_reason` still includes `trust_not_earned` for a chain-only playbook
+after running `--repeat --approval-mode=force` through a fault that exercises it, check
+`vault hop-certs <series-id>` to see its actual track record — it may genuinely be unstable or
+dirty (a real finding), not structurally uncertifiable.
 
 ---
 

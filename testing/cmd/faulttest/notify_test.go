@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"helpdesk/testing/faultlib"
 )
 
 // ── postNotify ────────────────────────────────────────────────────────────
@@ -108,7 +110,7 @@ func TestRequestVaultDraft_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "vault-key"}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "vault-key"}}
 	pbID, err := requestVaultDraft(context.Background(), cfg, "faulttest-abc-db-max-connections", "resolved", "")
 	if err != nil {
 		t.Fatalf("requestVaultDraft: %v", err)
@@ -143,7 +145,7 @@ func TestRequestVaultDraft_WithSeriesID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	requestVaultDraft(context.Background(), cfg, "trace-x", "resolved", "pbs_vacuum_triage") //nolint:errcheck
 	var body map[string]string
 	if err := json.Unmarshal(gotBody, &body); err != nil {
@@ -162,7 +164,7 @@ func TestRequestVaultDraft_EmptySeriesIDOmitted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	requestVaultDraft(context.Background(), cfg, "trace-x", "resolved", "") //nolint:errcheck
 	var body map[string]string
 	if err := json.Unmarshal(gotBody, &body); err != nil {
@@ -180,7 +182,7 @@ func TestRequestVaultDraft_NoPlaybookID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	pbID, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -197,7 +199,7 @@ func TestRequestVaultDraft_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err == nil {
 		t.Error("expected error for 500 response, got nil")
@@ -205,7 +207,7 @@ func TestRequestVaultDraft_ServerError(t *testing.T) {
 }
 
 func TestRequestVaultDraft_NetworkError(t *testing.T) {
-	cfg := &HarnessConfig{GatewayURL: "http://127.0.0.1:19996"}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: "http://127.0.0.1:19996"}}
 	_, err := requestVaultDraft(context.Background(), cfg, "trace-1", "resolved", "")
 	if err == nil {
 		t.Error("expected error for unreachable server, got nil")
@@ -220,7 +222,7 @@ func TestRequestVaultDraft_URLPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &HarnessConfig{GatewayURL: srv.URL}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
 	requestVaultDraft(context.Background(), cfg, "t", "resolved", "") //nolint:errcheck
 	if gotPath != "/api/v1/fleet/playbooks/from-trace" {
 		t.Errorf("path = %q, want /api/v1/fleet/playbooks/from-trace", gotPath)

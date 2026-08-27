@@ -53,12 +53,15 @@ func LoadAndMergeCatalogs(customPaths []string) (*Catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return mergeCustomInto(base, customPaths)
+	return MergeCustomInto(base, customPaths)
 }
 
-// mergeCustomInto appends faults from each custom file into base and returns
+// MergeCustomInto appends faults from each custom file into base and returns
 // the merged catalog. All duplicate-ID errors are collected before returning.
-func mergeCustomInto(base *Catalog, paths []string) (*Catalog, error) {
+// Exported (item 7 dedup, v0.26) so cmd/faulttest can merge custom catalogs
+// into a filesystem-loaded base catalog directly — a distinct call shape from
+// LoadAndMergeCatalogs, which always starts from the embedded builtin.
+func MergeCustomInto(base *Catalog, paths []string) (*Catalog, error) {
 	seen := make(map[string]string) // id → source label
 	for i := range base.Failures {
 		seen[base.Failures[i].ID] = base.Failures[i].Source
@@ -120,8 +123,14 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 		if excludeSet[f.ID] {
 			continue
 		}
+		// Auto-DB mode: only faults that work against a spun-up Docker PostgreSQL.
+		if cfg.AutoDB && !f.IsAutoDBCompat() {
+			continue
+		}
 		// External mode: skip faults that don't work without Docker/OS access.
-		if cfg.External && !f.ExternalCompat {
+		// Skipped when AutoDB is also set — AutoDB already implies Docker/OS
+		// access is available, so the two flags address orthogonal concerns.
+		if cfg.External && !cfg.AutoDB && !f.ExternalCompat {
 			continue
 		}
 		// Source filter: "builtin" or "custom".

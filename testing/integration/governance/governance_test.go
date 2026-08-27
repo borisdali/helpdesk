@@ -14,6 +14,7 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +28,8 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/a2a"
+
+	"helpdesk/internal/audit"
 )
 
 const (
@@ -784,6 +787,87 @@ func TestIntegration_AgentReasoningRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_ToolAuditor_RecordToolCall_ConfirmedByDelegationVerification
+// closes a real coverage gap found while fixing a live bug this session: three
+// tools (agents/sysadmin's five diagnostic tools, agents/database's
+// get_saved_snapshots/read_uploaded_file) genuinely executed but never called
+// audit.ToolAuditor.RecordToolCall at all, so audit.BuildDelegationVerification
+// flagged them as "narrated but unconfirmed" and fired false FABRICATION RISK
+// alerts. The fix (calling RecordToolCall in each) was unit-tested by reading
+// straight back from the audit.Store (agents/sysadmin, agents/database
+// *_test.go), and BuildDelegationVerification's read side was separately unit-
+// tested against synthetic httptest fixtures (internal/audit/delegate_tool_test.go)
+// — but nothing had ever exercised the two halves together through a real
+// HTTP write (ToolAuditor -> RemoteStore -> auditd -> SQLite) followed by a
+// real HTTP read (BuildDelegationVerification's own query), which is the exact
+// production wiring an agent process uses. This is the one round trip that
+// actually would have caught the missing RecordToolCall calls, had it existed
+// before this session's live testing surfaced them.
+func TestIntegration_ToolAuditor_RecordToolCall_ConfirmedByDelegationVerification(t *testing.T) {
+	traceID := fmt.Sprintf("tr-recordcall-%d", time.Now().UnixNano())
+	since := time.Now().Add(-time.Minute)
+
+	store := audit.NewRemoteStore(auditdAddr)
+	ta := audit.NewToolAuditor(store, "sysadmin_agent", "sess_recordcall", traceID)
+	ta.RecordToolCall(context.Background(), audit.ToolCall{
+		Name:       "check_host",
+		Parameters: map[string]any{"target": "prod_db"},
+	}, audit.ToolResult{
+		Output: "running (exitcode=0)",
+	}, 15*time.Millisecond)
+
+	verif := audit.BuildDelegationVerification(auditdAddr, "", traceID, since, audit.ActionRead, "", "sysadmin_agent", "")
+	if len(verif.ToolsConfirmed) != 1 || verif.ToolsConfirmed[0] != "check_host" {
+		t.Fatalf("ToolsConfirmed = %v, want [check_host] — RecordToolCall's write did not round-trip through a real HTTP write+read", verif.ToolsConfirmed)
+	}
+	if verif.Mismatch {
+		t.Error("Mismatch = true, want false: check_host is a confirmed read tool")
+	}
+}
+
+// TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips is
+// the integration-level round trip for hasActionClassDenial (internal/audit/
+// delegate_tool.go): closes a gap found while adding coverage for that fix —
+// existing coverage for policy_decision events only ever validated them via
+// GET /v1/events/{eventID} (single-event lookup); the actual query
+// BuildDelegationVerification issues, GET /v1/events?event_type=
+// policy_decision&trace_id=X, had never round-tripped a real Action/Effect
+// pair through a real auditd process.
+func TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips(t *testing.T) {
+	traceID := fmt.Sprintf("tr-policydenied-%d", time.Now().UnixNano())
+	since := time.Now().Add(-time.Minute)
+
+	store := audit.NewRemoteStore(auditdAddr)
+	err := store.Record(context.Background(), &audit.Event{
+		EventID:   fmt.Sprintf("pol-%d", time.Now().UnixNano()),
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypePolicyDecision,
+		TraceID:   traceID,
+		Session:   audit.Session{ID: "sess_policydenied"},
+		PolicyDecision: &audit.PolicyDecision{
+			ResourceType: "host",
+			ResourceName: "faulttest-db-local",
+			Action:       "destructive",
+			Effect:       "deny",
+			PolicyName:   "diagnostic-readonly-enforcement",
+			Message:      "purpose \"diagnostic\" is in the blocked list",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// No tool_execution events at all — this is the "write attempted, denied,
+	// nothing executed" shape.
+	verif := audit.BuildDelegationVerification(auditdAddr, "", traceID, since, audit.ActionDestructive, "", "sysadmin_agent", "")
+	if verif.Mismatch {
+		t.Errorf("Mismatch = true, want false: a real policy_decision deny event for a destructive action, round-tripped through a real HTTP write+read, should corroborate the write-absence")
+	}
+	if verif.MismatchReason == "" {
+		t.Error("MismatchReason = \"\", want a non-empty explanation for the downgrade")
+	}
+}
+
 func TestGovernance_PoliciesSummaryWithEngine(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policies.yaml")
 	if err := os.WriteFile(policyPath, []byte(minimalPolicyYAML), 0644); err != nil {
@@ -1472,6 +1556,73 @@ func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
 		if c["fault_id"] == faultID {
 			t.Error("cert unexpectedly returned for a different model — series_id+model filter is not scoping by model")
 		}
+	}
+}
+
+// TestIntegration_FaultStabilityCert_HopCert_MultipleFaultsSameSeries_RoundTrip
+// is v0.26 item 6's one genuinely new real-stack risk: the underlying
+// "multiple fault_id rows share one playbook_series_id, GetBySeriesAndModel
+// returns all of them" mechanism is already covered twice at the unit level
+// (internal/audit's TestGetBySeriesAndModel_MultipleFaultsSameSeries at the
+// SQL-store layer, cmd/gateway's TestTrustNotYetEarnedForceGate_* at the gate
+// logic layer) — both using ordinary fault_ids. What's never been exercised
+// anywhere, at any level, is postHopCerts's actual synthetic fault_id format
+// (`<entry-point-fault-id>::hop:<series-id>`) round-tripping through a real
+// HTTP request + real SQLite INSERT/SELECT, not a mocked httptest response.
+func TestIntegration_FaultStabilityCert_HopCert_MultipleFaultsSameSeries_RoundTrip(t *testing.T) {
+	seriesID := fmt.Sprintf("pbs_hopcert_shared_%d", time.Now().UnixNano())
+	model := "claude-sonnet-4-6"
+	entryFaultID := "db-wal-disk-full-k8s"
+	hopFaultID := entryFaultID + "::hop:" + seriesID
+
+	post(t, auditdAddr, "/v1/fleet/fault-stability", map[string]any{
+		"fault_id":           entryFaultID,
+		"fault_name":         "WAL disk full",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             5,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"is_clean":           true,
+	})
+	post(t, auditdAddr, "/v1/fleet/fault-stability", map[string]any{
+		"fault_id":           hopFaultID,
+		"fault_name":         "WAL disk full (hop: " + seriesID + ")",
+		"playbook_series_id": seriesID,
+		"diagnosis_model":    model,
+		"n_runs":             3,
+		"pass_rate":          1.0,
+		"is_stable":          true,
+		"is_clean":           true,
+	})
+
+	resp := get(t, auditdAddr, "/v1/fleet/fault-stability?series_id="+seriesID+"&model="+model)
+	certs, _ := resp["certs"].([]any)
+	if len(certs) != 2 {
+		t.Fatalf("expected 2 certs sharing series %s, got %d: %v", seriesID, len(certs), certs)
+	}
+	byFaultID := map[string]map[string]any{}
+	for _, raw := range certs {
+		c, _ := raw.(map[string]any)
+		byFaultID[fmt.Sprint(c["fault_id"])] = c
+	}
+	if byFaultID[entryFaultID] == nil {
+		t.Errorf("entry-point cert %q missing from series+model query", entryFaultID)
+	}
+	hopCert := byFaultID[hopFaultID]
+	if hopCert == nil {
+		t.Fatalf("hop cert %q missing from series+model query — the synthetic fault_id (with :: separators) did not round-trip", hopFaultID)
+	}
+	if hopCert["playbook_series_id"] != seriesID {
+		t.Errorf("hop cert playbook_series_id = %v, want %v", hopCert["playbook_series_id"], seriesID)
+	}
+
+	// The synthetic ID must also survive a direct fault_id path lookup
+	// unmangled (not silently truncated at the first ':', not requiring
+	// manual URL-escaping by the caller).
+	direct := get(t, auditdAddr, "/v1/fleet/fault-stability/"+hopFaultID)
+	if direct["fault_id"] != hopFaultID {
+		t.Errorf("direct lookup fault_id = %v, want %v", direct["fault_id"], hopFaultID)
 	}
 }
 

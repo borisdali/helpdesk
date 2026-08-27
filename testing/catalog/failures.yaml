@@ -1255,7 +1255,15 @@ failures:
       expected_diagnosis:
         category: "shutdown"
         narrative: "The agent should identify that the PostgreSQL container or process has been stopped and is not running, and recommend restarting it."
-    timeout: 60s
+    # 60s (the old value) is enough for a single-hop response, but with
+    # --approval-mode=force the gateway auto-chains synchronously within one
+    # HTTP request — this fault's real chain (pbs_db_restart_triage ->
+    # ESCALATE_TO pbs_sysadmin_docker_inspect -> TRANSITION_TO
+    # pbs_wal_disk_full) can take 3 LLM calls to complete. Live-confirmed
+    # 2026-08-24: a 70s client timeout (60s + the 10s runViaPlaybook adds)
+    # lost 2 of 3 --repeat reps to context deadline exceeded, even though the
+    # third rep (which completed) took 65s — right at the old ceiling.
+    timeout: 180s
 
   - id: host-pg-crash
     name: "PostgreSQL process crash inside container"
@@ -1994,6 +2002,12 @@ failures:
           drove the node into pressure and kubelet evicted that pod
           instead.
     timeout: 90s
+    # inject_timeout overrides the default 90s (Part B, v0.26): this fault's
+    # injection polls for a real kubelet eviction, computing its own internal
+    # deadline as (TARGET_MI/16)*3 + 300s buffer — observed live at ~20-25min
+    # on a typical test cluster (minikube/kind-sized node). 30m leaves
+    # headroom above that; raise further if ever run against a much larger node.
+    inject_timeout: 30m
     remediation:
       playbook_id: pbs_k8s_node_pressure_remediate
       namespace: helpdesk-test

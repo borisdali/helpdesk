@@ -205,6 +205,38 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 	}
 }
 
+// TestAssembleTriagePrompt_SysadminRestartHint is a regression test for a real
+// bug found during live 3-hop escalation-chain verification: every
+// sysadmin-agent playbook's prompt unconditionally named restart_container in
+// its first line, even for pbs_sysadmin_docker_inspect/pbs_wal_disk_full,
+// whose own guidance explicitly forbids calling it. Since ClassifyDelegation
+// only scans this first line, "restart" appearing there classified every
+// sysadmin delegation as write — including pure-diagnosis hops that never
+// attempt one. Only pbs_db_restart_action, which actually calls
+// restart_container, should mention it.
+func TestAssembleTriagePrompt_SysadminRestartHint(t *testing.T) {
+	req := PlaybookRunRequest{ConnectionString: "host=localhost port=15432"}
+
+	restartPB := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: "pbs_db_restart_action"}
+	restartPrompt := assembleTriagePrompt(restartPB, req, "")
+	firstLine := strings.SplitN(restartPrompt, "\n", 2)[0]
+	if !strings.Contains(firstLine, "restart_container") {
+		t.Errorf("pbs_db_restart_action's first line = %q, want it to mention restart_container", firstLine)
+	}
+
+	for _, seriesID := range []string{"pbs_sysadmin_docker_inspect", "pbs_wal_disk_full"} {
+		pb := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: seriesID}
+		prompt := assembleTriagePrompt(pb, req, "")
+		firstLine := strings.SplitN(prompt, "\n", 2)[0]
+		if strings.Contains(firstLine, "restart_container") {
+			t.Errorf("%s's first line = %q, want no mention of restart_container (its own guidance forbids calling it)", seriesID, firstLine)
+		}
+		if !strings.Contains(firstLine, "check_host") {
+			t.Errorf("%s's first line = %q, want it to still mention check_host", seriesID, firstLine)
+		}
+	}
+}
+
 func TestAssembleTriagePrompt_NoEscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{Name: "PITR Recovery"}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
@@ -2119,6 +2151,43 @@ func TestAppendChainedText_ChainedError(t *testing.T) {
 	}
 }
 
+// TestAggregateChainToolCalls_UnionAcrossHops is a regression test for a real
+// bug found during live 3-hop escalation-chain verification: the final
+// playbook-run response's tool_calls field only ever reflected the primary
+// (first) hop's own tool_call_summary, since injectFields builds the response
+// from primary.capture's raw body. For chains where the fault's expected
+// tools are actually called by a later, escalated/transitioned-to hop (the
+// common case), this silently zeroed the tool-evidence score. Verifies
+// aggregateChainToolCalls returns the deduped union across every hop.
+func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
+	chain := []chainEntry{
+		{Step: 1, PlaybookSeriesID: "pbs_db_triage", ToolCalls: []string{"check_connection", "get_saved_snapshots"}},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
+	}
+
+	got := aggregateChainToolCalls(chain)
+	want := []string{"check_connection", "get_saved_snapshots", "check_host", "get_host_logs"}
+
+	if len(got) != len(want) {
+		t.Fatalf("aggregateChainToolCalls() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("aggregateChainToolCalls()[%d] = %q, want %q (order should be first-seen, duplicates deduped): got %v", i, got[i], w, got)
+		}
+	}
+}
+
+func TestAggregateChainToolCalls_NoToolCalls(t *testing.T) {
+	chain := []chainEntry{
+		{Step: 1, PlaybookSeriesID: "pbs_db_triage"},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect"},
+	}
+	if got := aggregateChainToolCalls(chain); len(got) != 0 {
+		t.Errorf("aggregateChainToolCalls() = %v, want empty", got)
+	}
+}
+
 // mockChainAuditd starts a mock auditd that supports a full multi-hop
 // auto-chain: primary playbook fetch by ID, chained playbook fetch by
 // series_id, run creation (unique run_id per call), and run completion
@@ -2735,6 +2804,109 @@ func TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops(t *testi
 	}
 }
 
+// TestHandlePlaybookRun_AutoChain_ToolCallsAggregatedAcrossHops is a regression
+// test for a real bug found during live 3-hop escalation-chain verification:
+// the final playbook-run response's tool_calls field only reflected the
+// primary (first) hop's own tool_call_summary artifact — never a chained
+// hop's — because injectFields builds the response from primary.capture's
+// raw body. Faults whose expected_tools are actually called by a later,
+// escalated-to hop (the common case: an entry-point triage hop escalates
+// before calling any of the fault's real diagnostic tools) silently scored
+// 0% tool evidence even though the tools genuinely were called downstream.
+func TestHandlePlaybookRun_AutoChain_ToolCallsAggregatedAcrossHops(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_tcchain_triage",
+		SeriesID:      "pbs_tcchain_triage",
+		Name:          "TC Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "tcchain_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_tcchain_sysadmin",
+		SeriesID:      "pbs_tcchain_sysadmin",
+		Name:          "TC Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "tcchain_sysadmin_agent",
+		IsActive:      true,
+	}
+	pbData, _ := json.Marshal(pbTriage)
+
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/fleet/playbooks":
+			if r.URL.Query().Get("series_id") == "pbs_tcchain_sysadmin" {
+				json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{pbSysadmin}}) //nolint:errcheck
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks/"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_tcchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	// The primary (entry-point) hop calls its own tools and escalates before
+	// ever touching the fault's real expected tools — check_host/get_host_logs
+	// are only called by the chained (sysadmin) hop.
+	_, dbCard := mockA2AServerWithTextAndToolCalls(t, "tcchain_db_agent",
+		"FINDINGS: looks like a container problem\nESCALATE_TO: pbs_tcchain_sysadmin\n",
+		[]string{"check_connection", "get_saved_snapshots"})
+	_, sysadminCard := mockA2AServerWithTextAndToolCalls(t, "tcchain_sysadmin_agent",
+		"FINDINGS: container is stopped\nESCALATE_TO: none\n",
+		[]string{"check_host", "get_host_logs"})
+	for name, card := range map[string]*a2a.AgentCard{
+		"tcchain_db_agent":       dbCard,
+		"tcchain_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"container stopped","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	toolCallsRaw, ok := resp["tool_calls"].([]any)
+	if !ok {
+		t.Fatalf("expected top-level tool_calls field in response, got %v — body: %s", resp["tool_calls"], rec.Body.String())
+	}
+	var got []string
+	for _, tc := range toolCallsRaw {
+		got = append(got, fmt.Sprintf("%v", tc))
+	}
+	want := []string{"check_connection", "get_saved_snapshots", "check_host", "get_host_logs"}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tool_calls missing %q (from a chained hop) — got %v; the response must aggregate tool_calls across every hop, not just the primary/first one", w, got)
+		}
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal is a regression
 // test for a real bug found during live 3-hop escalation-chain verification:
 // the primary/entry-point run's OWN escalated_to/transitioned_to fields were
@@ -2831,6 +3003,87 @@ func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
 	}
 	if got := patch["transitioned_to"]; got != "" && got != nil {
 		t.Errorf("primary run's persisted transitioned_to = %v, want empty — the primary run itself emitted ESCALATE_TO, not TRANSITION_TO; a later hop's TRANSITION_TO must not leak onto the primary's own record", got)
+	}
+}
+
+// TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal
+// mirrors TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
+// the findingsRecommendMonitor early-exit branch instead of the informed-gate
+// branch: hop2 (chained) both names a transition target AND has its own
+// findings recommend monitor, tripping the early-exit at chain position 1
+// (len(chain)==1, not 0). Same bug shape: playbooks.go used to clear
+// finalEscalatedTo/finalTransitionedTo unconditionally here, which would have
+// blanked out the primary's own ESCALATE_TO signal just because a downstream
+// hop's findings said "monitor".
+func TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_monchain_triage",
+		SeriesID:      "pbs_monchain_triage",
+		Name:          "Monitor Chain Triage",
+		ExecutionMode: "agent",
+		AgentName:     "mon_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_monchain_sysadmin",
+		SeriesID:      "pbs_monchain_sysadmin",
+		Name:          "Monitor Chain Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "mon_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_monchain_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_monchain_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "mon_db_agent",
+		"FINDINGS: looks like a db problem\nESCALATE_TO: pbs_monchain_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "mon_sysadmin_agent",
+		"FINDINGS: worst table dead_ratio=0.03; recommended=monitor\nTRANSITION_TO: pbs_monchain_remediate\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"mon_db_agent":       dbCard,
+		"mon_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+
+	if got := patch["escalated_to"]; got != "pbs_monchain_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_monchain_sysadmin' (its own signal, not cleared by hop2's monitor recommendation)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
 	}
 }
 
@@ -3150,6 +3403,133 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate(t *testing.T)
 	// the chain before hop3 (remediate) is ever invoked.
 	if got := auditSrv.runCount(); got != 2 {
 		t.Errorf("runCount() = %d, want 2 — remediate agent should never have been invoked, the chain must stop at the gate", got)
+	}
+
+	// The primary (triage) run's own persisted record must still reflect its
+	// own ESCALATE_TO signal, not hop2's force-gated TRANSITION_TO — a real
+	// bug found live: hop2's TRANSITION_TO was leaking onto the primary's
+	// record, making handleGetIncident misclassify hop2 (an escalation hop)
+	// as the remediation chapter.
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+	if got := patch["escalated_to"]; got != "pbs_oevchain_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_oevchain_sysadmin' (its own signal, not hop2's)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty — hop2's force-gated TRANSITION_TO must not leak onto the primary's own record", got)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVariant
+// mirrors TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate exactly,
+// except hop2's own force-gated signal is ESCALATE_TO (isTransition=false)
+// instead of TRANSITION_TO (isTransition=true) — the informed-gate branch's
+// len(chain)==0 guard wraps a symmetric if/else (playbooks.go:879-889), and the
+// TRANSITION_TO path alone doesn't prove the ESCALATE_TO path got the same
+// treatment.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVariant(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_triage", SeriesID: "pbs_oevchain2v_triage",
+		Name: "OEV Chain2v Triage", ExecutionMode: "agent", AgentName: "oev2v_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_sysadmin", SeriesID: "pbs_oevchain2v_sysadmin",
+		Name: "OEV Chain2v Sysadmin", ExecutionMode: "agent", AgentName: "oev2v_sysadmin_agent", IsActive: true,
+	}
+	pbK8s := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_k8s", SeriesID: "pbs_oevchain2v_k8s",
+		Name: "OEV Chain2v K8s", ExecutionMode: "agent", AgentName: "oev2v_k8s_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain2v_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_oevchain2v_sysadmin": pbSysadmin,
+			"pbs_oevchain2v_k8s":      pbK8s,
+		})
+	// Skip 1 call: hop1's own evidence fetch sees no evidence, so it does not
+	// get gated on its own and chainEscalation actually runs. Every call from
+	// the 2nd onward (hop2's fetch) sees real evidence.
+	auditSrv.evidenceSkipCalls = 1
+	auditSrv.evidenceSignal = "pod_restarted"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev2v_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain2v_sysadmin\n")
+	// hop2 emits ESCALATE_TO (not TRANSITION_TO) — the isTransition=false path.
+	_, sysadminCard := mockA2AServerWithText(t, "oev2v_sysadmin_agent",
+		"HYPOTHESIS_1: needs cluster-level investigation | CONFIDENCE: 0.90 | EVIDENCE: \"restart_count=2\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod keeps restarting\nESCALATE_TO: pbs_oevchain2v_k8s\n")
+	_, k8sCard := mockA2AServerWithText(t, "oev2v_k8s_agent", "FINDINGS: should never be reached\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev2v_db_agent":       dbCard,
+		"oev2v_sysadmin_agent": sysadminCard,
+		"oev2v_k8s_agent":      k8sCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — chained-hop objective-evidence gate did not fire; body: %s", resp["status"], rec.Body.String())
+	}
+	if resp["escalation_target"] != "pbs_oevchain2v_k8s" {
+		t.Errorf("escalation_target = %q, want pbs_oevchain2v_k8s — must reflect hop2's own signal", resp["escalation_target"])
+	}
+	if got := auditSrv.runCount(); got != 2 {
+		t.Errorf("runCount() = %d, want 2 — k8s agent should never have been invoked, the chain must stop at the gate", got)
+	}
+
+	// The primary (triage) run's own persisted record must still reflect its
+	// own ESCALATE_TO signal (to the sysadmin hop), not hop2's own force-gated
+	// ESCALATE_TO (to the k8s hop) — the isTransition=false sibling of the bug
+	// fixed for the TRANSITION_TO case above.
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+	if got := patch["escalated_to"]; got != "pbs_oevchain2v_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_oevchain2v_sysadmin' (its own signal, not hop2's own ESCALATE_TO target)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
 	}
 }
 
@@ -4058,6 +4438,58 @@ func mockA2AServerWithText(t *testing.T, agentName, responseText string) (*httpt
 						"role": "agent",
 						"parts": []map[string]any{
 							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	card := &a2a.AgentCard{
+		Name:               agentName,
+		URL:                srv.URL,
+		PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+	return srv, card
+}
+
+// mockA2AServerWithTextAndToolCalls is mockA2AServerWithText plus a
+// tool_call_summary DataPart artifact, so the response carries a populated
+// tool_calls field the way a real agent's does when it actually invokes tools.
+func mockA2AServerWithTextAndToolCalls(t *testing.T, agentName, responseText string, toolCalls []string) (*httptest.Server, *a2a.AgentCard) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-toolcalls-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": responseText},
+						},
+					},
+				},
+				"artifacts": []map[string]any{
+					{
+						"artifactId": "artifact-1",
+						"parts": []map[string]any{
+							{
+								"kind": "data",
+								"data": map[string]any{"tool_calls": toolCalls},
+								"metadata": map[string]any{
+									"helpdesk_type": "tool_call_summary",
+								},
+							},
 						},
 					},
 				},

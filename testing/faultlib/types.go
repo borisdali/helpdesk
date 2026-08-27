@@ -23,6 +23,14 @@ type Failure struct {
 	Prompt      string     `yaml:"prompt"`
 	Evaluation  EvalSpec   `yaml:"evaluation"`
 	Timeout     string     `yaml:"timeout"`
+	// InjectTimeout bounds the injection phase specifically (Part B, v0.26 —
+	// distinct from Timeout, which bounds only the agent-call/run phase).
+	// Defaults to 90s when unset (see InjectTimeoutDuration) — generous
+	// enough for every fault's inject script + any post-inject `wait:`
+	// (largest in the catalog today is 45s), except k8s-node-memory-pressure,
+	// whose injection legitimately polls for up to ~20-25 minutes waiting on
+	// a real kubelet eviction and sets an explicit override.
+	InjectTimeout string `yaml:"inject_timeout,omitempty"`
 	// GovernanceGap marks tests that document a known agent behaviour gap rather
 	// than asserting correct behaviour.  When the evaluation fails for a
 	// governance-gap test, the harness logs the gap but does NOT call t.Errorf,
@@ -82,6 +90,16 @@ func (f Failure) TimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(f.Timeout)
 	if err != nil {
 		return 120 * time.Second
+	}
+	return d
+}
+
+// InjectTimeoutDuration parses InjectTimeout into a time.Duration, defaulting
+// to 90s when unset or invalid (Part B, v0.26).
+func (f Failure) InjectTimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(f.InjectTimeout)
+	if err != nil {
+		return 90 * time.Second
 	}
 	return d
 }
@@ -264,7 +282,19 @@ type HarnessConfig struct {
 	EmitAndWait bool
 }
 
-// EvalResult contains the evaluation outcome for a single failure test.
+// EvalResult holds the outcome of evaluating an agent's response against a
+// failure's evaluation criteria (the backward-compat, text-only scoring path
+// — see Evaluate in evaluator.go).
+//
+// Restored 2026-08-22 (item 7 dedup, v0.26 follow-up): originally deleted as
+// "dead code, zero production callers" during the evaluator.go dedup pass —
+// that check missed build-tag-gated files, which a plain `go build`/`go vet`/
+// `go test ./...` (no -tags) never compiles. testing/faulttest/faulttest_test.go
+// (tag `faulttest`) and testing/e2e/multi_agent_test.go (tag `e2e`) both call
+// Evaluate directly, confirmed via `go vet -tags faulttest ./...` and
+// `go vet -tags e2e ./...` failing with "undefined: faultlib.Evaluate" before
+// this restore. EvaluateWithJudge stayed deleted — confirmed zero callers
+// under every build tag in this repo (faulttest, e2e, integration).
 type EvalResult struct {
 	FailureID     string  `json:"failure_id"`
 	FailureName   string  `json:"failure_name"`

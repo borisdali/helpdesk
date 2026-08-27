@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	"helpdesk/testing/faultlib"
 )
 
 // TestRepeatAttribution_NilCompleter_DoesNotPanic tests the nil-completer path
@@ -34,7 +36,7 @@ func TestRepeatAttribution_NilCompleter_DoesNotPanic(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	cfg := &HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: ""}
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: ""}}
 
 	// Simulate the repeat path: no API key → nil completer.
 	completer := newAttributionCompleter(ctx, cfg)

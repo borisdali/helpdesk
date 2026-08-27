@@ -304,12 +304,14 @@ chain of any length maps cleanly to its audit trail — see
 full behavior this example is drawn from.
 
 `trace_id`/`has_mismatch`/`has_target_drift` on every chapter (triage, each escalation hop,
-remediation) surface that chapter's Journey-level verification signals inline — `has_mismatch`
-means the agent narrated or claimed a tool call with no matching `tool_execution` audit event;
-`has_target_drift` means a tool call genuinely executed, but against a different `connection_string`
-than the run was invoked with. Both default to `false` when absent, which can mean either "verified
-clean" or "no Journey data exists for this trace" (fail-open by design — a Journey is only
-discoverable when its trace has an anchor event). See
+remediation) surface that chapter's own verification signals inline — computed per chapter, scoped
+to the delegation_verification events recorded during that specific hop's own execution window, not
+per-Journey/whole-trace (a force-mode auto-chain can put multiple hops under one shared trace_id, so
+a whole-trace lookup can't tell them apart). `has_mismatch` means the agent narrated or claimed a
+tool call with no matching `tool_execution` audit event; `has_target_drift` means a tool call
+genuinely executed, but against a different `connection_string` than the run was invoked with. Both
+default to `false` when absent, which can mean either "verified clean" or "no delegation_verification
+events fall in this chapter's own window" (fail-open by design). See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome) and
 [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each flag.
 

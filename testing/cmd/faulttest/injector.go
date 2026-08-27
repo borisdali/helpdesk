@@ -28,7 +28,9 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 // Inject activates a failure mode.
 func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 	lfCfg := toLFConfig(inj.cfg)
-	err := faultlib.NewInjector(lfCfg).Inject(ctx, toLFFailure(f))
+	// f is already a faultlib.Failure (Failure is a type alias — item 7
+	// dedup, v0.26); no conversion needed.
+	err := faultlib.NewInjector(lfCfg).Inject(ctx, f)
 	inj.cfg.ConnStr = lfCfg.ConnStr
 	return err
 }
@@ -36,7 +38,7 @@ func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 // Teardown deactivates a failure mode and restores normal state.
 func (inj *Injector) Teardown(ctx context.Context, f Failure) error {
 	lfCfg := toLFConfig(inj.cfg)
-	err := faultlib.NewInjector(lfCfg).Teardown(ctx, toLFFailure(f))
+	err := faultlib.NewInjector(lfCfg).Teardown(ctx, f)
 	inj.cfg.ConnStr = lfCfg.ConnStr
 	return err
 }

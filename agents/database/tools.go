@@ -2466,7 +2466,23 @@ func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlR
 }
 
 func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
-	return readUploadedFileImpl(ctx, args)
+	start := time.Now()
+	result, err := readUploadedFileImpl(ctx, args)
+	duration := time.Since(start)
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "read_uploaded_file",
+			Parameters: map[string]any{"upload_id": args.UploadID, "lines": args.Lines, "filter": args.Filter},
+		}, audit.ToolResult{
+			Output: truncateForAudit(result.Output, 500),
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
 }
 
 // ---------------------------------------------------------------------------
@@ -2629,7 +2645,23 @@ func getSavedSnapshotsImpl(ctx context.Context, args GetSavedSnapshotsArgs) (Psq
 }
 
 func getSavedSnapshotsTool(ctx tool.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
-	return getSavedSnapshotsImpl(ctx, args)
+	start := time.Now()
+	result, err := getSavedSnapshotsImpl(ctx, args)
+	duration := time.Since(start)
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_saved_snapshots",
+			Parameters: map[string]any{"tool_name": args.ToolName, "server_name": args.ServerName, "limit": args.Limit, "since": args.Since},
+		}, audit.ToolResult{
+			Output: truncateForAudit(result.Output, 500),
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
 }
 
 func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {

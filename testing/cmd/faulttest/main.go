@@ -168,7 +168,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.UsersFile, "users-file", os.Getenv("HELPDESK_USERS_FILE"), "Path to users.yaml; when set, --operator must be a known human user in that file before force-mode auto-approval is accepted (or HELPDESK_USERS_FILE)")
 
 	// Policy safety check.
-	fs.StringVar(&cfg.InfraConfigPath, "infra-config", "", "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag")
+	fs.StringVar(&cfg.InfraConfigPath, "infra-config", os.Getenv("FAULTTEST_INFRA_CONFIG"), "Path to infrastructure.json; when set, target must have a 'test' or 'chaos' tag (or FAULTTEST_INFRA_CONFIG)")
 
 	// Customer catalog support.
 	var extraCatalogs stringSliceFlag
@@ -271,7 +271,7 @@ func loadActiveCatalog(cfg *HarnessConfig) (*Catalog, error) {
 		if len(cfg.CustomCatalogs) == 0 {
 			return base, nil
 		}
-		return mergeCustomInto(base, cfg.CustomCatalogs)
+		return faultlib.MergeCustomInto(base, cfg.CustomCatalogs)
 	}
 	// Standalone binary: use embedded catalog.
 	return LoadAndMergeCatalogs(cfg.CustomCatalogs)
@@ -412,8 +412,21 @@ func cmdRun(args []string) {
 		if repeatMode && cfg.RemediateEnabled {
 			slog.Warn("--remediate is disabled in --repeat mode", "repeat", nReps)
 		}
+		// Hop cert collection (v0.26 item 6) requires the gateway to actually
+		// auto-chain past the first hop, which needs --approval-mode=force
+		// (or a target playbook already configured for session/auto — see
+		// canAutoChain, cmd/gateway/playbooks.go). faulttest's own
+		// skip_trust_gate=true only bypasses the trust gate, not this check.
+		// Without it, --repeat only ever certifies the entry-point series,
+		// exactly as before this feature — warn once so that isn't mistaken
+		// for the feature being broken or absent.
+		if repeatMode && cfg.ApprovalMode != "force" {
+			slog.Warn("hop certification requires --approval-mode=force to auto-chain past the first hop; without it, --repeat only certifies the entry-point series", "approval_mode", cfg.ApprovalMode)
+		}
 
 		var repResults []EvalResult
+		hopAcc := map[string][]EvalResult{}
+		hopAttrSigs := map[string][]string{}
 
 		for rep := range nReps {
 			// Save original conn string for config-override failures; restore after each rep.
@@ -431,31 +444,37 @@ func cmdRun(args []string) {
 			}
 			faultCtx := context.WithValue(ctx, ctxKeyFaultTraceID{}, faultTraceID)
 
-			// 1. Inject.
-			if err := injector.Inject(ctx, f); err != nil {
-				slog.Error("injection failed", "id", f.ID, "rep", rep+1, "err", err)
+			// 1-2. Inject + run, injection independently bounded (Part B,
+			// v0.26) instead of relying on one unbounded ctx and the outer
+			// process-level timeout as the only safety net. On injection
+			// failure, RunFaultCycle tears down automatically before
+			// returning — see its doc comment for why this used to need a
+			// duplicate Teardown call in the injection-error branch here (a
+			// real bug found and fixed live: a failed k8s-node-memory-pressure
+			// injection left a noisy-neighbor pod running on the cluster for
+			// 36+ minutes before that fix).
+			callStart := time.Now()
+			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
+				cfg.ConnStr = origConn
+			})
+			if cycle.InjectErr != nil {
+				if cycle.TeardownErr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", cycle.TeardownErr)
+				}
+				slog.Error("injection failed", "id", f.ID, "rep", rep+1, "err", cycle.InjectErr)
 				repResults = append(repResults, EvalResult{
 					FailureID:   f.ID,
 					FailureName: f.Name,
 					Category:    f.Category,
-					Error:       fmt.Sprintf("injection failed: %v", err),
+					Error:       fmt.Sprintf("injection failed: %v", cycle.InjectErr),
 				})
-				cfg.ConnStr = origConn
-				// Tear down whatever the failed injection already created —
-				// an injection can fail partway through (e.g. a resource was
-				// created, then a later step in the same script failed) and
-				// without this, that resource is silently stranded. Confirmed
-				// live: a failed k8s-node-memory-pressure injection left a
-				// noisy-neighbor pod running on the cluster for 36+ minutes.
-				if tdErr := injector.Teardown(ctx, f); tdErr != nil {
-					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", tdErr)
-				}
 				break // abort remaining reps for this fault
 			}
-
-			// 2. Run agent (record call start for audit window).
-			callStart := time.Now()
-			resp := runner.Run(faultCtx, f)
+			// Injection succeeded — teardown is deferred until step 5 below
+			// (after remediation, which needs the fault to remain injected),
+			// via an explicit call rather than defer since this is a plain
+			// for-loop, not a per-iteration closure.
+			resp := cycle.Response
 
 			if resp.CrystalBall {
 				slog.Warn("⚠  crystal-ball mode active on gateway — playbook scaffolding is bypassed; this result measures unguided LLM capability only")
@@ -560,6 +579,23 @@ func cmdRun(args []string) {
 				}
 			}
 
+			// Hop cert collection (v0.26 item 6): fetch this rep's incident
+			// narrative to discover which distinct playbook series the chain
+			// actually passed through — any escalation/remediation hop with
+			// the gateway's own auto-chaining already includes the full
+			// chain in one response by the time resp is available here (see
+			// the --approval-mode=force warning above); cmd/faulttest's own
+			// separate remediation-triggering code is unconditionally
+			// skipped in repeat mode, so this is the only source of
+			// downstream hop data during a --repeat batch.
+			if repeatMode && cfg.GatewayURL != "" && resp.RunID != "" {
+				if narrative, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, resp.RunID); err == nil {
+					accumulateHopResults(hopAcc, hopAttrSigs, extractHopSignatures(narrative, f.DiagnosisPlaybookSeriesID))
+				} else {
+					slog.Warn("fault stability: could not fetch incident narrative for hop certs", "run_id", resp.RunID, "err", err)
+				}
+			}
+
 			// 4. Remediation phase (skipped in repeat mode).
 			// When gate_escalation=true, the triage playbook may return pending_gate at
 			// the triage→remediation boundary. In that case, the gate handler drives
@@ -652,9 +688,11 @@ func cmdRun(args []string) {
 
 			repResults = append(repResults, evalResult)
 
-			// 5. Teardown.
+			// 5. Teardown — own fresh context + timeout (Part B, v0.26),
+			// not derived from ctx, so teardown still gets a full budget
+			// even if ctx (or the run phase's own timeout) already expired.
 			cfg.ConnStr = origConn
-			if err := injector.Teardown(ctx, f); err != nil {
+			if err := faultlib.TeardownFault(injector, f); err != nil {
 				slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", err)
 			}
 
@@ -726,6 +764,7 @@ func cmdRun(args []string) {
 				slog.Warn("stability cert not posted: diagnosis model unknown — set HELPDESK_MODEL_NAME or --agent-model so the cert is attributed to the right model")
 			} else {
 				postStabilityCert(ctx, cfg, f, sr, cr, attrSummary)
+				postHopCerts(ctx, cfg, f, hopAcc, hopAttrSigs)
 			}
 		}
 
@@ -1086,7 +1125,7 @@ func cmdValidate(args []string) {
 	}
 
 	// Load the built-in catalog to check for duplicate IDs.
-	builtinCat, err := loadActiveCatalog(&HarnessConfig{CatalogPath: cfg.CatalogPath})
+	builtinCat, err := loadActiveCatalog(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{CatalogPath: cfg.CatalogPath}})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading built-in catalog: %v\n", err)
 		os.Exit(1)

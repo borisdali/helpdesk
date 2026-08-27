@@ -14,11 +14,11 @@ import (
 // newTestRemediator returns a Remediator pointed at the given server URL.
 func newTestRemediator(t *testing.T, serverURL string) *Remediator {
 	t.Helper()
-	return NewRemediator(&HarnessConfig{
+	return NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		GatewayURL:    serverURL,
 		GatewayAPIKey: "test-key",
 		ConnStr:       "host=localhost port=5432 dbname=testdb user=postgres",
-	})
+	}})
 }
 
 // resolveHandler returns an http.HandlerFunc that handles the GET resolve step
@@ -77,7 +77,7 @@ func TestTriggerPlaybook_ServerError(t *testing.T) {
 }
 
 func TestTriggerPlaybook_NoGateway(t *testing.T) {
-	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"}})
 	if _, err := r.triggerPlaybook(context.Background(), "pbs_restart", "", ""); err == nil {
 		t.Error("expected error when GatewayURL is empty, got nil")
 	}
@@ -101,7 +101,7 @@ func TestTriggerAgent_Success(t *testing.T) {
 }
 
 func TestTriggerAgent_NoGateway(t *testing.T) {
-	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"}})
 	if err := r.triggerAgent(context.Background(), "database", "restart"); err == nil {
 		t.Error("expected error when GatewayURL is empty, got nil")
 	}
@@ -216,12 +216,12 @@ func TestRunApprovalLoop_EffectiveApprovalModeOverride(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewRemediator(&HarnessConfig{
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		GatewayURL:    srv.URL,
 		GatewayAPIKey: "test-key",
 		ConnStr:       "host=localhost",
-		ApprovalMode:  "manual", // would prompt if EffectiveApprovalMode not honoured
-	})
+		ApprovalMode:  "manual",
+	}})
 	initial := faultlib.ApproveRunResponse{
 		RunID:                 "plr_eff01",
 		Status:                "pending_approval",
@@ -283,7 +283,7 @@ func TestProceedStep_SendsCorrectPayload(t *testing.T) {
 	var gotBody map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewDecoder(r.Body).Decode(&gotBody)                                  //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "complete"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -335,7 +335,7 @@ func TestTriggerPlaybook_BridgesTraceID(t *testing.T) {
 func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {
 	var gotBody map[string]interface{}
 	srv := httptest.NewServer(resolveHandler(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&gotBody)                                  //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "complete"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -352,7 +352,7 @@ func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {
 func TestTriggerPlaybook_OmitsPriorRunIDWhenEmpty(t *testing.T) {
 	var gotBody map[string]interface{}
 	srv := httptest.NewServer(resolveHandler(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&gotBody)                                  //nolint:errcheck
+		json.NewDecoder(r.Body).Decode(&gotBody)                                   //nolint:errcheck
 		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "complete"}) //nolint:errcheck
 	}))
 	defer srv.Close()
@@ -384,11 +384,11 @@ func TestRemediate_PlaybookThenRecovery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewRemediator(&HarnessConfig{
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		GatewayURL:    srv.URL,
 		GatewayAPIKey: "key",
 		ConnStr:       "host=localhost port=5432 dbname=testdb user=postgres password=testpass",
-	})
+	}})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -464,7 +464,7 @@ func TestPostFeedback_RemediationAtGate_Denied_WithNotes(t *testing.T) {
 
 func TestPostFeedback_RemediationAtGate_NoGateway(t *testing.T) {
 	// With no gateway configured, postFeedback must be a silent no-op (no panic).
-	r := NewRemediator(&HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"})
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: "", ConnStr: "host=localhost"}})
 	v := true
 	r.postFeedback(context.Background(), "plr_abc123", "remediation", "at_gate", &v, "", "")
 }
@@ -482,7 +482,7 @@ func TestFetchRunOutcome_ReturnsOutcome(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}}
 	outcome := r.fetchRunOutcome(context.Background(), "plr_abc123")
 	if outcome != "transitioned" {
 		t.Errorf("outcome = %q, want transitioned", outcome)
@@ -495,7 +495,7 @@ func TestFetchRunOutcome_ReturnsEmptyOnNonOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL}}}
 	outcome := r.fetchRunOutcome(context.Background(), "plr_missing")
 	if outcome != "" {
 		t.Errorf("outcome = %q, want empty for 404", outcome)
@@ -503,7 +503,7 @@ func TestFetchRunOutcome_ReturnsEmptyOnNonOK(t *testing.T) {
 }
 
 func TestFetchRunOutcome_ReturnsEmptyWhenNoAuditURL(t *testing.T) {
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: ""}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: ""}}}
 	outcome := r.fetchRunOutcome(context.Background(), "plr_abc123")
 	if outcome != "" {
 		t.Errorf("outcome = %q, want empty when AuditURL unset", outcome)
@@ -539,7 +539,7 @@ func TestWaitForChildRunComplete_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(auditMux("plr_parent", "plr_child", "transitioned"))
 	defer srv.Close()
 
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL, GatewayAPIKey: "key"}}}
 	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 5*time.Second)
 	if got != "plr_child" {
 		t.Errorf("childRunID = %q, want plr_child", got)
@@ -549,7 +549,7 @@ func TestWaitForChildRunComplete_HappyPath(t *testing.T) {
 func TestWaitForChildRunComplete_NoAuditURL_FallsBackToFindChild(t *testing.T) {
 	// When AuditURL is empty, falls back to findChildRunID which also returns ""
 	// because there is no server to query.
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: ""}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: ""}}}
 	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 100*time.Millisecond)
 	if got != "" {
 		t.Errorf("expected empty when AuditURL unset, got %q", got)
@@ -574,7 +574,7 @@ func TestWaitForChildRunComplete_EmptyOutcomeEventuallyTerminal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := &Remediator{cfg: &HarnessConfig{AuditURL: srv.URL}}
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL}}}
 	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 10*time.Second)
 	if got != "plr_child2" {
 		t.Errorf("childRunID = %q, want plr_child2", got)

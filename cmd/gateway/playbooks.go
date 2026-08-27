@@ -500,6 +500,7 @@ type agentRunResult struct {
 	runID            string
 	playbookSeriesID string
 	agentName        string
+	toolCalls        []string // tool names called during this hop (from the a2aResponse's tool_calls field)
 }
 
 // chainEntry is one element of the per-run chain returned in API responses.
@@ -511,6 +512,23 @@ type chainEntry struct {
 	Findings         string                  `json:"findings,omitempty"`
 	Text             string                  `json:"text,omitempty"`
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
+	ToolCalls        []string                `json:"tool_calls,omitempty"`
+}
+
+// aggregateChainToolCalls returns the deduped union of ToolCalls across every
+// hop in chain, preserving first-seen order.
+func aggregateChainToolCalls(chain []chainEntry) []string {
+	var all []string
+	seen := map[string]bool{}
+	for _, entry := range chain {
+		for _, tc := range entry.ToolCalls {
+			if !seen[tc] {
+				seen[tc] = true
+				all = append(all, tc)
+			}
+		}
+	}
+	return all
 }
 
 // runAgentPlaybook executes one agent-mode playbook run and returns the parsed result.
@@ -563,6 +581,13 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 	if capture.code == http.StatusOK {
 		var respBody map[string]any
 		if err := json.Unmarshal(capture.body.Bytes(), &respBody); err == nil {
+			if tc, ok := respBody["tool_calls"].([]any); ok {
+				for _, v := range tc {
+					if s, ok := v.(string); ok {
+						res.toolCalls = append(res.toolCalls, s)
+					}
+				}
+			}
 			if text, ok := respBody["text"].(string); ok {
 				res.rawText = text
 				res.diagReport = parseDiagnosticReport(text)
@@ -718,6 +743,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		Findings:         primary.findings,
 		Text:             capturedText(primary.capture),
 		DiagnosticReport: primary.diagReport,
+		ToolCalls:        primary.toolCalls,
 	}}
 
 	if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, pb, primary) {
@@ -754,8 +780,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		// nothing for the remediation playbook to act on.
 		if findingsRecommendMonitor(prev.findings) {
 			finalOutcome = "resolved"
-			finalEscalatedTo = ""
-			finalTransitionedTo = ""
+			// Only clear these when prev is still the primary hop (len(chain)==0).
+			// If a downstream hop is the one recommending monitor, the primary's
+			// own original escalated_to/transitioned_to must survive — see the
+			// len(chain) == 0 comment below for why these fields must never be
+			// overwritten by anything other than the primary's own signal.
+			if len(chain) == 0 {
+				finalEscalatedTo = ""
+				finalTransitionedTo = ""
+			}
 			break
 		}
 
@@ -787,17 +820,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				gateReasons = append(gateReasons, "trust_not_earned")
 				// len(chain) > 1 means prev was itself reached via chaining —
 				// it is not the top-level playbook the caller originally
-				// requested. A known, documented gap (docs/CONSISTENCY.md's
-				// "Certification scope" section): fault_stability_cert is
-				// only ever posted against a fault's designated entry-point
-				// series, never an intermediate hop, so a chain-only
-				// playbook can permanently fail this gate no matter how many
-				// --repeat runs exercise it. The gateway has no fault-catalog
-				// access to *prove* that's what's happening here — this is a
-				// contextual hint pointing at the likely cause, not a
-				// certainty claim.
+				// requested. As of v0.26.0 (docs/CONSISTENCY.md's
+				// "Certification scope" section), `faulttest run --repeat N
+				// --approval-mode=force` posts a cert for every distinct
+				// series a chain passes through, not just the fault's
+				// declared entry point — so a chain-only playbook CAN now
+				// earn its own trust, it just may genuinely never have been
+				// run that way yet, or may have a real unstable/dirty
+				// record. The gateway has no fault-catalog access to *prove*
+				// which of those applies here — this is a contextual hint
+				// pointing at where to look, not a certainty claim.
 				if len(chain) > 1 {
-					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — if it never appears as any fault's own diagnosis_playbook_series_id in your catalog, it has no path to earn its own certification; see docs/CONSISTENCY.md's \"Certification scope\" section"
+					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — check `vault hop-certs <series-id>` for its actual trust record; if it has none, run `faulttest run --repeat N --approval-mode=force` through a fault whose chain passes through it; see docs/CONSISTENCY.md's \"Certification scope\" section"
 				}
 			}
 			if len(gateReasons) > 0 {
@@ -836,12 +870,25 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				extra["diagnostic_report"] = prev.diagReport
 			}
 			finalOutcome = audit.OutcomeGatePending
-			if isTransition {
-				finalTransitionedTo = nextSeries
-				finalEscalatedTo = ""
-			} else {
-				finalEscalatedTo = nextSeries
-				finalTransitionedTo = ""
+			// Only set these when prev is still the primary hop (len(chain)==0).
+			// nextSeries/isTransition describe THIS hop's own handoff, but
+			// finalEscalatedTo/finalTransitionedTo get persisted onto the
+			// PRIMARY run's own record (see the len(chain)==0 comment further
+			// down, near the auto-chain success path) — a downstream hop's
+			// force-gated transition must not overwrite the primary's own
+			// original signal. Found live: a sysadmin hop's own
+			// TRANSITION_TO got force-gated on trust_not_earned, and this
+			// unconditional assignment corrupted the triage run's persisted
+			// transitioned_to, making handleGetIncident misclassify the
+			// sysadmin hop as the remediation instead of an escalation hop.
+			if len(chain) == 0 {
+				if isTransition {
+					finalTransitionedTo = nextSeries
+					finalEscalatedTo = ""
+				} else {
+					finalEscalatedTo = nextSeries
+					finalTransitionedTo = ""
+				}
 			}
 			finalFindings = prev.findings
 			finalReport = prev.diagReport
@@ -913,6 +960,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			Findings:         chained.findings,
 			Text:             capturedText(chained.capture),
 			DiagnosticReport: chained.diagReport,
+			ToolCalls:        chained.toolCalls,
 		})
 		finalReport = mergeDiagnosticReports(finalReport, chained.diagReport)
 		finalOutcome = "escalated+resolved"
@@ -984,7 +1032,14 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			extra["diagnostic_report"] = prev.diagReport
 		}
 		finalOutcome = audit.OutcomeGatePending
-		finalTransitionedTo = req.RemediationSeriesID
+		// Only set when prev is still the primary hop (len(chain)==0) — same
+		// leak risk as the informed-gate branch above: req.RemediationSeriesID
+		// is the CALLER's original target for the primary hop, and must not be
+		// stamped onto the primary's record as if it were a downstream hop's
+		// own omitted signal.
+		if len(chain) == 0 {
+			finalTransitionedTo = req.RemediationSeriesID
+		}
 		finalFindings = prev.findings
 		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with
@@ -1030,6 +1085,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Aggregate tool_calls across every hop in the chain (deduped) — the raw
+	// response body captured on primary.capture only reflects the first hop's
+	// own tool_call_summary, which understates (often to zero) the fault's
+	// real expected_tools when they're actually called by a later,
+	// escalated/transitioned-to hop. injectFields overrides primary.capture's
+	// own tool_calls with whatever is set here.
+	if allToolCalls := aggregateChainToolCalls(chain); len(allToolCalls) > 0 {
+		extra["tool_calls"] = allToolCalls
+	}
 	extra["chain"] = chain
 
 	injectFields(w, primary.capture, extra)
@@ -1903,7 +1967,23 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	// DB-agent tool that does not exist in the sysadmin tool set).
 	if req.ConnectionString != "" {
 		if pb.AgentName == agentNameSysadmin {
-			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use check_host and restart_container as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString)
+			// Only pbs_db_restart_action actually calls restart_container — the
+			// other two sysadmin playbooks (pbs_sysadmin_docker_inspect,
+			// pbs_wal_disk_full) explicitly forbid it in their own guidance and
+			// hand off to this playbook for the actual restart. Naming it here
+			// unconditionally for every sysadmin playbook was misleading (told the
+			// model it could use a tool its own playbook guidance forbade) and,
+			// found live, the direct cause of a real bug: ClassifyDelegation scans
+			// only this first line for action-class keywords, so "restart"
+			// appearing here classified every sysadmin delegation as write —
+			// including pure-diagnosis hops that never attempt one — which in turn
+			// made a genuine, corroborated decline on those hops indistinguishable
+			// from a real write-absence mismatch.
+			toolHint := "check_host"
+			if pb.SeriesID == "pbs_db_restart_action" {
+				toolHint = "check_host and restart_container"
+			}
+			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use %s as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString, toolHint)
 		} else {
 			fmt.Fprintf(&b, "Call check_connection with connection_string=%q and begin diagnosing why it is unavailable. Do not ask which database — the target is %q.\n", req.ConnectionString, req.ConnectionString)
 		}

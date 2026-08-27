@@ -139,7 +139,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|suggest|suggest-update|drafts|activate|diff|discard|import>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -151,6 +151,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
 		fmt.Fprintln(os.Stderr, "  judge-accuracy  Compare judge predictions (from vault diff) to actual run outcomes")
 		fmt.Fprintln(os.Stderr, "  cert-compare    Compare stability certs across two diagnosis models (model upgrade gating)")
+		fmt.Fprintln(os.Stderr, "  hop-certs       Show stability certs for a playbook series, including chain-only (hop) certs")
 		fmt.Fprintln(os.Stderr, "  suggest         Generate a playbook draft from an audit trace")
 		fmt.Fprintln(os.Stderr, "  suggest-update  Show proposed update for an existing playbook from a trace")
 		fmt.Fprintln(os.Stderr, "  drafts          List inactive (draft) playbooks awaiting activation")
@@ -188,6 +189,8 @@ func cmdVault(args []string) {
 		vaultJudgeAccuracy(args[1:])
 	case "cert-compare":
 		vaultCertCompare(args[1:])
+	case "hop-certs":
+		vaultHopCerts(args[1:])
 	case "suggest":
 		vaultSuggest(args[1:])
 	case "suggest-update":
@@ -557,6 +560,104 @@ func fetchCertHistory(gatewayURL, apiKey, faultID, model string, limit int) []au
 		return nil
 	}
 	return result.History
+}
+
+// fetchHopCerts calls GET .../fault-stability?series_id=X&model=Y — the
+// gateway's existing certs-by-series-and-model passthrough (already used
+// internally by trustNotYetEarnedForceGate via fetchFaultStabilityCerts,
+// cmd/gateway/playbooks.go; this is the same query, exposed to the CLI for
+// the first time — v0.26 item 6). Decodes directly into
+// audit.FaultStabilityCert, matching fetchCertHistory's pattern rather than
+// a hand-rolled mirror struct.
+//
+// vault list/status/drift all discover fault_ids via the catalog's own
+// Failure list, so they never surface hop certs — their fault_id is a
+// synthetic "<entry-point-fault-id>::hop:<series-id>" postHopCerts
+// constructs (hop.go), which appears nowhere in the catalog. This is the
+// only CLI path that can show them, keyed by series_id instead.
+func fetchHopCerts(gatewayURL, apiKey, seriesID, model string) []audit.FaultStabilityCert {
+	if gatewayURL == "" || seriesID == "" || model == "" {
+		return nil
+	}
+	reqURL := fmt.Sprintf("%s/api/v1/fleet/fault-stability?series_id=%s&model=%s",
+		strings.TrimSuffix(gatewayURL, "/"), neturl.QueryEscape(seriesID), neturl.QueryEscape(model))
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var result struct {
+		Certs []audit.FaultStabilityCert `json:"certs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	return result.Certs
+}
+
+// vaultHopCerts implements `faulttest vault hop-certs <series-id>` — shows
+// every fault-stability cert on record for a playbook series, including
+// synthetic hop certs postHopCerts posts for series that are never any
+// fault's own diagnosis_playbook_series_id (see hop.go). Answers the
+// question docs/CONSISTENCY.md used to have no CLI answer for: "what does
+// this chain-only playbook's own trust record look like."
+func vaultHopCerts(args []string) {
+	fs := flag.NewFlagSet("vault hop-certs", flag.ExitOnError)
+	cfg := loadConfig(fs, args)
+
+	if cfg.GatewayURL == "" {
+		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault hop-certs")
+		os.Exit(1)
+	}
+	if len(fs.Args()) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault hop-certs <series-id> [--agent-model MODEL]")
+		os.Exit(1)
+	}
+	seriesID := fs.Args()[0]
+	model := cfg.DiagnosisModel
+	if model == "" {
+		fmt.Fprintln(os.Stderr, "Error: no diagnosis model set — pass --agent-model or set HELPDESK_MODEL_NAME")
+		os.Exit(1)
+	}
+
+	certs := fetchHopCerts(cfg.GatewayURL, cfg.GatewayAPIKey, seriesID, model)
+	fmt.Printf("\nStability certs for series %s (model: %s)\n", seriesID, model)
+	if len(certs) == 0 {
+		fmt.Println("  None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`")
+		fmt.Println("  against a fault whose chain passes through this series to generate one.")
+		return
+	}
+	for _, c := range certs {
+		verdict := "UNSTABLE"
+		if c.IsStable {
+			verdict = "STABLE"
+		}
+		cleanVerdict := "DIRTY"
+		if c.IsClean {
+			cleanVerdict = "CLEAN"
+		}
+		trust := "NOT EARNED"
+		if c.EarnsTrust() {
+			trust = "EARNED"
+		}
+		fmt.Printf("\n  Fault         : %s  (%s)\n", c.FaultID, c.FaultName)
+		fmt.Printf("  Trust         : %s\n", trust)
+		fmt.Printf("  Verdict       : %s / %s\n", verdict, cleanVerdict)
+		fmt.Printf("  Runs          : %d  (pass rate %.0f%%)\n", c.NRuns, c.PassRate*100)
+		fmt.Printf("  Attribution   : %s  consistent: %v\n", c.PrimaryAttribution, c.AttributionConsistent)
+		fmt.Printf("  Tested at     : %s\n", c.TestedAt.Format(time.RFC3339))
+	}
 }
 
 // scanFlag returns the value of --flag=val or --flag val from a []string,
@@ -2432,32 +2533,19 @@ func vaultIncidents(args []string) {
 // ── vault journey ─────────────────────────────────────────────────────────
 
 // journeySummary mirrors audit.JourneySummary for JSON decoding.
-type journeySummary struct {
-	TraceID              string              `json:"trace_id"`
-	StartedAt            string              `json:"started_at"`
-	EndedAt              string              `json:"ended_at"`
-	DurationMs           int64               `json:"duration_ms"`
-	UserID               string              `json:"user_id,omitempty"`
-	UserQuery            string              `json:"user_query,omitempty"`
-	Agent                string              `json:"agent,omitempty"`
-	Category             string              `json:"category,omitempty"`
-	Delegations          []delegationSummary `json:"delegations,omitempty"`
-	ToolsUsed            []string            `json:"tools_used"`
-	Outcome              string              `json:"outcome,omitempty"`
-	EventCount           int                 `json:"event_count"`
-	RetryCount           int                 `json:"retry_count,omitempty"`
-	Origin               string              `json:"origin,omitempty"`
-	HasMismatch          bool                `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool                `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool                `json:"has_protocol_violation,omitempty"`
-	IncidentRunID        string              `json:"incident_run_id,omitempty"`
-}
-
-// delegationSummary mirrors audit.DelegationSummary.
-type delegationSummary struct {
-	Intent string   `json:"intent"`
-	Tools  []string `json:"tools"`
-}
+// journeySummary/delegationSummary are aliases for audit.JourneySummary/
+// audit.DelegationSummary (Part E, v0.26 — item 7's dedup pattern applied to
+// this file's own remaining mirrors) — this package previously carried a
+// hand-rolled copy of each. That mirror is what let HasTargetDrift silently
+// go missing until a coverage review caught it (see fetchCertHistory's doc
+// comment above, fixed earlier via the same underlying pattern), and it had
+// independently drifted further since: audit.JourneySummary also carries
+// Purpose/PurposeNote, which this mirror never had at all. internal/audit is
+// already a direct dependency of this file (see the import above), so
+// aliasing costs nothing and makes this class of drift a compile error
+// instead of a silent gap.
+type journeySummary = audit.JourneySummary
+type delegationSummary = audit.DelegationSummary
 
 // fetchJourneys calls GET /api/v1/governance/journeys with the given query params.
 func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journeySummary, error) {
@@ -2492,24 +2580,14 @@ func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journ
 	return summaries, nil
 }
 
-// targetDriftDetail mirrors audit.TargetDriftDetail for JSON decoding.
-type targetDriftDetail struct {
-	Tool             string `json:"tool"`
-	ConnectionString string `json:"connection_string"`
-}
-
-// delegationVerificationEvent mirrors the audit.DelegationVerification fields
-// vault journey needs to show tool/value detail instead of generic boilerplate
-// in its warning sections — a strict subset of the full struct.
-type delegationVerificationEvent struct {
-	Agent                string              `json:"agent"`
-	NarratedNotConfirmed []string            `json:"narrated_not_confirmed,omitempty"`
-	WriteConfirmed       []string            `json:"write_confirmed,omitempty"`
-	DestructiveConfirmed []string            `json:"destructive_confirmed,omitempty"`
-	TargetDrift          []string            `json:"target_drift,omitempty"`
-	TargetDriftDetail    []targetDriftDetail `json:"target_drift_detail,omitempty"`
-	ProtocolViolation    bool                `json:"protocol_violation,omitempty"`
-}
+// delegationVerificationEvent is an alias for audit.DelegationVerification
+// (Part E, v0.26). It previously mirrored only a strict subset of the real
+// struct's fields (the ones this file's warning-section rendering happened
+// to need) — aliasing to the full type costs nothing on the decode side
+// (unused fields are simply never read) and means any future rendering need
+// (e.g. ActionClass, ToolsConfirmed, MismatchReason) is already there rather
+// than requiring another mirror extension.
+type delegationVerificationEvent = audit.DelegationVerification
 
 // fetchDelegationVerificationEvents calls GET /api/v1/governance/events for
 // every delegation_verification event recorded on traceID — the raw events
@@ -4681,11 +4759,11 @@ type narrativeStep struct {
 	Status   string `json:"status"`
 }
 
-// narrativeJourneyRef mirrors audit.IncidentJourneyRef for JSON decoding.
-type narrativeJourneyRef struct {
-	Phase   string `json:"phase"`
-	TraceID string `json:"trace_id"`
-}
+// narrativeJourneyRef is an alias for audit.IncidentJourneyRef (Part E,
+// v0.26). Unlike narrativeEscalationHop/incidentNarrative below (which
+// mirror types in cmd/gateway, an unimportable package main), this one has
+// no such excuse — internal/audit is already a direct dependency here.
+type narrativeJourneyRef = audit.IncidentJourneyRef
 
 // narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
 type narrativeEscalationHop struct {
@@ -5538,11 +5616,11 @@ func vaultDiff(args []string) {
 		fmt.Println()
 	}
 
-	cfg := &HarnessConfig{
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
 		JudgeVendor: judgeVendor,
 		JudgeModel:  judgeModel,
 		JudgeAPIKey: judgeAPIKey,
-	}
+	}}
 	completer, err := newJudgeCompleter(context.Background(), cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Judge error: could not initialize LLM: %v\n", err)

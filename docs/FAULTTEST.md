@@ -430,7 +430,9 @@ faulttest run --external \
   --db-agent http://helpdesk-gateway:8080
 ```
 
-If `--infra-config` is omitted the check is skipped. This is intentional for air-gapped or single-tenant setups where the operator knows their target. The flag is strongly recommended in any shared environment.
+If `--infra-config` is omitted the safety check is skipped. This is intentional for air-gapped or single-tenant setups where the operator knows their target. The flag is strongly recommended in any shared environment.
+
+**`--infra-config` also drives `{{server_id}}` prompt substitution**, independent of the safety check — some catalog faults' prompts reference `{{server_id}}` (the resolved name of the target from `infrastructure.json`, e.g. "staging-db"). Omitting `--infra-config` doesn't error here either: `{{server_id}}` silently resolves to an empty string, producing a prompt like `"the database server '' is unreachable"` — confirmed live to visibly derail the agent into asking which server to investigate instead of diagnosing the fault. Set `FAULTTEST_INFRA_CONFIG` once (env var, same as the flag) rather than relying on remembering `--infra-config` on every invocation — especially for local/CI runs against the bundled `testing/testing.infra.json`.
 
 ---
 
@@ -501,7 +503,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
 | `--judge-api-key` | `HELPDESK_API_KEY` | — | API key for the judge (defaults to the agent key) |
 | `--audit-url` | — | — | auditd URL for audit-trail-based tool evidence (`ToolEvidenceMode: audit`) |
-| `--infra-config` | — | — | Path to `infrastructure.json` for safety check |
+| `--infra-config` | `FAULTTEST_INFRA_CONFIG` | — | Path to `infrastructure.json` for the safety check **and** for resolving `{{server_id}}` in fault prompts (§4). Omitting both the flag and the env var doesn't error — it silently resolves `{{server_id}}` to an empty string, which can visibly derail the agent's response on faults that use it. Set the env var once in your shell/CI rather than remembering the flag on every invocation. |
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
 | `--source` | — | all | Filter by source: `builtin` or `custom` |
@@ -1216,7 +1218,7 @@ The JSON report contains one entry per fault:
 | Priority | Mode | How | When available |
 |----------|------|-----|----------------|
 | 1 | `audit` | Exact tool names from auditd's `tool_execution` events | `--audit-url` is set and auditd is reachable |
-| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` (direct A2A, not via gateway) |
+| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a gateway `/api/v1/query`, or a gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
 | 3 | `text_fallback` | Keyword pattern matching against the agent's response text | All other cases |
 
 `audit` mode is the most accurate: it queries auditd directly for `tool_execution` events in the time window of the agent call, giving exact tool names regardless of which agent or transport was used. `text_fallback` is least reliable — a tool name appearing in the response text does not prove the tool was actually called. The mode used is recorded in `tool_evidence_mode` so you can assess reliability.

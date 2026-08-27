@@ -578,6 +578,16 @@ chain: a hop reached via `ESCALATE_TO` is another diagnosis hop (`escalations[]`
 via `TRANSITION_TO` is the remediation — singular, wherever it occurs. `remediation` is `nil` if
 the chain hasn't reached a transition yet, even when escalation hops exist.
 
+This classification is only as reliable as each hop's own persisted `escalated_to`/
+`transitioned_to` — which must describe *that hop's own* immediate handoff, never a later hop's.
+`cmd/gateway/playbooks.go`'s auto-chain loop maintains this by construction (`finalEscalatedTo`/
+`finalTransitionedTo` only ever get set from the primary hop's own signal, guarded by
+`len(chain) == 0`); a bug fixed in v0.26.0 let a downstream hop's own force-gated `TRANSITION_TO`
+leak onto an *earlier* hop's persisted record when the force-gate (`trust_not_earned`,
+`low_confidence`, `objective_evidence`) or the `recommended=monitor` early-exit fired several hops
+into a chain rather than on the primary hop itself — misclassifying that earlier hop as the
+remediation instead of an escalation hop.
+
 ```bash
 curl "http://localhost:8080/api/v1/incidents/plr_t1" | jq '.escalations, .remediation, .journeys'
 ```
@@ -679,8 +689,8 @@ When `mismatch=true`, several independent signals fire simultaneously:
 
 | Signal | Where | Details |
 |--------|-------|---------|
-| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object |
-| **Incident narrative chapter** | `GET /api/v1/incidents/{runID}` | `has_mismatch: true` on the TRIAGE/ESCALATION/REMEDIATION chapter that owns the flagged trace — inline, no separate Journey lookup needed; `vault incidents` prints an inline `⚠ unverified` line |
+| **Journey outcome** | `GET /v1/journeys` | `outcome` elevated to `unverified_claim`; `has_mismatch: true` on the Journey object (whole-trace scope) |
+| **Incident narrative chapter** | `GET /api/v1/incidents/{runID}` | `has_mismatch: true` on the specific TRIAGE/ESCALATION/REMEDIATION chapter that hop belongs to — computed independently of the Journey object, scoped to that hop's own execution window (not the whole trace), so a mismatch on one hop of a force-mode auto-chain does not flag every chapter sharing that trace_id; inline, no separate Journey lookup needed; `vault incidents` prints an inline `⚠ unverified` line |
 | **HTTP response header** | API caller | Gateway sets `X-Audit-Mismatch: true` on the HTTP response for the offending request |
 | **Prometheus counter** | Gateway `/metrics` | `gateway_fabrication_mismatches_total{agent, action_class}` incremented |
 | **Security alert** | auditor → incident webhook | `CRITICAL` `fabrication_mismatch` when check 3 fired (write/destructive-absence, unchanged); a lower `WARNING`-level `narrated_tool_not_confirmed` alert (not forwarded to the incident webhook) when check 4 fired *without* check 3 also firing — kept off the CRITICAL path until this newer check's false-positive rate is observed on real traffic |

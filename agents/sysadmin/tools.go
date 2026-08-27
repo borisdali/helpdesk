@@ -543,8 +543,22 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error) {
 	start := time.Now()
 	result, err := checkHostImpl(ctx, args)
+	duration := time.Since(start)
 	if err == nil {
-		slog.Info("tool ok", "name", "check_host", "ms", time.Since(start).Milliseconds())
+		slog.Info("tool ok", "name", "check_host", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "check_host",
+			Parameters: map[string]any{"target": args.Target},
+		}, audit.ToolResult{
+			Output: result.Details,
+			Error:  errMsg,
+		}, duration)
 	}
 	return result, err
 }
@@ -632,8 +646,22 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 func getHostLogsTool(ctx tool.Context, args GetHostLogsArgs) (HostLogsResult, error) {
 	start := time.Now()
 	result, err := getHostLogsImpl(ctx, args)
+	duration := time.Since(start)
 	if err == nil {
-		slog.Info("tool ok", "name", "get_host_logs", "ms", time.Since(start).Milliseconds())
+		slog.Info("tool ok", "name", "get_host_logs", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_host_logs",
+			Parameters: map[string]any{"target": args.Target, "lines": args.Lines, "filter": args.Filter},
+		}, audit.ToolResult{
+			Output: result.Logs,
+			Error:  errMsg,
+		}, duration)
 	}
 	return result, err
 }
@@ -675,8 +703,22 @@ func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) 
 func checkDiskTool(ctx tool.Context, args CheckDiskArgs) (DiskResult, error) {
 	start := time.Now()
 	result, err := checkDiskImpl(ctx, args)
+	duration := time.Since(start)
 	if err == nil {
-		slog.Info("tool ok", "name", "check_disk", "ms", time.Since(start).Milliseconds())
+		slog.Info("tool ok", "name", "check_disk", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "check_disk",
+			Parameters: map[string]any{"target": args.Target, "run_on_host": args.RunOnHost},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
 	}
 	return result, err
 }
@@ -718,8 +760,22 @@ func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, e
 func checkMemoryTool(ctx tool.Context, args CheckMemoryArgs) (MemoryResult, error) {
 	start := time.Now()
 	result, err := checkMemoryImpl(ctx, args)
+	duration := time.Since(start)
 	if err == nil {
-		slog.Info("tool ok", "name", "check_memory", "ms", time.Since(start).Milliseconds())
+		slog.Info("tool ok", "name", "check_memory", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "check_memory",
+			Parameters: map[string]any{"target": args.Target, "run_on_host": args.RunOnHost},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
 	}
 	return result, err
 }
@@ -807,8 +863,22 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 func readPgLogFileTool(ctx tool.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
 	start := time.Now()
 	result, err := readPgLogFileImpl(ctx, args)
+	duration := time.Since(start)
 	if err == nil {
-		slog.Info("tool ok", "name", "read_pg_log_file", "ms", time.Since(start).Milliseconds())
+		slog.Info("tool ok", "name", "read_pg_log_file", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "read_pg_log_file",
+			Parameters: map[string]any{"target": args.Target, "lines": args.Lines, "filter": args.Filter, "log_path": args.LogPath},
+		}, audit.ToolResult{
+			Output: result.Logs,
+			Error:  errMsg,
+		}, duration)
 	}
 	return result, err
 }

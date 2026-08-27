@@ -1,6 +1,7 @@
 package faultlib
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -59,6 +60,56 @@ func TestResolvedContainerName_NoMatchReturnsEmpty(t *testing.T) {
 
 	if got := inj.resolvedContainerName(); got != "" {
 		t.Errorf("resolvedContainerName() = %q, want empty string with no infra config", got)
+	}
+}
+
+// TestExecConfig_TeardownDoesNotRestore_CallerMustResetConnStr verifies the
+// assumption RunFaultCycle/TeardownFault's callers rely on (Part B, v0.26):
+// execConfig-type faults (db-auth-failure, db-not-exist) mutate cfg.ConnStr
+// on Inject, and their teardown spec is {type: config, restore: true} — but
+// execConfig never reads the Restore field at all, so Teardown alone does
+// NOT put ConnStr back. The actual restoration only happens because callers
+// explicitly reset cfg.ConnStr themselves before calling Teardown (the
+// beforeTeardown callback on the automatic/injection-failure path,
+// RunFaultCycle callers' own origConn-reset line on the success path). If
+// this test's first assertion (post-Teardown-alone) ever starts failing,
+// execConfig gained real restore behavior and the caller-side reset dance
+// may have become redundant defensive code rather than load-bearing.
+func TestExecConfig_TeardownDoesNotRestore_CallerMustResetConnStr(t *testing.T) {
+	origConn := "host=good port=5432 dbname=testdb"
+	cfg := &HarnessConfig{ConnStr: origConn}
+	inj := NewInjector(cfg)
+	f := Failure{
+		Inject: InjectSpec{
+			Type:     "config",
+			Override: map[string]string{"connection_string": "host=bad port=5432 dbname=testdb password=wrong"},
+		},
+		Teardown: InjectSpec{Type: "config", Restore: true},
+	}
+
+	if err := inj.Inject(context.Background(), f); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	if cfg.ConnStr == origConn {
+		t.Fatal("Inject should have mutated cfg.ConnStr to the override value")
+	}
+	mutated := cfg.ConnStr
+
+	if err := inj.Teardown(context.Background(), f); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if cfg.ConnStr != mutated {
+		t.Fatalf("Teardown alone changed cfg.ConnStr from %q to %q — execConfig now reads Restore; "+
+			"see this test's doc comment", mutated, cfg.ConnStr)
+	}
+
+	// Now the actual pattern callers use: reset BEFORE calling Teardown.
+	cfg.ConnStr = origConn
+	if err := inj.Teardown(context.Background(), f); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if cfg.ConnStr != origConn {
+		t.Errorf("cfg.ConnStr = %q after caller-side reset + Teardown, want %q", cfg.ConnStr, origConn)
 	}
 }
 

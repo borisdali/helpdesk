@@ -241,8 +241,8 @@ response — this is the authoritative record of what the sub-agent actually did
 
 When `mismatch=true`, these signals fire simultaneously:
 - The journey `outcome` is elevated to `unverified_claim`
-- The journey object gains `has_mismatch: true`
-- The corresponding incident-narrative chapter (`GET /api/v1/incidents/{runID}` — TRIAGE/ESCALATION/REMEDIATION) gains `has_mismatch: true` inline, so a reader doesn't need a separate Journey lookup to see it; `vault incidents` prints an inline `⚠ unverified` line
+- The journey object (whole-trace scope) gains `has_mismatch: true`
+- The incident-narrative chapter that hop actually belongs to (`GET /api/v1/incidents/{runID}` — TRIAGE/ESCALATION/REMEDIATION) gains `has_mismatch: true` inline, so a reader doesn't need a separate Journey lookup to see it — computed independently of the journey object, scoped to that specific hop's own execution window, not to the whole trace (a force-mode auto-chain can put multiple hops under one shared trace_id, so a mismatch on one hop does not flag every chapter sharing that trace_id); `vault incidents` prints an inline `⚠ unverified` line
 - The gateway sets `X-Audit-Mismatch: true` on the HTTP response
 - The `gateway_fabrication_mismatches_total` Prometheus counter is incremented
 - The auditor fires a security alert — **`fabrication_mismatch` at CRITICAL** (forwarded to `--incident-webhook`) when caused by the write/destructive-absence case; **`narrated_tool_not_confirmed` at WARNING** (not forwarded to the webhook) when caused only by `narrated_not_confirmed` — kept off the CRITICAL/webhook path until that newer check's false-positive rate is known on real traffic
