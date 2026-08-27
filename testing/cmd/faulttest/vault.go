@@ -2580,15 +2580,13 @@ func fetchJourneys(gatewayURL, apiKey string, params map[string]string) ([]journ
 	return summaries, nil
 }
 
-// targetDriftDetail/delegationVerificationEvent are aliases for
-// audit.TargetDriftDetail/audit.DelegationVerification (Part E, v0.26).
-// delegationVerificationEvent previously mirrored only a strict subset of
-// the real struct's fields (the ones this file's warning-section rendering
-// happened to need) — aliasing to the full type costs nothing on the decode
-// side (unused fields are simply never read) and means any future rendering
-// need (e.g. ActionClass, ToolsConfirmed, MismatchReason) is already there
-// rather than requiring another mirror extension.
-type targetDriftDetail = audit.TargetDriftDetail
+// delegationVerificationEvent is an alias for audit.DelegationVerification
+// (Part E, v0.26). It previously mirrored only a strict subset of the real
+// struct's fields (the ones this file's warning-section rendering happened
+// to need) — aliasing to the full type costs nothing on the decode side
+// (unused fields are simply never read) and means any future rendering need
+// (e.g. ActionClass, ToolsConfirmed, MismatchReason) is already there rather
+// than requiring another mirror extension.
 type delegationVerificationEvent = audit.DelegationVerification
 
 // fetchDelegationVerificationEvents calls GET /api/v1/governance/events for
