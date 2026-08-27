@@ -578,6 +578,16 @@ chain: a hop reached via `ESCALATE_TO` is another diagnosis hop (`escalations[]`
 via `TRANSITION_TO` is the remediation — singular, wherever it occurs. `remediation` is `nil` if
 the chain hasn't reached a transition yet, even when escalation hops exist.
 
+This classification is only as reliable as each hop's own persisted `escalated_to`/
+`transitioned_to` — which must describe *that hop's own* immediate handoff, never a later hop's.
+`cmd/gateway/playbooks.go`'s auto-chain loop maintains this by construction (`finalEscalatedTo`/
+`finalTransitionedTo` only ever get set from the primary hop's own signal, guarded by
+`len(chain) == 0`); a bug fixed in v0.26.0 let a downstream hop's own force-gated `TRANSITION_TO`
+leak onto an *earlier* hop's persisted record when the force-gate (`trust_not_earned`,
+`low_confidence`, `objective_evidence`) or the `recommended=monitor` early-exit fired several hops
+into a chain rather than on the primary hop itself — misclassifying that earlier hop as the
+remediation instead of an escalation hop.
+
 ```bash
 curl "http://localhost:8080/api/v1/incidents/plr_t1" | jq '.escalations, .remediation, .journeys'
 ```

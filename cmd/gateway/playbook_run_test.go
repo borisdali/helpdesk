@@ -3433,6 +3433,106 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate(t *testing.T)
 	}
 }
 
+// TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVariant
+// mirrors TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate exactly,
+// except hop2's own force-gated signal is ESCALATE_TO (isTransition=false)
+// instead of TRANSITION_TO (isTransition=true) — the informed-gate branch's
+// len(chain)==0 guard wraps a symmetric if/else (playbooks.go:879-889), and the
+// TRANSITION_TO path alone doesn't prove the ESCALATE_TO path got the same
+// treatment.
+func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVariant(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_triage", SeriesID: "pbs_oevchain2v_triage",
+		Name: "OEV Chain2v Triage", ExecutionMode: "agent", AgentName: "oev2v_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_sysadmin", SeriesID: "pbs_oevchain2v_sysadmin",
+		Name: "OEV Chain2v Sysadmin", ExecutionMode: "agent", AgentName: "oev2v_sysadmin_agent", IsActive: true,
+	}
+	pbK8s := &audit.Playbook{
+		PlaybookID: "pb_oevchain2v_k8s", SeriesID: "pbs_oevchain2v_k8s",
+		Name: "OEV Chain2v K8s", ExecutionMode: "agent", AgentName: "oev2v_k8s_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_oevchain2v_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_oevchain2v_sysadmin": pbSysadmin,
+			"pbs_oevchain2v_k8s":      pbK8s,
+		})
+	// Skip 1 call: hop1's own evidence fetch sees no evidence, so it does not
+	// get gated on its own and chainEscalation actually runs. Every call from
+	// the 2nd onward (hop2's fetch) sees real evidence.
+	auditSrv.evidenceSkipCalls = 1
+	auditSrv.evidenceSignal = "pod_restarted"
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "oev2v_db_agent",
+		"HYPOTHESIS_1: db-level connection issue | CONFIDENCE: 0.90 | EVIDENCE: \"connection refused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: looks like a db problem\nESCALATE_TO: pbs_oevchain2v_sysadmin\n")
+	// hop2 emits ESCALATE_TO (not TRANSITION_TO) — the isTransition=false path.
+	_, sysadminCard := mockA2AServerWithText(t, "oev2v_sysadmin_agent",
+		"HYPOTHESIS_1: needs cluster-level investigation | CONFIDENCE: 0.90 | EVIDENCE: \"restart_count=2\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: pod keeps restarting\nESCALATE_TO: pbs_oevchain2v_k8s\n")
+	_, k8sCard := mockA2AServerWithText(t, "oev2v_k8s_agent", "FINDINGS: should never be reached\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"oev2v_db_agent":       dbCard,
+		"oev2v_sysadmin_agent": sysadminCard,
+		"oev2v_k8s_agent":      k8sCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"connection refused","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate — chained-hop objective-evidence gate did not fire; body: %s", resp["status"], rec.Body.String())
+	}
+	if resp["escalation_target"] != "pbs_oevchain2v_k8s" {
+		t.Errorf("escalation_target = %q, want pbs_oevchain2v_k8s — must reflect hop2's own signal", resp["escalation_target"])
+	}
+	if got := auditSrv.runCount(); got != 2 {
+		t.Errorf("runCount() = %d, want 2 — k8s agent should never have been invoked, the chain must stop at the gate", got)
+	}
+
+	// The primary (triage) run's own persisted record must still reflect its
+	// own ESCALATE_TO signal (to the sysadmin hop), not hop2's own force-gated
+	// ESCALATE_TO (to the k8s hop) — the isTransition=false sibling of the bug
+	// fixed for the TRANSITION_TO case above.
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+	if got := patch["escalated_to"]; got != "pbs_oevchain2v_sysadmin" {
+		t.Errorf("primary run's persisted escalated_to = %v, want 'pbs_oevchain2v_sysadmin' (its own signal, not hop2's own ESCALATE_TO target)", got)
+	}
+	if got := patch["transitioned_to"]; got != "" && got != nil {
+		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
+	}
+}
+
 // TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_NoEscalation_SurfacesWarning
 // verifies the standalone-warning path for a SECOND hop: hop1 (triage)
 // escalates cleanly with no evidence; hop2 (sysadmin) has real objective
