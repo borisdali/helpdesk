@@ -510,7 +510,8 @@ failures:
     description: >
       The streaming replica has fallen behind the primary due to paused
       WAL replay, causing stale reads.
-    external_compat: false  # requires a replica; set FAULTTEST_REPLICA_CONN_STR
+    external_compat: true  # pure libpq, no Docker/OS access needed
+    requires_replica: true  # needs a real replica attached; set FAULTTEST_REPLICA_CONN_STR
     inject:
       type: sql
       target: replica
@@ -543,6 +544,58 @@ failures:
       playbook_id: pbs_replication_remediate
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_replication WHERE replay_lag > interval '60 seconds'"
       verify_timeout: "120s"
+    timeout: 60s
+
+  - id: db-replica-disconnected
+    name: "Replica disconnected (walreceiver dropped)"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's connection to the primary has been severed entirely.
+      pg_stat_replication no longer shows the replica at all — a naive check could
+      misread the absent row as "no active replication = healthy," when the correct
+      signal is an inactive slot in pg_replication_slots with growing retained WAL.
+    external_compat: true
+    requires_replica: true
+    prerequisites: >
+      The injection connection (not the agent's own connection) must have privilege
+      sufficient for ALTER SYSTEM (superuser or equivalent). A real streaming replica
+      must already be attached to the target primary — injection fails loudly if not.
+    inject:
+      type: sql
+      script_inline: >
+        DO $$ BEGIN IF (SELECT count(*) FROM pg_stat_replication) = 0 THEN RAISE
+        EXCEPTION 'db-replica-disconnected fault requires an already-connected
+        streaming replica; none found in pg_stat_replication'; END IF; END $$;
+        ALTER SYSTEM SET max_wal_senders = 0;
+        SELECT pg_reload_conf();
+        SELECT pg_terminate_backend(pid) FROM pg_stat_replication;
+    teardown:
+      type: sql
+      script_inline: >
+        ALTER SYSTEM RESET max_wal_senders;
+        SELECT pg_reload_conf();
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new writes
+      in over 10 minutes, and the replica's own status page shows no recent
+      activity. The primary connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. Please investigate replication health and
+      determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "disconnect"
+          - "walreceiver"
+          - "wal receiver"
+          - "no entry"
+          - "not present"
+          - "inactive slot"
+      expected_diagnosis:
+        category: "replica_disconnected"
+        narrative: "The agent should recognize the absent pg_stat_replication row (not a lag figure) combined with an inactive replication slot as a genuine disconnect, and correctly emit ESCALATE_TO: none with findings recommending manual WAL-sender/host investigation — not TRANSITION_TO: pbs_replication_remediate, which cannot address a disconnect, and not silently misread the absence as healthy."
+    diagnosis_playbook_series_id: pbs_replication_lag
     timeout: 60s
 
   - id: db-idle-in-transaction

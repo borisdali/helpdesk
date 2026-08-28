@@ -56,6 +56,15 @@ guidance: |
   (bulk insert/delete) as a failure — it is normal and will resolve. Only
   escalate if lag does not recover within 15 minutes of the batch completing.
 
+  Disconnected replica: if a replica that normally appears in pg_stat_replication
+  is now absent entirely (not just lagging), do not read that as zero lag —
+  cross-check pg_replication_slots for a matching inactive slot with growing
+  retained WAL. There is no automated remediation for this today: emit
+  ESCALATE_TO: none with FINDINGS recommending manual investigation of WAL
+  sender capacity, network connectivity, and replica host state. Do not emit
+  TRANSITION_TO: pbs_replication_remediate — that playbook only resumes a
+  paused-but-connected replica and cannot address a disconnect.
+
   Required output — write these exact lines at the end of your response,
   no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
   or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
@@ -63,7 +72,7 @@ guidance: |
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: max replay_lag=<N>s (replica <app_name>); sender_state=<streaming|catchup|disconnected>; stale_slot=<slot_name | none>; recommended=<drop_slot|investigate_replica|escalate|monitor>
-  TRANSITION_TO: pbs_replication_remediate
+  TRANSITION_TO: pbs_replication_remediate (or ESCALATE_TO: none if the replica is disconnected — see above)
 escalation:
   - "replay_lag > 5 minutes on any replica"
   - "replication slot with no active connection and lsn delta > 10GB"

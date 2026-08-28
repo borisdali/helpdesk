@@ -46,6 +46,16 @@ type Failure struct {
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
 	ExternalCompat bool `yaml:"external_compat,omitempty"`
+	// RequiresReplica marks faults that need a real streaming replica already
+	// attached to the target — independent of whether Docker/OS access is
+	// needed (that's ExternalCompat's concern). Used to exclude these faults
+	// from --auto-db mode, whose ephemeral single-instance stack never has a
+	// replica, without also blocking them from --external (a fault can be
+	// pure-libpq AND require a pre-existing replica topology at the same time
+	// — the two concerns were previously conflated by overloading
+	// ExternalCompat for both, which made --external --ids <fault> silently
+	// drop replica-requiring faults even when named explicitly).
+	RequiresReplica bool `yaml:"requires_replica,omitempty"`
 	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
 	// diagnosis. When set and ViaGateway is active, the runner calls
 	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
@@ -106,9 +116,11 @@ func (f Failure) InjectTimeoutDuration() time.Duration {
 
 // IsAutoDBCompat reports whether faulttest can inject this fault against a
 // temporary Docker PostgreSQL it spins up itself (--auto-db mode).
-// True when: external-compat, non-kubernetes, and inject type is not ssh_exec.
+// True when: external-compat, non-kubernetes, doesn't require a replica
+// (--auto-db's ephemeral single-instance stack never has one), and inject
+// type is not ssh_exec.
 func (f Failure) IsAutoDBCompat() bool {
-	if !f.ExternalCompat || f.Category == "kubernetes" {
+	if !f.ExternalCompat || f.Category == "kubernetes" || f.RequiresReplica {
 		return false
 	}
 	t := f.ExternalInject.Type
