@@ -18,7 +18,7 @@ domain.
 
 Fault [`db-replication-lag`](https://github.com/borisdali/helpdesk/blob/5761ec983b4b3dac5de97cea48217bc764bc992f/testing/catalog/failures.yaml#L506), triage playbook [`pbs_replication_lag`](../playbooks/replication-lag-triage.yaml).
 
-This is the case where a replica that's still connected, but falling behind. [`get_replication_status`](https://github.com/borisdali/helpdesk/blob/5761ec983b4b3dac5de97cea48217bc764bc992f/agents/database/tools.go#L1091) reads
+This is the case where a replica that's still connected, but falling behind. [`get_replication_status`](https://github.com/borisdali/helpdesk/blob/5761ec983b4b3dac5de97cea48217bc764bc992f/agents/database/tools.go#L1096) reads
 `sent_lsn`/`write_lsn`/`flush_lsn`/`replay_lsn` gaps per replica from
 `pg_stat_replication`, distinguishing a replica in `streaming` state with growing lag
 (can't keep up with write volume) from one in `catchup` state (recovering from a larger
