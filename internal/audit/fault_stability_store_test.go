@@ -1306,8 +1306,19 @@ func TestGetHistory_RespectsLimit(t *testing.T) {
 	ctx := context.Background()
 	store := newFaultStabilityStore(t)
 
+	// TestedAt must be distinct per Upsert — GetHistory orders by recorded_at
+	// (a direct copy of the cert's own TestedAt, not a server-generated
+	// insert timestamp), which has no secondary tiebreaker. Real callers
+	// always set TestedAt to a genuine time.Now() when a real faulttest run
+	// completes, so this can't collide in production, but a fixture that
+	// leaves it at its zero value (as this test originally did) makes every
+	// row tie — an ORDER BY on an all-tied column has no guaranteed result
+	// order, which is exactly what made this test flaky under heavier
+	// concurrent load (passed in isolation, failed under `make test-nocache`).
+	base := time.Now()
 	for i := 1; i <= 5; i++ {
-		if _, err := store.Upsert(ctx, &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: i, IsStable: true}); err != nil {
+		cert := &FaultStabilityCert{FaultID: "k8s-oomkilled", DiagnosisModel: "claude-sonnet-4-6", NRuns: i, IsStable: true, TestedAt: base.Add(time.Duration(i) * time.Minute)}
+		if _, err := store.Upsert(ctx, cert); err != nil {
 			t.Fatalf("Upsert #%d: %v", i, err)
 		}
 	}
