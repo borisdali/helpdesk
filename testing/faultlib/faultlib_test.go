@@ -307,6 +307,59 @@ func TestFilterFailures_External(t *testing.T) {
 	}
 }
 
+// TestFilterFailures_External_ExplicitIDNotOverridden documents existing,
+// unchanged behavior that motivated the RequiresReplica field: --external
+// mode's ExternalCompat check has no override for an explicit --ids
+// selection (unlike the exclude-list, which wins over everything else) — a
+// fault marked external_compat:false is dropped even when named directly.
+// This is why a replica-requiring-but-libpq-only fault must be marked
+// external_compat:true + requires_replica:true, not external_compat:false,
+// to remain reachable via --external --ids <fault> (real bug found and
+// fixed 2026-08-28 — see TestFilterFailures_AutoDB_RequiresReplica below for
+// the fix itself).
+func TestFilterFailures_External_ExplicitIDNotOverridden(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "docker-only", Category: "database", ExternalCompat: false},
+		},
+	}
+	result := FilterFailures(catalog, &HarnessConfig{External: true, FailureIDs: []string{"docker-only"}})
+	if len(result) != 0 {
+		t.Errorf("FilterFailures(external=true, ids=[docker-only]) = %v, want empty — explicit ID selection does not override external_compat:false", result)
+	}
+}
+
+// TestFilterFailures_AutoDB_RequiresReplica proves the actual fix: a fault
+// that's pure-libpq (external_compat:true, so reachable via --external even
+// with an explicit --ids) but needs a real replica already attached
+// (requires_replica:true) is still correctly excluded from --auto-db, whose
+// ephemeral single-instance docker-compose stack never provisions one.
+// Complements TestFilterFailures_External_ExplicitIDNotOverridden above:
+// together they prove requires_replica achieves what overloading
+// external_compat:false could not — externally testable AND auto-db-safe.
+func TestFilterFailures_AutoDB_RequiresReplica(t *testing.T) {
+	catalog := &Catalog{
+		Version: "1",
+		Failures: []Failure{
+			{ID: "replica-fault", Category: "database", ExternalCompat: true, RequiresReplica: true, Inject: InjectSpec{Type: "sql"}},
+			{ID: "no-replica-fault", Category: "database", ExternalCompat: true, RequiresReplica: false, Inject: InjectSpec{Type: "sql"}},
+		},
+	}
+
+	// Excluded from --auto-db despite being external-compat.
+	autoResult := FilterFailures(catalog, &HarnessConfig{AutoDB: true})
+	if len(autoResult) != 1 || autoResult[0].ID != "no-replica-fault" {
+		t.Errorf("FilterFailures(AutoDB=true) = %v, want [no-replica-fault] — replica-fault must be excluded", autoResult)
+	}
+
+	// But still reachable via --external with an explicit --ids.
+	extResult := FilterFailures(catalog, &HarnessConfig{External: true, FailureIDs: []string{"replica-fault"}})
+	if len(extResult) != 1 || extResult[0].ID != "replica-fault" {
+		t.Errorf("FilterFailures(External=true, ids=[replica-fault]) = %v, want [replica-fault]", extResult)
+	}
+}
+
 func TestFilterFailures_AutoDB(t *testing.T) {
 	// AutoDB-only faults must be external-compat, non-kubernetes, and not
 	// ssh_exec (IsAutoDBCompat's own definition — types.go). Item 7 dedup,
@@ -381,6 +434,39 @@ func TestTimeoutDuration(t *testing.T) {
 			got := f.TimeoutDuration()
 			if got != tt.want {
 				t.Errorf("TimeoutDuration(%q) = %v, want %v", tt.timeout, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNeedsReplica covers both ways a fault can need a replica connection:
+// an explicit target:replica on any of the 4 inject/teardown specs (the
+// original mechanism), or the RequiresReplica field (added for faults like
+// db-replica-disconnected whose injection runs entirely against the primary
+// but still needs a real replica already attached in the topology). Both
+// testing/cmd/faulttest's runner and testing/faulttest's Go-test harness
+// call this to decide whether to skip cleanly when --replica-conn isn't
+// configured — a fault needing RequiresReplica alone (no target:replica
+// anywhere) was a real gap found live: it fell through both skip checks
+// undetected and would fail loudly instead of skipping cleanly.
+func TestNeedsReplica(t *testing.T) {
+	tests := []struct {
+		name string
+		f    Failure
+		want bool
+	}{
+		{"neither set", Failure{}, false},
+		{"RequiresReplica alone, no target:replica anywhere", Failure{RequiresReplica: true}, true},
+		{"Inject.Target replica", Failure{Inject: InjectSpec{Target: "replica"}}, true},
+		{"Teardown.Target replica", Failure{Teardown: InjectSpec{Target: "replica"}}, true},
+		{"ExternalInject.Target replica", Failure{ExternalInject: InjectSpec{Target: "replica"}}, true},
+		{"ExternalTeardown.Target replica", Failure{ExternalTeardown: InjectSpec{Target: "replica"}}, true},
+		{"unrelated target set", Failure{Inject: InjectSpec{Target: "primary"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.f.NeedsReplica(); got != tt.want {
+				t.Errorf("NeedsReplica() = %v, want %v", got, tt.want)
 			}
 		})
 	}

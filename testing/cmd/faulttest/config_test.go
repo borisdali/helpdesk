@@ -423,6 +423,8 @@ func TestIsAutoDBCompat(t *testing.T) {
 		{Failure{ExternalCompat: true, Category: "database", ExternalInject: InjectSpec{Type: "ssh_exec"}}, false},
 		{Failure{ExternalCompat: true, Category: "kubernetes", Inject: InjectSpec{Type: "shell_exec"}}, false},
 		{Failure{ExternalCompat: false, Category: "database", Inject: InjectSpec{Type: "sql"}}, false},
+		{Failure{ExternalCompat: true, RequiresReplica: true, Category: "database", Inject: InjectSpec{Type: "sql"}}, false},
+		{Failure{ExternalCompat: true, RequiresReplica: false, Category: "database", Inject: InjectSpec{Type: "sql"}}, true},
 	}
 	for _, tc := range cases {
 		if got := tc.f.IsAutoDBCompat(); got != tc.want {
@@ -453,7 +455,7 @@ func TestFilterFailures_AutoDB(t *testing.T) {
 	for _, f := range autoFaults {
 		autoIDs[f.ID] = true
 	}
-	for _, excluded := range []string{"db-pg-hba-corrupt", "db-process-kill", "db-config-bad-param", "db-wal-disk-full", "db-wal-disk-full-k8s"} {
+	for _, excluded := range []string{"db-pg-hba-corrupt", "db-process-kill", "db-config-bad-param", "db-wal-disk-full", "db-wal-disk-full-k8s", "db-replication-lag", "db-replica-disconnected"} {
 		if autoIDs[excluded] {
 			t.Errorf("auto-db filter should not include %q", excluded)
 		}

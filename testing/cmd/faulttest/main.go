@@ -403,7 +403,7 @@ func cmdRun(args []string) {
 		}
 
 		// Skip faults that require a replica when none is configured.
-		if faultNeedsReplica(f) && cfg.ReplicaConnStr == "" {
+		if f.NeedsReplica() && cfg.ReplicaConnStr == "" {
 			slog.Warn("skipping fault: requires --replica-conn", "id", f.ID)
 			fmt.Printf("Result: [SKIP] replica connection not configured (pass --replica-conn)\n")
 			continue
@@ -1526,17 +1526,6 @@ failures:
       expected_diagnosis:
         category: availability
 `
-
-// faultNeedsReplica reports whether any inject/teardown spec in the fault
-// targets the replica, meaning --replica-conn is required to run it.
-func faultNeedsReplica(f Failure) bool {
-	for _, spec := range []InjectSpec{f.Inject, f.Teardown, f.ExternalInject, f.ExternalTeardown} {
-		if spec.Target == "replica" {
-			return true
-		}
-	}
-	return false
-}
 
 func findFailure(cat *Catalog, id string) *Failure {
 	for i := range cat.Failures {

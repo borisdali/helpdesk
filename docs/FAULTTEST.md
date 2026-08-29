@@ -210,7 +210,7 @@ faulttest run --external \
 
 The `--infra-config` flag is recommended (see [section 4](#4-policy-safety-the-infra-config-guard)).
 
-External mode runs all 17 `external_compat` faults, including the 4 SSH-injectable ones if `--ssh-host` is supplied (see [§3.3](#33-ssh-injection-mode)). Without `--ssh-host`, SSH faults are attempted over the local shell and will fail unless the target is localhost.
+External mode runs all `external_compat` faults (21 as of this writing — run `faulttest list --external` for the current count, since this number grows as the catalog does), including the 4 SSH-injectable ones if `--ssh-host` is supplied (see [§3.3](#33-ssh-injection-mode)). Without `--ssh-host`, SSH faults are attempted over the local shell and will fail unless the target is localhost. Two of these (`db-replication-lag`, `db-replica-disconnected`) additionally require a real replica already attached (`requires_replica: true` in the catalog) — see [HA_DR.md](HA_DR.md).
 
 All teardowns remove injected state completely: tables are dropped, held sessions are terminated, paused replay is resumed.
 
@@ -735,6 +735,8 @@ Fetches the current active Playbook for `--series-id`, synthesises a proposed up
 ## 6. Fault catalog
 
 The catalog lives at `testing/catalog/failures.yaml`. It is version-controlled alongside the codebase and versioned with the `version: "1"` field.
+
+For replication and HA-specific faults (`db-replication-lag`, `db-replica-disconnected`) — the reasoning behind each, what's verified vs. what's on the roadmap — see [HA_DR.md](HA_DR.md).
 
 ### 6.1 External-compatible faults
 
@@ -1459,6 +1461,18 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
 
   # Mark as externally injectable (no Docker/OS infrastructure needed).
   external_compat: true
+
+  # Optional: set when the fault needs a real streaming replica already
+  # attached to the target — independent of external_compat. A fault can be
+  # pure-libpq (external_compat: true) AND still need a pre-existing replica
+  # topology (requires_replica: true) at the same time; the two are checked
+  # separately. Excludes the fault from --auto-db (whose ephemeral
+  # single-instance stack never has a replica) without blocking --external.
+  # Set this whenever the fault needs a replica to exist, even if its own
+  # inject/teardown never connects to one directly (e.g. an injection that
+  # only touches the primary) — target: replica alone only covers the case
+  # where faulttest itself needs a replica connection string to inject.
+  requires_replica: false
 
   # Optional: override inject/teardown for --external mode.
   # Use type: sql for stateless DDL/DML (CREATE TABLE, INSERT, etc.).

@@ -235,13 +235,12 @@ func TestFaultInjection(t *testing.T) {
 				t.Skip("ssh_exec fault requires a target host; set FAULTTEST_SSH_HOST or exec_via in catalog")
 			}
 
-			// Skip faults that require a replica when no replica connection is configured.
-			injectTarget := f.Inject.Target
-			if cfg.External && f.ExternalInject.Type != "" {
-				injectTarget = f.ExternalInject.Target
-			}
-			if injectTarget == "replica" && cfg.ReplicaConnStr == "" {
-				t.Skip("fault targets the replica but FAULTTEST_REPLICA_CONN_STR not set")
+			// Skip faults that require a replica when no replica connection is
+			// configured — either because an inject/teardown spec targets it
+			// directly, or because RequiresReplica marks a real replica as
+			// needed in the topology even for a primary-only injection.
+			if f.NeedsReplica() && cfg.ReplicaConnStr == "" {
+				t.Skip("fault requires a replica but FAULTTEST_REPLICA_CONN_STR not set")
 			}
 
 			ctx := context.Background()

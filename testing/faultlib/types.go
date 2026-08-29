@@ -130,6 +130,26 @@ func (f Failure) IsAutoDBCompat() bool {
 	return t != "ssh_exec"
 }
 
+// NeedsReplica reports whether this fault needs a replica connection
+// configured (--replica-conn / FAULTTEST_REPLICA_CONN_STR) before it can run
+// — either because one of its inject/teardown specs targets the replica
+// directly, or because it's marked RequiresReplica (needs a real replica
+// already attached in the topology even when its own injection never
+// connects to it directly — e.g. a fault that disconnects a replica by
+// acting only on the primary). Callers use this to skip cleanly instead of
+// attempting an injection that will fail loudly for lack of a replica.
+func (f Failure) NeedsReplica() bool {
+	if f.RequiresReplica {
+		return true
+	}
+	for _, spec := range []InjectSpec{f.Inject, f.Teardown, f.ExternalInject, f.ExternalTeardown} {
+		if spec.Target == "replica" {
+			return true
+		}
+	}
+	return false
+}
+
 // InjectSpec describes how to inject or tear down a failure.
 type InjectSpec struct {
 	Type         string `yaml:"type"`
