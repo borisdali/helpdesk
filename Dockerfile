@@ -58,7 +58,7 @@ RUN mkdir -p /out/data/incidents /out/etc/helpdesk
 COPY helpdesk/policies.example.yaml /out/etc/helpdesk/policies.example.yaml
 COPY helpdesk/users.example.yaml /out/etc/helpdesk/users.example.yaml
 
-# Stage 2: Runtime image with psql and kubectl.
+# Stage 2: Runtime image with psql, kubectl and docker.
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -83,6 +83,28 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" \
     -o /usr/local/bin/kubectl \
     && chmod +x /usr/local/bin/kubectl
+
+# Docker CLI + Compose plugin — the docker-equivalent of kubectl above.
+# Needed so faulttest can run containerized (see docs/samples/SAMPLE009.md's
+# `docker run ... faulttest run` pattern) against type:docker faults
+# (host-container-stopped etc.), whose injection shells out to
+# `docker compose stop/start`. Client binaries only, no daemon — the caller
+# supplies /var/run/docker.sock at runtime, same as sysadmin-agent's own
+# dockerSocket mount. Pinned rather than "latest stable" like kubectl above:
+# unlike kubectl's stable.txt, there's no equivalent single-file version
+# pointer to query dynamically here — bump periodically.
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in \
+         amd64) DOCKER_ARCH=x86_64 ;; \
+         arm64) DOCKER_ARCH=aarch64 ;; \
+         *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-29.7.2.tgz" \
+    | tar -xz -C /usr/local/bin --strip-components=1 docker/docker \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/v5.5.0/docker-compose-linux-${DOCKER_ARCH}" \
+    -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
 # Copy binaries from builder.
 COPY --from=builder /out/database-agent  /usr/local/bin/database-agent
