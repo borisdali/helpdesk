@@ -23,8 +23,25 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 )
+
+// TestMain loads the real, shipped objective_evidence.yaml before any test
+// runs — deliberately not a hand-written test fixture. This means the
+// existing recordPodDistressEvidence/recordEventDistressEvidence regression
+// tests below (unchanged since before the evidence-package migration) prove
+// the actual file operators would edit reproduces the original hardcoded
+// behavior, not just that the Go evaluation logic can be made to.
+func TestMain(m *testing.M) {
+	rulesByTool, err := evidence.LoadRules("objective_evidence.yaml")
+	if err != nil {
+		panic("agents/k8s/objective_evidence.yaml failed to load — fix the file, don't skip this: " + err.Error())
+	}
+	podEvidenceRules = rulesByTool["get_pods"]
+	eventEvidenceRules = rulesByTool["get_events"]
+	os.Exit(m.Run())
+}
 
 // mockK8sToolContext implements tool.Context for k8s agent tests.
 type mockK8sToolContext struct {

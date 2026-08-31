@@ -1,0 +1,67 @@
+# Objective-evidence rules for the K8s agent.
+#
+# Each rule says: for a given tool's result, threshold a named probe and, if
+# it matches, force a human-reviewed gate with the given signal — regardless
+# of what the diagnosing model concludes or chooses to mention. See
+# internal/evidence's package doc and docs/AIGOVERNANCE.md for the full
+# rationale (objectiveEvidenceForceGate, cmd/gateway/playbooks.go).
+#
+# Probes (what fields exist, and how they're read) are Go code, registered
+# in agents/k8s/tools.go — adding a genuinely new field to threshold needs a
+# small code change there. Everything below — which probes are active, what
+# threshold triggers them, what the resulting signal/detail text is — is
+# authored here and takes effect on the next agent restart, no other code
+# change required. A rule naming an unregistered probe (e.g. a typo) fails
+# the agent's startup loudly; it never silently just does nothing.
+#
+# Rules for the same tool are evaluated in order, top to bottom; the first
+# matching rule per item wins (so oom_killed is listed before pod_restarted
+# below — a pod that's both restarted and OOMKilled should be reported as
+# the more specific, more actionable oom_killed, not the generic
+# pod_restarted).
+#
+# operator: one of > >= < <= == != ("==" / "!=" only for bool/string probes).
+# detail: optional; rendered as fmt.Sprintf(detail, resource, probe_value) —
+#   must consume exactly those two arguments if present.
+
+- tool: get_pods
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  detail: "pod %s was OOMKilled (oom_killed=%v)"
+
+- tool: get_pods
+  probe: restart_count
+  operator: ">"
+  threshold: 0
+  signal: pod_restarted
+  detail: "pod %s restarted %v time(s)"
+
+- tool: get_events
+  probe: reason
+  operator: "=="
+  threshold: "Evicted"
+  signal: evicted
+  detail: "event %s: reason=%v"
+
+- tool: get_events
+  probe: reason
+  operator: "=="
+  threshold: "FailedScheduling"
+  signal: failed_scheduling
+  detail: "event %s: reason=%v"
+
+- tool: get_events
+  probe: reason
+  operator: "=="
+  threshold: "NodeHasDiskPressure"
+  signal: disk_pressure
+  detail: "event %s: reason=%v"
+
+- tool: get_events
+  probe: reason
+  operator: "=="
+  threshold: "NodeHasMemoryPressure"
+  signal: memory_pressure
+  detail: "event %s: reason=%v"

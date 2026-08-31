@@ -21,6 +21,7 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/policy"
 )
 
@@ -468,6 +469,33 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 	return result, err
 }
 
+// podEvidenceSchema declares get_pods' two named, type-safe probes: whether
+// a pod's last termination was OOMKilled, and its restart count. The oom_killed
+// probe folds in the same "Restarts > 0" precondition the original hardcoded
+// version required (a pod OOMKilled with a zero restart count — not
+// something client-go should ever actually report — still won't fire either
+// signal, preserving that edge case exactly) rather than expressing it as a
+// second, separate rule condition.
+//
+// What *rules* apply to these probes (thresholds, resulting signal names,
+// Detail text) is authored declaratively — see agents/k8s/objective_evidence.yaml
+// and internal/evidence's package doc for why. This schema only says what
+// fields exist and how to read them; it's Go code specifically so a typo in
+// a rule's probe name is a load-time map-lookup failure, not a rule that
+// silently never fires.
+var podEvidenceSchema = evidence.NewToolSchema[PodInfo]("get_pods", func(p PodInfo) string { return p.Name }).
+	Bool("oom_killed", func(p PodInfo) bool {
+		return p.Restarts > 0 && p.LastState != nil && p.LastState.OOMKilled
+	}).
+	Numeric("restart_count", func(p PodInfo) float64 { return float64(p.Restarts) }).
+	Register()
+
+// podEvidenceRules holds the loaded rules for podEvidenceSchema, set by
+// main() at startup (loadEvidenceRules). Evaluate no-ops on a nil/empty
+// slice — no rules loaded means no forced-gate signals from get_pods, not a
+// crash — so an agent can still run before/without the rules file present.
+var podEvidenceRules []evidence.Rule
+
 // recordPodDistressEvidence records a deterministic objective_evidence audit
 // event for any pod with real client-go evidence of distress — a nonzero
 // restart count or an OOMKilled last-termination state. This is read directly
@@ -482,23 +510,7 @@ func recordPodDistressEvidence(ctx context.Context, result GetPodsResult) {
 	if toolAuditor == nil {
 		return
 	}
-	for _, pod := range result.Pods {
-		if pod.Restarts <= 0 {
-			continue
-		}
-		signal := "pod_restarted"
-		detail := fmt.Sprintf("pod %s restarted %d time(s)", pod.Name, pod.Restarts)
-		if pod.LastState != nil && pod.LastState.OOMKilled {
-			signal = "oom_killed"
-			detail = fmt.Sprintf("pod %s was OOMKilled (restart count %d)", pod.Name, pod.Restarts)
-		}
-		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
-			Tool:     "get_pods",
-			Resource: pod.Name,
-			Signal:   signal,
-			Detail:   detail,
-		})
-	}
+	evidence.Evaluate(ctx, toolAuditor, podEvidenceSchema, result.Pods, podEvidenceRules)
 }
 
 func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
@@ -739,6 +751,26 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 	return result, err
 }
 
+// eventEvidenceSchema declares get_events' one probe: a Warning-type event's
+// Reason (folded into the probe so a non-Warning event's Reason reads as ""
+// and can never match any rule below — reproducing the original hardcoded
+// "if ev.Type != Warning: skip" precondition without a special case in the
+// rule layer itself). See podEvidenceSchema's doc comment for why this is
+// Go code (typed field access) while the actual reason->signal mapping is
+// declarative YAML (agents/k8s/objective_evidence.yaml).
+var eventEvidenceSchema = evidence.NewToolSchema[EventInfo]("get_events", func(e EventInfo) string { return e.Object }).
+	String("reason", func(e EventInfo) string {
+		if e.Type != "Warning" {
+			return ""
+		}
+		return e.Reason
+	}).
+	Register()
+
+// eventEvidenceRules holds the loaded rules for eventEvidenceSchema, set by
+// main() at startup. See podEvidenceRules' doc comment re: nil/empty.
+var eventEvidenceRules []evidence.Rule
+
 // recordEventDistressEvidence records a deterministic objective_evidence
 // audit event for any Kubernetes event carrying real evidence of resource
 // distress — eviction, scheduling failure, or node pressure — read directly
@@ -754,37 +786,14 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 // Only a small, deliberately fixed vocabulary of Warning-type Reason values
 // is treated as distress — most Warning/Normal events (BackOff, Pulled,
 // Scheduled, Created, Started, ...) are routine noise for this purpose, not
-// evidence a human should be forced to review. Extend this list only when a
-// new Reason is confirmed to carry the same "real, code-derived, worth a
-// forced gate" weight as these.
+// evidence a human should be forced to review. The vocabulary itself now
+// lives in agents/k8s/objective_evidence.yaml, not here — extend it there,
+// not by editing this function.
 func recordEventDistressEvidence(ctx context.Context, result GetEventsResult) {
 	if toolAuditor == nil {
 		return
 	}
-	for _, ev := range result.Events {
-		if ev.Type != "Warning" {
-			continue
-		}
-		var signal string
-		switch ev.Reason {
-		case "Evicted":
-			signal = "evicted"
-		case "FailedScheduling":
-			signal = "failed_scheduling"
-		case "NodeHasDiskPressure":
-			signal = "disk_pressure"
-		case "NodeHasMemoryPressure":
-			signal = "memory_pressure"
-		default:
-			continue
-		}
-		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
-			Tool:     "get_events",
-			Resource: ev.Object,
-			Signal:   signal,
-			Detail:   ev.Message,
-		})
-	}
+	evidence.Evaluate(ctx, toolAuditor, eventEvidenceSchema, result.Events, eventEvidenceRules)
 }
 
 func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {

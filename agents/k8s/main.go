@@ -22,6 +22,7 @@ import (
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/buildinfo"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
@@ -50,6 +51,24 @@ func main() {
 			}
 			sort.Strings(dbKeys)
 			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
+		}
+	}
+
+	// Load objective_evidence rules if available. Unset/absent means no
+	// forced-gate signals from get_pods/get_events — a valid, degraded-but-
+	// running mode, same as infra config above. A *present but malformed*
+	// file (unknown probe, bad operator/threshold — see internal/evidence's
+	// LoadRules) is logged at Error, not Warn: an operator who configured
+	// this deliberately should have a broken config surfaced loudly, even
+	// though the agent still starts rather than crash-looping on it.
+	if rulesPath := os.Getenv("HELPDESK_K8S_EVIDENCE_RULES"); rulesPath != "" {
+		rulesByTool, err := evidence.LoadRules(rulesPath)
+		if err != nil {
+			slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pods/get_events until this is fixed", "path", rulesPath, "err", err)
+		} else {
+			podEvidenceRules = rulesByTool["get_pods"]
+			eventEvidenceRules = rulesByTool["get_events"]
+			slog.Info("objective_evidence rules loaded", "path", rulesPath, "get_pods_rules", len(podEvidenceRules), "get_events_rules", len(eventEvidenceRules))
 		}
 	}
 
