@@ -1,5 +1,7 @@
 # aiHelpDesk Fault Injection Testing (external)
 
+TL;DR: Your database, your faults, your [playbooks](PLAYBOOKS.md). Our [verification harness](AIGOVERNANCE.md) and [certification mechanism](CONSISTENCY.md).
+
 `faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
 Point it at a database, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. With `--auto-db`, faulttest spins up a temporary PostgreSQL container itself — no database setup required at all. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
