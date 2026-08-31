@@ -309,10 +309,136 @@ func TestEvaluate_NilAuditor_NoPanic(t *testing.T) {
 	schema := testSchema().Register()
 	rules := []Rule{{Tool: "test_tool", Probe: "restart_count", Operator: ">", Threshold: float64(0), Signal: "pod_restarted"}}
 	items := []testItem{{Name: "pod-e", Restarts: 1}}
-	// Passing a nil *fakeAuditor via the interface would be a non-nil
-	// interface wrapping a nil pointer — construct genuinely nil instead.
 	var fa auditor
 	Evaluate(context.Background(), fa, schema, items, rules) // must not panic
+}
+
+// TestEvaluate_TypedNilAuditorPointer_NoPanic covers the real, easy-to-miss
+// case: a caller passing an unguarded nil *audit.ToolAuditor (or any
+// concrete pointer type implementing auditor) directly as the interface
+// argument. Go's `a == nil` treats an interface holding a typed nil pointer
+// as non-nil, so *this* is the case a naive nil check misses — the whole
+// reason isNilAuditor exists instead of a plain `a == nil`. Without it,
+// this test would panic inside fakeAuditor.RecordObjectiveEvidence's own
+// field access on a nil receiver, exactly mirroring how
+// (*audit.ToolAuditor).RecordObjectiveEvidence's `ta.auditor` field access
+// would panic on a nil ta.
+func TestEvaluate_TypedNilAuditorPointer_NoPanic(t *testing.T) {
+	resetRegistry(t)
+	schema := testSchema().Register()
+	rules := []Rule{{Tool: "test_tool", Probe: "restart_count", Operator: ">", Threshold: float64(0), Signal: "pod_restarted"}}
+	items := []testItem{{Name: "pod-f", Restarts: 1}}
+	var fa *fakeAuditor // typed nil, not a literal nil interface
+	Evaluate(context.Background(), fa, schema, items, rules) // must not panic
+}
+
+func TestCompare_NumericOperators(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		val       float64
+		threshold float64
+		want      bool
+	}{
+		{"gt_true", ">", 5, 3, true},
+		{"gt_false", ">", 3, 5, false},
+		{"gte_equal_true", ">=", 5, 5, true},
+		{"gte_greater_true", ">=", 6, 5, true},
+		{"gte_false", ">=", 4, 5, false},
+		{"lt_true", "<", 3, 5, true},
+		{"lt_false", "<", 5, 3, false},
+		{"lte_equal_true", "<=", 5, 5, true},
+		{"lte_less_true", "<=", 4, 5, true},
+		{"lte_false", "<=", 6, 5, false},
+		{"eq_true", "==", 5, 5, true},
+		{"eq_false", "==", 5, 6, false},
+		{"neq_true", "!=", 5, 6, true},
+		{"neq_false", "!=", 5, 5, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := compare(KindNumeric, tc.val, tc.operator, tc.threshold)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("compare(%v, %q, %v) = %v, want %v", tc.val, tc.operator, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompare_BoolOperators(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		val       bool
+		threshold bool
+		want      bool
+	}{
+		{"eq_true", "==", true, true, true},
+		{"eq_false", "==", true, false, false},
+		{"neq_true", "!=", true, false, true},
+		{"neq_false", "!=", false, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := compare(KindBool, tc.val, tc.operator, tc.threshold)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("compare(%v, %q, %v) = %v, want %v", tc.val, tc.operator, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompare_StringOperators(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		val       string
+		threshold string
+		want      bool
+	}{
+		{"eq_true", "==", "Evicted", "Evicted", true},
+		{"eq_false", "==", "Evicted", "BackOff", false},
+		{"neq_true", "!=", "Evicted", "BackOff", true},
+		{"neq_false", "!=", "Evicted", "Evicted", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := compare(KindString, tc.val, tc.operator, tc.threshold)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("compare(%q, %q, %q) = %v, want %v", tc.val, tc.operator, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEvaluate_UnregisteredProbe_SkipsDefensively covers Evaluate's
+// defensive "probe not found" branch — unreachable when rules come from
+// LoadRules (which validates every probe name exists), but Evaluate is a
+// public function and can be called with manually-constructed Rules that
+// bypass that validation entirely.
+func TestEvaluate_UnregisteredProbe_SkipsDefensively(t *testing.T) {
+	resetRegistry(t)
+	schema := testSchema().Register()
+	rules := []Rule{
+		{Tool: "test_tool", Probe: "no_such_probe", Operator: "==", Threshold: true, Signal: "should_never_fire"},
+		{Tool: "test_tool", Probe: "restart_count", Operator: ">", Threshold: float64(0), Signal: "pod_restarted"},
+	}
+	items := []testItem{{Name: "pod-f", Restarts: 1}}
+	fa := &fakeAuditor{}
+	Evaluate(context.Background(), fa, schema, items, rules) // must not panic
+
+	if len(fa.recorded) != 1 || fa.recorded[0].Signal != "pod_restarted" {
+		t.Fatalf("got %+v, want the unregistered-probe rule skipped and pod_restarted to fire", fa.recorded)
+	}
 }
 
 func TestCompare_TypeMismatchReturnsError(t *testing.T) {

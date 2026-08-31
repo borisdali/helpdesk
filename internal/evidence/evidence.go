@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 
 	"gopkg.in/yaml.v3"
 
@@ -211,11 +212,30 @@ type auditor interface {
 	RecordObjectiveEvidence(ctx context.Context, ev audit.ObjectiveEvidence)
 }
 
+// isNilAuditor reports whether a is nil — either a literal nil interface,
+// or (the case that actually bites callers) a concrete *audit.ToolAuditor
+// pointer that is itself nil, passed through the auditor interface. A plain
+// `a == nil` check only catches the first case: Go's interface equality
+// treats an interface holding a typed nil pointer as non-nil, so a caller
+// passing an unguarded nil *audit.ToolAuditor straight into Evaluate would
+// otherwise sail past that check and panic inside RecordObjectiveEvidence's
+// own nil-receiver field access. Evaluate checks this itself rather than
+// relying on every call site to add its own `if toolAuditor == nil` guard
+// first — one missed guard at any future call site would otherwise be a
+// live panic risk, not just a missed signal.
+func isNilAuditor(a auditor) bool {
+	if a == nil {
+		return true
+	}
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && v.IsNil()
+}
+
 // Evaluate runs rules against items (the typed result of a tool call),
 // recording objective evidence for the first matching rule per item, in
 // rule order. schema.Tool must match the tool the rules were loaded for.
 func Evaluate[T any](ctx context.Context, a auditor, schema *ToolSchema[T], items []T, rules []Rule) {
-	if a == nil {
+	if isNilAuditor(a) {
 		return
 	}
 	for _, item := range items {

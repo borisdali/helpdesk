@@ -54,22 +54,10 @@ func main() {
 		}
 	}
 
-	// Load objective_evidence rules if available. Unset/absent means no
-	// forced-gate signals from get_pods/get_events — a valid, degraded-but-
-	// running mode, same as infra config above. A *present but malformed*
-	// file (unknown probe, bad operator/threshold — see internal/evidence's
-	// LoadRules) is logged at Error, not Warn: an operator who configured
-	// this deliberately should have a broken config surfaced loudly, even
-	// though the agent still starts rather than crash-looping on it.
+	// Load objective_evidence rules if available. See loadK8sEvidenceRules'
+	// own doc comment for the unset/malformed-file behavior.
 	if rulesPath := os.Getenv("HELPDESK_K8S_EVIDENCE_RULES"); rulesPath != "" {
-		rulesByTool, err := evidence.LoadRules(rulesPath)
-		if err != nil {
-			slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pods/get_events until this is fixed", "path", rulesPath, "err", err)
-		} else {
-			podEvidenceRules = rulesByTool["get_pods"]
-			eventEvidenceRules = rulesByTool["get_events"]
-			slog.Info("objective_evidence rules loaded", "path", rulesPath, "get_pods_rules", len(podEvidenceRules), "get_events_rules", len(eventEvidenceRules))
-		}
+		podEvidenceRules, eventEvidenceRules = loadK8sEvidenceRules(rulesPath)
 	}
 
 	// Initialize audit store if enabled
@@ -348,4 +336,28 @@ func envIntK8s(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// loadK8sEvidenceRules loads and validates an objective_evidence rules file
+// (see internal/evidence), returning the get_pods/get_events rule slices to
+// assign to podEvidenceRules/eventEvidenceRules. Extracted out of main() so
+// it's directly unit-testable — a wrong map key here (e.g. "get_pod" typo'd
+// for "get_pods") would otherwise silently leave one tool's rules empty
+// forever with nothing to catch it.
+//
+// A load/validation failure (unknown probe, bad operator/threshold) is
+// logged at Error, not Warn, and returns (nil, nil): an operator who
+// configured this deliberately should have a broken config surfaced
+// loudly, even though the agent still starts — same non-fatal convention
+// as the infrastructure config load above, one severity level up given the
+// higher governance stakes of a forced-gate mechanism silently not firing.
+func loadK8sEvidenceRules(path string) (podRules, eventRules []evidence.Rule) {
+	rulesByTool, err := evidence.LoadRules(path)
+	if err != nil {
+		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pods/get_events until this is fixed", "path", path, "err", err)
+		return nil, nil
+	}
+	podRules, eventRules = rulesByTool["get_pods"], rulesByTool["get_events"]
+	slog.Info("objective_evidence rules loaded", "path", path, "get_pods_rules", len(podRules), "get_events_rules", len(eventRules))
+	return podRules, eventRules
 }

@@ -21,8 +21,10 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
+	"helpdesk/internal/psqlx"
 )
 
 // ephemeralDBs holds DB entries registered at runtime (e.g. by --auto-db faulttest runs).
@@ -907,7 +909,84 @@ type GetActiveConnectionsArgs struct {
 	ActiveOnly       bool   `json:"active_only,omitempty" jsonschema:"If true, show only connections currently executing a query (state=active). Default shows all connected sessions including idle ones."`
 }
 
-func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+// ActiveConnection is one row from pg_stat_activity, parsed from the same
+// psql -x output already captured for GetActiveConnectionsResult.Output —
+// not a second query. Numeric fields default to 0 when the underlying psql
+// value is empty (NULL) or unparseable.
+type ActiveConnection struct {
+	PID           int32  `json:"pid"`
+	User          string `json:"user"`
+	Database      string `json:"database"`
+	ClientAddr    string `json:"client_addr"`
+	State         string `json:"state"`
+	WaitEventType string `json:"wait_event_type"`
+	WaitEvent     string `json:"wait_event"`
+	QuerySeconds  int32  `json:"query_seconds"`
+	QueryPreview  string `json:"query_preview"`
+}
+
+// activeConnectionEvidenceSchema declares get_active_connections' one
+// probe: how long a connection has been sitting idle-in-transaction. The
+// State == "idle in transaction" precondition is folded into the probe
+// itself (returns 0 — never trips a "> N seconds" threshold — for any other
+// state), the same pattern podEvidenceSchema (agents/k8s/tools.go) uses for
+// oom_killed's Restarts > 0 precondition: what "idle in transaction" means
+// stays Go; how long is too long is the YAML-tunable knob (see
+// agents/database/objective_evidence.yaml).
+var activeConnectionEvidenceSchema = evidence.NewToolSchema[ActiveConnection]("get_active_connections", func(c ActiveConnection) string { return strconv.Itoa(int(c.PID)) }).
+	Numeric("idle_in_transaction_seconds", func(c ActiveConnection) float64 {
+		if c.State != "idle in transaction" {
+			return 0
+		}
+		return float64(c.QuerySeconds)
+	}).
+	Register()
+
+// activeConnectionEvidenceRules holds the loaded rules for
+// activeConnectionEvidenceSchema, set by main() at startup. Evaluate
+// no-ops on a nil/empty slice — see podEvidenceRules' doc comment.
+var activeConnectionEvidenceRules []evidence.Rule
+
+// GetActiveConnectionsResult is the structured result for
+// get_active_connections. Output is unchanged from before this tool had any
+// typed fields — the LLM and audit trail see exactly the same text as
+// always. Connections is new: the same output, parsed, for
+// objective_evidence probing (see agents/database/objective_evidence.yaml
+// and internal/evidence's package doc).
+type GetActiveConnectionsResult struct {
+	Output      string             `json:"output"`
+	Connections []ActiveConnection `json:"connections,omitempty"`
+}
+
+// parseActiveConnections parses get_active_connections' single-statement
+// psql -x output into typed rows. Returns nil (not an error) if output
+// doesn't parse as expected — a parse gap here should degrade to "no
+// objective-evidence signal available," not break the tool.
+func parseActiveConnections(output string) []ActiveConnection {
+	statements := psqlx.ParseExpanded(output)
+	if len(statements) == 0 {
+		return nil
+	}
+	conns := make([]ActiveConnection, 0, len(statements[0]))
+	for _, rec := range statements[0] {
+		pid, _ := strconv.ParseInt(rec["pid"], 10, 32)
+		querySecs, _ := strconv.ParseInt(rec["query_seconds"], 10, 32)
+		conns = append(conns, ActiveConnection{
+			PID:           int32(pid),
+			User:          rec["user"],
+			Database:      rec["database"],
+			ClientAddr:    rec["client_addr"],
+			State:         rec["state"],
+			WaitEventType: rec["wait_event_type"],
+			WaitEvent:     rec["wait_event"],
+			QuerySeconds:  int32(querySecs),
+			QueryPreview:  rec["query_preview"],
+		})
+	}
+	return conns
+}
+
+func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
 	// Default: show all user connections including idle sessions (connected but not running a query).
 	// Autovacuum workers and background processes have state IS NULL and are excluded automatically.
 	stateFilter := "AND state IS NOT NULL"
@@ -933,15 +1012,19 @@ func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_active_connections")
 	if err != nil {
-		return errorResult("get_active_connections", args.ConnectionString, err), nil
+		return GetActiveConnectionsResult{Output: errorResult("get_active_connections", args.ConnectionString, err).Output}, nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
-		return PsqlResult{Output: "No active connections found."}, nil
+		return GetActiveConnectionsResult{Output: "No active connections found."}, nil
 	}
-	return PsqlResult{Output: output}, nil
+	conns := parseActiveConnections(output)
+	if toolAuditor != nil {
+		evidence.Evaluate(ctx, toolAuditor, activeConnectionEvidenceSchema, conns, activeConnectionEvidenceRules)
+	}
+	return GetActiveConnectionsResult{Output: output, Connections: conns}, nil
 }
 
-func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
 	return getActiveConnectionsImpl(ctx, args)
 }
 
@@ -1093,7 +1176,146 @@ type GetReplicationStatusArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+// ReplicationPeer is one row from pg_stat_replication — a currently
+// connected streaming replica. Absent entirely (zero rows, not a row with
+// zero-ish values) is itself the signal for a disconnected replica; see
+// ReplicationSummary.
+type ReplicationPeer struct {
+	ClientAddr      string `json:"client_addr"`
+	User            string `json:"user"`
+	ApplicationName string `json:"application_name"`
+	State           string `json:"state"`
+	SyncState       string `json:"sync_state"`
+	WriteLagBytes   int64  `json:"write_lag_bytes"`
+	FlushLagBytes   int64  `json:"flush_lag_bytes"`
+	ReplayLagBytes  int64  `json:"replay_lag_bytes"`
+}
+
+// ReplicationSlot is one row from pg_replication_slots. Unlike
+// pg_stat_replication, a slot persists across a disconnect — an inactive
+// slot with growing retained WAL (LagBytes > 0) is the corroborating signal
+// that a vanished pg_stat_replication row means "disconnected," not
+// "nothing was ever attached here."
+type ReplicationSlot struct {
+	SlotName string `json:"slot_name"`
+	SlotType string `json:"slot_type"`
+	Active   bool   `json:"active"`
+	LagBytes int64  `json:"lag_bytes"`
+}
+
+// GetReplicationStatusResult is the structured result for
+// get_replication_status. Output is unchanged from before this tool had any
+// typed fields. Role/IsInRecovery/Replicas/Slots are new, parsed from that
+// same text (three separate result sets in one psql -x invocation — see
+// internal/psqlx's package doc for how statement boundaries are detected).
+type GetReplicationStatusResult struct {
+	Output       string            `json:"output"`
+	Role         string            `json:"role,omitempty"`
+	IsInRecovery bool              `json:"is_in_recovery,omitempty"`
+	Replicas     []ReplicationPeer `json:"replicas,omitempty"`
+	Slots        []ReplicationSlot `json:"slots,omitempty"`
+}
+
+// ReplicationSummary is a single, synthesized item combining all three of
+// get_replication_status' result sets into the one thing worth an
+// objective_evidence probe: is a replica that should be connected actually
+// disconnected. This is deliberately not a per-row signal (unlike
+// get_pods/get_events/get_active_connections) — "a replica disconnected" is
+// a property of the *whole* pg_stat_replication result being empty, not of
+// any single row in it, so it can't be expressed as "threshold this field
+// on this item." Folding the three-way condition (primary role + zero
+// connected replicas + a corroborating inactive-slot-with-lag) into one
+// synthesized item's bool probe reuses evidence.Evaluate unchanged, the
+// same way podEvidenceSchema folds Restarts>0 into oom_killed's probe
+// instead of expressing it as a second rule.
+type ReplicationSummary struct {
+	Role                  string
+	ConnectedReplicaCount int
+	InactiveSlotsWithLag  []string // slot_name, for any slot with Active=false and LagBytes>0
+}
+
+// replicationEvidenceSchema declares get_replication_status' one probe:
+// disconnected, true only when all three conditions hold together (see
+// ReplicationSummary's doc comment). There is nothing to threshold-tune
+// here (it's a fixed logical condition, not a numeric duration like
+// get_active_connections' idle-in-transaction probe) — the YAML layer still
+// controls whether this probe is active at all and what signal name/detail
+// it produces, matching the same authoring convention as every other tool.
+var replicationEvidenceSchema = evidence.NewToolSchema[ReplicationSummary]("get_replication_status", func(s ReplicationSummary) string {
+	if len(s.InactiveSlotsWithLag) > 0 {
+		return s.InactiveSlotsWithLag[0]
+	}
+	return ""
+}).
+	Bool("disconnected", func(s ReplicationSummary) bool {
+		return s.Role == "Primary" && s.ConnectedReplicaCount == 0 && len(s.InactiveSlotsWithLag) > 0
+	}).
+	Register()
+
+// replicationEvidenceRules holds the loaded rules for
+// replicationEvidenceSchema, set by main() at startup. See
+// podEvidenceRules' doc comment re: nil/empty.
+var replicationEvidenceRules []evidence.Rule
+
+// parseReplicationStatus parses get_replication_status' three-statement
+// psql -x output into typed fields. Returns the zero GetReplicationStatusResult
+// (aside from Output) if output doesn't parse as expected — same
+// degrade-don't-break convention as parseActiveConnections.
+func parseReplicationStatus(output string) GetReplicationStatusResult {
+	result := GetReplicationStatusResult{Output: output}
+	statements := psqlx.ParseExpanded(output)
+	if len(statements) > 0 && len(statements[0]) > 0 {
+		roleRow := statements[0][0]
+		result.Role = roleRow["role"]
+		result.IsInRecovery = roleRow["is_in_recovery"] == "t"
+	}
+	if len(statements) > 1 {
+		for _, rec := range statements[1] {
+			result.Replicas = append(result.Replicas, ReplicationPeer{
+				ClientAddr:      rec["client_addr"],
+				User:            rec["user"],
+				ApplicationName: rec["application_name"],
+				State:           rec["state"],
+				SyncState:       rec["sync_state"],
+				WriteLagBytes:   parseInt64Field(rec["write_lag_bytes"]),
+				FlushLagBytes:   parseInt64Field(rec["flush_lag_bytes"]),
+				ReplayLagBytes:  parseInt64Field(rec["replay_lag_bytes"]),
+			})
+		}
+	}
+	if len(statements) > 2 {
+		for _, rec := range statements[2] {
+			result.Slots = append(result.Slots, ReplicationSlot{
+				SlotName: rec["slot_name"],
+				SlotType: rec["slot_type"],
+				Active:   rec["active"] == "t",
+				LagBytes: parseInt64Field(rec["lag_bytes"]),
+			})
+		}
+	}
+	return result
+}
+
+// parseInt64Field parses a psql -x field value as int64, defaulting to 0 for
+// an empty (NULL) or unparseable value.
+func parseInt64Field(s string) int64 {
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
+
+// replicationSummaryFrom derives the single evidence-probing item from an
+// already-parsed GetReplicationStatusResult.
+func replicationSummaryFrom(r GetReplicationStatusResult) ReplicationSummary {
+	summary := ReplicationSummary{Role: r.Role, ConnectedReplicaCount: len(r.Replicas)}
+	for _, slot := range r.Slots {
+		if !slot.Active && slot.LagBytes > 0 {
+			summary.InactiveSlotsWithLag = append(summary.InactiveSlotsWithLag, slot.SlotName)
+		}
+	}
+	return summary
+}
+
+func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
 	query := `SELECT
 		CASE WHEN pg_is_in_recovery() THEN 'Replica' ELSE 'Primary' END as role,
 		pg_is_in_recovery() as is_in_recovery;
@@ -1118,12 +1340,17 @@ func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_replication_status")
 	if err != nil {
-		return errorResult("get_replication_status", args.ConnectionString, err), nil
+		return GetReplicationStatusResult{Output: errorResult("get_replication_status", args.ConnectionString, err).Output}, nil
 	}
-	return PsqlResult{Output: output}, nil
+	result := parseReplicationStatus(output)
+	if toolAuditor != nil {
+		summary := []ReplicationSummary{replicationSummaryFrom(result)}
+		evidence.Evaluate(ctx, toolAuditor, replicationEvidenceSchema, summary, replicationEvidenceRules)
+	}
+	return result, nil
 }
 
-func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
 	return getReplicationStatusImpl(ctx, args)
 }
 

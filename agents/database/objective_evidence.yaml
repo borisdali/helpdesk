@@ -1,0 +1,35 @@
+# Objective-evidence rules for the database agent.
+#
+# Each rule says: for a given tool's result, threshold a named probe and, if
+# it matches, force a human-reviewed gate with the given signal — regardless
+# of what the diagnosing model concludes or chooses to mention. See
+# internal/evidence's package doc, agents/k8s/objective_evidence.yaml (the
+# same mechanism's first user), and docs/AIGOVERNANCE.md for the full
+# rationale (objectiveEvidenceForceGate, cmd/gateway/playbooks.go).
+#
+# Probes (what fields exist, and how they're read) are Go code, registered
+# in agents/database/tools.go — adding a genuinely new field to threshold
+# needs a small code change there. Everything below — which probes are
+# active, what threshold triggers them, what the resulting signal/detail
+# text is — is authored here and takes effect on the next agent restart, no
+# other code change required. A rule naming an unregistered probe (e.g. a
+# typo) fails the agent's startup loudly; it never silently just does
+# nothing.
+#
+# operator: one of > >= < <= == != ("==" / "!=" only for bool/string probes).
+# detail: optional; rendered as fmt.Sprintf(detail, resource, probe_value) —
+#   must consume exactly those two arguments if present.
+
+- tool: get_active_connections
+  probe: idle_in_transaction_seconds
+  operator: ">"
+  threshold: 300
+  signal: idle_in_transaction_stuck
+  detail: "connection pid %s idle in transaction for %v seconds"
+
+- tool: get_replication_status
+  probe: disconnected
+  operator: "=="
+  threshold: true
+  signal: replica_disconnected
+  detail: "replica disconnected — inactive replication slot %s with retained WAL"
