@@ -653,6 +653,217 @@ query_seconds   | 10
 	}
 }
 
+// TestGetActiveConnectionsTool_MultipleConnections_SelectiveEvidence exercises
+// real multi-record parsing + selective per-item firing together — the
+// underlying primitives (psqlx multi-record parsing, evidence.Evaluate's
+// multi-item loop) are each tested in isolation elsewhere, but a boundary-
+// detection bug in parseActiveConnections' own per-record mapping loop
+// specifically wouldn't be caught by either of those alone.
+func TestGetActiveConnectionsTool_MultipleConnections_SelectiveEvidence(t *testing.T) {
+	withActiveConnectionEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 100
+state           | active
+query_seconds   | 900
+-[ RECORD 2 ]---+-----------------------------------
+pid             | 200
+state           | idle in transaction
+query_seconds   | 900
+-[ RECORD 3 ]---+-----------------------------------
+pid             | 300
+state           | idle in transaction
+query_seconds   | 5
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "multi_conn_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_multi", "trace_multi")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+	if len(result.Connections) != 3 {
+		t.Fatalf("got %d connections, want 3", len(result.Connections))
+	}
+	if result.Connections[0].PID != 100 || result.Connections[1].PID != 200 || result.Connections[2].PID != 300 {
+		t.Fatalf("connections out of order or misparsed: %+v", result.Connections)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 objective_evidence event (only pid 200 qualifies), got %d: %+v", len(events), events)
+	}
+	if events[0].ObjectiveEvidence.Resource != "200" {
+		t.Errorf("Resource = %q, want 200 (pid 100 is active, pid 300 is below threshold)", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
+func TestParseInt64Field(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{"normal value", "1024", 1024},
+		{"empty (NULL)", "", 0},
+		{"zero", "0", 0},
+		{"garbage", "not-a-number", 0},
+		{"negative", "-5", -5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseInt64Field(tt.in); got != tt.want {
+				t.Errorf("parseInt64Field(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplicationSummaryFrom(t *testing.T) {
+	tests := []struct {
+		name string
+		in   GetReplicationStatusResult
+		want ReplicationSummary
+	}{
+		{
+			name: "connected replica, active slot — nothing inactive",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1"}},
+				Slots:    []ReplicationSlot{{SlotName: "slot1", Active: true, LagBytes: 0}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "disconnected: zero replicas, one inactive slot with lag",
+			in: GetReplicationStatusResult{
+				Role:  "Primary",
+				Slots: []ReplicationSlot{{SlotName: "slot1", Active: false, LagBytes: 8388608}},
+			},
+			want: ReplicationSummary{Role: "Primary", InactiveSlotsWithLag: []string{"slot1"}},
+		},
+		{
+			name: "inactive slot but zero lag — never actually used, not a disconnect signal",
+			in: GetReplicationStatusResult{
+				Role:  "Primary",
+				Slots: []ReplicationSlot{{SlotName: "unused_slot", Active: false, LagBytes: 0}},
+			},
+			want: ReplicationSummary{Role: "Primary"},
+		},
+		{
+			name: "multiple slots — only the inactive-with-lag ones collected",
+			in: GetReplicationStatusResult{
+				Role: "Primary",
+				Slots: []ReplicationSlot{
+					{SlotName: "active_slot", Active: true, LagBytes: 0},
+					{SlotName: "dead_slot_1", Active: false, LagBytes: 100},
+					{SlotName: "unused_slot", Active: false, LagBytes: 0},
+					{SlotName: "dead_slot_2", Active: false, LagBytes: 200},
+				},
+			},
+			want: ReplicationSummary{Role: "Primary", InactiveSlotsWithLag: []string{"dead_slot_1", "dead_slot_2"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replicationSummaryFrom(tt.in)
+			if got.Role != tt.want.Role || got.ConnectedReplicaCount != tt.want.ConnectedReplicaCount {
+				t.Errorf("got Role=%q ConnectedReplicaCount=%d, want Role=%q ConnectedReplicaCount=%d", got.Role, got.ConnectedReplicaCount, tt.want.Role, tt.want.ConnectedReplicaCount)
+			}
+			if fmt.Sprint(got.InactiveSlotsWithLag) != fmt.Sprint(tt.want.InactiveSlotsWithLag) {
+				t.Errorf("got InactiveSlotsWithLag=%v, want %v", got.InactiveSlotsWithLag, tt.want.InactiveSlotsWithLag)
+			}
+		})
+	}
+}
+
+func TestGetReplicationStatusTool_MultipleSlots_OnlyMatchingOneReported(t *testing.T) {
+	withReplicationEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+(0 rows)
+
+-[ RECORD 1 ]---+-----
+slot_name       | healthy_slot
+active          | t
+lag_bytes       | 0
+-[ RECORD 2 ]---+-----
+slot_name       | dead_slot
+active          | f
+lag_bytes       | 4096
+-[ RECORD 3 ]---+-----
+slot_name       | unused_slot
+active          | f
+lag_bytes       | 0
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "multi_slot_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_multislot", "trace_multislot")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	result, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getReplicationStatusTool() error = %v, want nil", err)
+	}
+	if len(result.Slots) != 3 {
+		t.Fatalf("got %d slots, want 3", len(result.Slots))
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 objective_evidence event, got %d: %+v", len(events), events)
+	}
+	if events[0].ObjectiveEvidence.Resource != "dead_slot" {
+		t.Errorf("Resource = %q, want dead_slot (the only inactive slot with real lag)", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
+func TestParseReplicationStatus_TruncatedOutput_NoPanic(t *testing.T) {
+	// Only the role/recovery statement present — a malformed or unexpectedly
+	// short response (e.g. a psql version/behavior change) must degrade to
+	// empty Replicas/Slots, not panic on an out-of-range statements index.
+	result := parseReplicationStatus("-[ RECORD 1 ]\nrole | Primary\nis_in_recovery | f\n")
+	if result.Role != "Primary" {
+		t.Errorf("Role = %q, want Primary", result.Role)
+	}
+	if result.Replicas != nil {
+		t.Errorf("Replicas = %v, want nil (statement never present)", result.Replicas)
+	}
+	if result.Slots != nil {
+		t.Errorf("Slots = %v, want nil (statement never present)", result.Slots)
+	}
+}
+
+func TestParseReplicationStatus_EmptyOutput_NoPanic(t *testing.T) {
+	result := parseReplicationStatus("")
+	if result.Role != "" || result.Replicas != nil || result.Slots != nil {
+		t.Errorf("got %+v, want zero value aside from Output", result)
+	}
+}
+
 func TestGetLockInfoTool_WithLocks(t *testing.T) {
 	mockOutput := `-[ RECORD 1 ]--+----------------------------------------
 blocked_pid    | 12345
