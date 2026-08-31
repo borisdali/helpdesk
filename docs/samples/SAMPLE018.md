@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[The Last One That Still Needed Him](...)**
+- **[The Last One That Still Needed Him](https://itnext.io/the-last-one-that-still-needed-him-14af8f324776)**
   Why the one hop Michael still checked out of habit finally stopped needing him. Part three of a series on trust that's earned and now, finally, complete.
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
@@ -16,12 +16,12 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on Docker, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE017.md) for VM/Bare Metal, the source and K8s respectively (although not the exact commands shown on this page).
 
-In this transcript we pick the most important part of the aiHelpDesk [v0.26 release](https://github.com/borisdali/helpdesk/releases/tag/v0.26.0) release, which is making the intermidate hop playbooks to earn their own certs and demonstrating the power of the newly released `vault hop-certs` CLI command, so... let's run the faulttest:
+In this transcript we pick the most important part of the aiHelpDesk [v0.26 release](https://github.com/borisdali/helpdesk/releases/tag/v0.26.0) release, which is making the intermidate hop playbooks to earn their own certs and demonstrating the power of the newly released [`vault hop-certs`](../VAULT.md#vault-hop-certs) CLI command, so... let's run the faulttest:
 
 
-## 0. Basics...
+## 0. Back to the Basics
 
-This is probably redundant at this stage, but just in case this is the first sample transcript you stumbled on for Docker/Podman, here are the basics in a nutshell:
+This section is likely redundant at this stage, but just in case that this is the first aiHelpDesk sample transcript you stumbled upon for Docker/Podman, here are the basics in a nutshell:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.26.0-deploy/docker-compose]$ docker compose --profile governance down -v --remove-orphans
@@ -72,7 +72,7 @@ helpdesk-sysadmin-agent-1   ghcr.io/borisdali/helpdesk:v0.26.0   "/usr/local/bin
 The [SysAdmin Agent](../SYSADMIN_AGENT.md) is one of the key agents for this 3-hop certs, so let's quickly check the log:
 
 ```
-[boris@cassiopeia /tmp/helpdesk/helpdesk-v0.26.0-deploy/docker-compose]$ docker compose logs sysadmin-agent
+[boris@ /tmp/helpdesk/helpdesk-v0.26.0-deploy/docker-compose]$ docker compose logs sysadmin-agent
 sysadmin-agent-1  | time=2026-08-30T20:51:44.659Z level=INFO msg="agent starting" component=sysadmin_agent operating_mode=fix
 sysadmin-agent-1  | time=2026-08-30T20:51:44.660Z level=INFO msg="infrastructure config loaded" databases=7 db_keys="alloydb-on-vm, alloydb-on-vm-local, faulttest-db, faulttest-db-local, pg-cluster-minkube, pg-cluster-minkube-local, test-db"
 sysadmin-agent-1  | time=2026-08-30T20:51:44.660Z level=INFO msg="agent audit logging enabled (remote)" url=http://auditd:1199
@@ -106,6 +106,19 @@ See the previous sample transcripts (starting with [this sample](SAMPLE006.md)) 
 >     --judge-api-key "$HELPDESK_API_KEY" \
 >     --conn faulttest-db --infra-config /infrastructure.json \
 >     --agent-model claude-haiku-4-5-20251001 --operator alice@example.com
+```
+
+A couple of comments on the parameters used in the above command:
+
+  --ids is the parameter that we use to run just a single fault injection test, `host-container-stopped` in this case.
+
+  --conn takes a full raw DSN or an alias that aiHelpDesk `faulttest` resolves by consulting the infra.json file (see next parameter).
+
+  --infra-config points at this staging directory's copy of the infra.json that is mapped from a host (see the "-v" mapping above).
+
+Here's how the output of the above command looks like:
+
+```
 Sun Aug 30 21:48:12 EDT 2026
 time=2026-08-31T01:48:13.085Z level=INFO msg=--conn alias=faulttest-db host=host.docker.internal
 
