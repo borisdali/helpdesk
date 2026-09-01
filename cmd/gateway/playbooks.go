@@ -818,6 +818,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			for _, r := range all {
 				appendObjectiveEvidenceSignal(extra, r)
 			}
+			appendObjectiveEvidenceBreakdown(extra, all, unconfirmed)
 			if len(unconfirmed) > 0 {
 				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(unconfirmed, ","))
 			}
@@ -1430,16 +1431,43 @@ func appendWarning(extra map[string]any, key, msg string) {
 // human-readable message, so faulttest/CLEAN-cert consumers can bucket by
 // signal instead of string-matching gate_reason.
 func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
+	appendDedupedSignal(extra, "objective_evidence_signals", signal)
+}
+
+// appendObjectiveEvidenceBreakdown records, for one hop's evidence.Confirmed
+// results, which signals were confirmed vs unconfirmed — explicit,
+// unconditional visibility into what objectiveEvidenceSignals only otherwise
+// exposes indirectly (a signal's absence from gate_reason/evidence_warnings
+// implying it was confirmed). Deduplicated and accumulated across hops the
+// same way objective_evidence_signals itself is.
+func appendObjectiveEvidenceBreakdown(extra map[string]any, all, unconfirmed []string) {
+	isUnconfirmed := make(map[string]bool, len(unconfirmed))
+	for _, s := range unconfirmed {
+		isUnconfirmed[s] = true
+	}
+	for _, s := range all {
+		if isUnconfirmed[s] {
+			appendDedupedSignal(extra, "objective_evidence_unconfirmed", s)
+		} else {
+			appendDedupedSignal(extra, "objective_evidence_confirmed", s)
+		}
+	}
+}
+
+// appendDedupedSignal appends signal to the string slice stored at
+// extra[key], skipping duplicates — shared by appendObjectiveEvidenceSignal
+// and appendObjectiveEvidenceBreakdown.
+func appendDedupedSignal(extra map[string]any, key, signal string) {
 	if signal == "" {
 		return
 	}
-	existing, _ := extra["objective_evidence_signals"].([]string)
+	existing, _ := extra[key].([]string)
 	for _, s := range existing {
 		if s == signal {
 			return
 		}
 	}
-	extra["objective_evidence_signals"] = append(existing, signal)
+	extra[key] = append(existing, signal)
 }
 
 // recordSignalLessWarnings runs three independent, unconditional checks on
@@ -1479,6 +1507,7 @@ func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb 
 	for _, r := range all {
 		appendObjectiveEvidenceSignal(extra, r)
 	}
+	appendObjectiveEvidenceBreakdown(extra, all, unconfirmed)
 	if len(unconfirmed) > 0 {
 		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
 			"hop %q (agent %s) recorded unconfirmed objective evidence (%s) — response text never engaged with it, and the hop did not escalate or transition",

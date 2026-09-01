@@ -5007,6 +5007,28 @@ func TestObjectiveEvidenceSignals_Confirmation(t *testing.T) {
 	})
 }
 
+func TestAppendObjectiveEvidenceBreakdown(t *testing.T) {
+	extra := map[string]any{}
+	appendObjectiveEvidenceBreakdown(extra, []string{"replica_disconnected", "idle_in_transaction_stuck"}, []string{"idle_in_transaction_stuck"})
+
+	confirmed, _ := extra["objective_evidence_confirmed"].([]string)
+	unconfirmed, _ := extra["objective_evidence_unconfirmed"].([]string)
+	if !reflect.DeepEqual(confirmed, []string{"replica_disconnected"}) {
+		t.Errorf("objective_evidence_confirmed = %v, want [replica_disconnected]", confirmed)
+	}
+	if !reflect.DeepEqual(unconfirmed, []string{"idle_in_transaction_stuck"}) {
+		t.Errorf("objective_evidence_unconfirmed = %v, want [idle_in_transaction_stuck]", unconfirmed)
+	}
+
+	// A second hop's breakdown accumulates rather than overwrites, same as
+	// objective_evidence_signals itself does across chained hops.
+	appendObjectiveEvidenceBreakdown(extra, []string{"oom_killed"}, nil)
+	confirmed, _ = extra["objective_evidence_confirmed"].([]string)
+	if !reflect.DeepEqual(confirmed, []string{"replica_disconnected", "oom_killed"}) {
+		t.Errorf("objective_evidence_confirmed after second hop = %v, want [replica_disconnected oom_killed]", confirmed)
+	}
+}
+
 // ── trustNotYetEarnedForceGate ──────────────────────────────────────────────
 
 // serveFakeFaultStabilityCerts starts an httptest.Server that responds to
