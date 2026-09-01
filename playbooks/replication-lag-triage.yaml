@@ -1,6 +1,6 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -12,6 +12,10 @@ approval_mode: manual
 # model from inventing playbook names. No cross-domain escalations declared.
 transitions_to:
   - pbs_replication_remediate
+# Cross-domain escalation: hand a disconnected replica off to sysadmin for a
+# real host/container-level diagnosis instead of terminating at ESCALATE_TO: none.
+escalates_to:
+  - pbs_sysadmin_replica_connectivity_triage
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -59,20 +63,40 @@ guidance: |
   Disconnected replica: if a replica that normally appears in pg_stat_replication
   is now absent entirely (not just lagging), do not read that as zero lag —
   cross-check pg_replication_slots for a matching inactive slot with growing
-  retained WAL. There is no automated remediation for this today: emit
-  ESCALATE_TO: none with FINDINGS recommending manual investigation of WAL
-  sender capacity, network connectivity, and replica host state — do not
+  retained WAL. You cannot diagnose the replica's own state from here — you
+  only have the primary's side of the story, and you have no tool capable of
+  querying a different server. Do NOT attempt to connect to the replica
+  yourself with any tool, even if its host:port appears in this prompt — that
+  value is not a usable connection string (no dbname/user/password) and exists
+  only for the Ending B handoff below. This is Ending B, not Ending A — do not
   transition into pbs_replication_remediate, which only resumes a
-  paused-but-connected replica and cannot address a disconnect.
+  paused-but-connected replica and cannot address a disconnect. If no replica
+  host:port is present in the "Additional context" section of this prompt, you
+  cannot complete the handoff — use Ending A's shape instead but with
+  ESCALATE_TO: none and FINDINGS noting the missing target.
 
   Required output — write these exact lines at the end of your response,
   no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
-  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate:
+  or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate.
+  Two mutually exclusive endings, pick exactly one based on what you found:
+
+  Ending A — replica is lagging but connected (the normal case):
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: max replay_lag=<N>s (replica <app_name>); sender_state=<streaming|catchup|disconnected>; stale_slot=<slot_name | none>; recommended=<drop_slot|investigate_replica|escalate|monitor>
   TRANSITION_TO: pbs_replication_remediate
+
+  Ending B — replica is disconnected entirely (absent from pg_stat_replication,
+  matching inactive slot — this is NOT the same as Ending A's "disconnected"
+  sender_state value, which describes a slot-only observation; Ending B is the
+  full disconnected-replica diagnosis described above):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: replica disconnected (absent from pg_stat_replication); stale_slot=<slot_name>; lag_bytes=<N>; handing off to sysadmin for host/container-level diagnosis
+  TARGET: <the replica's host:port, copied verbatim from Additional context>
+  ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage
 escalation:
   - "replay_lag > 5 minutes on any replica"
   - "replication slot with no active connection and lsn delta > 10GB"

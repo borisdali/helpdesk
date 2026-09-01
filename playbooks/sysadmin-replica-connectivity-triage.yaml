@@ -1,0 +1,124 @@
+series_id: pbs_sysadmin_replica_connectivity_triage
+name: "Sysadmin — Replica Connectivity Diagnosis"
+version: "1.0"
+playbook_type: triage
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+# Same-domain follow-on: restarting the replica container, handled by sysadmin_agent.
+transitions_to:
+  - pbs_replica_restart_action
+# No cross-domain escalation target today — the replica in every environment
+# this playbook runs in is Docker/Podman-hosted. A runtime=kubectl branch
+# (mirroring pbs_sysadmin_docker_inspect's own ESCALATE_TO: pbs_k8s_pod_crash_triage)
+# would be a natural addition if a K8s-hosted replica scenario is ever built.
+escalates_to: []
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Investigate a PostgreSQL streaming replica reported as disconnected from its
+  primary (absent from pg_stat_replication with a growing, inactive replication
+  slot). Determine whether the replica's own container/process is healthy —
+  distinguishing a crashed replica (safe to restart) from a replica correctly
+  rejected by the primary (pg_hba.conf, wal-sender exhaustion, credentials) or
+  a suspected network partition (neither of which a restart can fix).
+symptoms:
+  - "DB agent diagnosed a disconnected replica via an absent pg_stat_replication row and an inactive, WAL-retaining replication slot"
+  - "downstream consumers report the replica has not reflected new writes for an extended period"
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - replica-container-crashed
+    - replica-connection-rejected-by-primary
+    - replica-host-unreachable
+guidance: |
+  You are the second stage of a two-agent diagnostic chain. The DB agent has
+  already confirmed the replica is absent from pg_stat_replication with a
+  matching inactive, WAL-retaining slot — your job is to explain WHY from the
+  replica's own vantage point: is its container actually down, or is it up and
+  simply being refused?
+
+  Your target for every tool call below is the REPLICA, not the primary — the
+  connection_string stated at the top of this prompt already points at the
+  replica (the DB agent handed it off explicitly via its own TARGET: signal).
+  Do not substitute the primary's connection details even if prior findings
+  mention them.
+
+  Do NOT call any psql-based tools — this is a host/container-level
+  investigation, not a database-level one.
+  Do NOT call restart_container under any circumstances — even if the
+  container looks crashed. Insufficient evidence is itself a finding;
+  describe the recommended action for the next playbook to execute.
+
+  Step 1 — Replica container state:
+  Call check_host with the connection_string (target). Read the `runtime`
+  field first:
+  - runtime=kubectl → this replica is Kubernetes-managed, not Docker/Podman.
+    State the pod status from `details` as your FINDINGS and emit exactly:
+      ESCALATE_TO: none
+    (no Kubernetes-replica remediation path exists yet — do not guess or
+    perform further diagnosis yourself.)
+  - runtime=docker or runtime=podman → proceed with the container inspection
+    steps below.
+
+  Read these fields carefully (docker/podman targets only):
+  - exitcode=0 → container was stopped CLEANLY. Not a crash.
+  - oomkilled=true → kernel killed the process due to memory pressure.
+  - exitcode=1 or higher (and oomkilled=false) → process exited with error.
+  - restarting=true → container is in a restart loop.
+  - Status=running → the container is up. A disconnect with a running
+    container means something is rejecting or blocking the connection, not a
+    replica-side crash — proceed to Step 2 to confirm.
+
+  Step 2 — Replica logs:
+  Call get_host_logs to retrieve the last 50 lines of container output
+  (falling back to read_pg_log_file with filter="FATAL" if container logs
+  lack PostgreSQL-level detail). Key signals, from the replica's own,
+  client-side view of the failed connection:
+  - "no pg_hba.conf entry" / "connection rejected" / repeated reconnection
+    attempts each followed by an immediate failure → the primary is refusing
+    this replica; nothing on the replica side is broken.
+  - "out of memory" / "OOM" → OOM kill; a restart is a candidate action.
+  - "database system was shut down" / clean shutdown messages with
+    exitcode=0 → clean stop; a restart is a candidate action.
+  - "FATAL" / "PANIC" other than a connection rejection, or "invalid page" /
+    "checksum failure" → replica-side corruption or hard failure; do not
+    recommend a restart.
+  - No recent log activity at all, container unreachable → suspected network
+    partition or host-down condition.
+
+  Step 3 — Conclude:
+  Your FINDINGS must include:
+  - Container state: Status, ExitCode, OOMKilled (from check_host)
+  - Log evidence: quote the specific log lines that support your conclusion
+    verbatim — do not paraphrase.
+  - Conclusion: crashed-and-safe-to-restart / rejected-by-primary /
+    host-unreachable-or-partitioned / other hard failure.
+
+  Escalation rules (emit exactly one signal):
+  - check_host runtime=kubectl:
+      ESCALATE_TO: none
+  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/rejection
+    signals (i.e. the container itself stopped, the primary never rejected it):
+      TARGET: <the same connection_string this prompt gave you, verbatim>
+      TRANSITION_TO: pbs_replica_restart_action
+    (the restart playbook will perform and confirm the restart; TARGET must
+    repeat your own connection_string exactly so the next hop inspects the
+    same replica, not the primary — the chain does not carry a target forward
+    automatically beyond one hop, each hop that needs it must restate it.)
+  - Container running, logs show repeated connection-rejected/no-pg_hba-entry
+    messages: nothing to restart — the replica is healthy but refused.
+      ESCALATE_TO: none
+  - oomkilled=true, or FATAL/PANIC/corruption signals other than a
+    connection rejection: do not restart automatically.
+      ESCALATE_TO: none
+  - No clear signal / ambiguous evidence:
+      ESCALATE_TO: none
+
+escalation:
+  - "container logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"
+  - "container logs show repeated primary-side rejection — this is a primary-side/config issue, not a replica problem"
+  - "no recent log activity and container unreachable — suspected network partition or host failure, needs manual investigation"
+  - "container is already healthy and connected — investigate the database layer, not the container"
+target_hints: []

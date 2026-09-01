@@ -496,6 +496,7 @@ type agentRunResult struct {
 	sawSignalLine    bool   // true iff a TRANSITION_TO:/ESCALATE_TO: line was present at all (see agentEscalation.SawSignalLine)
 	rawText          string // the model's raw, pre-strip response text — see capturedText's doc comment for why this is not the same as capture.body's text
 	findings         string
+	target           string // set when agent emits TARGET: — see agentEscalation.Target
 	diagReport       *audit.DiagnosticReport
 	runID            string
 	playbookSeriesID string
@@ -594,6 +595,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
 				res.sawSignalLine = esc.SawSignalLine
+				res.target = esc.Target
 				// Validate emitted next-playbook targets against the triage
 				// playbook's declared allow-lists. TRANSITION_TO is checked
 				// against transitions_to (same-domain follow-ons), ESCALATE_TO
@@ -1144,8 +1146,17 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		return nil
 	}
 
+	// connectionString defaults to the chain's original target, but a hop can
+	// override it for the next hop via a TARGET: signal line (primary.target)
+	// when its diagnosis concerns a different server — e.g. the DB agent
+	// escalating to sysadmin about a replica while req.ConnectionString stays
+	// pinned to the primary for the whole chain. See agentEscalation.Target.
+	connectionString := req.ConnectionString
+	if primary.target != "" {
+		connectionString = primary.target
+	}
 	chainReq := PlaybookRunRequest{
-		ConnectionString: req.ConnectionString,
+		ConnectionString: connectionString,
 		Namespace:        req.Namespace,
 		Context:          req.Context,
 		PriorRunID:       primary.runID,
@@ -2585,8 +2596,16 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 type agentEscalation struct {
 	EscalateTo    string // series_id for out-of-scope escalations (ESCALATE_TO signal)
 	TransitionTo  string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
-	Findings      string // one-sentence diagnosis summary
-	CleanText     string // response text with signal lines removed
+	Target        string // optional TARGET: connection string — overrides the next chained
+	// hop's connection_string when this hop's diagnosis concerns a different
+	// server than the one it was launched against (e.g. DB agent escalating to
+	// sysadmin about a replica while its own connection_string stays pinned to
+	// the primary throughout the chain). Deliberately a structured signal line,
+	// not left to free-text FINDINGS extraction — see PlaybookRunRequest.Namespace's
+	// doc comment for why a value load-bearing for correctness shouldn't be
+	// trusted from prose the model writes.
+	Findings  string // one-sentence diagnosis summary
+	CleanText string // response text with signal lines removed
 	SawSignalLine bool   // true iff a TRANSITION_TO: or ESCALATE_TO: line was present at
 	// all, regardless of whether its value resolved to a real target, "none",
 	// or "" — lets callers distinguish "explicitly declined" (compliant) from
@@ -2624,6 +2643,8 @@ func parseAgentEscalation(text string) agentEscalation {
 			}
 		} else if strings.HasPrefix(trimmed, "FINDINGS:") {
 			result.Findings = strings.TrimSpace(strings.TrimPrefix(trimmed, "FINDINGS:"))
+		} else if strings.HasPrefix(trimmed, "TARGET:") {
+			result.Target = strings.TrimSpace(strings.TrimPrefix(trimmed, "TARGET:"))
 		} else {
 			cleaned.WriteString(line)
 			cleaned.WriteByte('\n')
