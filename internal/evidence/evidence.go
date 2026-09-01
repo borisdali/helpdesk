@@ -124,6 +124,17 @@ type Rule struct {
 	// exactly two verbs (resource, then value) — fmt.Sprintf is called with
 	// exactly those two arguments regardless of how many verbs Detail has.
 	Detail string `yaml:"detail,omitempty"`
+	// ConfirmationProbe/ConfirmationOperator/ConfirmationThreshold declare
+	// how the gateway decides whether a hop's own response confirms this
+	// signal (see HopOutcome/Confirmed in confirm.go), rather than treating
+	// the signal's mere presence as reason enough to force a human gate.
+	// All three are optional; an empty ConfirmationProbe defaults to
+	// "evidence_quote_contains_value" with operator "==" and threshold
+	// true at evaluation time. When ConfirmationProbe IS set, all three are
+	// validated at LoadRules time the same way Probe/Operator/Threshold are.
+	ConfirmationProbe     string `yaml:"confirmation_probe,omitempty"`
+	ConfirmationOperator  string `yaml:"confirmation_operator,omitempty"`
+	ConfirmationThreshold any    `yaml:"confirmation_threshold,omitempty"`
 }
 
 // LoadRules parses a YAML rules file — a flat list of Rule, each naming its
@@ -171,6 +182,34 @@ func LoadRules(path string) (map[string][]Rule, error) {
 		// later (or never, for a rarely-hit condition like this one).
 		if _, err := compare(probe.kind, zeroValue(probe.kind), r.Operator, r.Threshold); err != nil {
 			return nil, fmt.Errorf("evidence: rule %d in %q: threshold %v is not valid for probe %q (kind %s): %w", i, path, r.Threshold, r.Probe, probe.kind, err)
+		}
+		if r.ConfirmationProbe != "" {
+			cprobe, ok := confirmationRegistry[r.ConfirmationProbe]
+			if !ok {
+				return nil, fmt.Errorf("evidence: rule %d in %q: unknown confirmation_probe %q", i, path, r.ConfirmationProbe)
+			}
+			cOperator := r.ConfirmationOperator
+			if cOperator == "" {
+				cOperator = "=="
+			}
+			if !operatorValidForKind(cOperator, cprobe.kind) {
+				return nil, fmt.Errorf("evidence: rule %d in %q: confirmation_operator %q is not valid for confirmation_probe %q (kind %s)", i, path, cOperator, r.ConfirmationProbe, cprobe.kind)
+			}
+			cThreshold := r.ConfirmationThreshold
+			if cThreshold == nil {
+				// Bool-kind probes have a sensible universal default
+				// (true); non-bool probes (e.g. primary_confidence) don't
+				// — a numeric probe with no declared threshold would
+				// otherwise silently compare against 0, which is never
+				// what a rule author means by "confirmed".
+				if cprobe.kind != KindBool {
+					return nil, fmt.Errorf("evidence: rule %d in %q: confirmation_probe %q (kind %s) requires an explicit confirmation_threshold — no universal default for non-bool probes", i, path, r.ConfirmationProbe, cprobe.kind)
+				}
+				cThreshold = true
+			}
+			if _, err := compare(cprobe.kind, zeroValue(cprobe.kind), cOperator, cThreshold); err != nil {
+				return nil, fmt.Errorf("evidence: rule %d in %q: confirmation_threshold %v is not valid for confirmation_probe %q (kind %s): %w", i, path, cThreshold, r.ConfirmationProbe, cprobe.kind, err)
+			}
 		}
 		byTool[r.Tool] = append(byTool[r.Tool], r)
 	}
@@ -258,10 +297,14 @@ func Evaluate[T any](ctx context.Context, a auditor, schema *ToolSchema[T], item
 				detail = fmt.Sprintf(detail, resource, val)
 			}
 			a.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
-				Tool:     schema.Tool,
-				Resource: resource,
-				Signal:   r.Signal,
-				Detail:   detail,
+				Tool:                  schema.Tool,
+				Resource:              resource,
+				Signal:                r.Signal,
+				Detail:                detail,
+				Value:                 val,
+				ConfirmationProbe:     r.ConfirmationProbe,
+				ConfirmationOperator:  r.ConfirmationOperator,
+				ConfirmationThreshold: r.ConfirmationThreshold,
 			})
 			break // first matching rule per item wins
 		}

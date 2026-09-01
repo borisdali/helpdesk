@@ -19,6 +19,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/decisions"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 )
@@ -812,11 +813,13 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			if lowConfidenceForceGate(prev.diagReport) {
 				gateReasons = append(gateReasons, "low_confidence")
 			}
-			if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
-				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(reasons, ","))
-				for _, r := range reasons {
-					appendObjectiveEvidenceSignal(extra, r)
-				}
+			outcome := evidence.HopOutcome{Report: prev.diagReport, RawText: prev.rawText, SawSignalLine: prev.sawSignalLine}
+			all, unconfirmed := objectiveEvidenceSignals(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart), outcome)
+			for _, r := range all {
+				appendObjectiveEvidenceSignal(extra, r)
+			}
+			if len(unconfirmed) > 0 {
+				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(unconfirmed, ","))
 			}
 			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
 				gateReasons = append(gateReasons, "trust_not_earned")
@@ -1335,19 +1338,27 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 	return true // primary hypothesis not marked — treat as uncertain
 }
 
-// objectiveEvidenceForceGate returns true, with every distinct signal found
-// (deduplicated, in first-seen order), when one or more objective_evidence
-// events were recorded for this hop — a deterministic, code-derived distress
-// signal (e.g. a real pod restart, OOM kill, eviction, or scheduling
-// failure) read directly from a tool's structured result, independent of
-// what the model's own text concludes about it. Unlike lowConfidenceForceGate,
-// this does not depend on the model self-reporting anything: the same tool
-// evidence produces the same gate regardless of the model's stated
-// ESCALATE_TO or CONFIDENCE. Returns false, nil when no such events were
-// recorded — deliberately scoped today to whichever tools populate
-// objective_evidence (currently the K8s agent's get_pods and get_events; see
-// the plan's "generic plumbing, narrow rollout" scoping note before
-// extending this to other tools).
+// objectiveEvidenceSignals partitions the objective_evidence events recorded
+// for this hop into every distinct signal observed (all — reported
+// unconditionally, for audit/CLEAN-cert visibility regardless of what
+// happens next) and the subset outcome's own response never engaged with
+// (unconfirmed — see evidence.Confirmed). Deduplicated, first-seen order.
+//
+// Evidence is a deterministic, code-derived distress signal (e.g. a real pod
+// restart, OOM kill, eviction, or scheduling failure) read directly from a
+// tool's structured result — independent of the model's self-reported
+// CONFIDENCE, same as before. What changed: presence alone used to be
+// sufficient to force a human gate, regardless of whether the model's own
+// conclusion already correctly accounted for it — found live to not scale as
+// objective-evidence coverage grows past K8s to other agents (see
+// db-replica-disconnected's sysadmin escalation, whose textbook-correct
+// diagnosis was gated identically to how a wrong one would be). Now, only
+// evidence the response never demonstrably engaged with (per
+// evidence.Confirmed's structured, non-keyword check against the model's own
+// required verbatim EVIDENCE quote / named resource) still forces a gate —
+// evidence the model correctly cited and acted on is corroboration, not a
+// red flag, and stays visible in objective_evidence_signals without gating
+// or warning anything.
 //
 // Collects every distinct signal rather than stopping at the first: a single
 // hop can legitimately call more than one evidence-producing tool (e.g.
@@ -1358,8 +1369,7 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 // gate_reason, objective_evidence_signals, and the CLEAN cert's
 // warning_distribution — the exact class of bug this project's whole
 // point is to catch, not commit.
-func objectiveEvidenceForceGate(events []audit.Event) (bool, []string) {
-	var signals []string
+func objectiveEvidenceSignals(events []audit.Event, outcome evidence.HopOutcome) (all, unconfirmed []string) {
 	seen := map[string]bool{}
 	for _, ev := range events {
 		if ev.ObjectiveEvidence == nil || ev.ObjectiveEvidence.Signal == "" {
@@ -1370,9 +1380,17 @@ func objectiveEvidenceForceGate(events []audit.Event) (bool, []string) {
 			continue
 		}
 		seen[sig] = true
-		signals = append(signals, sig)
+		all = append(all, sig)
+		confirmed, err := evidence.Confirmed(outcome, *ev.ObjectiveEvidence)
+		if err != nil {
+			slog.Warn("objective evidence: confirmation check failed, treating as unconfirmed",
+				"signal", sig, "err", err)
+		}
+		if err != nil || !confirmed {
+			unconfirmed = append(unconfirmed, sig)
+		}
 	}
-	return len(signals) > 0, signals
+	return all, unconfirmed
 }
 
 // protocolViolation reports whether hop violated the triage response
@@ -1432,7 +1450,10 @@ func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
 // approval for.
 //
 //   - objective_evidence: real, code-derived tool evidence (e.g. a pod
-//     restart/OOM kill) the hop saw but didn't act on.
+//     restart/OOM kill) that the hop's own response never engaged with —
+//     confirmed evidence (the response demonstrably accounts for it, see
+//     objectiveEvidenceSignals) is still reported for visibility but does
+//     not warn here.
 //   - protocol_violation: the triage response protocol itself was violated
 //     (see protocolViolation). Returns true so the caller can additionally
 //     persist a durable, queryable audit event (see checkTargetScope's
@@ -1453,13 +1474,15 @@ func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb 
 		return false
 	}
 
-	if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
+	outcome := evidence.HopOutcome{Report: hop.diagReport, RawText: hop.rawText, SawSignalLine: hop.sawSignalLine}
+	all, unconfirmed := objectiveEvidenceSignals(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart), outcome)
+	for _, r := range all {
+		appendObjectiveEvidenceSignal(extra, r)
+	}
+	if len(unconfirmed) > 0 {
 		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
-			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
-			hop.playbookSeriesID, hop.agentName, strings.Join(reasons, ", ")))
-		for _, r := range reasons {
-			appendObjectiveEvidenceSignal(extra, r)
-		}
+			"hop %q (agent %s) recorded unconfirmed objective evidence (%s) — response text never engaged with it, and the hop did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName, strings.Join(unconfirmed, ", ")))
 	}
 
 	if protocolViolation(pb.PlaybookType, hop) {
@@ -2594,9 +2617,9 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 
 // agentEscalation holds the structured signals parsed from an agent response.
 type agentEscalation struct {
-	EscalateTo    string // series_id for out-of-scope escalations (ESCALATE_TO signal)
-	TransitionTo  string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
-	Target        string // optional TARGET: connection string — overrides the next chained
+	EscalateTo   string // series_id for out-of-scope escalations (ESCALATE_TO signal)
+	TransitionTo string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	Target       string // optional TARGET: connection string — overrides the next chained
 	// hop's connection_string when this hop's diagnosis concerns a different
 	// server than the one it was launched against (e.g. DB agent escalating to
 	// sysadmin about a replica while its own connection_string stays pinned to
@@ -2604,8 +2627,8 @@ type agentEscalation struct {
 	// not left to free-text FINDINGS extraction — see PlaybookRunRequest.Namespace's
 	// doc comment for why a value load-bearing for correctness shouldn't be
 	// trusted from prose the model writes.
-	Findings  string // one-sentence diagnosis summary
-	CleanText string // response text with signal lines removed
+	Findings      string // one-sentence diagnosis summary
+	CleanText     string // response text with signal lines removed
 	SawSignalLine bool   // true iff a TRANSITION_TO: or ESCALATE_TO: line was present at
 	// all, regardless of whether its value resolved to a real target, "none",
 	// or "" — lets callers distinguish "explicitly declined" (compliant) from

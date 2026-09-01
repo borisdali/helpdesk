@@ -342,12 +342,31 @@ type ObjectiveEvidence struct {
 	// (e.g. a pod name), when applicable.
 	Resource string `json:"resource,omitempty"`
 	// Signal is a short, stable machine-readable identifier for the distress
-	// condition (e.g. "pod_restarted", "oom_killed"). objectiveEvidenceForceGate
+	// condition (e.g. "pod_restarted", "oom_killed"). objectiveEvidenceSignals
 	// matches on this field, not on Detail.
 	Signal string `json:"signal"`
 	// Detail is a short human-readable description for operators reading the
 	// audit trail directly.
 	Detail string `json:"detail,omitempty"`
+	// Value is the raw probe value that made the rule fire (float64/bool/
+	// string, matching the probe's Kind) — e.g. 95475440, or true. Populated
+	// by evidence.Evaluate alongside Detail (which is just this same value
+	// formatted into a sentence). Used by the confirmation-probe registry
+	// (internal/evidence's HopOutcome/Confirmed) to check whether the
+	// model's own response actually engaged with the real data behind this
+	// signal, not merely that the signal exists.
+	Value any `json:"value,omitempty"`
+	// ConfirmationProbe/ConfirmationOperator/ConfirmationThreshold declare
+	// how to decide whether a hop's own response confirms this signal —
+	// authored on the evidence.Rule that fired it and carried through onto
+	// the event so the gateway (which evaluates confirmation, in a
+	// different process than the agent that recorded this event) never
+	// needs file access to the agent's own rules YAML. Empty
+	// ConfirmationProbe defaults to "evidence_quote_contains_value" with
+	// operator "==" and threshold true.
+	ConfirmationProbe     string `json:"confirmation_probe,omitempty"`
+	ConfirmationOperator  string `json:"confirmation_operator,omitempty"`
+	ConfirmationThreshold any    `json:"confirmation_threshold,omitempty"`
 }
 
 // RollbackExecution is set on rollback_initiated, rollback_executed, and

@@ -1,6 +1,7 @@
 series_id: pbs_replica_restart_action
 name: "Sysadmin — Replica Container Restart"
 version: "1.0"
+playbook_type: remediation
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent

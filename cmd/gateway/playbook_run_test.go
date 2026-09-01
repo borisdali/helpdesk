@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
@@ -4823,49 +4825,57 @@ func TestLowConfidenceForceGate(t *testing.T) {
 	}
 }
 
-// ── objectiveEvidenceForceGate ─────────────────────────────────────────────
+// ── objectiveEvidenceSignals ────────────────────────────────────────────────
+//
+// All cases below use an empty evidence.HopOutcome{} — no Report, no
+// RawText — so nothing can ever be confirmed (evidenceQuoteContainsValue
+// requires both a primary hypothesis AND a non-nil ev.Value; none of these
+// events set Value either, matching how every pre-existing caller/mock in
+// this file constructs ObjectiveEvidence without it). This intentionally
+// preserves the exact old objectiveEvidenceForceGate behavior for this
+// unit test's scope (signal collection/dedup — see all vs wantAll below);
+// confirmation-specific behavior (a signal moving out of unconfirmed when
+// the outcome genuinely supports it) is covered separately in
+// TestObjectiveEvidenceSignals_Confirmation.
 
-func TestObjectiveEvidenceForceGate(t *testing.T) {
+func TestObjectiveEvidenceSignals(t *testing.T) {
 	cases := []struct {
-		name        string
-		events      []audit.Event
-		wantFire    bool
-		wantReasons []string
+		name            string
+		events          []audit.Event
+		wantAll         []string
+		wantUnconfirmed []string
 	}{
 		{
-			name:     "no events — no gate",
-			events:   nil,
-			wantFire: false,
+			name:   "no events — nothing",
+			events: nil,
 		},
 		{
-			name: "event with nil ObjectiveEvidence — no gate",
+			name: "event with nil ObjectiveEvidence — nothing",
 			events: []audit.Event{
 				{EventType: audit.EventTypeObjectiveEvidence},
 			},
-			wantFire: false,
 		},
 		{
-			name: "event with empty Signal — no gate",
+			name: "event with empty Signal — nothing",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}},
 			},
-			wantFire: false,
 		},
 		{
-			name: "real pod_restarted signal — gate fires",
+			name: "real pod_restarted signal, no confirming outcome — unconfirmed",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted"},
+			wantAll:         []string{"pod_restarted"},
+			wantUnconfirmed: []string{"pod_restarted"},
 		},
 		{
-			name: "real oom_killed signal — gate fires",
+			name: "real oom_killed signal, no confirming outcome — unconfirmed",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"oom_killed"},
+			wantAll:         []string{"oom_killed"},
+			wantUnconfirmed: []string{"oom_killed"},
 		},
 		{
 			name: "unrelated events mixed in — real signal still found",
@@ -4874,8 +4884,8 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}}, // empty signal, skipped
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted"},
+			wantAll:         []string{"pod_restarted"},
+			wantUnconfirmed: []string{"pod_restarted"},
 		},
 		{
 			// The gap found and fixed in v0.25.0: a hop calling both get_pods
@@ -4887,8 +4897,8 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_events", Signal: "failed_scheduling"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted", "failed_scheduling"},
+			wantAll:         []string{"pod_restarted", "failed_scheduling"},
+			wantUnconfirmed: []string{"pod_restarted", "failed_scheduling"},
 		},
 		{
 			name: "same signal from two different events — deduplicated",
@@ -4896,26 +4906,105 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-a"}},
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-b"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"oom_killed"},
+			wantAll:         []string{"oom_killed"},
+			wantUnconfirmed: []string{"oom_killed"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fire, reasons := objectiveEvidenceForceGate(tc.events)
-			if fire != tc.wantFire {
-				t.Errorf("objectiveEvidenceForceGate() fire = %v, want %v", fire, tc.wantFire)
+			all, unconfirmed := objectiveEvidenceSignals(tc.events, evidence.HopOutcome{})
+			if !reflect.DeepEqual(all, tc.wantAll) {
+				t.Errorf("objectiveEvidenceSignals() all = %v, want %v", all, tc.wantAll)
 			}
-			if len(reasons) != len(tc.wantReasons) {
-				t.Fatalf("objectiveEvidenceForceGate() reasons = %v, want %v", reasons, tc.wantReasons)
-			}
-			for i := range reasons {
-				if reasons[i] != tc.wantReasons[i] {
-					t.Errorf("objectiveEvidenceForceGate() reasons[%d] = %q, want %q", i, reasons[i], tc.wantReasons[i])
-				}
+			if !reflect.DeepEqual(unconfirmed, tc.wantUnconfirmed) {
+				t.Errorf("objectiveEvidenceSignals() unconfirmed = %v, want %v", unconfirmed, tc.wantUnconfirmed)
 			}
 		})
 	}
+}
+
+// TestObjectiveEvidenceSignals_Confirmation covers the part
+// TestObjectiveEvidenceSignals deliberately doesn't: a signal whose outcome
+// genuinely supports it moves out of unconfirmed (but stays in all).
+func TestObjectiveEvidenceSignals_Confirmation(t *testing.T) {
+	confirmingOutcome := evidence.HopOutcome{
+		Report: &audit.DiagnosticReport{
+			Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.95, Evidence: "lag_bytes | 95475440"},
+			},
+		},
+	}
+	nonConfirmingOutcome := evidence.HopOutcome{
+		Report: &audit.DiagnosticReport{
+			Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.95, Evidence: "everything looks healthy"},
+			},
+		},
+	}
+
+	t.Run("default probe, value quoted verbatim — confirmed, not gated", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_replication_status", Signal: "replica_disconnected", Value: float64(95475440)}},
+		}
+		all, unconfirmed := objectiveEvidenceSignals(events, confirmingOutcome)
+		if !reflect.DeepEqual(all, []string{"replica_disconnected"}) {
+			t.Errorf("all = %v, want [replica_disconnected] — confirmed evidence must still be reported", all)
+		}
+		if len(unconfirmed) != 0 {
+			t.Errorf("unconfirmed = %v, want empty — the model's own quote contains the fired value", unconfirmed)
+		}
+	})
+
+	t.Run("default probe, value never quoted — still unconfirmed", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_replication_status", Signal: "replica_disconnected", Value: float64(95475440)}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, nonConfirmingOutcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected] — quote never mentions the real value", unconfirmed)
+		}
+	})
+
+	t.Run("resource_named_in_quote override — resource named in response text confirms", func(t *testing.T) {
+		outcome := evidence.HopOutcome{RawText: "the replication slot replica_slot is inactive"}
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				Resource: "replica_slot", Value: true, ConfirmationProbe: "resource_named_in_quote",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, outcome)
+		if len(unconfirmed) != 0 {
+			t.Errorf("unconfirmed = %v, want empty — resource is named in the response text", unconfirmed)
+		}
+	})
+
+	t.Run("resource_named_in_quote override — resource never mentioned stays unconfirmed", func(t *testing.T) {
+		outcome := evidence.HopOutcome{RawText: "everything looks healthy"}
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				Resource: "replica_slot", Value: true, ConfirmationProbe: "resource_named_in_quote",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, outcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected]", unconfirmed)
+		}
+	})
+
+	t.Run("unknown confirmation probe — fails conservative, stays unconfirmed", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				ConfirmationProbe: "does_not_exist",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, confirmingOutcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected] — an unrecognized probe must not silently pass", unconfirmed)
+		}
+	})
 }
 
 // ── trustNotYetEarnedForceGate ──────────────────────────────────────────────

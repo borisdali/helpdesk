@@ -23,6 +23,17 @@
 # operator: one of > >= < <= == != ("==" / "!=" only for bool/string probes).
 # detail: optional; rendered as fmt.Sprintf(detail, resource, probe_value) —
 #   must consume exactly those two arguments if present.
+#
+# confirmation_probe/confirmation_operator/confirmation_threshold (all
+# optional): how the gateway decides whether a hop's own response actually
+# confirms this signal, before treating its mere presence as reason to force
+# a human gate (objectiveEvidenceSignals, cmd/gateway/playbooks.go). Default
+# (all three omitted): confirmation_probe=evidence_quote_contains_value,
+# operator="==", threshold=true — does the model's own required verbatim
+# HYPOTHESIS_1 EVIDENCE quote contain the actual fired value? Use
+# resource_named_in_quote instead for bool-kind signals, where quoting a
+# bare "true" is unnatural — checks whether the response names the same
+# resource (pod name, etc.) the evidence is about.
 
 - tool: get_pods
   probe: oom_killed
@@ -30,6 +41,7 @@
   threshold: true
   signal: oom_killed
   detail: "pod %s was OOMKilled (oom_killed=%v)"
+  confirmation_probe: resource_named_in_quote
 
 - tool: get_pods
   probe: restart_count

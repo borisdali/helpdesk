@@ -328,7 +328,7 @@ func TestEvaluate_TypedNilAuditorPointer_NoPanic(t *testing.T) {
 	schema := testSchema().Register()
 	rules := []Rule{{Tool: "test_tool", Probe: "restart_count", Operator: ">", Threshold: float64(0), Signal: "pod_restarted"}}
 	items := []testItem{{Name: "pod-f", Restarts: 1}}
-	var fa *fakeAuditor // typed nil, not a literal nil interface
+	var fa *fakeAuditor                                      // typed nil, not a literal nil interface
 	Evaluate(context.Background(), fa, schema, items, rules) // must not panic
 }
 
@@ -450,5 +450,140 @@ func TestCompare_TypeMismatchReturnsError(t *testing.T) {
 	}
 	if _, err := compare(KindString, 5, "==", "x"); err == nil {
 		t.Error("expected error for non-string probe value")
+	}
+}
+
+// ── confirmation fields on Rule/LoadRules/Evaluate ──────────────────────────
+
+func TestLoadRules_NoConfirmationFields_Valid(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: restart_count
+  operator: ">"
+  threshold: 0
+  signal: pod_restarted
+`)
+	if _, err := LoadRules(path); err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+}
+
+func TestLoadRules_ConfirmationProbe_Valid(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  confirmation_probe: resource_named_in_quote
+`)
+	if _, err := LoadRules(path); err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+}
+
+func TestLoadRules_ConfirmationProbe_Unknown(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  confirmation_probe: does_not_exist
+`)
+	if _, err := LoadRules(path); err == nil {
+		t.Fatal("expected error for unknown confirmation_probe")
+	}
+}
+
+func TestLoadRules_ConfirmationProbe_NumericWithoutThreshold(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  confirmation_probe: primary_confidence
+`)
+	if _, err := LoadRules(path); err == nil {
+		t.Fatal("expected error: primary_confidence (numeric) has no universal default threshold")
+	}
+}
+
+func TestLoadRules_ConfirmationProbe_NumericWithThreshold_Valid(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  confirmation_probe: primary_confidence
+  confirmation_operator: ">="
+  confirmation_threshold: 0.6
+`)
+	if _, err := LoadRules(path); err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+}
+
+func TestLoadRules_ConfirmationOperator_InvalidForKind(t *testing.T) {
+	resetRegistry(t)
+	testSchema().Register()
+	// resource_named_in_quote is bool-kind — ">" only applies to numeric probes.
+	path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+  confirmation_probe: resource_named_in_quote
+  confirmation_operator: ">"
+  confirmation_threshold: true
+`)
+	if _, err := LoadRules(path); err == nil {
+		t.Fatal("expected error for '>' operator on a bool-kind confirmation probe")
+	}
+}
+
+func TestEvaluate_PopulatesValueAndConfirmationFields(t *testing.T) {
+	resetRegistry(t)
+	schema := testSchema().Register()
+	rules := []Rule{
+		{
+			Tool: "test_tool", Probe: "restart_count", Operator: ">", Threshold: float64(0),
+			Signal: "pod_restarted",
+			// no confirmation_* fields — Value must still be populated.
+		},
+		{
+			Tool: "test_tool", Probe: "oom_killed", Operator: "==", Threshold: true,
+			Signal: "oom_killed", ConfirmationProbe: "resource_named_in_quote",
+		},
+	}
+	items := []testItem{{Name: "pod-g", Restarts: 3, OOM: true}}
+	fa := &fakeAuditor{}
+	Evaluate(context.Background(), fa, schema, items, rules)
+
+	if len(fa.recorded) != 1 {
+		t.Fatalf("got %d recorded events, want 1 (first matching rule per item wins)", len(fa.recorded))
+	}
+	ev := fa.recorded[0]
+	if ev.Signal != "pod_restarted" {
+		t.Fatalf("Signal = %q, want pod_restarted", ev.Signal)
+	}
+	if ev.Value != float64(3) {
+		t.Errorf("Value = %v, want 3", ev.Value)
+	}
+	if ev.ConfirmationProbe != "" {
+		t.Errorf("ConfirmationProbe = %q, want empty (rule declared none)", ev.ConfirmationProbe)
 	}
 }
