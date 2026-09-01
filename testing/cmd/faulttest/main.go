@@ -562,6 +562,8 @@ func cmdRun(args []string) {
 				}
 				if len(resp.ObjectiveEvidenceSignals) > 0 {
 					evalResult.ObjectiveEvidenceSignals = resp.ObjectiveEvidenceSignals
+					evalResult.ObjectiveEvidenceConfirmed = resp.ObjectiveEvidenceConfirmed
+					evalResult.ObjectiveEvidenceUnconfirmed = resp.ObjectiveEvidenceUnconfirmed
 				}
 				// Fabrication risk: the agent narrated calling a tool that never
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).

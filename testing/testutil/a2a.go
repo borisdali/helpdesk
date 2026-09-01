@@ -75,6 +75,17 @@ type AgentResponse struct {
 	// uniformly and without string-parsing gate_reason. See
 	// objectiveEvidenceForceGate (cmd/gateway/playbooks.go).
 	ObjectiveEvidenceSignals []string
+	// ObjectiveEvidenceConfirmed/ObjectiveEvidenceUnconfirmed partition
+	// ObjectiveEvidenceSignals by whether the hop's own response
+	// demonstrably engaged with each signal — see evidence.Confirmed
+	// (internal/evidence/confirm.go) and objectiveEvidenceSignals
+	// (cmd/gateway/playbooks.go). A signal appears in exactly one of the
+	// two. Unconfirmed signals are the ones that actually gate/warn;
+	// confirmed ones are reported here purely for visibility — evidence the
+	// response already correctly accounts for is corroboration, not a red
+	// flag.
+	ObjectiveEvidenceConfirmed   []string
+	ObjectiveEvidenceUnconfirmed []string
 	// Mismatch is true when a delegation_verification event for this run had
 	// Mismatch=true — the model narrated calling a tool (or claimed a
 	// write/destructive action) that produced no matching tool_execution

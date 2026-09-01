@@ -83,6 +83,14 @@ type EvalResult struct {
 	// warn-only (EvidenceWarnings) case uniformly, without string-parsing
 	// gate_reason. Empty on responses recorded before this field existed.
 	ObjectiveEvidenceSignals []string `json:"objective_evidence_signals,omitempty"`
+	// ObjectiveEvidenceConfirmed/ObjectiveEvidenceUnconfirmed mirror
+	// resp.ObjectiveEvidenceConfirmed/Unconfirmed — the same signals as
+	// ObjectiveEvidenceSignals, partitioned by whether the hop's own
+	// response demonstrably engaged with each one (see evidence.Confirmed,
+	// internal/evidence/confirm.go). Only unconfirmed signals contribute to
+	// gate_reason/evidence_warnings; confirmed ones are visibility-only.
+	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
 	// Mismatch is true when resp.Mismatch is true — a delegation_verification
 	// event for this run had Mismatch=true: the model narrated calling a tool
 	// (or claimed a write/destructive action) that produced no matching

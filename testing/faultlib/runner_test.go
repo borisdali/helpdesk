@@ -285,17 +285,24 @@ func TestRunViaPlaybook_EvidenceWarningsPopulated(t *testing.T) {
 }
 
 // TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated mirrors
-// TestRunViaPlaybook_EvidenceWarningsPopulated exactly, for the two newer
-// response fields (target_drift, objective_evidence_signals) added to the
-// same anonymous decode struct — both were previously undecoded anywhere in
-// this package; a faulttest run that hit either field would have silently
-// dropped it, exactly like evidence_warnings did before that field was wired.
+// TestRunViaPlaybook_EvidenceWarningsPopulated exactly, for the newer
+// response fields (target_drift, objective_evidence_signals, and the
+// confirmed/unconfirmed split added alongside it) sharing the same anonymous
+// decode struct — all were previously undecoded anywhere in this package; a
+// faulttest run that hit any of these fields would have silently dropped it,
+// exactly like evidence_warnings did before that field was wired. The
+// confirmed/unconfirmed fields specifically closed a gap found live: the
+// gateway-side confirmation mechanism worked correctly, but faulttest never
+// decoded the two new response fields it added, so no user running faulttest
+// could actually see whether a signal was confirmed or not.
 func TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated(t *testing.T) {
 	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
-		"text":                       "result",
-		"run_id":                     "run_drift01",
-		"target_drift":               []string{"host=localhost port=15432 dbname=testdb"},
-		"objective_evidence_signals": []string{"pod_restarted"},
+		"text":                           "result",
+		"run_id":                         "run_drift01",
+		"target_drift":                   []string{"host=localhost port=15432 dbname=testdb"},
+		"objective_evidence_signals":     []string{"pod_restarted", "oom_killed"},
+		"objective_evidence_confirmed":   []string{"oom_killed"},
+		"objective_evidence_unconfirmed": []string{"pod_restarted"},
 	})
 	defer srv.Close()
 
@@ -312,8 +319,14 @@ func TestRunViaPlaybook_TargetDriftAndObjectiveEvidenceSignalsPopulated(t *testi
 	if len(resp.TargetDrift) != 1 || resp.TargetDrift[0] != "host=localhost port=15432 dbname=testdb" {
 		t.Errorf("TargetDrift = %v, want [host=localhost port=15432 dbname=testdb]", resp.TargetDrift)
 	}
-	if len(resp.ObjectiveEvidenceSignals) != 1 || resp.ObjectiveEvidenceSignals[0] != "pod_restarted" {
-		t.Errorf("ObjectiveEvidenceSignals = %v, want [pod_restarted]", resp.ObjectiveEvidenceSignals)
+	if len(resp.ObjectiveEvidenceSignals) != 2 {
+		t.Errorf("ObjectiveEvidenceSignals = %v, want [pod_restarted oom_killed]", resp.ObjectiveEvidenceSignals)
+	}
+	if len(resp.ObjectiveEvidenceConfirmed) != 1 || resp.ObjectiveEvidenceConfirmed[0] != "oom_killed" {
+		t.Errorf("ObjectiveEvidenceConfirmed = %v, want [oom_killed]", resp.ObjectiveEvidenceConfirmed)
+	}
+	if len(resp.ObjectiveEvidenceUnconfirmed) != 1 || resp.ObjectiveEvidenceUnconfirmed[0] != "pod_restarted" {
+		t.Errorf("ObjectiveEvidenceUnconfirmed = %v, want [pod_restarted]", resp.ObjectiveEvidenceUnconfirmed)
 	}
 }
 
