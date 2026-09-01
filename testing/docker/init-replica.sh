@@ -14,5 +14,11 @@ pg_basebackup -h postgres -U postgres -D /var/lib/postgresql/data -Fp -Xs -R
 chown -R postgres:postgres /var/lib/postgresql/data
 chmod 0700 /var/lib/postgresql/data
 
+# Retry reconnection aggressively (default is 5s) — this replica exists for
+# fault testing (db-replica-disconnected), where a test needs the standby to
+# notice a lifted pg_hba reject and reconnect quickly and predictably, not
+# for realistic production retry pacing.
+echo "wal_retrieve_retry_interval = '1s'" >> /var/lib/postgresql/data/postgresql.auto.conf
+
 # Drop privileges and start postgres.
 exec gosu postgres postgres

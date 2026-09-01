@@ -557,23 +557,38 @@ failures:
       signal is an inactive slot in pg_replication_slots with growing retained WAL.
     external_compat: true
     requires_replica: true
+    # 120s, not the 90s default: injection's own precondition guard can wait
+    # up to 90s on its own for the replica to reconnect after a prior --repeat
+    # rep's teardown (see inject's own comment) — needs headroom above that or
+    # the harness SIGKILLs the injection subprocess before the guard's own,
+    # more informative RAISE EXCEPTION ever gets a chance to fire.
+    inject_timeout: 60s
     prerequisites: >
-      The injection connection (not the agent's own connection) must have privilege
-      sufficient for ALTER SYSTEM (superuser or equivalent). A real streaming replica
-      must already be attached to the target primary — injection fails loudly if not.
+      The injection connection (not the agent's own connection) must be superuser —
+      needed both for pg_hba.conf's COPY ... TO PROGRAM rewrite below and for
+      pg_terminate_backend. A real streaming replica must already be attached to the
+      target primary — injection fails loudly if not.
     inject:
       type: sql
       script_inline: >
-        DO $$ BEGIN IF (SELECT count(*) FROM pg_stat_replication) = 0 THEN RAISE
-        EXCEPTION 'db-replica-disconnected fault requires an already-connected
-        streaming replica; none found in pg_stat_replication'; END IF; END $$;
-        ALTER SYSTEM SET max_wal_senders = 0;
+        COPY (SELECT 1) TO PROGRAM
+        'for i in $(seq 1 45); do
+        n=$(psql -tAc "SELECT count(*) FROM pg_stat_replication" -d testdb);
+        if [ "$n" -gt 0 ]; then exit 0; fi;
+        sleep 1; done;
+        echo "db-replica-disconnected fault requires an already-connected streaming
+        replica; none found in pg_stat_replication after waiting 45s for
+        reconnection (relevant for --repeat: the replica needs time to reconnect
+        after a prior rep''s teardown lifts the reject rule)" >&2; exit 1';
+        COPY (SELECT 'host replication all all reject') TO PROGRAM
+        'cat > /tmp/hba_new.conf && cat /var/lib/postgresql/data/pg_hba.conf >> /tmp/hba_new.conf && mv /tmp/hba_new.conf /var/lib/postgresql/data/pg_hba.conf';
         SELECT pg_reload_conf();
         SELECT pg_terminate_backend(pid) FROM pg_stat_replication;
     teardown:
       type: sql
       script_inline: >
-        ALTER SYSTEM RESET max_wal_senders;
+        COPY (SELECT 1) TO PROGRAM
+        'tail -n +2 /var/lib/postgresql/data/pg_hba.conf > /tmp/hba_restored.conf && mv /tmp/hba_restored.conf /var/lib/postgresql/data/pg_hba.conf';
         SELECT pg_reload_conf();
     prompt: >
       Downstream consumers report the read replica hasn't reflected any new writes
@@ -596,7 +611,10 @@ failures:
         category: "replica_disconnected"
         narrative: "The agent should recognize the absent pg_stat_replication row (not a lag figure) combined with an inactive replication slot as a genuine disconnect, and correctly emit ESCALATE_TO: none with findings recommending manual WAL-sender/host investigation — not TRANSITION_TO: pbs_replication_remediate, which cannot address a disconnect, and not silently misread the absence as healthy."
     diagnosis_playbook_series_id: pbs_replication_lag
-    timeout: 60s
+    # 150s, not 60s: injection's own precondition guard can now wait up to 90s
+    # for the replica to reconnect after a prior --repeat rep's teardown (see
+    # inject's own comment) on top of the ~20-30s the diagnosis itself takes.
+    timeout: 150s
 
   - id: db-idle-in-transaction
     name: "Session stuck with uncommitted writes"

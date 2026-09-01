@@ -56,6 +56,21 @@ a replica absent from `pg_stat_replication` is its own named condition (not a la
 figure) and the correct response is `ESCALATE_TO: none` with findings recommending
 manual investigation — not silence and not a fabricated "zero lag" reading.
 
+**A second, independent backstop that doesn't depend on the model getting it
+right**: the guidance above only helps if the diagnosing LLM actually follows it.
+`get_replication_status` also feeds a deterministic, code-derived check
+(`internal/evidence`, `agents/database/tools.go`) that reaches the same
+conclusion without any LLM involved — if the primary reports zero connected
+replicas *and* a replication slot is inactive with real retained WAL, the
+gateway force-gates the response for human review regardless of what the
+model concluded or chose to mention (`objective_evidence:replica_disconnected`,
+same mechanism used for `k8s-oomkilled`'s pod-restart/OOM-kill signals — see
+`agents/k8s/objective_evidence.yaml` for that side, `agents/database/
+objective_evidence.yaml` for this one). A model that silently misreads the
+absence as healthy can still get overridden by this check; the guidance
+above is what makes the *correct* diagnosis likely, this is what makes an
+*incorrect* one non-silent.
+
 **Why there's no automated remediation for this today and why that's the honest
 answer rather than a gap**: a disconnected walreceiver in a real environment can have
 many different root causes starting with a network partition, replica host down, expired
