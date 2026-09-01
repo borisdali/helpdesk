@@ -428,7 +428,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 
 ### Objective-evidence gate
 
-`gate_reason: "low_confidence"` is gated on the model's own self-reported `CONFIDENCE:` value — a real signal, but one the model writes about itself, not something independently checked. A second, deterministic force-gate exists specifically to close that gap: when a tool call in the hop produced **objective, code-derived evidence** the gateway can verify independently of anything the model says — a Kubernetes pod's real restart count or `OOMKilled` state (`get_pods`), or a distress-indicating cluster event like an eviction or scheduling failure (`get_events`) — read directly off the tool's structured result before it is summarized for the LLM. The gateway forces a gate regardless of the model's stated confidence or `ESCALATE_TO`/`TRANSITION_TO` signal. `gate_reason` is set to `"objective_evidence:<signal>"`, e.g. `"objective_evidence:pod_restarted"` or `"objective_evidence:oom_killed"`:
+`gate_reason: "low_confidence"` is gated on the model's own self-reported `CONFIDENCE:` value — a real signal, but one the model writes about itself, not something independently checked. A second, deterministic force-gate exists specifically to close that gap: when a tool call in the hop produced **objective, code-derived evidence** the gateway can verify independently of anything the model says — read directly off the tool's structured result before it is summarized for the LLM — and the model's own response never demonstrably engaged with it, the gateway forces a gate regardless of the model's stated confidence or `ESCALATE_TO`/`TRANSITION_TO` signal. `gate_reason` is set to `"objective_evidence:<signal>"`, e.g. `"objective_evidence:pod_restarted"` or `"objective_evidence:replica_disconnected"`:
 
 ```json
 {
@@ -441,42 +441,18 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
 }
 ```
 
-A hop can find more than one *distinct* signal — e.g. a pod that both restarted (`get_pods`) and triggered a `FailedScheduling` event (`get_events`) in the same hop — in which case all of them are comma-joined within the single `objective_evidence:` reason, e.g. `"objective_evidence:pod_restarted,failed_scheduling"`, not just whichever was found first. Fixed in v0.25.0 after this was confirmed to silently drop the second signal — see `objectiveEvidenceForceGate`'s doc comment (`cmd/gateway/playbooks.go`) for the specific gap.
+Evidence the model correctly cited and acted on is corroboration, not a red flag — it's still reported on the response (`objective_evidence_signals`/`objective_evidence_confirmed`), just doesn't gate or warn anything. Low confidence and objective evidence are independently evaluated and jointly reported when both apply (`gate_reason` joins them with `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"`).
 
-This scope is deliberately narrow — as of v0.25.0, two K8s-agent tools populate it: `get_pods` (`pod_restarted`/`oom_killed`, read off a pod's typed restart count and last-termination state) and `get_events` (`evicted`/`failed_scheduling`/`disk_pressure`/`memory_pressure`, read off a small, deliberately fixed vocabulary of `Warning`-type event `Reason` values — most Warning/Normal events, like `BackOff` or `Pulled`, are routine noise, not evidence worth forcing a gate over). Both are tools whose result already carries unambiguous structured evidence (a DB agent's uptime, by contrast, is free text and is not currently evidence for anything on its own). Extending this to other tools is a case-by-case decision, not a mechanical rollout — see the design note in the source (`cmd/gateway/playbooks.go`'s `objectiveEvidenceForceGate`) for the reasoning, and `agents/k8s/tools.go`'s `recordEventDistressEvidence`/`recordPodDistressEvidence` for the two current sources.
+A non-gated counterpart, `evidence_warnings`, covers the case where a hop sees real unconfirmed evidence but emits *neither* `TRANSITION_TO` nor `ESCALATE_TO` — there's no next-hop candidate to gate approval for, so it surfaces as a warning on an otherwise-normal `resolved` response instead.
 
-Low confidence and objective evidence are independently evaluated — a hop can trip either, both or neither. When both apply, `gate_reason` joins them with `+`, e.g. `"low_confidence+objective_evidence:pod_restarted"` — note this is a different separator than the `,` used to join multiple objective-evidence *signals* within their own single reason, so an operator reviewing the gate always sees every applicable reason (and every signal behind the objective-evidence one) rather than just whichever check, or whichever signal, happened to be found first.
+Full mechanism — the declarative probe/YAML rules layer, how a signal gets confirmed against the model's own response before it's allowed to gate anything, what's shipped today, and how to author a new rule — is its own document: **[OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md)**. Response field reference:
 
-**`evidence_warnings` — the non-gated counterpart.** The force-gate above only runs when the hop already emitted a `TRANSITION_TO`/`ESCALATE_TO` signal — a chain-loop precondition, not a design choice — so it cannot catch a hop that sees real evidence and emits *neither* signal, silently closing out. For that case, a normal (non-`pending_gate`) response instead carries an `evidence_warnings` array, independent of `status`:
-
-```json
-{
-  "run_id":    "plr_d7b3e5a1",
-  "status":    "resolved",
-  "findings":  "Pod is currently healthy.",
-  "evidence_warnings": [
-    "hop \"pbs_k8s_pod_crash_triage\" (agent k8s_agent) recorded objective evidence (oom_killed) but did not escalate or transition"
-  ]
-}
-```
-
-This never creates a Decision Hub entry — there is no next-hop candidate to gate approval for — it is purely a visible flag on the response you already receive, so it doesn't require a separate lookup to notice the discrepancy.
-
-**`objective_evidence_signals` — the specific signal, structurally.** Both paths above ultimately trace back to the same underlying signal string (`"pod_restarted"`, `"oom_killed"`, ...), but historically the only way to get at it was string-parsing `gate_reason` (which can be a `"+"`-joined combination with `low_confidence`/`trust_not_earned`) — brittle, and the `evidence_warnings` path never carried it as a separate value at all, only embedded in a human-readable sentence. `objective_evidence_signals` is a deduplicated array of just the signal names, accumulated across every hop in the response (force-gated or warn-only, uniformly) and present whenever either path fired:
-
-```json
-{
-  "run_id":    "plr_d7b3e5a1",
-  "status":    "resolved",
-  "findings":  "Pod is currently healthy.",
-  "evidence_warnings": [
-    "hop \"pbs_k8s_pod_crash_triage\" (agent k8s_agent) recorded objective evidence (oom_killed) but did not escalate or transition"
-  ],
-  "objective_evidence_signals": ["oom_killed"]
-}
-```
-
-Additive: `gate_reason`'s `"objective_evidence:<signal>"` substring and `evidence_warnings`' human-readable sentence are both unchanged. `objective_evidence_signals` exists so a consumer (faulttest's CLEAN cert, in particular — see [`ATTRIBUTION_CERTS.md` §9](ATTRIBUTION_CERTS.md#9-the-clean-axis)) can bucket by signal without parsing prose.
+| Field | When present | Meaning |
+|---|---|---|
+| `gate_reason: "objective_evidence:<signal>[,<signal>...]"` | `status: pending_gate` | An unconfirmed signal forced this gate |
+| `evidence_warnings` | any response | Unconfirmed evidence on a hop that didn't chain onward |
+| `objective_evidence_signals` | any response | Every distinct signal fired, confirmed or not, deduplicated across all hops |
+| `objective_evidence_confirmed` / `objective_evidence_unconfirmed` | any response | The same signals, split by whether the model's response accounted for them |
 
 ### Signal-less hops
 
