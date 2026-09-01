@@ -624,6 +624,68 @@ failures:
     # sysadmin hop (host/container inspection) before the run concludes.
     timeout: 180s
 
+  - id: db-replica-container-stopped
+    name: "Replica container stopped"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's own container has been stopped cleanly (docker
+      compose stop) — unlike db-replica-disconnected, the primary never
+      rejects anything; the replica simply isn't running. From the primary's
+      side this looks identical to db-replica-disconnected (absent
+      pg_stat_replication row, inactive WAL-retaining slot), so the DB agent
+      must escalate the same way. The distinguishing evidence only appears at
+      the sysadmin hop: ExitCode=0 and clean-shutdown logs with no rejection
+      message, which is the one branch that should conclude
+      TRANSITION_TO: pbs_replica_restart_action rather than ESCALATE_TO: none.
+    requires_replica: true
+    inject:
+      type: docker
+      action: stop
+      service: replica
+    teardown:
+      type: docker
+      action: start
+      service: replica
+      # Give the replica a moment to reattach and stream before the next
+      # --repeat rep's injection runs its own "already-connected" precondition
+      # wait on db-replica-disconnected-style faults sharing this stack.
+      wait: 5s
+    diagnosis_playbook_series_id: pbs_replication_lag
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new
+      writes in over 10 minutes, and the replica's own status page shows no
+      recent activity. The primary connection_string is
+      "{{connection_string}}" — use it verbatim for ALL of your own tool
+      calls (check_connection, get_replication_status, get_active_connections,
+      get_server_info, etc.) — you have no tools capable of querying a
+      different server, so never pass anything else to them. If you determine
+      the replica is genuinely disconnected and need to hand off to sysadmin
+      for a host/container-level check, the replica's host:port is
+      "{{replica_host_port}}" — this is NOT a connection string (no dbname/
+      user/password) and exists only to be quoted verbatim in a TARGET: line
+      per your playbook guidance, never passed to any of your own tools.
+      Please investigate replication health and determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "disconnect"
+          - "walreceiver"
+          - "wal receiver"
+          - "no entry"
+          - "not present"
+          - "inactive slot"
+      expected_diagnosis:
+        category: "replica_disconnected"
+        narrative: "The agent should recognize the absent pg_stat_replication row combined with an inactive replication slot as a genuine disconnect, and hand off to sysadmin — emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage — the same first-hop answer as db-replica-disconnected, since the primary-side signal is identical. The sysadmin hop should find the replica container Status=exited with ExitCode=0 and clean-shutdown logs (no rejection message), and correctly conclude TRANSITION_TO: pbs_replica_restart_action — exercising the one branch of pbs_sysadmin_replica_connectivity_triage's decision table that db-replica-disconnected's own injection (a primary-side reject, replica container never touched) cannot reach. The restart playbook should then confirm the container is running again and streaming."
+    # 180s: same two-hop chain as db-replica-disconnected, plus a third hop
+    # (pbs_replica_restart_action actually restarts and confirms the
+    # container) when the sysadmin agent correctly transitions instead of
+    # escalating to none.
+    timeout: 180s
+
   - id: db-idle-in-transaction
     name: "Session stuck with uncommitted writes"
     category: database

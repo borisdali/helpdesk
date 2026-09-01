@@ -312,6 +312,33 @@ func TestParseAgentEscalation_NoSignal(t *testing.T) {
 	}
 }
 
+func TestParseAgentEscalation_Target(t *testing.T) {
+	text := "The replica is disconnected; primary-side rejection.\n\n" +
+		"FINDINGS: replica rejected by pg_hba.conf\n" +
+		"TARGET: host.docker.internal:15433\n" +
+		"ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Target != "host.docker.internal:15433" {
+		t.Errorf("target = %q, want host.docker.internal:15433", esc.Target)
+	}
+	if esc.EscalateTo != "pbs_sysadmin_replica_connectivity_triage" {
+		t.Errorf("escalate_to = %q", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "TARGET:") {
+		t.Error("CleanText should not contain TARGET: line")
+	}
+}
+
+func TestParseAgentEscalation_NoTarget_DefaultsEmpty(t *testing.T) {
+	text := "FINDINGS: routine diagnosis, no server handoff needed\nESCALATE_TO: pbs_something\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Target != "" {
+		t.Errorf("target = %q, want empty when no TARGET: line is present", esc.Target)
+	}
+}
+
 // --- checkRequiresEvidence ---
 
 func TestCheckRequiresEvidence_EmptyPatterns(t *testing.T) {
@@ -3532,6 +3559,315 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVar
 	}
 	if got := patch["transitioned_to"]; got != "" && got != nil {
 		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_TargetOverride verifies the item-5c
+// TARGET: handoff mechanism end to end: when hop1 (DB triage) emits a
+// TARGET: line alongside ESCALATE_TO, chainEscalation must send hop2
+// (sysadmin) a request built against the TARGET connection string, not the
+// caller's original req.ConnectionString (see chainEscalation,
+// playbooks.go:1158-1161) — this is what lets the DB agent hand sysadmin the
+// replica's connection string while its own chain stays pinned to the
+// primary. Never previously covered by a unit test, only exercised live.
+func TestHandlePlaybookRun_ChainedHop_TargetOverride(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_target_triage", SeriesID: "pbs_target_triage",
+		Name: "Target Override Triage", ExecutionMode: "agent", AgentName: "target_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_target_sysadmin", SeriesID: "pbs_target_sysadmin",
+		Name: "Target Override Sysadmin", ExecutionMode: "agent", AgentName: "target_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_target_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_target_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "target_db_agent",
+		"HYPOTHESIS_1: replica rejected by primary | CONFIDENCE: 0.95 | EVIDENCE: \"pg_hba.conf rejects\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica disconnected, primary-side rejection\n"+
+			"TARGET: host.docker.internal:15433\nESCALATE_TO: pbs_target_sysadmin\n")
+
+	var capturedPromptText string
+	sysadminSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if len(req.Params.Message.Parts) > 0 {
+			capturedPromptText = req.Params.Message.Parts[0].Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-target-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: replica container is healthy\nESCALATE_TO: none\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(sysadminSrv.Close)
+	sysadminCard := &a2a.AgentCard{
+		Name: "target_sysadmin_agent", URL: sysadminSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"target_db_agent":       dbCard,
+		"target_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"replica lag","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// The chain must have actually run hop2 (sysadmin).
+	if got := auditSrv.runCount(); got != 2 {
+		t.Fatalf("runCount() = %d, want 2 (triage + sysadmin)", got)
+	}
+	if capturedPromptText == "" {
+		t.Fatal("sysadmin agent never received a prompt")
+	}
+	if !strings.Contains(capturedPromptText, "host.docker.internal:15433") {
+		t.Errorf("sysadmin prompt does not contain the TARGET override (host.docker.internal:15433); got: %s", capturedPromptText)
+	}
+	if strings.Contains(capturedPromptText, "port=15432") {
+		t.Errorf("sysadmin prompt still contains the primary's original connection string (port=15432) — TARGET override did not take effect; got: %s", capturedPromptText)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_TargetOverride_CarriesForwardWhenHopOmitsIt
+// is a real bug found via live testing (db-replica-container-stopped,
+// 2026-09-01): hop2 correctly diagnosed a target (the replica) via TARGET:
+// but then, transitioning to hop3, failed to restate it — a real, observed
+// model-reliability gap, not a hypothetical. chainEscalation's old logic only
+// ever looked at the immediately preceding hop's OWN .target field, so it
+// fell back to req.ConnectionString (the top-level primary) for hop3 — a
+// remediation playbook whose own guidance assumes "connection_string ...
+// already points at the replica." hop3 detected the contradiction and
+// correctly refused to act, but the real fault was left unfixed despite a
+// fully correct 2-hop diagnosis. Fixed via chainTarget, carried forward
+// across hops that don't restate their own (playbooks.go: the loop above
+// chainEscalation's call site). This test's hop2 deliberately emits NO
+// TARGET: line at all — proving hop3 still gets hop1's target.
+func TestHandlePlaybookRun_ChainedHop_TargetOverride_CarriesForwardWhenHopOmitsIt(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_triage", SeriesID: "pbs_targetfwd_triage",
+		Name: "TargetFwd Triage", ExecutionMode: "agent", AgentName: "targetfwd_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_sysadmin", SeriesID: "pbs_targetfwd_sysadmin",
+		Name: "TargetFwd Sysadmin", ExecutionMode: "agent", AgentName: "targetfwd_sysadmin_agent", IsActive: true,
+	}
+	pbRestart := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_restart", SeriesID: "pbs_targetfwd_restart",
+		Name: "TargetFwd Restart", ExecutionMode: "agent", AgentName: "targetfwd_restart_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_targetfwd_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_targetfwd_sysadmin": pbSysadmin,
+			"pbs_targetfwd_restart":  pbRestart,
+		})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "targetfwd_db_agent",
+		"HYPOTHESIS_1: replica disconnected | CONFIDENCE: 0.95 | EVIDENCE: \"inactive slot\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica disconnected\n"+
+			"TARGET: host.docker.internal:15433\nESCALATE_TO: pbs_targetfwd_sysadmin\n")
+	// hop2 deliberately omits its own TARGET: line before transitioning —
+	// the exact real-world failure mode this test guards against.
+	_, sysadminCard := mockA2AServerWithText(t, "targetfwd_sysadmin_agent",
+		"HYPOTHESIS_1: replica container cleanly stopped | CONFIDENCE: 0.9 | EVIDENCE: \"exitcode=0\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica container stopped, safe to restart\n"+
+			"TRANSITION_TO: pbs_targetfwd_restart\n")
+
+	var capturedPromptText string
+	restartSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if len(req.Params.Message.Parts) > 0 {
+			capturedPromptText = req.Params.Message.Parts[0].Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"kind": "task", "id": "task-targetfwd-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: replica restarted successfully\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(restartSrv.Close)
+	restartCard := &a2a.AgentCard{
+		Name: "targetfwd_restart_agent", URL: restartSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"targetfwd_db_agent":       dbCard,
+		"targetfwd_sysadmin_agent": sysadminCard,
+		"targetfwd_restart_agent":  restartCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"replica down","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := auditSrv.runCount(); got != 3 {
+		t.Fatalf("runCount() = %d, want 3 (triage + sysadmin + restart)", got)
+	}
+	if capturedPromptText == "" {
+		t.Fatal("restart agent never received a prompt")
+	}
+	if !strings.Contains(capturedPromptText, "host.docker.internal:15433") {
+		t.Errorf("restart-hop prompt does not contain hop1's carried-forward TARGET (host.docker.internal:15433) — target was lost when hop2 omitted its own TARGET: line; got: %s", capturedPromptText)
+	}
+	if strings.Contains(capturedPromptText, "port=15432") {
+		t.Errorf("restart-hop prompt still contains the primary's original connection string (port=15432) — chainTarget did not carry forward; got: %s", capturedPromptText)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_PurposeDerivedFromPlaybookType is a real
+// bug found via live testing (db-replica-container-stopped, 2026-09-01):
+// faulttest's default --purpose is "diagnostic", and chainEscalation never
+// updated X-Purpose per hop (chainReq never carried Purpose at all, and the
+// shared *http.Request's header is only ever set once, at the top) — so a
+// force-mode auto-chain into a real playbook_type: remediation playbook
+// still declared "diagnostic" purpose to its own tool calls, and a policy
+// rule denying write/destructive actions under diagnostic purpose correctly
+// (per its own logic) blocked restart_container — even though canAutoChain
+// had already authorized the chain into remediation. Fixed via
+// derivedPurpose, applied in chainEscalation for every chained hop. This
+// test's top-level request declares "diagnostic"; hop2 is playbook_type:
+// remediation and must receive "remediation" in its A2A message metadata.
+func TestHandlePlaybookRun_ChainedHop_PurposeDerivedFromPlaybookType(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_purpose_triage", SeriesID: "pbs_purpose_triage",
+		Name: "Purpose Triage", ExecutionMode: "agent", AgentName: "purpose_db_agent", IsActive: true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID: "pb_purpose_remediate", SeriesID: "pbs_purpose_remediate",
+		Name: "Purpose Remediate", ExecutionMode: "agent", AgentName: "purpose_remediate_agent",
+		IsActive: true, PlaybookType: "remediation",
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_purpose_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_purpose_remediate": pbRemediate})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "purpose_db_agent",
+		"HYPOTHESIS_1: container cleanly stopped | CONFIDENCE: 0.95 | EVIDENCE: \"exitcode=0\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: safe to restart\nTRANSITION_TO: pbs_purpose_remediate\n")
+
+	var capturedPurpose string
+	remediateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Metadata map[string]any `json:"metadata"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if p, ok := req.Params.Message.Metadata["purpose"].(string); ok {
+			capturedPurpose = p
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"kind": "task", "id": "task-purpose-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: restarted successfully\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(remediateSrv.Close)
+	remediateCard := &a2a.AgentCard{
+		Name: "purpose_remediate_agent", URL: remediateSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"purpose_db_agent":        dbCard,
+		"purpose_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"container stopped","approval_mode":"force","purpose":"diagnostic"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := auditSrv.runCount(); got != 2 {
+		t.Fatalf("runCount() = %d, want 2 (triage + remediate)", got)
+	}
+	if capturedPurpose != "remediation" {
+		t.Errorf("remediation hop's A2A metadata.purpose = %q, want %q — chainEscalation must derive purpose from the hop's own playbook_type, not forward the caller's original 'diagnostic' declaration", capturedPurpose, "remediation")
 	}
 }
 

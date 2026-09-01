@@ -17,10 +17,22 @@ import (
 var DockerComposeDir string
 
 // DockerCompose runs a docker compose command with the given arguments.
+//
+// Also includes docker-compose.repl.yaml when present alongside the base
+// file — needed for any docker-type inject/teardown spec targeting the
+// "replica" service (e.g. db-replica-container-stopped), which
+// docker-compose.yaml alone doesn't declare. Harmless to include
+// unconditionally for services the overlay doesn't touch (e.g. "postgres"):
+// compose only needs the merged config to resolve the target service name to
+// an already-running container for stop/start/kill — it doesn't reconcile or
+// recreate anything on its own.
 func DockerCompose(ctx context.Context, args ...string) (string, error) {
 	cmdArgs := []string{"compose"}
 	if DockerComposeDir != "" {
 		cmdArgs = append(cmdArgs, "-f", DockerComposeDir+"/docker-compose.yaml")
+		if replOverlay := DockerComposeDir + "/docker-compose.repl.yaml"; fileExists(replOverlay) {
+			cmdArgs = append(cmdArgs, "-f", replOverlay)
+		}
 	}
 	cmdArgs = append(cmdArgs, args...)
 
@@ -30,6 +42,11 @@ func DockerCompose(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("docker compose %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output), nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // DockerComposeStop stops a specific service in the compose stack.

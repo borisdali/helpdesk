@@ -755,6 +755,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	const maxChainDepth = 5
 	prev := primary
+	// chainTarget is the last TARGET: connection string seen anywhere in this
+	// chain, carried forward across hops that don't restate their own — see
+	// chainEscalation's own doc comment for why a hop needs it (e.g.
+	// pbs_replica_restart_action's guidance assumes its connection_string
+	// "already points at the replica"). Found live: a hop reliably following
+	// the sub-instruction to re-emit TARGET: before TRANSITION_TO: is not
+	// guaranteed (a cheaper model skipped it in practice), and resetting to
+	// req.ConnectionString (always the top-level primary) the moment one hop
+	// omits it silently sent the NEXT hop to the wrong server — a remediation
+	// hop that then correctly detected the mismatch and refused to act, but
+	// left the real fault unfixed despite a fully correct diagnosis chain.
+	chainTarget := primary.target
 	for len(chain) < maxChainDepth && (prev.escalatedTo != "" || prev.transitionTo != "") {
 		// nextSeries is the target for either signal; isTransition distinguishes them.
 		nextSeries := prev.escalatedTo
@@ -948,9 +960,17 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			extra["suggested_next"] = buildSuggestedNext(nextSeries, req, prev.runID, prev.findings)
 			break
 		}
-		chained := g.chainEscalation(r, pb, req, prev, nextPB)
+		// Use the chain's carried-forward target (see chainTarget above),
+		// not just this hop's own restated one — chainEscalation reads
+		// .target off whatever agentRunResult it's given.
+		hopForChain := prev
+		hopForChain.target = chainTarget
+		chained := g.chainEscalation(r, pb, req, hopForChain, nextPB)
 		if chained == nil {
 			break
+		}
+		if chained.target != "" {
+			chainTarget = chained.target
 		}
 		if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, nextPB, *chained) {
 			g.recordProtocolViolationEvent(r.Context(), *chained)
@@ -1143,6 +1163,23 @@ func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string, targ
 	}
 }
 
+// derivedPurpose maps a playbook's own type to the X-Purpose value its own
+// tool calls should declare — "triage" playbooks are read-only by contract
+// (diagnostic), "remediation" playbooks perform the actual fix. An untyped
+// playbook (pbType == "", e.g. some non-triage/non-remediation entry points)
+// falls back to the caller's own originally-declared purpose rather than
+// guessing.
+func derivedPurpose(pbType, fallback string) string {
+	switch pbType {
+	case "triage":
+		return "diagnostic"
+	case "remediation":
+		return "remediation"
+	default:
+		return fallback
+	}
+}
+
 // chainEscalation runs nextPB as a chained agent session, using the primary
 // run's findings as context. nextPB must already be fetched by the caller.
 func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, req PlaybookRunRequest, primary agentRunResult, nextPB *audit.Playbook) *agentRunResult {
@@ -1177,6 +1214,22 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 			chainReq.PriorFindings = prior.FindingsSummary
 		}
 	}
+
+	// X-Purpose drives tool-level policy enforcement on the agent side (see
+	// resolveRequest/proxyToAgentWithTool, forwarded into the A2A message's
+	// metadata.purpose) — derive it from THIS hop's own playbook type rather
+	// than leaving whatever the top-level caller originally declared on the
+	// shared *http.Request r. Found live: a force-mode auto-chain into a real
+	// remediation playbook (pbs_replica_restart_action) still carried the
+	// caller's original "diagnostic" purpose (chainReq never carried Purpose
+	// at all, and r's X-Purpose header is only ever set once, at the very
+	// top) straight into its own restart_container call — canAutoChain had
+	// already authorized the chain into remediation, but the tool-level
+	// policy gate never learned that, and correctly-per-its-own-rule denied
+	// the write. Applies to every triage->remediation transition in the
+	// system, not just this one: the fix lives in chainEscalation, the one
+	// shared function every auto-chained hop goes through.
+	r.Header.Set("X-Purpose", derivedPurpose(nextPB.PlaybookType, req.Purpose))
 
 	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
