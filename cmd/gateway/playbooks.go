@@ -2894,6 +2894,33 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 	}
 }
 
+// splitOutsideQuotes splits s on sep, skipping any occurrence of sep that
+// falls inside a double-quoted region. Doesn't handle escaped quotes (\") —
+// not needed here, EVIDENCE quotes are plain tool output text, not
+// re-encoded JSON. Toggles a simple in/out-of-quotes flag on each '"'
+// encountered; an odd number of quote characters (a genuinely malformed
+// line) just leaves the parser "inside quotes" for the remainder of the
+// string, which degrades to "don't split further" rather than panicking or
+// misparsing worse.
+func splitOutsideQuotes(s, sep string) []string {
+	var parts []string
+	inQuotes := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && strings.HasPrefix(s[i:], sep) {
+			parts = append(parts, s[start:i])
+			i += len(sep) - 1
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
 // matchHypothesisLine parses a single HYPOTHESIS_N: ... line.
 // Returns nil if the line does not match.
 func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
@@ -2915,8 +2942,19 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 	rest := strings.TrimSpace(line[colonIdx+1:])
 	h := audit.DiagnosticHypothesis{Rank: rank}
 
-	// Split on " | " to get fields.
-	parts := strings.Split(rest, " | ")
+	// Split on " | " to get fields — but not inside a quoted EVIDENCE value.
+	// A model quoting a raw psql -x line verbatim (exactly what the protocol
+	// asks for: "a short verbatim quote from tool output") routinely
+	// produces text like EVIDENCE: "reply_lag_seconds | 52" — a plain
+	// strings.Split here would shred that quote right at its own internal
+	// " | ", truncating h.Evidence down to just "reply_lag_seconds" and
+	// silently losing the actual value. Found live (2026-09-02): this
+	// wasn't specific to any one signal — replica_disconnected's own
+	// confirmation happened to use resource_named_in_quote (checks raw
+	// response text, unaffected), which is what hid this bug until a
+	// numeric signal using the default evidence_quote_contains_value probe
+	// (which depends on this exact parsing) hit it.
+	parts := splitOutsideQuotes(rest, " | ")
 	if len(parts) == 0 {
 		return nil
 	}

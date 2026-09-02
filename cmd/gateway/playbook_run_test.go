@@ -1139,6 +1139,74 @@ ESCALATE_TO: none`
 	}
 }
 
+// TestSplitOutsideQuotes covers the parser primitive directly, including
+// the exact live-found bug: a quoted EVIDENCE value that itself contains
+// " | " (a model quoting a raw psql -x "field | value" line verbatim,
+// exactly what the protocol's own "verbatim quote from tool output"
+// instruction asks for) must not get shredded at that internal separator.
+func TestSplitOutsideQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"no separator", "hello world", []string{"hello world"}},
+		{"plain split, no quotes", "a | b | c", []string{"a", "b", "c"}},
+		{
+			"separator inside quotes is not split",
+			`text | EVIDENCE: "reply_lag_seconds | 52"`,
+			[]string{"text", `EVIDENCE: "reply_lag_seconds | 52"`},
+		},
+		{
+			"two quoted segments joined by prose, both preserved whole",
+			`text | EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread`,
+			[]string{"text", `EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread`},
+		},
+		{"empty string", "", []string{""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitOutsideQuotes(tc.in, " | ")
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitOutsideQuotes(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("splitOutsideQuotes(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseDiagnosticReport_EvidenceQuoteContainsPipe is a regression test
+// for a real bug found live (2026-09-02, db-replica-stalled): the model
+// quoted a raw psql -x line verbatim as its EVIDENCE — exactly per protocol
+// — but that line's own " | " field separator collided with the
+// hypothesis-line parser's field delimiter, truncating h.Evidence down to
+// just "reply_lag_seconds" and silently dropping the actual value ("52").
+// That in turn made evidence_quote_contains_value (internal/evidence)
+// wrongly report the signal as unconfirmed even though the model
+// demonstrably cited the real data — forcing an unnecessary human gate on a
+// textbook-correct diagnosis.
+func TestParseDiagnosticReport_EvidenceQuoteContainsPipe(t *testing.T) {
+	text := `HYPOTHESIS_1: Replica process is stalled or unresponsive; no feedback received in 52 seconds despite active streaming connection | CONFIDENCE: 0.95 | EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread
+HYPOTHESIS_2: Network partition that has not torn down the TCP session | CONFIDENCE: 0.05 | REJECTED: still active
+ROOT_CAUSE: HYPOTHESIS_1`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("expected non-nil DiagnosticReport")
+	}
+	h1 := report.Hypotheses[0]
+	if !strings.Contains(h1.Evidence, "52") {
+		t.Errorf("h1.Evidence = %q, want it to contain %q (the real fired value) — got truncated at the quote's own internal \" | \"", h1.Evidence, "52")
+	}
+	if h1.Confidence != 0.95 {
+		t.Errorf("h1.Confidence = %v, want 0.95 — must not have been consumed by the mis-split either", h1.Confidence)
+	}
+}
+
 func TestParseDiagnosticReport_NoHypotheses_ReturnsNil(t *testing.T) {
 	text := `FINDINGS: Something happened.
 ESCALATE_TO: none`
