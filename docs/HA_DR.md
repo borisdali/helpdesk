@@ -93,8 +93,16 @@ Reachable via `faulttest run --ids db-replica-disconnected --external --replica-
 <...>` against any real environment with a streaming replica — including the bundled
 `make faulttest`/`faulttest-fast` targets, which already provision one
 (`testing/docker/docker-compose.repl.yaml`). `db-replica-container-stopped` (§3) is
-Docker-only by design (it stops the replica's own container directly) and isn't
-reachable via `--external`, but runs the same way under `make faulttest`/`faulttest-fast`.
+Docker-only today (`inject.type: docker`, stopping the replica's own container
+directly), but not for a fundamental reason — the *inject* side could reuse the
+same superuser `COPY ... TO PROGRAM` shell-escape `db-replica-disconnected`
+already proves, retargeted at the replica's own connection (`pg_ctl stop -m fast`
+instead of rewriting `pg_hba.conf`). The real blocker is *teardown*: once the
+postmaster is down, there's no SQL connection left to bring it back up, so
+closing this one over `--external` needs either `ssh_exec` (an external
+supervisor — systemd, `pg_ctlcluster` — to restart a killed postmaster) or an
+assumption this repo doesn't currently make about the target's process
+management. Runs under `make faulttest`/`faulttest-fast` today.
 
 ## 3. Replica present but stalled (the reply-lag edge case)
 
@@ -110,7 +118,7 @@ Fault [`db-replica-stalled`](https://github.com/borisdali/helpdesk/blob/40c1d8b6
 
 **A real, structural parser bug found live while confirming that backstop, not specific to this signal**: the gateway's hypothesis-line parser split a model's response on every literal `" | "` it found — but a model quoting a raw `psql -x` line verbatim as its evidence (exactly what the protocol's own "verbatim quote from tool output" instruction asks for, and exactly what `reply_lag_seconds | 56` looks like) contains that same separator *inside* the quote. The naive split shredded the quote at its own internal `" | "`, truncating the parsed evidence down to just `"reply_lag_seconds"` — silently losing the actual value and making a textbook-correct diagnosis register as unconfirmed. `db-replica-disconnected`'s own confirmation happened to use a different check (`resource_named_in_quote`, reading raw response text rather than the parsed field) — which is what hid this bug until a signal using the default confirmation probe actually depended on correct parsing. Fixed by making the parser quote-aware (`splitOutsideQuotes`, `cmd/gateway/playbooks.go`) rather than working around it in just this one rule — the bug was in a code path every default-confirmation signal shares, present or future.
 
-**Verified, not just claimed**: the fault freezes a real replica container (`docker pause` — Docker's cgroup freezer, chosen specifically because it stops the process without closing its TCP connection, unlike stop/kill) and confirms the connection genuinely survives (`pg_stat_replication` still shows the row) while `reply_lag_seconds` climbs. `requires_replica: true`, Docker-only by design (freezing a container isn't expressible over `--external`) — same category as `db-replica-container-stopped`, runs under `make faulttest`/`faulttest-fast`.
+**Verified, not just claimed**: the fault freezes a real replica container (`docker pause` — Docker's cgroup freezer, chosen specifically because it stops the process without closing its TCP connection, unlike stop/kill) and confirms the connection genuinely survives (`pg_stat_replication` still shows the row) while `reply_lag_seconds` climbs. `requires_replica: true`, Docker-only today (`docker pause`), but unlike `db-replica-container-stopped` this one has no teardown asymmetry — a real bridge exists: the same superuser `COPY ... TO PROGRAM` shell-escape `db-replica-disconnected` already proves could send `kill -STOP`/`kill -CONT` to the walreceiver's own OS pid (`pg_stat_wal_receiver.pid`, queried on the replica), reproducing the freeze-without-disconnect effect without any container access. Not yet built — tracked as a follow-up, contingent on the target replica granting superuser (or `pg_execute_server_program`) SQL access. Runs under `make faulttest`/`faulttest-fast` today.
 
 ## 4. SysAdmin-domain escalation: telling a crashed, rejected, and frozen replica apart
 
