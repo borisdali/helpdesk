@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_replica_connectivity_triage
 name: "Sysadmin — Replica Connectivity Diagnosis"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -27,11 +27,12 @@ symptoms:
   - "DB agent diagnosed a disconnected replica via an absent pg_stat_replication row and an inactive, WAL-retaining replication slot"
   - "downstream consumers report the replica has not reflected new writes for an extended period"
 root_cause_classes:
-  version: "1.0"
+  version: "1.1"
   classes:
     - replica-container-crashed
     - replica-connection-rejected-by-primary
     - replica-host-unreachable
+    - replica-process-frozen-or-paused
 guidance: |
   You are the second stage of a two-agent diagnostic chain. The DB agent has
   already confirmed the replica is absent from pg_stat_replication with a
@@ -67,6 +68,15 @@ guidance: |
   - oomkilled=true → kernel killed the process due to memory pressure.
   - exitcode=1 or higher (and oomkilled=false) → process exited with error.
   - restarting=true → container is in a restart loop.
+  - Status=paused → the container's own processes are entirely frozen
+    (Docker's cgroup freezer), not crashed and not exited — the replica
+    can't send replication feedback because nothing inside it is executing
+    at all, not because the primary rejected it. Do NOT call
+    restart_container: this is not the crashed-and-safe-to-restart case
+    pbs_replica_restart_action exists for (that playbook's own precondition
+    check requires exitcode=0 clean-shutdown logs, which a paused container
+    has none of — it never exited), and no tool in your toolset can unpause
+    a container today. Report it and stop.
   - Status=running → the container is up. A disconnect with a running
     container means something is rejecting or blocking the connection, not a
     replica-side crash — proceed to Step 2 to confirm.
@@ -99,6 +109,9 @@ guidance: |
   Escalation rules (emit exactly one signal):
   - check_host runtime=kubectl:
       ESCALATE_TO: none
+  - Status=paused: the process is frozen, not crashed — nothing to restart,
+    and no tool exists to unpause it.
+      ESCALATE_TO: none
   - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/rejection
     signals (i.e. the container itself stopped, the primary never rejected it):
       TARGET: <the same connection_string this prompt gave you, verbatim>
@@ -121,4 +134,5 @@ escalation:
   - "container logs show repeated primary-side rejection — this is a primary-side/config issue, not a replica problem"
   - "no recent log activity and container unreachable — suspected network partition or host failure, needs manual investigation"
   - "container is already healthy and connected — investigate the database layer, not the container"
+  - "container status is paused — frozen, not crashed; no restart_container call, no tool exists to unpause it"
 target_hints: []

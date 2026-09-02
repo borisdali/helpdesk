@@ -1189,6 +1189,17 @@ type ReplicationPeer struct {
 	WriteLagBytes   int64  `json:"write_lag_bytes"`
 	FlushLagBytes   int64  `json:"flush_lag_bytes"`
 	ReplayLagBytes  int64  `json:"replay_lag_bytes"`
+	// ReplyLagSeconds is derived from pg_stat_replication.reply_time — how
+	// long since this standby last sent a feedback message, in one snapshot
+	// (no stored baseline needed, unlike a "hasn't moved" check would). This
+	// is the field that distinguishes a genuinely healthy connection from
+	// one that's present in pg_stat_replication (so absent-row checks like
+	// ReplicationSummary.InactiveSlotsWithLag miss it entirely) but has
+	// silently stopped communicating — e.g. a frozen/CPU-starved replica
+	// process, or a network partition that doesn't tear down the TCP
+	// connection. 0 for a freshly-connected replica that hasn't sent its
+	// first reply yet (reply_time NULL) — that's normal startup, not stale.
+	ReplyLagSeconds int64 `json:"reply_lag_seconds"`
 }
 
 // ReplicationSlot is one row from pg_replication_slots. Unlike
@@ -1232,23 +1243,42 @@ type ReplicationSummary struct {
 	Role                  string
 	ConnectedReplicaCount int
 	InactiveSlotsWithLag  []string // slot_name, for any slot with Active=false and LagBytes>0
+	// MaxReplyLagSeconds/StalledReplicaName cover the case InactiveSlotsWithLag
+	// can't: a replica that IS present in pg_stat_replication (so an
+	// absent-row check reads it as healthy) but has stopped sending reply
+	// feedback. MaxReplyLagSeconds is the largest ReplyLagSeconds among
+	// currently-streaming replicas (0 if none connected or none streaming);
+	// StalledReplicaName is whichever replica that value belongs to
+	// (ApplicationName, falling back to ClientAddr) — computed
+	// unconditionally alongside it, not gated on any threshold, since "which
+	// one is worst" is well-defined regardless of whether it crosses one.
+	MaxReplyLagSeconds int64
+	StalledReplicaName string
 }
 
-// replicationEvidenceSchema declares get_replication_status' one probe:
-// disconnected, true only when all three conditions hold together (see
-// ReplicationSummary's doc comment). There is nothing to threshold-tune
-// here (it's a fixed logical condition, not a numeric duration like
-// get_active_connections' idle-in-transaction probe) — the YAML layer still
-// controls whether this probe is active at all and what signal name/detail
-// it produces, matching the same authoring convention as every other tool.
+// replicationEvidenceSchema declares get_replication_status' probes:
+// disconnected (bool, true only when all three conditions hold together —
+// see ReplicationSummary's doc comment, nothing to threshold-tune, a fixed
+// logical condition) and max_reply_lag_seconds (numeric — unlike
+// disconnected, this DOES have a genuine tunable duration, so it's exposed
+// as a plain numeric probe rather than pre-deciding "stalled" in Go, the
+// same pattern get_active_connections' idle_in_transaction_seconds uses).
+// The YAML layer controls whether each probe is active and what
+// signal/detail it produces, matching every other tool's convention.
 var replicationEvidenceSchema = evidence.NewToolSchema[ReplicationSummary]("get_replication_status", func(s ReplicationSummary) string {
 	if len(s.InactiveSlotsWithLag) > 0 {
 		return s.InactiveSlotsWithLag[0]
+	}
+	if s.StalledReplicaName != "" {
+		return s.StalledReplicaName
 	}
 	return ""
 }).
 	Bool("disconnected", func(s ReplicationSummary) bool {
 		return s.Role == "Primary" && s.ConnectedReplicaCount == 0 && len(s.InactiveSlotsWithLag) > 0
+	}).
+	Numeric("max_reply_lag_seconds", func(s ReplicationSummary) float64 {
+		return float64(s.MaxReplyLagSeconds)
 	}).
 	Register()
 
@@ -1280,6 +1310,7 @@ func parseReplicationStatus(output string) GetReplicationStatusResult {
 				WriteLagBytes:   parseInt64Field(rec["write_lag_bytes"]),
 				FlushLagBytes:   parseInt64Field(rec["flush_lag_bytes"]),
 				ReplayLagBytes:  parseInt64Field(rec["replay_lag_bytes"]),
+				ReplyLagSeconds: parseInt64Field(rec["reply_lag_seconds"]),
 			})
 		}
 	}
@@ -1312,6 +1343,31 @@ func replicationSummaryFrom(r GetReplicationStatusResult) ReplicationSummary {
 			summary.InactiveSlotsWithLag = append(summary.InactiveSlotsWithLag, slot.SlotName)
 		}
 	}
+	// Only ever computed against the primary — a downstream replica in a
+	// simple (non-cascading) topology has no rows in its own
+	// pg_stat_replication, so this would naturally stay zero there anyway,
+	// but the explicit guard matches disconnected's own Role=="Primary"
+	// check for clarity rather than relying on incidental data absence.
+	// Restricted to state=="streaming": a replica still in "catchup" after a
+	// fresh clone can legitimately have a large gap and infrequent replies
+	// for a while — the same false-positive risk pbs_replication_lag's own
+	// guidance already calls out for lag-based checks — so it's excluded
+	// here rather than double-counted as "stalled."
+	if r.Role == "Primary" {
+		for _, peer := range r.Replicas {
+			if peer.State != "streaming" {
+				continue
+			}
+			if peer.ReplyLagSeconds > summary.MaxReplyLagSeconds {
+				summary.MaxReplyLagSeconds = peer.ReplyLagSeconds
+				name := peer.ApplicationName
+				if name == "" {
+					name = peer.ClientAddr
+				}
+				summary.StalledReplicaName = name
+			}
+		}
+	}
 	return summary
 }
 
@@ -1328,7 +1384,8 @@ func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs
 		sync_state,
 		pg_wal_lsn_diff(sent_lsn, write_lsn) as write_lag_bytes,
 		pg_wal_lsn_diff(sent_lsn, flush_lsn) as flush_lag_bytes,
-		pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes
+		pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes,
+		COALESCE(extract(epoch from (now() - reply_time))::bigint, 0) as reply_lag_seconds
 	FROM pg_stat_replication;
 
 	SELECT

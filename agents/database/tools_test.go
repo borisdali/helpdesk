@@ -774,6 +774,49 @@ func TestReplicationSummaryFrom(t *testing.T) {
 			},
 			want: ReplicationSummary{Role: "Primary", InactiveSlotsWithLag: []string{"dead_slot_1", "dead_slot_2"}},
 		},
+		{
+			name: "streaming replica with high reply_lag_seconds — stalled",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1, MaxReplyLagSeconds: 90, StalledReplicaName: "replica1"},
+		},
+		{
+			name: "catchup state excluded even with high reply_lag_seconds — expected during a fresh clone",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "catchup", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "non-primary role excluded even with a streaming row and high reply_lag_seconds",
+			in: GetReplicationStatusResult{
+				Role:     "Replica",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Replica", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "multiple streaming replicas — only the worst becomes MaxReplyLagSeconds/StalledReplicaName",
+			in: GetReplicationStatusResult{
+				Role: "Primary",
+				Replicas: []ReplicationPeer{
+					{ApplicationName: "replica_ok", State: "streaming", ReplyLagSeconds: 2},
+					{ApplicationName: "replica_stalled", State: "streaming", ReplyLagSeconds: 120},
+				},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 2, MaxReplyLagSeconds: 120, StalledReplicaName: "replica_stalled"},
+		},
+		{
+			name: "empty ApplicationName falls back to ClientAddr",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ClientAddr: "10.0.0.5", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1, MaxReplyLagSeconds: 90, StalledReplicaName: "10.0.0.5"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -783,6 +826,12 @@ func TestReplicationSummaryFrom(t *testing.T) {
 			}
 			if fmt.Sprint(got.InactiveSlotsWithLag) != fmt.Sprint(tt.want.InactiveSlotsWithLag) {
 				t.Errorf("got InactiveSlotsWithLag=%v, want %v", got.InactiveSlotsWithLag, tt.want.InactiveSlotsWithLag)
+			}
+			if got.MaxReplyLagSeconds != tt.want.MaxReplyLagSeconds {
+				t.Errorf("got MaxReplyLagSeconds=%d, want %d", got.MaxReplyLagSeconds, tt.want.MaxReplyLagSeconds)
+			}
+			if got.StalledReplicaName != tt.want.StalledReplicaName {
+				t.Errorf("got StalledReplicaName=%q, want %q", got.StalledReplicaName, tt.want.StalledReplicaName)
 			}
 		})
 	}
@@ -1131,6 +1180,7 @@ sync_state      | async
 write_lag_bytes | 0
 flush_lag_bytes | 0
 replay_lag_bytes| 1024
+reply_lag_seconds| 3
 
 -[ RECORD 1 ]---+-----
 slot_name       | replica1_slot
@@ -1152,8 +1202,8 @@ lag_bytes       | 0
 		t.Fatalf("got %d replicas, want 1", len(result.Replicas))
 	}
 	r := result.Replicas[0]
-	if r.ApplicationName != "replica1" || r.State != "streaming" || r.ReplayLagBytes != 1024 {
-		t.Errorf("got %+v, want application_name=replica1 state=streaming replay_lag_bytes=1024", r)
+	if r.ApplicationName != "replica1" || r.State != "streaming" || r.ReplayLagBytes != 1024 || r.ReplyLagSeconds != 3 {
+		t.Errorf("got %+v, want application_name=replica1 state=streaming replay_lag_bytes=1024 reply_lag_seconds=3", r)
 	}
 	if len(result.Slots) != 1 {
 		t.Fatalf("got %d slots, want 1", len(result.Slots))
@@ -1171,6 +1221,7 @@ func withReplicationEvidenceRules(t *testing.T) {
 	orig := replicationEvidenceRules
 	replicationEvidenceRules = []evidence.Rule{
 		{Tool: "get_replication_status", Probe: "disconnected", Operator: "==", Threshold: true, Signal: "replica_disconnected", Detail: "replica disconnected — inactive slot %s"},
+		{Tool: "get_replication_status", Probe: "max_reply_lag_seconds", Operator: ">", Threshold: float64(60), Signal: "replica_stalled", Detail: "replica %s stalled, reply_lag_seconds=%v"},
 	}
 	t.Cleanup(func() { replicationEvidenceRules = orig })
 }
@@ -1236,6 +1287,77 @@ lag_bytes       | 8388608
 	}
 	if ev.Tool != "get_replication_status" {
 		t.Errorf("Tool = %q, want get_replication_status", ev.Tool)
+	}
+}
+
+// TestGetReplicationStatusTool_StalledReplica_RecordsObjectiveEvidence
+// verifies the row-present-but-stale case: unlike
+// TestGetReplicationStatusTool_DisconnectedReplica_RecordsObjectiveEvidence
+// above, this replica IS present in pg_stat_replication (state=streaming) —
+// a naive absent-row check would call this healthy.
+func TestGetReplicationStatusTool_StalledReplica_RecordsObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+user            | replicator
+application_name| replica1
+state           | streaming
+sync_state      | async
+write_lag_bytes | 0
+flush_lag_bytes | 0
+replay_lag_bytes| 0
+reply_lag_seconds| 145
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+slot_type       | physical
+active          | t
+lag_bytes       | 0
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "replica_stalled" {
+		t.Errorf("Signal = %q, want replica_stalled", ev.Signal)
+	}
+	if ev.Resource != "replica1" {
+		t.Errorf("Resource = %q, want replica1", ev.Resource)
+	}
+	if ev.Value != float64(145) {
+		t.Errorf("Value = %v, want 145", ev.Value)
+	}
+}
+
+// TestGetReplicationStatusTool_StalledReplica_BelowThreshold_NoObjectiveEvidence
+// confirms a replica that's merely slow to reply (below the threshold) does
+// not fire — only a genuinely stale one does.
+func TestGetReplicationStatusTool_StalledReplica_BelowThreshold_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+application_name| replica1
+state           | streaming
+reply_lag_seconds| 12
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+active          | t
+lag_bytes       | 0
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Fatalf("expected 0 objective_evidence events, got %d: %+v", len(events), events)
 	}
 }
 

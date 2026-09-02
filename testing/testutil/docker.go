@@ -70,6 +70,23 @@ func DockerComposeKill(ctx context.Context, signal, service string) error {
 	return err
 }
 
+// DockerComposePause freezes every process in a service's container (cgroup
+// freezer, SIGSTOP-equivalent) without closing its TCP connections — unlike
+// stop/kill, the process doesn't get a chance to run at all, so it can't send
+// a clean shutdown message or a FIN. Used to simulate a genuinely frozen/
+// CPU-starved host: from another server's point of view, an existing
+// connection stays open and "alive" while the frozen side goes silent.
+func DockerComposePause(ctx context.Context, service string) error {
+	_, err := DockerCompose(ctx, "pause", service)
+	return err
+}
+
+// DockerComposeUnpause reverses DockerComposePause.
+func DockerComposeUnpause(ctx context.Context, service string) error {
+	_, err := DockerCompose(ctx, "unpause", service)
+	return err
+}
+
 // DockerExec runs a command inside a running container.
 func DockerExec(ctx context.Context, container string, cmd ...string) (string, error) {
 	args := append([]string{"exec", "-i", container}, cmd...)

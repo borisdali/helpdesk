@@ -45,3 +45,23 @@
   signal: replica_disconnected
   detail: "replica disconnected — inactive replication slot %s with retained WAL"
   confirmation_probe: resource_named_in_quote
+
+# replica_stalled (v0.27.0) covers the case replica_disconnected can't: a
+# replica that IS present in pg_stat_replication (state=streaming) — so an
+# absent-row check reads it as healthy — but has stopped sending reply
+# feedback (pg_stat_replication.reply_time). A frozen/CPU-starved replica
+# process or a network partition that doesn't tear down the TCP connection
+# both look like this. Threshold: 60s, six times Postgres's own default
+# wal_receiver_status_interval (10s) — comfortably past a single missed
+# heartbeat (noise, not a real signal) without waiting anywhere near long
+# enough for the underlying problem to get worse. Uses the default
+# confirmation probe (evidence_quote_contains_value), same as
+# idle_in_transaction_stuck above — both are numeric threshold signals where
+# quoting the real value back is natural, unlike replica_disconnected's bool
+# signal above.
+- tool: get_replication_status
+  probe: max_reply_lag_seconds
+  operator: ">"
+  threshold: 60
+  signal: replica_stalled
+  detail: "replica %s has not sent a reply in %v seconds — connected but not communicating"

@@ -1,6 +1,6 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
-version: "1.4"
+version: "1.5"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -23,11 +23,12 @@ description: |
   source of lag (WAL sender state, network, replica load) and assess the risk
   to read workloads and failover readiness.
 root_cause_classes:
-  version: "1.0"
+  version: "1.1"
   classes:
     - replica-cannot-keep-up-with-write-volume
     - stale-replication-slot-accumulating-wal
     - replica-disconnected
+    - replica-stalled-but-connected
     - transient-batch-write-spike
 symptoms:
   - "replica lag > acceptable threshold"
@@ -35,6 +36,7 @@ symptoms:
   - "read replicas returning stale data"
   - "WAL receiver stopped or in error state"
   - "pg_stat_replication shows large sent_lsn vs replay_lsn delta"
+  - "replica appears connected but reply_lag_seconds is abnormally high"
 guidance: |
   Begin with get_replication_status to get the full picture: sent_lsn,
   write_lsn, flush_lsn, replay_lsn gaps for each replica, plus WAL sender
@@ -75,10 +77,24 @@ guidance: |
   cannot complete the handoff — use Ending A's shape instead but with
   ESCALATE_TO: none and FINDINGS noting the missing target.
 
+  Stalled-but-connected replica: a row present in pg_stat_replication with
+  state=streaming is NOT proof of health by itself — also check
+  reply_lag_seconds (how long since this replica last sent any feedback at
+  all, independent of WAL position). A healthy, actively-replicating
+  connection sends feedback roughly every 10 seconds; a value well beyond
+  that (tens of seconds or more) means the connection is present but the
+  replica process itself has stopped communicating — frozen, CPU-starved, or
+  a network partition that never tore down the TCP session. This is Ending C,
+  not Ending A: the replica LSN gap alone may look small or unremarkable
+  (nothing has been exchanged recently to create one), so do not let a
+  small replay_lag reassure you if reply_lag_seconds is also large. Same
+  reasoning and same handoff mechanics as Ending B — you cannot diagnose the
+  replica's own process/host state from the primary's side alone.
+
   Required output — write these exact lines at the end of your response,
   no markdown, no extra text on any line. The handoff signal (TRANSITION_TO
   or ESCALATE_TO) is mandatory: omitting it stalls the operator review gate.
-  Two mutually exclusive endings, pick exactly one based on what you found:
+  Three mutually exclusive endings, pick exactly one based on what you found:
 
   Ending A — replica is lagging but connected (the normal case):
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
@@ -97,9 +113,19 @@ guidance: |
   FINDINGS: replica disconnected (absent from pg_stat_replication); stale_slot=<slot_name>; lag_bytes=<N>; handing off to sysadmin for host/container-level diagnosis
   TARGET: <the replica's host:port, copied verbatim from Additional context>
   ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage
+
+  Ending C — replica is present in pg_stat_replication but has stopped sending
+  reply feedback (stalled, not disconnected — see the guidance above):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: replica <app_name> present but stalled; reply_lag_seconds=<N>; handing off to sysadmin for host/process-level diagnosis
+  TARGET: <the replica's host:port, copied verbatim from Additional context>
+  ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage
 escalation:
   - "replay_lag > 5 minutes on any replica"
   - "replication slot with no active connection and lsn delta > 10GB"
   - "WAL sender state is not 'streaming' and not 'catchup'"
   - "replica has been disconnected (no entry in pg_stat_replication)"
+  - "replica present in pg_stat_replication but reply_lag_seconds exceeds normal heartbeat interval by a wide margin"
 target_hints: []

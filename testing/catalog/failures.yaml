@@ -686,6 +686,82 @@ failures:
     # escalating to none.
     timeout: 180s
 
+  - id: db-replica-stalled
+    name: "Replica present but not communicating (frozen walreceiver)"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's own process is frozen (Docker cgroup freezer — a
+      stand-in for a real CPU-starved/hung host) — unlike db-replica-disconnected
+      and db-replica-container-stopped, the connection is never torn down: the
+      replica's row in pg_stat_replication stays present with state=streaming
+      the whole time. A check that only asks "is there a row?" misreads this as
+      healthy. The correct signal is reply_lag_seconds — how long since this
+      replica last sent any feedback at all — climbing well past a normal
+      heartbeat interval while the connection otherwise looks unremarkable.
+    requires_replica: true
+    # inject_timeout must clear the inject spec's own 75s wait with real
+    # margin — a tight budget here previously caused a real bug (SIGKILL
+    # racing the injection's own guard at nearly the same deadline, see
+    # db-replica-disconnected's own history). 120s gives ~45s of headroom.
+    inject_timeout: 120s
+    prerequisites: >
+      A real streaming replica must already be attached to the target primary
+      — this fault freezes that replica's own container; it fails loudly (docker
+      pause on a nonexistent/already-stopped container errors) rather than
+      silently no-op'ing.
+    inject:
+      type: docker
+      action: pause
+      service: replica
+      # 75s: comfortably past the shipped objective_evidence.yaml threshold
+      # (60s, six times Postgres's own default wal_receiver_status_interval)
+      # with margin, so the signal has genuinely fired — not a race against
+      # the exact threshold — by the time the diagnosis prompt is sent.
+      wait: 75s
+    teardown:
+      type: docker
+      action: unpause
+      service: replica
+      # Give the replica a moment to resume sending feedback and catch back
+      # up before the next --repeat rep's injection runs its own precondition
+      # checks — same reasoning as db-replica-container-stopped's teardown wait.
+      wait: 5s
+    diagnosis_playbook_series_id: pbs_replication_lag
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new
+      writes in over a minute, but the replica's own status page still shows
+      it as "connected." The primary connection_string is
+      "{{connection_string}}" — use it verbatim for ALL of your own tool
+      calls (check_connection, get_replication_status, get_active_connections,
+      get_server_info, etc.) — you have no tools capable of querying a
+      different server, so never pass anything else to them. If you determine
+      the replica is present but stalled and need to hand off to sysadmin for
+      a host/process-level check, the replica's host:port is
+      "{{replica_host_port}}" — this is NOT a connection string (no dbname/
+      user/password) and exists only to be quoted verbatim in a TARGET: line
+      per your playbook guidance, never passed to any of your own tools.
+      Please investigate replication health and determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "stalled"
+          - "reply_lag"
+          - "not communicating"
+          - "frozen"
+          - "no reply"
+          - "stopped sending"
+      expected_diagnosis:
+        category: "replica_stalled"
+        narrative: "The agent should recognize a replica row present in pg_stat_replication (state=streaming, not absent) combined with an abnormally high reply_lag_seconds as Ending C — present but stalled, not Ending A's ordinary lag and not Ending B's disconnect — and hand off to sysadmin, emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage. The sysadmin hop should find the replica container Status=paused (frozen, not crashed, not exited) and correctly conclude ESCALATE_TO: none — this fault's injection never crashes the container, so pbs_replica_restart_action's own crashed-and-safe-to-restart precondition (exitcode=0, clean shutdown logs) is never satisfied and must not be reached."
+    # 270s: two-hop chain (DB triage + sysadmin triage, both ending in
+    # ESCALATE_TO: none — no third remediation hop for this fault, a paused
+    # container isn't the crashed case pbs_replica_restart_action handles)
+    # plus the inject spec's own 75s wait, with real margin above both.
+    timeout: 270s
+
   - id: db-idle-in-transaction
     name: "Session stuck with uncommitted writes"
     category: database
