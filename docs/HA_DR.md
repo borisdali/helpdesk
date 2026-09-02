@@ -10,8 +10,9 @@ domain.
 
 1. [Replication lag](#1-replication-lag)
 2. [Replica disconnection (the absent-row edge case)](#2-replica-disconnection-the-absent-row-edge-case)
-3. [SysAdmin-domain escalation: telling a crashed replica from a rejected one](#3-sysadmin-domain-escalation-telling-a-crashed-replica-from-a-rejected-one)
-4. [Roadmap](#4-roadmap)
+3. [Replica present but stalled (the reply-lag edge case)](#3-replica-present-but-stalled-the-reply-lag-edge-case)
+4. [SysAdmin-domain escalation: telling a crashed, rejected, and frozen replica apart](#4-sysadmin-domain-escalation-telling-a-crashed-rejected-and-frozen-replica-apart)
+5. [Roadmap](#5-roadmap)
 
 ---
 
@@ -95,20 +96,38 @@ Reachable via `faulttest run --ids db-replica-disconnected --external --replica-
 Docker-only by design (it stops the replica's own container directly) and isn't
 reachable via `--external`, but runs the same way under `make faulttest`/`faulttest-fast`.
 
-## 3. SysAdmin-domain escalation: telling a crashed replica from a rejected one
+## 3. Replica present but stalled (the reply-lag edge case)
 
-From the primary's own vantage point, two very different real-world conditions look
-identical: absent `pg_stat_replication` row, inactive `pg_replication_slots` row with
-retained WAL. Two faults exercise both:
+Fault [`db-replica-stalled`](https://github.com/borisdali/helpdesk/blob/40c1d8b613f27b0bb30aa0d7488eae517f46cb32/testing/catalog/failures.yaml#L689). Prompted by external feedback on an earlier draft of this page: §2's absent-row check handles a replica that vanishes entirely, but what about one whose row is still *present* — so an absent-row check reads it as healthy — while the replica itself has silently stopped communicating?
+
+**The failure mode**: a replica's connection to the primary can survive (TCP session intact, `pg_stat_replication` still shows a row with `state=streaming`) while the replica process itself is frozen — CPU-starved, hung, or a network partition that never tears down the socket. Byte-based lag alone doesn't catch this: `write_lag_bytes`/`flush_lag_bytes`/`replay_lag_bytes` can all read `0` (nothing new to replicate, or the gap simply hasn't grown yet), giving no signal that anything is wrong.
+
+**Why aiHelpDesk doesn't make that mistake**: [`get_replication_status`](https://github.com/borisdali/helpdesk/blob/40c1d8b613f27b0bb30aa0d7488eae517f46cb32/agents/database/tools.go#L1202) also selects `reply_lag_seconds`, derived from `pg_stat_replication.reply_time` — how long since this replica last sent *any* feedback, independent of WAL position. A healthy connection replies roughly every `wal_receiver_status_interval` (Postgres default: 10s); a value well beyond that means the connection is present but the replica behind it has gone silent. The triage guidance (Ending C in [`replication-lag-triage.yaml`](../playbooks/replication-lag-triage.yaml)) treats this as its own condition, distinct from both Ending A (ordinary lag) and Ending B (absent entirely) — same handoff to SysAdmin as Ending B, since the primary's own side can't tell *why* the replica went quiet.
+
+**A real, narrow constraint this fault had to be designed around**: Postgres has its own protocol-level timeout, `wal_sender_timeout` (default: 60s/1min) — if a connection goes silent for that long, the *primary itself* proactively terminates it, and the row disappears from `pg_stat_replication` entirely. Past that point this is Ending B, not Ending C, regardless of what caused the silence. That ceiling isn't optional headroom to design around loosely — it's a hard deadline. Confirmed live (2026-09-02): an earlier version of this fault paused the replica for 75s and thresholded the objective-evidence signal at 60s (matched exactly to `wal_sender_timeout`, no margin) — the primary always won that race, tearing the connection down before the signal could ever fire, so the fault only ever produced an ordinary disconnect and never tested what it claimed to. Fixed by choosing values with real margin on both sides: a 20s threshold (comfortably past a couple of missed heartbeats, nowhere near the 60s ceiling) and a 40s pause (past the threshold, 20s of margin below the ceiling).
+
+**A second, independent backstop, same mechanism as §2's**: `get_replication_status` also feeds the `replica_stalled` objective-evidence signal (`agents/database/objective_evidence.yaml`) — deterministic, code-derived, reaches the same conclusion without any LLM involved. Confirmed (not just gated) once the model's own required `EVIDENCE` quote demonstrably cites the real `reply_lag_seconds` value.
+
+**A real, structural parser bug found live while confirming that backstop, not specific to this signal**: the gateway's hypothesis-line parser split a model's response on every literal `" | "` it found — but a model quoting a raw `psql -x` line verbatim as its evidence (exactly what the protocol's own "verbatim quote from tool output" instruction asks for, and exactly what `reply_lag_seconds | 56` looks like) contains that same separator *inside* the quote. The naive split shredded the quote at its own internal `" | "`, truncating the parsed evidence down to just `"reply_lag_seconds"` — silently losing the actual value and making a textbook-correct diagnosis register as unconfirmed. `db-replica-disconnected`'s own confirmation happened to use a different check (`resource_named_in_quote`, reading raw response text rather than the parsed field) — which is what hid this bug until a signal using the default confirmation probe actually depended on correct parsing. Fixed by making the parser quote-aware (`splitOutsideQuotes`, `cmd/gateway/playbooks.go`) rather than working around it in just this one rule — the bug was in a code path every default-confirmation signal shares, present or future.
+
+**Verified, not just claimed**: the fault freezes a real replica container (`docker pause` — Docker's cgroup freezer, chosen specifically because it stops the process without closing its TCP connection, unlike stop/kill) and confirms the connection genuinely survives (`pg_stat_replication` still shows the row) while `reply_lag_seconds` climbs. `requires_replica: true`, Docker-only by design (freezing a container isn't expressible over `--external`) — same category as `db-replica-container-stopped`, runs under `make faulttest`/`faulttest-fast`.
+
+## 4. SysAdmin-domain escalation: telling a crashed, rejected, and frozen replica apart
+
+From the primary's own vantage point, three very different real-world conditions can
+look alike or ambiguous at the SQL level alone. Three faults exercise all of them:
 
 - [`db-replica-disconnected`](https://github.com/borisdali/helpdesk/blob/ea74bcad0961ccb28e4cc662ef78078cfef4e3c7/testing/catalog/failures.yaml#L549)
-  (§2 above): the primary rejects the connection (`pg_hba.conf`), while the replica container
+  (§2): the primary rejects the connection (`pg_hba.conf`), while the replica container
   itself is healthy and running the whole time.
 - [`db-replica-container-stopped`](https://github.com/borisdali/helpdesk/blob/ea74bcad0961ccb28e4cc662ef78078cfef4e3c7/testing/catalog/failures.yaml#L627):
   the replica's own container has been stopped cleanly, while the primary never rejects
   anything, there's simply nothing connected.
+- [`db-replica-stalled`](https://github.com/borisdali/helpdesk/blob/40c1d8b613f27b0bb30aa0d7488eae517f46cb32/testing/catalog/failures.yaml#L689)
+  (§3): the replica's own container is frozen (`docker pause`), while the connection to
+  the primary is still technically intact the whole time.
 
-Both faults get initially diagnosed by the DB Agent, which determines that it needs additional OS level info and so it escalates (the same way for both faults) to the SysAdmin Agent: `ESCALATE_TO:
+All three get initially diagnosed by the DB Agent, which determines that it needs additional OS level info and so it escalates (the same way for all three) to the SysAdmin Agent: `ESCALATE_TO:
 pbs_sysadmin_replica_connectivity_triage`, handing off the replica's own `host:port` via
 a structured `TARGET:` signal line (not a full connection string — deliberately stripped
 to `{{replica_host_port}}` so the DB Agent's own tools can't be pointed at the replica
@@ -117,7 +136,7 @@ replica with its own tools instead of escalating, leads to inconsistent diagnosi
 
 The SysAdmin hop (`pbs_sysadmin_replica_connectivity_triage`) inspects the replica's own
 container state and logs — `Status`, `ExitCode`, `OOMKilled` and the actual log content
-— and reaches opposite, correct conclusions from the two faults above:
+— and reaches three different, correct conclusions from the three faults above:
 
 - Container running, logs show repeated `pg_hba.conf` rejection messages: nothing to
   restart, the replica is healthy, but refused → `ESCALATE_TO: none`.
@@ -125,6 +144,12 @@ container state and logs — `Status`, `ExitCode`, `OOMKilled` and the actual lo
   or corruption signal → `TRANSITION_TO: pbs_replica_restart_action`, a genuine
   remediation playbook that restarts the container and confirms it's healthy and
   streaming again before reporting success.
+- Container `Status=paused` — frozen, not crashed and not exited. The connection dropped
+  because nothing inside the container is executing at all, not because of anything a
+  restart would fix; `pbs_replica_restart_action`'s own precondition (`exitcode=0`, clean
+  shutdown logs) is never satisfied by a paused container, and no tool in the SysAdmin
+  Agent's own toolset can unpause one today → `ESCALATE_TO: none`, reported for manual
+  intervention rather than guessed at.
 
 **Two real, general bugs found live while building this, both fixed in the shared
 chain-escalation code, not this fault specifically:**
@@ -148,10 +173,15 @@ triage → SysAdmin restart), replica genuinely stopped and genuinely restarted,
 independently against `pg_stat_replication` (not just the agent's own self-report) after
 each run.
 
-## 4. Roadmap
+## 5. Roadmap
 
 Not yet built — tracked, not forgotten:
 
+- **Unpause a frozen replica container.** §4's `Status=paused` branch correctly refuses
+  to restart a frozen container (that's not what it needs) but has no tool capable of the
+  actual fix (`docker unpause`) either — it can only report the finding for a human to
+  act on. A narrowly-scoped `unpause_container` SysAdmin tool, mirroring
+  `restart_container`'s own precondition-checked shape, is the natural next step.
 - **Replica promotion / failover.** `pg_promote()` exists in the codebase today only
   as a manual step buried in the PITR-recovery playbook's guidance — there's no
   first-class `promote_replica` tool or dedicated failover playbook yet.

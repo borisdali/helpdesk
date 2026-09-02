@@ -254,7 +254,7 @@ accounted for it) forces a human-reviewed gate; evidence the model correctly cit
 corroboration, not a red flag.
 
 Unlike Layers 1–2, this is agent-and-tool-scoped by design, not universal: today it
-covers 6 signals on the K8s agent (`get_pods`, `get_events`) and 2 on the database agent
+covers 6 signals on the K8s agent (`get_pods`, `get_events`) and 3 on the database agent
 (`get_active_connections`, `get_replication_status`). Extending coverage is a rule
 addition per tool (often pure YAML, no code change) — see
 [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full mechanism, what's shipped,
@@ -271,7 +271,7 @@ line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 |---|---|---|---|
 | Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify | ✅ scoped to instrumented tools |
 | Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) | ✅ scoped to instrumented tools |
-| Read-only tool output content | — | — | ✅ for the ~8 signals with a declarative rule; unscoped tools still uncovered |
+| Read-only tool output content | — | — | ✅ for the ~9 signals with a declarative rule; unscoped tools still uncovered |
 
 **`client.VerifyTrace` — Layer 2 at the Gateway boundary:**
 

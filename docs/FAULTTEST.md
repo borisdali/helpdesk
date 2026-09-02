@@ -1255,7 +1255,7 @@ faulttest run --external \
 
 ### 9.1 Overview
 
-Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 31 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 36 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
 A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 

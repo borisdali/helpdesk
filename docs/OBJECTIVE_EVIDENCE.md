@@ -178,12 +178,13 @@ underlying `objective_evidence` audit events, so it stays inspectable long after
 | `get_events` | `disk_pressure` | default |
 | `get_events` | `memory_pressure` | default |
 
-**Database agent** (`agents/database/objective_evidence.yaml`, 2 rules):
+**Database agent** (`agents/database/objective_evidence.yaml`, 3 rules):
 
 | Tool | Signal | Confirmation |
 |---|---|---|
 | `get_active_connections` | `idle_in_transaction_stuck` | default |
 | `get_replication_status` | `replica_disconnected` | `resource_named_in_quote` |
+| `get_replication_status` | `replica_stalled` | default |
 
 `replica_disconnected` is a good example of a signal that isn't a property of any single
 row — it's synthesized from three related queries (`get_replication_status` combines
@@ -193,9 +194,24 @@ inactive slot retaining WAL) before being probed like any other typed item. Deli
 not "zero connected replicas alone," which would false-positive on a primary that
 legitimately never had a replica attached.
 
+`replica_stalled` shares that same synthesized-item shape but catches the opposite blind
+spot: a replica *present* in `pg_stat_replication` (so `replica_disconnected` can't fire —
+it explicitly requires zero connected replicas) whose connection has gone silent. The
+probe is `max_reply_lag_seconds` — how long since the worst-lagging `state=="streaming"`
+replica last sent any feedback at all (`pg_stat_replication.reply_time`), thresholded at
+20s. That number isn't arbitrary: it has to clear a couple of missed heartbeats
+(Postgres's own default `wal_receiver_status_interval` is 10s) while staying with real
+margin *below* Postgres's own `wal_sender_timeout` (default 60s) — past that ceiling the
+primary itself proactively tears the connection down, turning this into
+`replica_disconnected` instead. See [HA_DR.md §3](HA_DR.md#3-replica-present-but-stalled-the-reply-lag-edge-case)
+for the live-found timing bug this constraint caused, and the real hypothesis-line
+parser bug (`splitOutsideQuotes`, `cmd/gateway/playbooks.go`) found while confirming it —
+not specific to this one signal, a fix to a code path every default-confirmation signal
+shares.
+
 **Not yet instrumented:** the sysadmin agent (`check_host`/`get_host_logs` — container
 exit codes and log content are exactly the kind of typed, verifiable data this mechanism
-is built for) and every other database/K8s tool beyond the eight rules above.
+is built for) and every other database/K8s tool beyond the nine rules above.
 
 ## 7. Authoring a new rule
 
@@ -257,7 +273,7 @@ a red flag — only a genuine, checkable contradiction still forces a gate.
 - **A broader, unscoped version of this idea is still backlogged.** Cross-checking any
   `EVIDENCE:` quote against the real `tool_execution` audit output — regardless of
   whether a declarative rule exists for that specific tool/signal — would generalize this
-  mechanism's confirmation half beyond the eight rules above. Not started; distinct from
+  mechanism's confirmation half beyond the nine rules above. Not started; distinct from
   the action-provenance delegation verification in
   [AIGOVERNANCE.md §1.1 Layer 2](AIGOVERNANCE.md#11-llm-fabrication-detection), which
   this would complement rather than replace.
