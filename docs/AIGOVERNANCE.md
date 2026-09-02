@@ -260,6 +260,11 @@ addition per tool (often pure YAML, no code change) — see
 [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full mechanism, what's shipped,
 and how to add a rule.
 
+Surfaced the same way Layer 2's `has_mismatch` is: `vault incidents` prints confirmed/
+unconfirmed evidence inline per chapter (`⚠`/`✓`), and a `--repeat N` certification run's
+aggregate confirmed-vs-unconfirmed split is queryable via `vault accuracy`'s `Confirmed:`
+line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
+
 **Coverage:**
 
 | Session path | Layer 1 | Layer 2 | Layer 3 |

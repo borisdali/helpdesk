@@ -407,7 +407,7 @@ Cert history (last 3)
   2026-08-14 19:14 UTC   STABLE   CLEAN  attr=consistent (5 runs)
 ```
 
-Each row is one recertification, newest first. The `↳` line under a row — when present — explains what changed since the row below it: `IsStable`/`IsClean`/`AttributionConsistent` flips, `warning_distribution` deltas (which specific signal appeared, disappeared, or changed count), and `playbook_version`/`taxonomy_version` changes. A row with no `↳` line means nothing tracked here changed since the previous cert. The section is silently omitted below two recorded certs — there's no trend to show yet.
+Each row is one recertification, newest first. The `↳` line under a row — when present — explains what changed since the row below it: `IsStable`/`IsClean`/`AttributionConsistent` flips, `warning_distribution` and `confirmed_distribution` deltas (which specific signal appeared, disappeared, or changed count), and `playbook_version`/`taxonomy_version` changes. A row with no `↳` line means nothing tracked here changed since the previous cert. The section is silently omitted below two recorded certs — there's no trend to show yet.
 
 > **Not to be confused with [`vault history`](#vault-history)**, a different, unrelated command — this section is the *stability cert's* own recertification trend for one fault; `vault history` lists every stored *version of a playbook* (authoring/provenance lineage, `pb_` IDs, `from=` trace). Same word, different axis.
 
@@ -533,6 +533,29 @@ either way. Computed per chapter, not per-Journey/whole-trace, so a mismatch on 
 force-mode auto-chain doesn't flag every chapter sharing that trace_id. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
 and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
+
+**Objective-evidence lines appear inline too (v0.27.0)**, same placement, right under a
+chapter's `Findings` — the incident-narrative counterpart to
+[AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#11-llm-fabrication-detection). `⚠` marks a
+signal the chapter's own response never demonstrably engaged with (real, code-derived tool
+evidence — worth investigating); `✓` marks one the response correctly cited — corroboration,
+not a concern:
+
+```
+── TRIAGE ──────────────────────────────────────────────────
+Playbook:  pbs_replication_lag
+Findings:  Replica disconnected — inactive slot retaining WAL
+           ⚠ unconfirmed evidence — replica_disconnected
+
+── ESCALATION 1/1 ───────────────────────────────────────────
+Playbook:  pbs_sysadmin_replica_connectivity_triage   Outcome: resolved
+Findings:  Replica container healthy; primary-side pg_hba.conf rejection
+           ✓ confirmed evidence — replica_disconnected
+```
+
+Same fail-open caveat as above: absence means either "confirmed" or "no objective_evidence
+events in this chapter's window," not a positive attestation. See
+[OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full probe/confirmation mechanism.
 
 The `[auto_judge]` tag on a feedback line means the verdict was submitted automatically by the LLM judge (`feedback_source: "auto_judge"`), not by a human operator. Human-submitted feedback carries no tag. Both sources are counted equally in `vault accuracy` and `vault calibration`.
 

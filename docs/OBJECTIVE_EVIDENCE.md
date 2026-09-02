@@ -150,6 +150,21 @@ with `+`) rather than the first check found short-circuiting the second.
 
 Full request/response shapes: [PLAYBOOKS.md § Objective-evidence gate](PLAYBOOKS.md#objective-evidence-gate).
 
+**Surfaced after the fact too (v0.27.0), not just at request time.** The live response fields
+above are ephemeral — gone once the HTTP response is delivered, unless a caller happened to
+capture it. Two persistent views recompute the same confirmed/unconfirmed split from the
+underlying `objective_evidence` audit events, so it stays inspectable long after the run:
+
+- **Per-run, per-hop:** `vault incidents` prints `⚠ unconfirmed evidence — ...` /
+  `✓ confirmed evidence — ...` inline on the specific chapter, mirroring how
+  `has_mismatch`/`has_target_drift` already surface (see
+  [VAULT.md § vault incidents](VAULT.md#vault-incidents)).
+- **Aggregate, per-fault:** a `--repeat N` certification run's `ConfirmedDistribution` — a real
+  column on `fault_stability_cert`, `warning_distribution`'s positive counterpart — is shown via
+  `vault accuracy <fault-id>`'s `Confirmed:` line (see
+  [CONSISTENCY.md § Confirmed-evidence field](CONSISTENCY.md#confirmed-evidence-field-v0270)
+  and [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis)).
+
 ## 6. What's shipped today
 
 **K8s agent** (`agents/k8s/objective_evidence.yaml`, 6 rules):
@@ -255,4 +270,6 @@ a red flag — only a genuine, checkable contradiction still forces a gate.
 | [PLAYBOOKS.md § Objective-evidence gate](PLAYBOOKS.md#objective-evidence-gate) | Full request/response JSON shapes at the API level |
 | [SECOND_OPINION.md](SECOND_OPINION.md) | The broader independent-verification philosophy this mechanism serves |
 | [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) | How `objective_evidence_signals` feeds the CLEAN axis on a stability cert |
+| [VAULT.md § vault incidents](VAULT.md#vault-incidents) | Per-hop confirmed/unconfirmed evidence in the incident narrative CLI |
+| [CONSISTENCY.md § Confirmed-evidence field](CONSISTENCY.md#confirmed-evidence-field-v0270) | `ConfirmedDistribution`, the aggregate per-fault view |
 | [HA_DR.md §2](HA_DR.md#2-replica-disconnection-the-absent-row-edge-case) | The `db-replica-disconnected` case study this mechanism's confirmation-registry redesign came from |

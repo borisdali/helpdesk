@@ -82,6 +82,64 @@ func TestFaultStabilityHandlers_UpsertAndGet(t *testing.T) {
 	}
 }
 
+// TestFaultStabilityHandlers_DistributionFields_Roundtrip verifies
+// warning_distribution and confirmed_distribution both survive the real
+// POST(JSON decode)→Upsert(real SQLite)→GET(JSON encode) path — previously
+// unexercised at this layer for either field. The unit-level
+// FaultStabilityStore tests (internal/audit) cover Upsert/scanCert directly;
+// this is the layer those can't catch a bug in: the HTTP handler's own JSON
+// decode/encode, which is exactly where a JSON tag typo or missing field
+// wiring would actually surface in production.
+func TestFaultStabilityHandlers_DistributionFields_Roundtrip(t *testing.T) {
+	srv := newFaultStabilityServer(t)
+
+	payload := map[string]any{
+		"fault_id":               "db-replica-disconnected",
+		"fault_name":             "Replica disconnected",
+		"diagnosis_model":        "claude-haiku-4-5-20251001",
+		"n_runs":                 3,
+		"is_stable":              true,
+		"is_clean":               false,
+		"warning_count":          1,
+		"warning_distribution":   map[string]int{"objective_evidence:idle_in_transaction_stuck": 1},
+		"confirmed_distribution": map[string]int{"objective_evidence:replica_disconnected": 2},
+	}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/fleet/fault-stability", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.handleUpsert(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST: got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/fleet/fault-stability/db-replica-disconnected", nil)
+	req2.SetPathValue("faultID", "db-replica-disconnected")
+	rec2 := httptest.NewRecorder()
+	srv.handleGet(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET: got %d, want 200", rec2.Code)
+	}
+
+	var got audit.FaultStabilityCert
+	if err := json.NewDecoder(rec2.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.WarningDistribution["objective_evidence:idle_in_transaction_stuck"] != 1 {
+		t.Errorf("WarningDistribution: got %v, want idle_in_transaction_stuck=1", got.WarningDistribution)
+	}
+	if got.ConfirmedDistribution["objective_evidence:replica_disconnected"] != 2 {
+		t.Errorf("ConfirmedDistribution: got %v, want replica_disconnected=2", got.ConfirmedDistribution)
+	}
+	if got.NRuns != 3 {
+		t.Errorf("NRuns: got %d, want 3", got.NRuns)
+	}
+	if got.IsClean {
+		t.Error("IsClean: want false — a warning fired")
+	}
+}
+
 func TestFaultStabilityHandlers_Upsert_MissingFaultID(t *testing.T) {
 	srv := newFaultStabilityServer(t)
 
