@@ -1126,8 +1126,23 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		gateReason, _ := extra["gate_reason"].(string)
+		// Persist primary.diagReport (this run's own, hop-scoped report), not
+		// finalReport (the cross-hop merge). finalReport exists for the
+		// immediate HTTP response's combined view (extra["diagnostic_report"]
+		// above) — mergeDiagnosticReports re-ranks hypotheses from different
+		// hops purely by raw confidence and demotes the primary run's own
+		// declared root cause whenever a later, unrelated hop reports higher
+		// confidence. Persisting that onto the primary run's own record
+		// previously corrupted incident_narrative.go's TRIAGE chapter (which
+		// reads run.DiagnosticReport directly) and, via evidence.Confirmed's
+		// primaryHypothesis lookup, silently broke objective-evidence
+		// confirmation for the triage hop's own signal whenever a downstream
+		// hop happened to score higher — found live 2026-09-02 on
+		// db-replica-stalled (sysadmin's paused-container hypothesis at 1.0
+		// confidence outranked the triage hop's own reply_lag_seconds
+		// hypothesis at 0.95, even though they answer different questions).
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine, gateReason)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, primary.diagReport, primary.sawSignalLine, gateReason)
 	}
 }
 

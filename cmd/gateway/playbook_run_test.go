@@ -3103,6 +3103,106 @@ func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnDiagnosticReport mirrors
+// TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
+// DiagnosticReport instead of escalated_to/transitioned_to: the primary run's
+// persisted diagnostic_report must stay scoped to its own hypotheses, not the
+// cross-hop merge (mergeDiagnosticReports) used for the immediate HTTP
+// response's combined view. Found live 2026-09-02 on db-replica-stalled — the
+// sysadmin hop's unrelated "container paused" hypothesis (confidence 1.0)
+// outranked the triage hop's own reply_lag_seconds hypothesis (confidence
+// 0.95) in the merge, and that merged report got persisted onto the triage
+// run's own record, silently breaking objective-evidence confirmation for the
+// triage hop's own signal (evidence.Confirmed looks up the primary
+// hypothesis's Evidence field via primaryHypothesis, which after the bad
+// merge pointed at the wrong hop's unrelated evidence text).
+func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnDiagnosticReport(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_diagtest_triage",
+		SeriesID:      "pbs_diagtest_triage",
+		Name:          "Diag Test Triage",
+		ExecutionMode: "agent",
+		AgentName:     "test_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_diagtest_sysadmin",
+		SeriesID:      "pbs_diagtest_sysadmin",
+		Name:          "Diag Test Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "test_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_diagtest_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_diagtest_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "test_db_agent",
+		"FINDINGS: replica reply lag is high\n"+
+			"HYPOTHESIS_1: Replica is stalled but connected | CONFIDENCE: 0.95 | EVIDENCE: \"reply_lag_seconds | 47\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\n"+
+			"ESCALATE_TO: pbs_diagtest_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "test_sysadmin_agent",
+		"FINDINGS: container is paused\n"+
+			"HYPOTHESIS_1: Container frozen by cgroup freezer | CONFIDENCE: 1.0 | EVIDENCE: \"paused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"test_db_agent":       dbCard,
+		"test_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"replica lag","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+
+	report, _ := patch["diagnostic_report"].(map[string]any)
+	if report == nil {
+		t.Fatalf("primary run's persisted diagnostic_report is missing or not an object: %v", patch["diagnostic_report"])
+	}
+	hyps, _ := report["hypotheses"].([]any)
+	if len(hyps) != 1 {
+		t.Fatalf("primary run's persisted diagnostic_report has %d hypotheses, want 1 (its own only, not merged with the chained hop's) — got: %+v", len(hyps), hyps)
+	}
+	h, _ := hyps[0].(map[string]any)
+	if h["is_primary"] != true {
+		t.Errorf("primary run's own hypothesis has is_primary = %v, want true — it must stay primary on its own record regardless of a later hop's higher confidence", h["is_primary"])
+	}
+	if evidence, _ := h["evidence"].(string); !strings.Contains(evidence, "reply_lag_seconds") {
+		t.Errorf("primary run's persisted evidence = %q, want it to contain \"reply_lag_seconds\" (its own hop's evidence, not the sysadmin hop's unrelated \"paused\")", evidence)
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal
 // mirrors TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
 // the findingsRecommendMonitor early-exit branch instead of the informed-gate
