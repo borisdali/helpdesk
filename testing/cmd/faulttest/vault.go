@@ -466,6 +466,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 	WarningCount            int            `json:"warning_count"`
 	IsClean                 bool           `json:"is_clean"`
 	WarningDistribution     map[string]int `json:"warning_distribution"`
+	ConfirmedDistribution   map[string]int `json:"confirmed_distribution"`
 	PlaybookVersion         string         `json:"playbook_version"`
 	PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
 	PlaybookID              string         `json:"playbook_id"`
@@ -509,6 +510,7 @@ func fetchStabilityCert(gatewayURL, apiKey, faultID string) *struct {
 		WarningCount            int            `json:"warning_count"`
 		IsClean                 bool           `json:"is_clean"`
 		WarningDistribution     map[string]int `json:"warning_distribution"`
+		ConfirmedDistribution   map[string]int `json:"confirmed_distribution"`
 		PlaybookVersion         string         `json:"playbook_version"`
 		PlaybookUpdatedAt       string         `json:"playbook_updated_at"`
 		PlaybookID              string         `json:"playbook_id"`
@@ -1647,6 +1649,9 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	if dist := warningDistributionString(cert.WarningDistribution, cert.NRuns); dist != "" {
 		fmt.Printf("  Warning types : %s\n", dist)
 	}
+	if dist := warningDistributionString(cert.ConfirmedDistribution, cert.NRuns); dist != "" {
+		fmt.Printf("  Confirmed     : %s\n", dist)
+	}
 	if cert.PlaybookSeriesID != "" {
 		fmt.Printf("  Playbook      : %s\n", cert.PlaybookSeriesID)
 	}
@@ -1804,6 +1809,9 @@ func diffCertHistoryEntries(newer, older audit.FaultStabilityCert) []string {
 	}
 	if d := diffCountMap(older.WarningDistribution, newer.WarningDistribution); d != "" {
 		changes = append(changes, "warning_distribution: "+d)
+	}
+	if d := diffCountMap(older.ConfirmedDistribution, newer.ConfirmedDistribution); d != "" {
+		changes = append(changes, "confirmed_distribution: "+d)
 	}
 	if older.PlaybookVersion != "" && newer.PlaybookVersion != "" && older.PlaybookVersion != newer.PlaybookVersion {
 		changes = append(changes, fmt.Sprintf("playbook_version: %s→%s", older.PlaybookVersion, newer.PlaybookVersion))
@@ -3662,6 +3670,9 @@ func postStabilityCert(ctx context.Context, cfg *HarnessConfig, f Failure, sr St
 	if len(cr.WarningDistribution) > 0 {
 		payload["warning_distribution"] = cr.WarningDistribution
 	}
+	if len(cr.ConfirmedDistribution) > 0 {
+		payload["confirmed_distribution"] = cr.ConfirmedDistribution
+	}
 	if attr != nil {
 		payload["primary_attribution"] = attr.PrimaryAttribution
 		payload["attribution_consistent"] = attr.AttributionConsistent
@@ -4767,18 +4778,20 @@ type narrativeJourneyRef = audit.IncidentJourneyRef
 
 // narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
 type narrativeEscalationHop struct {
-	RunID                string               `json:"run_id"`
-	Playbook             string               `json:"playbook"`
-	Outcome              string               `json:"outcome"`
-	EscalatedTo          string               `json:"escalated_to,omitempty"`
-	Findings             string               `json:"findings,omitempty"`
-	DiagnosticReport     *narrativeDiagReport `json:"diagnostic_report,omitempty"`
-	Steps                []narrativeStep      `json:"steps,omitempty"`
-	TraceID              string               `json:"trace_id,omitempty"`
-	HasMismatch          bool                 `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
-	SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
+	RunID                        string               `json:"run_id"`
+	Playbook                     string               `json:"playbook"`
+	Outcome                      string               `json:"outcome"`
+	EscalatedTo                  string               `json:"escalated_to,omitempty"`
+	Findings                     string               `json:"findings,omitempty"`
+	DiagnosticReport             *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+	Steps                        []narrativeStep      `json:"steps,omitempty"`
+	TraceID                      string               `json:"trace_id,omitempty"`
+	HasMismatch                  bool                 `json:"has_mismatch,omitempty"`
+	HasTargetDrift               bool                 `json:"has_target_drift,omitempty"`
+	HasProtocolViolation         bool                 `json:"has_protocol_violation,omitempty"`
+	SawSignalLine                bool                 `json:"saw_signal_line,omitempty"`
+	ObjectiveEvidenceConfirmed   []string             `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string             `json:"objective_evidence_unconfirmed,omitempty"`
 }
 
 // incidentNarrative mirrors gateway.IncidentNarrative for JSON decoding.
@@ -4790,15 +4803,17 @@ type incidentNarrative struct {
 	Operator       string     `json:"operator"`
 	TriggerContext string     `json:"trigger_context,omitempty"`
 	Triage         struct {
-		RunID                string               `json:"run_id"`
-		Playbook             string               `json:"playbook"`
-		Findings             string               `json:"findings,omitempty"`
-		DiagnosticReport     *narrativeDiagReport `json:"diagnostic_report,omitempty"`
-		TraceID              string               `json:"trace_id,omitempty"`
-		HasMismatch          bool                 `json:"has_mismatch,omitempty"`
-		HasTargetDrift       bool                 `json:"has_target_drift,omitempty"`
-		HasProtocolViolation bool                 `json:"has_protocol_violation,omitempty"`
-		SawSignalLine        bool                 `json:"saw_signal_line,omitempty"`
+		RunID                        string               `json:"run_id"`
+		Playbook                     string               `json:"playbook"`
+		Findings                     string               `json:"findings,omitempty"`
+		DiagnosticReport             *narrativeDiagReport `json:"diagnostic_report,omitempty"`
+		TraceID                      string               `json:"trace_id,omitempty"`
+		HasMismatch                  bool                 `json:"has_mismatch,omitempty"`
+		HasTargetDrift               bool                 `json:"has_target_drift,omitempty"`
+		HasProtocolViolation         bool                 `json:"has_protocol_violation,omitempty"`
+		SawSignalLine                bool                 `json:"saw_signal_line,omitempty"`
+		ObjectiveEvidenceConfirmed   []string             `json:"objective_evidence_confirmed,omitempty"`
+		ObjectiveEvidenceUnconfirmed []string             `json:"objective_evidence_unconfirmed,omitempty"`
 	} `json:"triage"`
 	Gate *struct {
 		ApprovedBy     string    `json:"approved_by,omitempty"`
@@ -4810,17 +4825,19 @@ type incidentNarrative struct {
 	// strictly between Triage and the (optional) terminal Remediation.
 	Escalations []narrativeEscalationHop `json:"escalations,omitempty"`
 	Remediation *struct {
-		RunID                string          `json:"run_id"`
-		Playbook             string          `json:"playbook"`
-		Outcome              string          `json:"outcome"`
-		Findings             string          `json:"findings,omitempty"`
-		Transcript           string          `json:"transcript,omitempty"`
-		Steps                []narrativeStep `json:"steps,omitempty"`
-		TraceID              string          `json:"trace_id,omitempty"`
-		HasMismatch          bool            `json:"has_mismatch,omitempty"`
-		HasTargetDrift       bool            `json:"has_target_drift,omitempty"`
-		HasProtocolViolation bool            `json:"has_protocol_violation,omitempty"`
-		SawSignalLine        bool            `json:"saw_signal_line,omitempty"`
+		RunID                        string          `json:"run_id"`
+		Playbook                     string          `json:"playbook"`
+		Outcome                      string          `json:"outcome"`
+		Findings                     string          `json:"findings,omitempty"`
+		Transcript                   string          `json:"transcript,omitempty"`
+		Steps                        []narrativeStep `json:"steps,omitempty"`
+		TraceID                      string          `json:"trace_id,omitempty"`
+		HasMismatch                  bool            `json:"has_mismatch,omitempty"`
+		HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
+		HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
+		SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
+		ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
+		ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`
 	} `json:"remediation,omitempty"`
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
@@ -4885,6 +4902,20 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			fmt.Println("           ⚠ protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted")
 		}
 	}
+	// printObjectiveEvidence surfaces Layer 3 (docs/AIGOVERNANCE.md §1.1) inline,
+	// same reasoning as printFlags above for Layers 1-2: a reader shouldn't have
+	// to separately know to look for this. Unconfirmed is the one worth a
+	// warning glyph — real, code-derived tool evidence this chapter's own
+	// response never demonstrably engaged with. Confirmed is reported plainly,
+	// not as a warning — it's proof the model saw and cited the real data.
+	printObjectiveEvidence := func(confirmed, unconfirmed []string) {
+		if len(unconfirmed) > 0 {
+			fmt.Printf("           ⚠ unconfirmed evidence — %s\n", strings.Join(unconfirmed, ", "))
+		}
+		if len(confirmed) > 0 {
+			fmt.Printf("           ✓ confirmed evidence — %s\n", strings.Join(confirmed, ", "))
+		}
+	}
 
 	fmt.Printf("\n%s\n", divider)
 	started := n.StartedAt.UTC().Format("2006-01-02 15:04 UTC")
@@ -4908,6 +4939,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		fmt.Printf("Findings:  %s\n", wordWrap(n.Triage.Findings, 70, "           "))
 	}
 	printFlags(n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
+	printObjectiveEvidence(n.Triage.ObjectiveEvidenceConfirmed, n.Triage.ObjectiveEvidenceUnconfirmed)
 	if n.Triage.DiagnosticReport != nil && len(n.Triage.DiagnosticReport.Hypotheses) > 0 {
 		fmt.Println("\nHypotheses:")
 		for _, h := range n.Triage.DiagnosticReport.Hypotheses {
@@ -4975,6 +5007,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
 		}
 		printFlags(hop.HasMismatch, hop.HasTargetDrift, hop.HasProtocolViolation)
+		printObjectiveEvidence(hop.ObjectiveEvidenceConfirmed, hop.ObjectiveEvidenceUnconfirmed)
 		if hop.DiagnosticReport != nil && len(hop.DiagnosticReport.Hypotheses) > 0 {
 			fmt.Println("\nHypotheses:")
 			for _, h := range hop.DiagnosticReport.Hypotheses {
@@ -5006,6 +5039,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			fmt.Printf("Plan:      %s\n", wordWrap(n.Remediation.Findings, 70, "           "))
 		}
 		printFlags(n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation)
+		printObjectiveEvidence(n.Remediation.ObjectiveEvidenceConfirmed, n.Remediation.ObjectiveEvidenceUnconfirmed)
 		if len(n.Remediation.Steps) > 0 {
 			stepNames := make([]string, 0, len(n.Remediation.Steps))
 			for _, s := range n.Remediation.Steps {

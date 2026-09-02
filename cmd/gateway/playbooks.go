@@ -1487,6 +1487,27 @@ func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
 	appendDedupedSignal(extra, "objective_evidence_signals", signal)
 }
 
+// splitConfirmedUnconfirmed partitions all (every distinct signal fired) into
+// confirmed/unconfirmed using unconfirmed (the subset objectiveEvidenceSignals
+// determined the response never demonstrably engaged with) as the key —
+// shared by appendObjectiveEvidenceBreakdown's response-level view and
+// incident_narrative.go's persisted-incident view, so the two never drift
+// apart on what "confirmed" means.
+func splitConfirmedUnconfirmed(all, unconfirmed []string) (confirmed, unconf []string) {
+	isUnconfirmed := make(map[string]bool, len(unconfirmed))
+	for _, s := range unconfirmed {
+		isUnconfirmed[s] = true
+	}
+	for _, s := range all {
+		if isUnconfirmed[s] {
+			unconf = append(unconf, s)
+		} else {
+			confirmed = append(confirmed, s)
+		}
+	}
+	return confirmed, unconf
+}
+
 // appendObjectiveEvidenceBreakdown records, for one hop's evidence.Confirmed
 // results, which signals were confirmed vs unconfirmed — explicit,
 // unconditional visibility into what objectiveEvidenceSignals only otherwise
@@ -1494,16 +1515,12 @@ func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
 // implying it was confirmed). Deduplicated and accumulated across hops the
 // same way objective_evidence_signals itself is.
 func appendObjectiveEvidenceBreakdown(extra map[string]any, all, unconfirmed []string) {
-	isUnconfirmed := make(map[string]bool, len(unconfirmed))
-	for _, s := range unconfirmed {
-		isUnconfirmed[s] = true
+	confirmed, unconf := splitConfirmedUnconfirmed(all, unconfirmed)
+	for _, s := range confirmed {
+		appendDedupedSignal(extra, "objective_evidence_confirmed", s)
 	}
-	for _, s := range all {
-		if isUnconfirmed[s] {
-			appendDedupedSignal(extra, "objective_evidence_unconfirmed", s)
-		} else {
-			appendDedupedSignal(extra, "objective_evidence_confirmed", s)
-		}
+	for _, s := range unconf {
+		appendDedupedSignal(extra, "objective_evidence_unconfirmed", s)
 	}
 }
 

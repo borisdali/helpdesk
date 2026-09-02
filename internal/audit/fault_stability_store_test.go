@@ -992,6 +992,185 @@ func TestFaultStabilityCert_WarningDistribution_Empty(t *testing.T) {
 	}
 }
 
+func TestFaultStabilityCert_ConfirmedDistribution_Roundtrip(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	dist := map[string]int{"objective_evidence:oom_killed": 4, "objective_evidence:replica_disconnected": 1}
+	cert := &FaultStabilityCert{
+		FaultID:               "k8s-crashloop",
+		DiagnosisModel:        "claude-haiku-4-5-20251001",
+		NRuns:                 5,
+		IsClean:               true,
+		ConfirmedDistribution: dist,
+	}
+	if _, err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.ConfirmedDistribution) != 2 || got.ConfirmedDistribution["objective_evidence:oom_killed"] != 4 ||
+		got.ConfirmedDistribution["objective_evidence:replica_disconnected"] != 1 {
+		t.Errorf("ConfirmedDistribution: got %v, want %v", got.ConfirmedDistribution, dist)
+	}
+}
+
+func TestFaultStabilityCert_ConfirmedDistribution_Empty(t *testing.T) {
+	// Mirrors TestFaultStabilityCert_WarningDistribution_Empty — a cert
+	// where objective evidence never fired at all must round-trip as a
+	// nil/empty map, not a literal "{}" string leaking into the Go value.
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:        "db-auth-failure",
+		DiagnosisModel: "claude-haiku-4-5-20251001",
+		NRuns:          5,
+		IsClean:        true,
+	}
+	if _, err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if len(got.ConfirmedDistribution) != 0 {
+		t.Errorf("ConfirmedDistribution: got %v, want empty", got.ConfirmedDistribution)
+	}
+}
+
+// TestFaultStabilityCert_WarningAndConfirmedDistribution_Independent verifies
+// a cert can carry both distributions at once, distinctly — a real scenario:
+// one run's evidence went unconfirmed (warns) while another run's own
+// evidence, or a different signal within the same run, was confirmed. The
+// two maps must not collide or overwrite each other in storage.
+func TestFaultStabilityCert_WarningAndConfirmedDistribution_Independent(t *testing.T) {
+	ctx := context.Background()
+	store := newFaultStabilityStore(t)
+
+	cert := &FaultStabilityCert{
+		FaultID:               "db-replica-disconnected",
+		DiagnosisModel:        "claude-haiku-4-5-20251001",
+		NRuns:                 3,
+		WarningCount:          1,
+		WarningDistribution:   map[string]int{"objective_evidence:replica_disconnected": 1},
+		ConfirmedDistribution: map[string]int{"objective_evidence:replica_disconnected": 2},
+	}
+	if _, err := store.Upsert(ctx, cert); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got, err := store.GetByFaultAndModel(ctx, cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel: %v", err)
+	}
+	if got.WarningDistribution["objective_evidence:replica_disconnected"] != 1 {
+		t.Errorf("WarningDistribution = %v, want objective_evidence:replica_disconnected=1", got.WarningDistribution)
+	}
+	if got.ConfirmedDistribution["objective_evidence:replica_disconnected"] != 2 {
+		t.Errorf("ConfirmedDistribution = %v, want objective_evidence:replica_disconnected=2", got.ConfirmedDistribution)
+	}
+}
+
+// TestFaultStabilityStore_Migrate_ConfirmedDistributionColumn verifies a
+// pre-v0.27.0 database (has warning_distribution but not
+// confirmed_distribution) migrates cleanly: pre-existing rows survive with
+// ConfirmedDistribution defaulting to empty, and new rows can use the field
+// immediately after migration. Mirrors
+// TestFaultStabilityStore_Migrate_VersioningColumns' structure exactly.
+func TestFaultStabilityStore_Migrate_ConfirmedDistributionColumn(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "migrate_confirmed_dist.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// v0.26.0 schema: composite PK, attribution, CLEAN, and versioning
+	// columns — everything except confirmed_distribution.
+	if _, err := store.DB().Exec(`
+CREATE TABLE fault_stability_cert (
+    fault_id                  TEXT    NOT NULL,
+    fault_name                TEXT    NOT NULL DEFAULT '',
+    playbook_series_id        TEXT    NOT NULL DEFAULT '',
+    model                     TEXT    NOT NULL DEFAULT '',
+    diagnosis_model           TEXT    NOT NULL DEFAULT '',
+    n_runs                    INTEGER NOT NULL DEFAULT 0,
+    pass_rate                 REAL    NOT NULL DEFAULT 0,
+    conf_range_pp             INTEGER NOT NULL DEFAULT 0,
+    is_stable                 INTEGER NOT NULL DEFAULT 0,
+    tested_at                 TEXT    NOT NULL DEFAULT '',
+    primary_attribution       TEXT    NOT NULL DEFAULT '',
+    attribution_consistent    INTEGER NOT NULL DEFAULT 0,
+    attribution_distribution  TEXT    NOT NULL DEFAULT '{}',
+    judge_spread              REAL    NOT NULL DEFAULT 0,
+    taxonomy_version          TEXT    NOT NULL DEFAULT '',
+    warning_count             INTEGER NOT NULL DEFAULT 0,
+    is_clean                  INTEGER NOT NULL DEFAULT 0,
+    warning_distribution      TEXT    NOT NULL DEFAULT '{}',
+    playbook_version          TEXT    NOT NULL DEFAULT '',
+    playbook_updated_at       TEXT    NOT NULL DEFAULT '',
+    playbook_id               TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (fault_id, diagnosis_model)
+)`); err != nil {
+		t.Fatalf("create v0.26.0 schema: %v", err)
+	}
+	// Seed a pre-v0.27.0 row to verify it survives migration untouched.
+	if _, err := store.DB().Exec(
+		`INSERT INTO fault_stability_cert (fault_id, fault_name, n_runs, is_stable, diagnosis_model, is_clean)
+         VALUES ('db-old-fault', 'Old Fault', 5, 1, 'test-model', 1)`,
+	); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	fs := &FaultStabilityStore{db: store.DB(), isPostgres: false}
+	if err := fs.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Pre-existing row must survive, ConfirmedDistribution defaulting to
+	// empty rather than erroring or losing the row.
+	old, err := fs.GetByFaultAndModel(context.Background(), "db-old-fault", "test-model")
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel (old row): %v", err)
+	}
+	if old.FaultName != "Old Fault" {
+		t.Errorf("FaultName after migration: got %q, want Old Fault", old.FaultName)
+	}
+	if len(old.ConfirmedDistribution) != 0 {
+		t.Errorf("ConfirmedDistribution on a pre-migration row: got %v, want empty", old.ConfirmedDistribution)
+	}
+
+	// New rows can use the field immediately after migration.
+	cert := &FaultStabilityCert{
+		FaultID: "db-new-fault", DiagnosisModel: "claude-sonnet-4-6", NRuns: 5, IsStable: true,
+		ConfirmedDistribution: map[string]int{"objective_evidence:oom_killed": 3},
+	}
+	if _, err := fs.Upsert(context.Background(), cert); err != nil {
+		t.Fatalf("Upsert after migration: %v", err)
+	}
+	got, err := fs.GetByFaultAndModel(context.Background(), cert.FaultID, cert.DiagnosisModel)
+	if err != nil {
+		t.Fatalf("GetByFaultAndModel after migration: %v", err)
+	}
+	if got.ConfirmedDistribution["objective_evidence:oom_killed"] != 3 {
+		t.Errorf("ConfirmedDistribution: got %v, want objective_evidence:oom_killed=3", got.ConfirmedDistribution)
+	}
+
+	// The history table must also have picked up the column post-migration.
+	history, err := fs.GetHistory(context.Background(), "db-new-fault", "claude-sonnet-4-6", 10)
+	if err != nil {
+		t.Fatalf("GetHistory after migration: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history entries after migration: got %d, want 1", len(history))
+	}
+	if history[0].ConfirmedDistribution["objective_evidence:oom_killed"] != 3 {
+		t.Errorf("history ConfirmedDistribution: got %v, want objective_evidence:oom_killed=3", history[0].ConfirmedDistribution)
+	}
+}
+
 // ── GetBySeriesAndModel ──────────────────────────────────────────────────────
 
 func TestGetBySeriesAndModel_MultipleFaultsSameSeries(t *testing.T) {

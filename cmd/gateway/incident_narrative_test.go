@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 )
 
 // mockIncidentAuditd builds a mock auditd that serves the minimum set of
@@ -29,6 +31,10 @@ type mockIncidentAuditd struct {
 	// return. Absent key ⇒ empty array (no events found for that trace — the
 	// fail-open case).
 	eventsByTraceID map[string][]audit.Event
+	// oevEventsByTraceID mirrors eventsByTraceID but for
+	// event_type=objective_evidence — a separate map since it's a separate
+	// server-side query (fetchEventsByType), same as the real gateway/auditd.
+	oevEventsByTraceID map[string][]audit.Event
 	// eventsRequestCount counts GET /v1/events?event_type=delegation_verification
 	// requests per trace_id — used to assert the dedup cache in
 	// handleGetIncident actually works.
@@ -74,6 +80,12 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 			}
 			m.eventsRequestCount[traceID]++
 			json.NewEncoder(w).Encode(m.eventsByTraceID[traceID]) //nolint:errcheck
+
+		// Objective-evidence events: GET /v1/events?event_type=
+		// objective_evidence&trace_id=X — same bare-array shape as above.
+		case strings.Contains(path, "/events") && r.URL.Query().Get("event_type") == "objective_evidence":
+			traceID := r.URL.Query().Get("trace_id")
+			json.NewEncoder(w).Encode(m.oevEventsByTraceID[traceID]) //nolint:errcheck
 
 		// Gate event lookup (and any other event_type).
 		case strings.Contains(path, "/events"):
@@ -218,6 +230,66 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	}
 	if !n.Triage.HasProtocolViolation {
 		t.Error("Triage.HasProtocolViolation = false, want true — should surface inline without a separate Journey lookup")
+	}
+}
+
+// TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter verifies that real
+// objective_evidence events, cross-checked against the run's own stored
+// response, surface as ObjectiveEvidenceConfirmed/Unconfirmed inline on the
+// Triage chapter — the Layer 3 (docs/AIGOVERNANCE.md §1.1) counterpart to
+// HasMismatch/HasTargetDrift above, proven through the real handler, not just
+// hopObjectiveEvidence in isolation.
+func TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:     "plr_oev01",
+		SeriesID:  "pbs_replication_lag",
+		Outcome:   audit.OutcomeResolved,
+		StartedAt: time.Now().UTC(),
+		TraceID:   "tr_oev01",
+		AgentTranscript: "HYPOTHESIS_1: replica disconnected | CONFIDENCE: 0.95 | " +
+			`EVIDENCE: "lag_bytes | 95475440"` + "\nROOT_CAUSE: HYPOTHESIS_1",
+		DiagnosticReport: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+			{IsPrimary: true, Confidence: 0.95, Evidence: "lag_bytes | 95475440"},
+		}},
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		oevEventsByTraceID: map[string][]audit.Event{
+			"tr_oev01": {
+				{
+					Timestamp: run.StartedAt.Add(time.Second),
+					ObjectiveEvidence: &audit.ObjectiveEvidence{
+						Tool: "get_replication_status", Signal: "replica_disconnected", Value: float64(95475440),
+					},
+				},
+				{
+					Timestamp: run.StartedAt.Add(2 * time.Second),
+					ObjectiveEvidence: &audit.ObjectiveEvidence{
+						Tool: "get_active_connections", Signal: "idle_in_transaction_stuck", Value: float64(600),
+					},
+				},
+			},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_oev01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if !reflect.DeepEqual(n.Triage.ObjectiveEvidenceConfirmed, []string{"replica_disconnected"}) {
+		t.Errorf("Triage.ObjectiveEvidenceConfirmed = %v, want [replica_disconnected] — the response's own quote contains the real value",
+			n.Triage.ObjectiveEvidenceConfirmed)
+	}
+	if !reflect.DeepEqual(n.Triage.ObjectiveEvidenceUnconfirmed, []string{"idle_in_transaction_stuck"}) {
+		t.Errorf("Triage.ObjectiveEvidenceUnconfirmed = %v, want [idle_in_transaction_stuck] — never quoted anywhere in the response",
+			n.Triage.ObjectiveEvidenceUnconfirmed)
 	}
 }
 
@@ -1179,6 +1251,86 @@ func TestHopVerificationFlags(t *testing.T) {
 			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation {
 				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v), want (mismatch=%v, drift=%v, violation=%v)",
 					gotMismatch, gotTargetDrift, gotProtocolViolation, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation)
+			}
+		})
+	}
+}
+
+func TestHopObjectiveEvidence(t *testing.T) {
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	start := base
+	end := base.Add(10 * time.Second)
+
+	oevEvent := func(ts time.Time, signal string, value any) audit.Event {
+		return audit.Event{Timestamp: ts, ObjectiveEvidence: &audit.ObjectiveEvidence{
+			Tool: "get_replication_status", Signal: signal, Value: value,
+		}}
+	}
+
+	confirmingOutcome := evidence.HopOutcome{
+		RawText: "",
+		Report: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+			{IsPrimary: true, Confidence: 0.95, Evidence: "lag_bytes | 95475440"},
+		}},
+	}
+	nonConfirmingOutcome := evidence.HopOutcome{
+		Report: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+			{IsPrimary: true, Confidence: 0.95, Evidence: "everything looks healthy"},
+		}},
+	}
+
+	tests := []struct {
+		name            string
+		events          []audit.Event
+		start, end      time.Time
+		outcome         evidence.HopOutcome
+		wantConfirmed   []string
+		wantUnconfirmed []string
+	}{
+		{
+			name: "empty events", events: nil, start: start, end: end, outcome: confirmingOutcome,
+		},
+		{
+			name:   "value quoted verbatim in the required evidence line — confirmed",
+			events: []audit.Event{oevEvent(start.Add(time.Second), "replica_disconnected", float64(95475440))},
+			start:  start, end: end, outcome: confirmingOutcome,
+			wantConfirmed: []string{"replica_disconnected"},
+		},
+		{
+			name:   "value never quoted — unconfirmed",
+			events: []audit.Event{oevEvent(start.Add(time.Second), "replica_disconnected", float64(95475440))},
+			start:  start, end: end, outcome: nonConfirmingOutcome,
+			wantUnconfirmed: []string{"replica_disconnected"},
+		},
+		{
+			name:   "event outside the window is excluded, same boundary semantics as hopVerificationFlags",
+			events: []audit.Event{oevEvent(end, "replica_disconnected", float64(95475440))},
+			start:  start, end: end, outcome: confirmingOutcome,
+		},
+		{
+			name:   "event before start is excluded",
+			events: []audit.Event{oevEvent(start.Add(-time.Second), "replica_disconnected", float64(95475440))},
+			start:  start, end: end, outcome: confirmingOutcome,
+		},
+		{
+			name: "two distinct signals, one confirmed one not",
+			events: []audit.Event{
+				oevEvent(start.Add(time.Second), "replica_disconnected", float64(95475440)),
+				oevEvent(start.Add(2*time.Second), "idle_in_transaction_stuck", float64(600)),
+			},
+			start: start, end: end, outcome: confirmingOutcome,
+			wantConfirmed: []string{"replica_disconnected"}, wantUnconfirmed: []string{"idle_in_transaction_stuck"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotConfirmed, gotUnconfirmed := hopObjectiveEvidence(tc.events, tc.start, tc.end, tc.outcome)
+			if !reflect.DeepEqual(gotConfirmed, tc.wantConfirmed) {
+				t.Errorf("confirmed = %v, want %v", gotConfirmed, tc.wantConfirmed)
+			}
+			if !reflect.DeepEqual(gotUnconfirmed, tc.wantUnconfirmed) {
+				t.Errorf("unconfirmed = %v, want %v", gotUnconfirmed, tc.wantUnconfirmed)
 			}
 		})
 	}

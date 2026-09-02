@@ -167,17 +167,19 @@ func TestExtractHopSignatures_CarriesCleanSignals(t *testing.T) {
 func TestExtractHopSignatures_RemediationChapter(t *testing.T) {
 	n := &incidentNarrative{
 		Remediation: &struct {
-			RunID                string          `json:"run_id"`
-			Playbook             string          `json:"playbook"`
-			Outcome              string          `json:"outcome"`
-			Findings             string          `json:"findings,omitempty"`
-			Transcript           string          `json:"transcript,omitempty"`
-			Steps                []narrativeStep `json:"steps,omitempty"`
-			TraceID              string          `json:"trace_id,omitempty"`
-			HasMismatch          bool            `json:"has_mismatch,omitempty"`
-			HasTargetDrift       bool            `json:"has_target_drift,omitempty"`
-			HasProtocolViolation bool            `json:"has_protocol_violation,omitempty"`
-			SawSignalLine        bool            `json:"saw_signal_line,omitempty"`
+			RunID                        string          `json:"run_id"`
+			Playbook                     string          `json:"playbook"`
+			Outcome                      string          `json:"outcome"`
+			Findings                     string          `json:"findings,omitempty"`
+			Transcript                   string          `json:"transcript,omitempty"`
+			Steps                        []narrativeStep `json:"steps,omitempty"`
+			TraceID                      string          `json:"trace_id,omitempty"`
+			HasMismatch                  bool            `json:"has_mismatch,omitempty"`
+			HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
+			HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
+			SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
+			ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
+			ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`
 		}{
 			Playbook: "pbs_k8s_pod_crash_remediate",
 			Outcome:  "resolved",
@@ -207,17 +209,19 @@ func TestExtractHopSignatures_RemediationDedupedAgainstEscalations(t *testing.T)
 			{Playbook: "pbs_shared", Outcome: "escalated", EscalatedTo: "pbs_other"},
 		},
 		Remediation: &struct {
-			RunID                string          `json:"run_id"`
-			Playbook             string          `json:"playbook"`
-			Outcome              string          `json:"outcome"`
-			Findings             string          `json:"findings,omitempty"`
-			Transcript           string          `json:"transcript,omitempty"`
-			Steps                []narrativeStep `json:"steps,omitempty"`
-			TraceID              string          `json:"trace_id,omitempty"`
-			HasMismatch          bool            `json:"has_mismatch,omitempty"`
-			HasTargetDrift       bool            `json:"has_target_drift,omitempty"`
-			HasProtocolViolation bool            `json:"has_protocol_violation,omitempty"`
-			SawSignalLine        bool            `json:"saw_signal_line,omitempty"`
+			RunID                        string          `json:"run_id"`
+			Playbook                     string          `json:"playbook"`
+			Outcome                      string          `json:"outcome"`
+			Findings                     string          `json:"findings,omitempty"`
+			Transcript                   string          `json:"transcript,omitempty"`
+			Steps                        []narrativeStep `json:"steps,omitempty"`
+			TraceID                      string          `json:"trace_id,omitempty"`
+			HasMismatch                  bool            `json:"has_mismatch,omitempty"`
+			HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
+			HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
+			SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
+			ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
+			ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`
 		}{
 			Playbook: "pbs_shared",
 			Outcome:  "resolved",

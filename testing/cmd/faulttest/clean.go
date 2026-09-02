@@ -21,6 +21,15 @@ type CleanReport struct {
 	// than WarningCount. Mirrors AttributionDistribution's shape/purpose:
 	// WarningCount alone can't tell an operator which kind of warning fired.
 	WarningDistribution map[string]int
+	// ConfirmedDistribution is WarningDistribution's positive counterpart:
+	// occurrences of each objective-evidence signal that fired AND was
+	// confirmed by the run's own response (see internal/evidence's
+	// confirmation registry) — proof the model saw and cited the real data,
+	// not a concern. Without this, a report with zero warnings can't
+	// distinguish "objective evidence never fired" from "it fired and was
+	// always correctly confirmed" — both look identical (empty
+	// WarningDistribution) even though the second is a much stronger signal.
+	ConfirmedDistribution map[string]int
 }
 
 // warningTypesFor returns which named warning type(s) fired for a single run
@@ -58,6 +67,18 @@ func warningTypesFor(er EvalResult) []string {
 	return types
 }
 
+// confirmedTypesFor returns which objective-evidence signal(s) were fired
+// AND confirmed for a single run — the WarningDistribution counterpart to
+// warningTypesFor above, using the same "objective_evidence:<signal>" bucket
+// naming so the two distributions read as one consistent vocabulary.
+func confirmedTypesFor(er EvalResult) []string {
+	var types []string
+	for _, sig := range er.ObjectiveEvidenceConfirmed {
+		types = append(types, "objective_evidence:"+sig)
+	}
+	return types
+}
+
 func buildCleanReport(f Failure, results []EvalResult) CleanReport {
 	r := CleanReport{
 		FailureID:   f.ID,
@@ -73,6 +94,12 @@ func buildCleanReport(f Failure, results []EvalResult) CleanReport {
 				r.WarningDistribution = map[string]int{}
 			}
 			r.WarningDistribution[t]++
+		}
+		for _, t := range confirmedTypesFor(res) {
+			if r.ConfirmedDistribution == nil {
+				r.ConfirmedDistribution = map[string]int{}
+			}
+			r.ConfirmedDistribution[t]++
 		}
 	}
 	return r
@@ -131,6 +158,9 @@ func (r CleanReport) Print() {
 	fmt.Printf("    Warnings:     %d/%d run(s) tripped a verified warning signal\n", r.WarningCount, r.N)
 	if dist := warningDistributionString(r.WarningDistribution, r.N); dist != "" {
 		fmt.Printf("    Warning types: %s\n", dist)
+	}
+	if dist := warningDistributionString(r.ConfirmedDistribution, r.N); dist != "" {
+		fmt.Printf("    Confirmed:     %s\n", dist)
 	}
 	if r.isClean() {
 		fmt.Printf("    Clean:        yes\n")
