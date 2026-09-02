@@ -530,6 +530,41 @@ func TestDiffCertHistoryEntries_WarningDistributionDelta(t *testing.T) {
 	}
 }
 
+func TestDiffCertHistoryEntries_ConfirmedDistributionDelta(t *testing.T) {
+	older := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true, ConfirmedDistribution: map[string]int{"objective_evidence:oom_killed": 5, "objective_evidence:pod_restarted": 2}}
+	newer := audit.FaultStabilityCert{IsStable: true, IsClean: true, AttributionConsistent: true, ConfirmedDistribution: map[string]int{"objective_evidence:oom_killed": 5, "objective_evidence:pod_restarted": 4}}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "confirmed_distribution: objective_evidence:pod_restarted 2→4") {
+		t.Errorf("got %v, want confirmed_distribution: objective_evidence:pod_restarted 2→4 (oom_killed unchanged, shouldn't appear)", got)
+	}
+	for _, c := range got {
+		if strings.Contains(c, "oom_killed") {
+			t.Errorf("got %v, unchanged key oom_killed should not appear in diff", got)
+		}
+	}
+}
+
+// TestDiffCertHistoryEntries_WarningAndConfirmedDistribution_BothReported
+// verifies the two distributions are independent diff lines — a change in
+// one must not suppress or merge with a change in the other.
+func TestDiffCertHistoryEntries_WarningAndConfirmedDistribution_BothReported(t *testing.T) {
+	older := audit.FaultStabilityCert{
+		WarningDistribution:   map[string]int{"mismatch": 0},
+		ConfirmedDistribution: map[string]int{"objective_evidence:oom_killed": 1},
+	}
+	newer := audit.FaultStabilityCert{
+		WarningDistribution:   map[string]int{"mismatch": 2},
+		ConfirmedDistribution: map[string]int{"objective_evidence:oom_killed": 5},
+	}
+	got := diffCertHistoryEntries(newer, older)
+	if !containsSubstring(got, "warning_distribution: mismatch 0→2") {
+		t.Errorf("got %v, want warning_distribution: mismatch 0→2", got)
+	}
+	if !containsSubstring(got, "confirmed_distribution: objective_evidence:oom_killed 1→5") {
+		t.Errorf("got %v, want confirmed_distribution: objective_evidence:oom_killed 1→5", got)
+	}
+}
+
 func TestDiffCertHistoryEntries_TaxonomyVersionChange_OnlyWhenBothNonEmpty(t *testing.T) {
 	// Both non-empty and differ: reported.
 	older := audit.FaultStabilityCert{TaxonomyVersion: "2.0"}
@@ -2030,6 +2065,59 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	}
 	if strings.Contains(out, "⚠ target drift") {
 		t.Errorf("output should not show target drift warning, has_target_drift is false, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters verifies
+// printObjectiveEvidence's three call sites (Triage, Escalation, Remediation
+// — mirroring printFlags' own three sites tested separately above) each
+// surface the correct glyph on the correct chapter: ⚠ for unconfirmed
+// evidence, ✓ for confirmed, and never both glyphs bleeding onto the wrong
+// chapter.
+func TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_oevprint1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":                         "plr_oevprint1",
+				"playbook":                       "pbs_replication_lag",
+				"findings":                       "replica disconnected",
+				"objective_evidence_unconfirmed": []string{"replica_disconnected"},
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":                       "plr_oevprint2",
+					"playbook":                     "pbs_sysadmin_replica_connectivity_triage",
+					"outcome":                      "resolved",
+					"findings":                     "container healthy, primary rejected",
+					"objective_evidence_confirmed": []string{"replica_disconnected"},
+				},
+			},
+			"remediation": map[string]any{
+				"run_id":                       "plr_oevprint3",
+				"playbook":                     "pbs_replica_restart_action",
+				"outcome":                      "resolved",
+				"findings":                     "restarted",
+				"objective_evidence_confirmed": []string{"replica_disconnected"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_oevprint1")
+	})
+
+	if !strings.Contains(out, "⚠ unconfirmed evidence — replica_disconnected") {
+		t.Errorf("output missing unconfirmed evidence line for triage, got:\n%s", out)
+	}
+	if got := strings.Count(out, "✓ confirmed evidence — replica_disconnected"); got != 2 {
+		t.Errorf("✓ confirmed evidence appeared %d times, want exactly 2 (escalation + remediation), got:\n%s", got, out)
+	}
+	if got := strings.Count(out, "⚠ unconfirmed evidence"); got != 1 {
+		t.Errorf("⚠ unconfirmed evidence appeared %d times, want exactly 1 (triage only), got:\n%s", got, out)
 	}
 }
 
@@ -4725,6 +4813,57 @@ func TestPostStabilityCert_CleanPayload_AllClean(t *testing.T) {
 	}
 	if _, ok := gotBody["warning_distribution"]; ok {
 		t.Errorf("warning_distribution should be omitted entirely when there are no warnings, got %v", gotBody["warning_distribution"])
+	}
+}
+
+func TestPostStabilityCert_ConfirmedDistributionPayload(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
+	cr := buildCleanReport(Failure{ID: "db-replica-disconnected"}, []EvalResult{
+		{Passed: true, ObjectiveEvidenceConfirmed: []string{"replica_disconnected"}},
+		{Passed: true, ObjectiveEvidenceConfirmed: []string{"replica_disconnected"}},
+		{Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-replica-disconnected"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	// Confirmed evidence is not a warning — is_clean must stay true.
+	if gotBody["is_clean"] != true {
+		t.Errorf("is_clean = %v, want true — confirmed evidence is not a warning", gotBody["is_clean"])
+	}
+	if _, ok := gotBody["warning_distribution"]; ok {
+		t.Errorf("warning_distribution should be omitted — nothing was unconfirmed, got %v", gotBody["warning_distribution"])
+	}
+	dist, ok := gotBody["confirmed_distribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("confirmed_distribution missing or wrong shape: %v", gotBody["confirmed_distribution"])
+	}
+	if dist["objective_evidence:replica_disconnected"] != float64(2) {
+		t.Errorf("confirmed_distribution[objective_evidence:replica_disconnected] = %v, want 2", dist["objective_evidence:replica_disconnected"])
+	}
+}
+
+func TestPostStabilityCert_ConfirmedDistributionPayload_OmittedWhenNeverConfirmed(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}
+	cr := buildCleanReport(Failure{ID: "db-lock-contention"}, []EvalResult{
+		{Passed: true}, {Passed: true}, {Passed: true},
+	})
+	postStabilityCert(context.Background(), cfg, Failure{ID: "db-lock-contention"}, StabilityReport{N: 3, PassCount: 3}, cr, nil)
+
+	if _, ok := gotBody["confirmed_distribution"]; ok {
+		t.Errorf("confirmed_distribution should be omitted entirely when objective evidence never fired, got %v", gotBody["confirmed_distribution"])
 	}
 }
 
