@@ -700,11 +700,11 @@ failures:
       replica last sent any feedback at all — climbing well past a normal
       heartbeat interval while the connection otherwise looks unremarkable.
     requires_replica: true
-    # inject_timeout must clear the inject spec's own 75s wait with real
-    # margin — a tight budget here previously caused a real bug (SIGKILL
-    # racing the injection's own guard at nearly the same deadline, see
-    # db-replica-disconnected's own history). 120s gives ~45s of headroom.
-    inject_timeout: 120s
+    # inject_timeout must clear the inject spec's own 40s wait with real
+    # margin — a tight budget here previously caused a real bug elsewhere
+    # (SIGKILL racing the injection's own guard at nearly the same deadline,
+    # see db-replica-disconnected's own history). 90s gives 50s of headroom.
+    inject_timeout: 90s
     prerequisites: >
       A real streaming replica must already be attached to the target primary
       — this fault freezes that replica's own container; it fails loudly (docker
@@ -714,11 +714,18 @@ failures:
       type: docker
       action: pause
       service: replica
-      # 75s: comfortably past the shipped objective_evidence.yaml threshold
-      # (60s, six times Postgres's own default wal_receiver_status_interval)
-      # with margin, so the signal has genuinely fired — not a race against
-      # the exact threshold — by the time the diagnosis prompt is sent.
-      wait: 75s
+      # 40s: has to thread a real, narrow needle, not just "long enough."
+      # It must clear the shipped objective_evidence.yaml threshold (20s)
+      # with margin so the signal has genuinely fired, but stay well below
+      # Postgres's own wal_sender_timeout (default 60s/1min) — past that,
+      # the PRIMARY itself proactively terminates the connection and the
+      # row disappears from pg_stat_replication entirely, turning this into
+      # an ordinary disconnect instead of the present-but-stalled case this
+      # fault exists to exercise. Confirmed live (2026-09-01): an earlier
+      # 75s wait (already past the 60s cutoff on its own) always lost that
+      # race — see objective_evidence.yaml's own threshold comment for the
+      # full story. 40s leaves 20s of margin on both sides.
+      wait: 40s
     teardown:
       type: docker
       action: unpause
@@ -756,11 +763,11 @@ failures:
       expected_diagnosis:
         category: "replica_stalled"
         narrative: "The agent should recognize a replica row present in pg_stat_replication (state=streaming, not absent) combined with an abnormally high reply_lag_seconds as Ending C — present but stalled, not Ending A's ordinary lag and not Ending B's disconnect — and hand off to sysadmin, emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage. The sysadmin hop should find the replica container Status=paused (frozen, not crashed, not exited) and correctly conclude ESCALATE_TO: none — this fault's injection never crashes the container, so pbs_replica_restart_action's own crashed-and-safe-to-restart precondition (exitcode=0, clean shutdown logs) is never satisfied and must not be reached."
-    # 270s: two-hop chain (DB triage + sysadmin triage, both ending in
+    # 200s: two-hop chain (DB triage + sysadmin triage, both ending in
     # ESCALATE_TO: none — no third remediation hop for this fault, a paused
     # container isn't the crashed case pbs_replica_restart_action handles)
-    # plus the inject spec's own 75s wait, with real margin above both.
-    timeout: 270s
+    # plus the inject spec's own 40s wait, with real margin above both.
+    timeout: 200s
 
   - id: db-idle-in-transaction
     name: "Session stuck with uncommitted writes"

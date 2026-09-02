@@ -1221,7 +1221,7 @@ func withReplicationEvidenceRules(t *testing.T) {
 	orig := replicationEvidenceRules
 	replicationEvidenceRules = []evidence.Rule{
 		{Tool: "get_replication_status", Probe: "disconnected", Operator: "==", Threshold: true, Signal: "replica_disconnected", Detail: "replica disconnected — inactive slot %s"},
-		{Tool: "get_replication_status", Probe: "max_reply_lag_seconds", Operator: ">", Threshold: float64(60), Signal: "replica_stalled", Detail: "replica %s stalled, reply_lag_seconds=%v"},
+		{Tool: "get_replication_status", Probe: "max_reply_lag_seconds", Operator: ">", Threshold: float64(20), Signal: "replica_stalled", Detail: "replica %s stalled, reply_lag_seconds=%v"},
 	}
 	t.Cleanup(func() { replicationEvidenceRules = orig })
 }
