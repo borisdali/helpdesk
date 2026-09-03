@@ -10,6 +10,32 @@ import (
 
 const builtinMinimum = 33
 
+// TestEvidenceSignalConfirmed mirrors cmd/faulttest's own
+// TestEvidenceSignalConfirmed — see EvidenceSignalConfirmed's doc comment
+// (evaluator.go) for why this exists as a duplicated, gateway-gated check
+// rather than an unconditional one.
+func TestEvidenceSignalConfirmed(t *testing.T) {
+	cases := []struct {
+		name      string
+		sig       string
+		confirmed []string
+		want      bool
+	}{
+		{"confirmed present", "replica_stalled", []string{"replica_stalled"}, true},
+		{"confirmed among others", "replica_stalled", []string{"idle_in_transaction_stuck", "replica_stalled"}, true},
+		{"signal fired but not this one", "replica_stalled", []string{"replica_disconnected"}, false},
+		{"no signals confirmed at all — the empty-evidence-query case", "replica_stalled", nil, false},
+		{"confirmed list empty slice", "replica_stalled", []string{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EvidenceSignalConfirmed(tc.sig, tc.confirmed); got != tc.want {
+				t.Errorf("EvidenceSignalConfirmed(%q, %v) = %v, want %v", tc.sig, tc.confirmed, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Find the catalog relative to this test file.
 	catalogPath := findCatalog()

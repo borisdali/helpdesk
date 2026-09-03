@@ -313,6 +313,20 @@ func TestFaultInjection(t *testing.T) {
 			// 4. Evaluate response.
 			result := faultlib.Evaluate(f, resp.Text)
 
+			// When the fault declares an expected deterministic signal and this
+			// run actually went via the gateway (only gateway playbook responses
+			// carry real confirmed-evidence data), a pass requires that signal to
+			// be confirmed — not just keyword/category text matching, which a
+			// vague hedge can satisfy without the model ever demonstrably
+			// engaging with real tool data. See EvidenceSignalConfirmed's doc
+			// comment (testing/faultlib/evaluator.go) for the full story.
+			if cfg.ViaGateway {
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
+					result.Passed = false
+					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				}
+			}
+
 			t.Logf("Evaluation: score=%.0f%%, keywords=%v, diagnosis=%v, tools=%v",
 				result.Score*100, result.KeywordPass, result.DiagnosisPass, result.ToolEvidence)
 
@@ -588,6 +602,16 @@ func TestExternalModeInjection(t *testing.T) {
 			}
 
 			result := faultlib.Evaluate(f, resp.Text)
+
+			// See the identical gate above (first Evaluate call site in this
+			// file) for the full explanation.
+			if cfg.ViaGateway {
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
+					result.Passed = false
+					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				}
+			}
+
 			t.Logf("score=%.0f%%, keywords=%v, diagnosis=%v",
 				result.Score*100, result.KeywordPass, result.DiagnosisPass)
 
