@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
@@ -375,7 +376,7 @@ type IncidentBundleResult struct {
 	PlaybookID string `json:"playbook_id,omitempty"`
 }
 
-func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
+func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
 	start := time.Now()
 	now := start
 	incidentID := generateShortID()
@@ -528,7 +529,7 @@ func createIncidentBundleTool(ctx tool.Context, args CreateIncidentBundleArgs) (
 // bundle ID (best-effort approximation when a real auditd trace is unavailable).
 // Returns the draft YAML and the persisted playbook_id (empty when auditd is not
 // configured on the gateway).
-func requestPlaybookDraft(ctx tool.Context, incidentID, outcome string) (draft, playbookID string, err error) {
+func requestPlaybookDraft(ctx agent.ToolContext, incidentID, outcome string) (draft, playbookID string, err error) {
 	return doPlaybookDraftRequest(context.Background(), os.Getenv("HELPDESK_GATEWAY_URL"), os.Getenv("HELPDESK_CLIENT_API_KEY"), incidentID, outcome)
 }
 
@@ -668,7 +669,7 @@ type ListIncidentsResult struct {
 	Incidents []IndexEntry `json:"incidents"`
 }
 
-func listIncidentsTool(ctx tool.Context, args ListIncidentsArgs) (ListIncidentsResult, error) {
+func listIncidentsTool(ctx agent.ToolContext, args ListIncidentsArgs) (ListIncidentsResult, error) {
 	outputDir := os.Getenv("HELPDESK_INCIDENT_DIR")
 	if outputDir == "" {
 		outputDir = "."

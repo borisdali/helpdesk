@@ -15,13 +15,13 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
@@ -75,7 +75,7 @@ func withMockRunnerSequence(calls ...psqlResponse) func() {
 	return func() { cmdRunner = old }
 }
 
-// mockToolContext implements tool.Context for testing.
+// mockToolContext implements agent.ToolContext for testing.
 type mockToolContext struct {
 	context.Context
 }
@@ -94,7 +94,7 @@ func (mockToolContext) Branch() string                       { return "" }
 func (mockToolContext) Artifacts() agent.Artifacts { return nil }
 func (mockToolContext) State() session.State       { return nil }
 
-// tool.Context methods
+// agent.ToolContext methods
 func (mockToolContext) FunctionCallID() string         { return "test-call-id" }
 func (mockToolContext) Actions() *session.EventActions { return nil }
 func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
@@ -103,7 +103,7 @@ func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResp
 func (mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 func (mockToolContext) RequestConfirmation(string, any) error                { return nil }
 
-func newTestContext() tool.Context {
+func newTestContext() agent.ToolContext {
 	return mockToolContext{context.Background()}
 }
 
@@ -471,6 +471,447 @@ func TestGetActiveConnectionsTool_ActiveOnly(t *testing.T) {
 	}
 }
 
+// --- get_active_connections: typed Connections + objective_evidence ---
+
+func TestGetActiveConnectionsTool_ParsesConnections(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 12345
+user            | app_user
+database        | testdb
+client_addr     | 192.168.1.100
+state           | active
+wait_event_type |
+wait_event      |
+query_seconds   | 5
+query_preview   | SELECT * FROM users WHERE id = 1
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+	if len(result.Connections) != 1 {
+		t.Fatalf("got %d connections, want 1", len(result.Connections))
+	}
+	c := result.Connections[0]
+	if c.PID != 12345 {
+		t.Errorf("PID = %d, want 12345", c.PID)
+	}
+	if c.User != "app_user" || c.Database != "testdb" || c.State != "active" {
+		t.Errorf("got %+v, want user=app_user database=testdb state=active", c)
+	}
+	if c.QuerySeconds != 5 {
+		t.Errorf("QuerySeconds = %d, want 5", c.QuerySeconds)
+	}
+}
+
+func TestGetActiveConnectionsTool_NoConnections_EmptyConnectionsSlice(t *testing.T) {
+	defer withMockRunner("(0 rows)", nil)()
+
+	ctx := newTestContext()
+	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+	if len(result.Connections) != 0 {
+		t.Errorf("got %d connections, want 0", len(result.Connections))
+	}
+}
+
+// withActiveConnectionEvidenceRules installs a real idle-in-transaction rule
+// for the duration of the calling test and restores the prior (production)
+// rules afterward — mirrors how agents/k8s/tools_test.go's TestMain loads
+// the real shipped file, except here it's per-test since not every test in
+// this package wants evidence rules active.
+func withActiveConnectionEvidenceRules(t *testing.T) {
+	t.Helper()
+	orig := activeConnectionEvidenceRules
+	activeConnectionEvidenceRules = []evidence.Rule{
+		{Tool: "get_active_connections", Probe: "idle_in_transaction_seconds", Operator: ">", Threshold: float64(300), Signal: "idle_in_transaction_stuck", Detail: "connection %s idle in transaction for %v seconds"},
+	}
+	t.Cleanup(func() { activeConnectionEvidenceRules = orig })
+}
+
+func TestGetActiveConnectionsTool_IdleInTransactionStuck_RecordsObjectiveEvidence(t *testing.T) {
+	withActiveConnectionEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 777
+user            | app_user
+database        | testdb
+client_addr     | 192.168.1.100
+state           | idle in transaction
+wait_event_type | Client
+wait_event      | ClientRead
+query_seconds   | 900
+query_preview   | UPDATE accounts SET balance = balance - 100 WHERE id = 5
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "idle_in_tx_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_idle_tx", "trace_idle_tx")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	if _, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"}); err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "idle_in_transaction_stuck" {
+		t.Errorf("Signal = %q, want idle_in_transaction_stuck", ev.Signal)
+	}
+	if ev.Resource != "777" {
+		t.Errorf("Resource = %q, want 777 (the PID)", ev.Resource)
+	}
+	if ev.Tool != "get_active_connections" {
+		t.Errorf("Tool = %q, want get_active_connections", ev.Tool)
+	}
+}
+
+func TestGetActiveConnectionsTool_ActiveState_NoObjectiveEvidence(t *testing.T) {
+	withActiveConnectionEvidenceRules(t)
+	// Same query_seconds as the stuck case above, but state=active — the
+	// precondition folded into the probe must exclude this, not just a
+	// high duration alone.
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 778
+state           | active
+query_seconds   | 900
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "active_state_no_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_active", "trace_active")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	if _, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"}); err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events for state=active regardless of duration, got %d", len(events))
+	}
+}
+
+func TestGetActiveConnectionsTool_IdleInTransactionBelowThreshold_NoObjectiveEvidence(t *testing.T) {
+	withActiveConnectionEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 779
+state           | idle in transaction
+query_seconds   | 10
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "idle_below_threshold_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_below", "trace_below")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	if _, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"}); err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events (10s is below the 300s threshold), got %d", len(events))
+	}
+}
+
+// TestGetActiveConnectionsTool_MultipleConnections_SelectiveEvidence exercises
+// real multi-record parsing + selective per-item firing together — the
+// underlying primitives (psqlx multi-record parsing, evidence.Evaluate's
+// multi-item loop) are each tested in isolation elsewhere, but a boundary-
+// detection bug in parseActiveConnections' own per-record mapping loop
+// specifically wouldn't be caught by either of those alone.
+func TestGetActiveConnectionsTool_MultipleConnections_SelectiveEvidence(t *testing.T) {
+	withActiveConnectionEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+-----------------------------------
+pid             | 100
+state           | active
+query_seconds   | 900
+-[ RECORD 2 ]---+-----------------------------------
+pid             | 200
+state           | idle in transaction
+query_seconds   | 900
+-[ RECORD 3 ]---+-----------------------------------
+pid             | 300
+state           | idle in transaction
+query_seconds   | 5
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "multi_conn_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_multi", "trace_multi")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	result, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getActiveConnectionsTool() error = %v, want nil", err)
+	}
+	if len(result.Connections) != 3 {
+		t.Fatalf("got %d connections, want 3", len(result.Connections))
+	}
+	if result.Connections[0].PID != 100 || result.Connections[1].PID != 200 || result.Connections[2].PID != 300 {
+		t.Fatalf("connections out of order or misparsed: %+v", result.Connections)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 objective_evidence event (only pid 200 qualifies), got %d: %+v", len(events), events)
+	}
+	if events[0].ObjectiveEvidence.Resource != "200" {
+		t.Errorf("Resource = %q, want 200 (pid 100 is active, pid 300 is below threshold)", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
+func TestParseInt64Field(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{"normal value", "1024", 1024},
+		{"empty (NULL)", "", 0},
+		{"zero", "0", 0},
+		{"garbage", "not-a-number", 0},
+		{"negative", "-5", -5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseInt64Field(tt.in); got != tt.want {
+				t.Errorf("parseInt64Field(%q) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplicationSummaryFrom(t *testing.T) {
+	tests := []struct {
+		name string
+		in   GetReplicationStatusResult
+		want ReplicationSummary
+	}{
+		{
+			name: "connected replica, active slot — nothing inactive",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1"}},
+				Slots:    []ReplicationSlot{{SlotName: "slot1", Active: true, LagBytes: 0}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "disconnected: zero replicas, one inactive slot with lag",
+			in: GetReplicationStatusResult{
+				Role:  "Primary",
+				Slots: []ReplicationSlot{{SlotName: "slot1", Active: false, LagBytes: 8388608}},
+			},
+			want: ReplicationSummary{Role: "Primary", InactiveSlotsWithLag: []string{"slot1"}},
+		},
+		{
+			name: "inactive slot but zero lag — never actually used, not a disconnect signal",
+			in: GetReplicationStatusResult{
+				Role:  "Primary",
+				Slots: []ReplicationSlot{{SlotName: "unused_slot", Active: false, LagBytes: 0}},
+			},
+			want: ReplicationSummary{Role: "Primary"},
+		},
+		{
+			name: "multiple slots — only the inactive-with-lag ones collected",
+			in: GetReplicationStatusResult{
+				Role: "Primary",
+				Slots: []ReplicationSlot{
+					{SlotName: "active_slot", Active: true, LagBytes: 0},
+					{SlotName: "dead_slot_1", Active: false, LagBytes: 100},
+					{SlotName: "unused_slot", Active: false, LagBytes: 0},
+					{SlotName: "dead_slot_2", Active: false, LagBytes: 200},
+				},
+			},
+			want: ReplicationSummary{Role: "Primary", InactiveSlotsWithLag: []string{"dead_slot_1", "dead_slot_2"}},
+		},
+		{
+			name: "streaming replica with high reply_lag_seconds — stalled",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1, MaxReplyLagSeconds: 90, StalledReplicaName: "replica1"},
+		},
+		{
+			name: "catchup state excluded even with high reply_lag_seconds — expected during a fresh clone",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "catchup", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "non-primary role excluded even with a streaming row and high reply_lag_seconds",
+			in: GetReplicationStatusResult{
+				Role:     "Replica",
+				Replicas: []ReplicationPeer{{ApplicationName: "replica1", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Replica", ConnectedReplicaCount: 1},
+		},
+		{
+			name: "multiple streaming replicas — only the worst becomes MaxReplyLagSeconds/StalledReplicaName",
+			in: GetReplicationStatusResult{
+				Role: "Primary",
+				Replicas: []ReplicationPeer{
+					{ApplicationName: "replica_ok", State: "streaming", ReplyLagSeconds: 2},
+					{ApplicationName: "replica_stalled", State: "streaming", ReplyLagSeconds: 120},
+				},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 2, MaxReplyLagSeconds: 120, StalledReplicaName: "replica_stalled"},
+		},
+		{
+			name: "empty ApplicationName falls back to ClientAddr",
+			in: GetReplicationStatusResult{
+				Role:     "Primary",
+				Replicas: []ReplicationPeer{{ClientAddr: "10.0.0.5", State: "streaming", ReplyLagSeconds: 90}},
+			},
+			want: ReplicationSummary{Role: "Primary", ConnectedReplicaCount: 1, MaxReplyLagSeconds: 90, StalledReplicaName: "10.0.0.5"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replicationSummaryFrom(tt.in)
+			if got.Role != tt.want.Role || got.ConnectedReplicaCount != tt.want.ConnectedReplicaCount {
+				t.Errorf("got Role=%q ConnectedReplicaCount=%d, want Role=%q ConnectedReplicaCount=%d", got.Role, got.ConnectedReplicaCount, tt.want.Role, tt.want.ConnectedReplicaCount)
+			}
+			if fmt.Sprint(got.InactiveSlotsWithLag) != fmt.Sprint(tt.want.InactiveSlotsWithLag) {
+				t.Errorf("got InactiveSlotsWithLag=%v, want %v", got.InactiveSlotsWithLag, tt.want.InactiveSlotsWithLag)
+			}
+			if got.MaxReplyLagSeconds != tt.want.MaxReplyLagSeconds {
+				t.Errorf("got MaxReplyLagSeconds=%d, want %d", got.MaxReplyLagSeconds, tt.want.MaxReplyLagSeconds)
+			}
+			if got.StalledReplicaName != tt.want.StalledReplicaName {
+				t.Errorf("got StalledReplicaName=%q, want %q", got.StalledReplicaName, tt.want.StalledReplicaName)
+			}
+		})
+	}
+}
+
+func TestGetReplicationStatusTool_MultipleSlots_OnlyMatchingOneReported(t *testing.T) {
+	withReplicationEvidenceRules(t)
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+(0 rows)
+
+-[ RECORD 1 ]---+-----
+slot_name       | healthy_slot
+active          | t
+lag_bytes       | 0
+-[ RECORD 2 ]---+-----
+slot_name       | dead_slot
+active          | f
+lag_bytes       | 4096
+-[ RECORD 3 ]---+-----
+slot_name       | unused_slot
+active          | f
+lag_bytes       | 0
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "multi_slot_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_multislot", "trace_multislot")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	result, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getReplicationStatusTool() error = %v, want nil", err)
+	}
+	if len(result.Slots) != 3 {
+		t.Fatalf("got %d slots, want 3", len(result.Slots))
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 objective_evidence event, got %d: %+v", len(events), events)
+	}
+	if events[0].ObjectiveEvidence.Resource != "dead_slot" {
+		t.Errorf("Resource = %q, want dead_slot (the only inactive slot with real lag)", events[0].ObjectiveEvidence.Resource)
+	}
+}
+
+func TestParseReplicationStatus_TruncatedOutput_NoPanic(t *testing.T) {
+	// Only the role/recovery statement present — a malformed or unexpectedly
+	// short response (e.g. a psql version/behavior change) must degrade to
+	// empty Replicas/Slots, not panic on an out-of-range statements index.
+	result := parseReplicationStatus("-[ RECORD 1 ]\nrole | Primary\nis_in_recovery | f\n")
+	if result.Role != "Primary" {
+		t.Errorf("Role = %q, want Primary", result.Role)
+	}
+	if result.Replicas != nil {
+		t.Errorf("Replicas = %v, want nil (statement never present)", result.Replicas)
+	}
+	if result.Slots != nil {
+		t.Errorf("Slots = %v, want nil (statement never present)", result.Slots)
+	}
+}
+
+func TestParseReplicationStatus_EmptyOutput_NoPanic(t *testing.T) {
+	result := parseReplicationStatus("")
+	if result.Role != "" || result.Replicas != nil || result.Slots != nil {
+		t.Errorf("got %+v, want zero value aside from Output", result)
+	}
+}
+
 func TestGetLockInfoTool_WithLocks(t *testing.T) {
 	mockOutput := `-[ RECORD 1 ]--+----------------------------------------
 blocked_pid    | 12345
@@ -724,6 +1165,264 @@ replay_lag_bytes| 1024
 	}
 }
 
+func TestGetReplicationStatusTool_ParsesTypedFields_ConnectedReplica(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+user            | replicator
+application_name| replica1
+state           | streaming
+sync_state      | async
+write_lag_bytes | 0
+flush_lag_bytes | 0
+replay_lag_bytes| 1024
+reply_lag_seconds| 3
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+slot_type       | physical
+active          | t
+lag_bytes       | 0
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getReplicationStatusTool() error = %v, want nil", err)
+	}
+	if result.Role != "Primary" || result.IsInRecovery {
+		t.Errorf("got Role=%q IsInRecovery=%v, want Primary/false", result.Role, result.IsInRecovery)
+	}
+	if len(result.Replicas) != 1 {
+		t.Fatalf("got %d replicas, want 1", len(result.Replicas))
+	}
+	r := result.Replicas[0]
+	if r.ApplicationName != "replica1" || r.State != "streaming" || r.ReplayLagBytes != 1024 || r.ReplyLagSeconds != 3 {
+		t.Errorf("got %+v, want application_name=replica1 state=streaming replay_lag_bytes=1024 reply_lag_seconds=3", r)
+	}
+	if len(result.Slots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(result.Slots))
+	}
+	if s := result.Slots[0]; s.SlotName != "replica1_slot" || !s.Active {
+		t.Errorf("got %+v, want slot_name=replica1_slot active=true", s)
+	}
+}
+
+// withReplicationEvidenceRules installs a real disconnected-replica rule for
+// the duration of the calling test, mirroring
+// withActiveConnectionEvidenceRules above.
+func withReplicationEvidenceRules(t *testing.T) {
+	t.Helper()
+	orig := replicationEvidenceRules
+	replicationEvidenceRules = []evidence.Rule{
+		{Tool: "get_replication_status", Probe: "disconnected", Operator: "==", Threshold: true, Signal: "replica_disconnected", Detail: "replica disconnected — inactive slot %s"},
+		{Tool: "get_replication_status", Probe: "max_reply_lag_seconds", Operator: ">", Threshold: float64(20), Signal: "replica_stalled", Detail: "replica %s stalled, reply_lag_seconds=%v"},
+	}
+	t.Cleanup(func() { replicationEvidenceRules = orig })
+}
+
+func getReplicationStatusWithEvidence(t *testing.T, mockOutput string) []audit.Event {
+	t.Helper()
+	withReplicationEvidenceRules(t)
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "replication_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_repl", "trace_repl")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	if _, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{ConnectionString: "host=localhost"}); err != nil {
+		t.Fatalf("getReplicationStatusTool() error = %v, want nil", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	return events
+}
+
+// TestGetReplicationStatusTool_DisconnectedReplica_RecordsObjectiveEvidence
+// is the scenario this whole tool conversion was motivated by: the exact
+// signature testing/catalog/failures.yaml's db-replica-disconnected fault
+// produces — pg_stat_replication has zero rows (the replica vanished, not
+// merely lagging) and pg_replication_slots shows the slot inactive with
+// real retained WAL.
+func TestGetReplicationStatusTool_DisconnectedReplica_RecordsObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+(0 rows)
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+slot_type       | physical
+active          | f
+lag_bytes       | 8388608
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "replica_disconnected" {
+		t.Errorf("Signal = %q, want replica_disconnected", ev.Signal)
+	}
+	if ev.Resource != "replica1_slot" {
+		t.Errorf("Resource = %q, want replica1_slot", ev.Resource)
+	}
+	if ev.Tool != "get_replication_status" {
+		t.Errorf("Tool = %q, want get_replication_status", ev.Tool)
+	}
+}
+
+// TestGetReplicationStatusTool_StalledReplica_RecordsObjectiveEvidence
+// verifies the row-present-but-stale case: unlike
+// TestGetReplicationStatusTool_DisconnectedReplica_RecordsObjectiveEvidence
+// above, this replica IS present in pg_stat_replication (state=streaming) —
+// a naive absent-row check would call this healthy.
+func TestGetReplicationStatusTool_StalledReplica_RecordsObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+user            | replicator
+application_name| replica1
+state           | streaming
+sync_state      | async
+write_lag_bytes | 0
+flush_lag_bytes | 0
+replay_lag_bytes| 0
+reply_lag_seconds| 145
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+slot_type       | physical
+active          | t
+lag_bytes       | 0
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "replica_stalled" {
+		t.Errorf("Signal = %q, want replica_stalled", ev.Signal)
+	}
+	if ev.Resource != "replica1" {
+		t.Errorf("Resource = %q, want replica1", ev.Resource)
+	}
+	if ev.Value != float64(145) {
+		t.Errorf("Value = %v, want 145", ev.Value)
+	}
+}
+
+// TestGetReplicationStatusTool_StalledReplica_BelowThreshold_NoObjectiveEvidence
+// confirms a replica that's merely slow to reply (below the threshold) does
+// not fire — only a genuinely stale one does.
+func TestGetReplicationStatusTool_StalledReplica_BelowThreshold_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+application_name| replica1
+state           | streaming
+reply_lag_seconds| 12
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+active          | t
+lag_bytes       | 0
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Fatalf("expected 0 objective_evidence events, got %d: %+v", len(events), events)
+	}
+}
+
+func TestGetReplicationStatusTool_ConnectedReplica_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+-[ RECORD 1 ]---+---------------
+client_addr     | 192.168.1.101
+state           | streaming
+replay_lag_bytes| 1024
+
+-[ RECORD 1 ]---+-----
+slot_name       | replica1_slot
+active          | t
+lag_bytes       | 0
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events for a healthy connected replica, got %d", len(events))
+	}
+}
+
+// TestGetReplicationStatusTool_NoReplicaEverAttached_NoObjectiveEvidence
+// guards the deliberate distinction this probe makes: an empty
+// pg_stat_replication result alone must NOT be read as "disconnected" — a
+// primary with no slots at all (nothing was ever attached here) is a
+// completely different, unremarkable situation from one where a slot
+// exists, inactive, with real retained WAL. Only the latter fires.
+func TestGetReplicationStatusTool_NoReplicaEverAttached_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Primary
+is_in_recovery  | f
+
+(0 rows)
+
+(0 rows)
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events when no slot was ever configured, got %d", len(events))
+	}
+}
+
+func TestGetReplicationStatusTool_ReplicaRole_NoObjectiveEvidence(t *testing.T) {
+	// A replica reporting on its own (nonexistent) downstream replication
+	// must not fire this primary-scoped signal, even with a matching
+	// zero-rows + inactive-slot shape.
+	mockOutput := `-[ RECORD 1 ]---+--------
+role            | Replica
+is_in_recovery  | t
+
+(0 rows)
+
+-[ RECORD 1 ]---+-----
+slot_name       | some_slot
+active          | f
+lag_bytes       | 100
+`
+	events := getReplicationStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events for role=Replica, got %d", len(events))
+	}
+}
+
 // Test error handling for all tools
 // Note: Errors are now returned in the output text (not as Go errors)
 // so that the LLM can see them when orchestrator calls sub-agents.
@@ -733,32 +1432,32 @@ func TestToolsErrorHandling(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		fn       func() (PsqlResult, error)
+		fn       func() (string, error) // extracts .Output — decouples this table from each tool's exact result type
 		toolName string
 	}{
-		{"getServerInfoTool", func() (PsqlResult, error) { return getServerInfoTool(ctx, GetServerInfoArgs{}) }, "get_server_info"},
-		{"getDatabaseInfoTool", func() (PsqlResult, error) { return getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}) }, "get_database_info"},
-		{"getActiveConnectionsTool", func() (PsqlResult, error) { return getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}) }, "get_active_connections"},
-		{"getConnectionStatsTool", func() (PsqlResult, error) { return getConnectionStatsTool(ctx, GetConnectionStatsArgs{}) }, "get_connection_stats"},
-		{"getDatabaseStatsTool", func() (PsqlResult, error) { return getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{}) }, "get_database_stats"},
-		{"getConfigParameterTool", func() (PsqlResult, error) { return getConfigParameterTool(ctx, GetConfigParameterArgs{}) }, "get_config_parameter"},
-		{"getReplicationStatusTool", func() (PsqlResult, error) { return getReplicationStatusTool(ctx, GetReplicationStatusArgs{}) }, "get_replication_status"},
-		{"getLockInfoTool", func() (PsqlResult, error) { return getLockInfoTool(ctx, GetLockInfoArgs{}) }, "get_lock_info"},
-		{"getTableStatsTool", func() (PsqlResult, error) { return getTableStatsTool(ctx, GetTableStatsArgs{}) }, "get_table_stats"},
-		{"getBgwriterStatsTool", func() (PsqlResult, error) { return getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{}) }, "get_bgwriter_stats"},
+		{"getServerInfoTool", func() (string, error) { r, err := getServerInfoTool(ctx, GetServerInfoArgs{}); return r.Output, err }, "get_server_info"},
+		{"getDatabaseInfoTool", func() (string, error) { r, err := getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}); return r.Output, err }, "get_database_info"},
+		{"getActiveConnectionsTool", func() (string, error) { r, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}); return r.Output, err }, "get_active_connections"},
+		{"getConnectionStatsTool", func() (string, error) { r, err := getConnectionStatsTool(ctx, GetConnectionStatsArgs{}); return r.Output, err }, "get_connection_stats"},
+		{"getDatabaseStatsTool", func() (string, error) { r, err := getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{}); return r.Output, err }, "get_database_stats"},
+		{"getConfigParameterTool", func() (string, error) { r, err := getConfigParameterTool(ctx, GetConfigParameterArgs{}); return r.Output, err }, "get_config_parameter"},
+		{"getReplicationStatusTool", func() (string, error) { r, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{}); return r.Output, err }, "get_replication_status"},
+		{"getLockInfoTool", func() (string, error) { r, err := getLockInfoTool(ctx, GetLockInfoArgs{}); return r.Output, err }, "get_lock_info"},
+		{"getTableStatsTool", func() (string, error) { r, err := getTableStatsTool(ctx, GetTableStatsArgs{}); return r.Output, err }, "get_table_stats"},
+		{"getBgwriterStatsTool", func() (string, error) { r, err := getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{}); return r.Output, err }, "get_bgwriter_stats"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := tt.fn()
+			output, err := tt.fn()
 			if err != nil {
 				t.Errorf("%s() unexpected Go error: %v", tt.name, err)
 			}
-			if !strings.Contains(result.Output, "ERROR") {
-				t.Errorf("%s() output = %q, want to contain 'ERROR'", tt.name, result.Output)
+			if !strings.Contains(output, "ERROR") {
+				t.Errorf("%s() output = %q, want to contain 'ERROR'", tt.name, output)
 			}
-			if !strings.Contains(result.Output, tt.toolName) {
-				t.Errorf("%s() output = %q, want to contain %q", tt.name, result.Output, tt.toolName)
+			if !strings.Contains(output, tt.toolName) {
+				t.Errorf("%s() output = %q, want to contain %q", tt.name, output, tt.toolName)
 			}
 		})
 	}

@@ -7,7 +7,14 @@ services:
       context: ../../..
       dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
-    entrypoint: ["/bin/sh", "-c", "sleep 4 && exec /usr/local/bin/auditd"]
+    # Fixed shell command, not "exec $@" — an overriding command (e.g.
+    # `docker compose run --rm auditd hashapikey <key>`, a documented way to
+    # invoke the other binaries baked into this same image) was silently
+    # ignored: sh -c's script text never referenced $@, so the passed command
+    # became inert positional args and the full auditd server started anyway,
+    # looking like a hang. Fixed by passing through an overriding command when
+    # one is given, defaulting to the delayed auditd start otherwise.
+    entrypoint: ["/bin/sh", "-c", "if [ \"$#\" -gt 0 ]; then exec \"$@\"; else sleep 4 && exec /usr/local/bin/auditd; fi", "sh"]
     environment:
       HELPDESK_LOG_LEVEL: ${HELPDESK_LOG_LEVEL:-info}
       # Core audit configuration
@@ -28,8 +35,14 @@ services:
       # Infrastructure config — enables tag/sensitivity resolution in the
       # /v1/governance/explain endpoint without relying on caller-supplied values.
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
-      # Identity & access control for auditd endpoints (agents authenticate here)
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      # Identity & access control for auditd endpoints (agents authenticate here).
+      # static (not none): matches every agent in this file, which already
+      # defaults to static — auditd/gateway were the only two services left on
+      # the permissive "none" default, silently breaking role-based checks
+      # (e.g. approval_override_roles) for any human operator, found live
+      # during the debugging of faulttest's approval-mode clamp. The demo-*
+      # services below already run static successfully — same pattern.
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
@@ -85,6 +98,10 @@ services:
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
       HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
       HELPDESK_VERIFY_MAX_DELAY_S: ${HELPDESK_VERIFY_MAX_DELAY_S:-}
+      # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): deterministic,
+      # code-derived rules that force-gate a response when a tool result crosses
+      # a threshold, independent of what the diagnosing model concludes.
+      HELPDESK_DB_EVIDENCE_RULES: /etc/helpdesk/objective_evidence.yaml
       # Optional: set PGPASSWORD in .env as a single global DB password.
       # This is not secure and not recommended for anything beyond
       # throw-away development databases.
@@ -95,6 +112,7 @@ services:
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
       - ${PGPASSFILE:-./.pgpass}:/root/.pgpass:ro
+      - ${HELPDESK_DB_EVIDENCE_RULES_HOST:-../../agents/database/objective_evidence.yaml}:/etc/helpdesk/objective_evidence.yaml:ro
     ports:
       - "1100:1100"
     restart: unless-stopped
@@ -131,11 +149,16 @@ services:
       HELPDESK_VERIFY_MAX_ATTEMPTS: ${HELPDESK_VERIFY_MAX_ATTEMPTS:-}
       HELPDESK_VERIFY_INITIAL_DELAY_S: ${HELPDESK_VERIFY_INITIAL_DELAY_S:-}
       HELPDESK_VERIFY_MAX_DELAY_S: ${HELPDESK_VERIFY_MAX_DELAY_S:-}
+      # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): deterministic,
+      # code-derived rules that force-gate a response when a tool result crosses
+      # a threshold, independent of what the diagnosing model concludes.
+      HELPDESK_K8S_EVIDENCE_RULES: /etc/helpdesk/objective_evidence.yaml
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${KUBECONFIG:-~/.kube/config}:/root/.kube/config:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_K8S_EVIDENCE_RULES_HOST:-../../agents/k8s/objective_evidence.yaml}:/etc/helpdesk/objective_evidence.yaml:ro
     ports:
       - "1102:1102"
     restart: unless-stopped
@@ -277,8 +300,13 @@ services:
       HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-gateway-api-key}
       # API key for operator CLIs exec'd inside this container (govexplain, srebot).
       HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
-      # Identity & access (optional; defaults to "none" — unverified X-User headers)
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      # Identity & access. static (not none): matches every agent in this file,
+      # which already defaults to static — gateway/auditd were the only two
+      # services left on the permissive "none" default, silently breaking
+      # role-based checks (e.g. approval_override_roles) for any human
+      # operator, found live during the debugging of faulttest's approval-mode
+      # clamp. The demo-* services below already run static successfully.
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_JWT_JWKS_URL: ${HELPDESK_JWT_JWKS_URL:-}
       HELPDESK_JWT_ISSUER: ${HELPDESK_JWT_ISSUER:-}

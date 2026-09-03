@@ -25,6 +25,9 @@
 //     enumerate every other fault ID
 //   - FAULTTEST_GATEWAY_URL: Gateway base URL (e.g., http://localhost:8080)
 //   - FAULTTEST_VIA_GATEWAY: Set to "true" to route diagnosis through gateway playbooks
+//   - FAULTTEST_PURPOSE: Declared purpose sent in gateway requests (default when
+//     FAULTTEST_VIA_GATEWAY=true: "diagnostic" — a policy requiring an explicit
+//     purpose from an allow-list will otherwise deny even read-only tool calls)
 //   - FAULTTEST_APPROVAL_MODE: Override playbook approval_mode (use "force" for automated runs)
 //   - FAULTTEST_REMEDIATE: Set to "true" to run remediation phase after diagnosis
 //   - FAULTTEST_AUDIT_URL: Audit service base URL (e.g., http://localhost:7070); enables structured tool evidence
@@ -55,6 +58,16 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 	if viaGateway && approvalMode == "" {
 		approvalMode = "force"
 	}
+	purpose := os.Getenv("FAULTTEST_PURPOSE")
+	// Default purpose to "diagnostic" when routing via gateway — mirrors
+	// testing/cmd/faulttest/main.go's own --purpose default. Found live
+	// (db-replica-container-stopped, 2026-09-01): this harness never
+	// declared any purpose at all, so a policy requiring an explicit
+	// purpose from an allow-list denied even a plain read (check_connection)
+	// on the very first tool call, unrelated to anything else under test.
+	if viaGateway && purpose == "" {
+		purpose = "diagnostic"
+	}
 	connStr := os.Getenv("FAULTTEST_CONN_STR")
 	cfg := &faultlib.HarnessConfig{
 		ConnStr:          connStr,
@@ -75,6 +88,7 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		GatewayAPIKey:    os.Getenv("FAULTTEST_API_KEY"),
 		ViaGateway:       viaGateway,
 		ApprovalMode:     approvalMode,
+		GatewayPurpose:   purpose,
 		RemediateEnabled: os.Getenv("FAULTTEST_REMEDIATE") == "true",
 		// Audit service — enables structured tool evidence and emit-and-wait step approvals.
 		AuditURL: os.Getenv("FAULTTEST_AUDIT_URL"),
@@ -235,13 +249,12 @@ func TestFaultInjection(t *testing.T) {
 				t.Skip("ssh_exec fault requires a target host; set FAULTTEST_SSH_HOST or exec_via in catalog")
 			}
 
-			// Skip faults that require a replica when no replica connection is configured.
-			injectTarget := f.Inject.Target
-			if cfg.External && f.ExternalInject.Type != "" {
-				injectTarget = f.ExternalInject.Target
-			}
-			if injectTarget == "replica" && cfg.ReplicaConnStr == "" {
-				t.Skip("fault targets the replica but FAULTTEST_REPLICA_CONN_STR not set")
+			// Skip faults that require a replica when no replica connection is
+			// configured — either because an inject/teardown spec targets it
+			// directly, or because RequiresReplica marks a real replica as
+			// needed in the topology even for a primary-only injection.
+			if f.NeedsReplica() && cfg.ReplicaConnStr == "" {
+				t.Skip("fault requires a replica but FAULTTEST_REPLICA_CONN_STR not set")
 			}
 
 			ctx := context.Background()
@@ -299,6 +312,20 @@ func TestFaultInjection(t *testing.T) {
 
 			// 4. Evaluate response.
 			result := faultlib.Evaluate(f, resp.Text)
+
+			// When the fault declares an expected deterministic signal and this
+			// run actually went via the gateway (only gateway playbook responses
+			// carry real confirmed-evidence data), a pass requires that signal to
+			// be confirmed — not just keyword/category text matching, which a
+			// vague hedge can satisfy without the model ever demonstrably
+			// engaging with real tool data. See EvidenceSignalConfirmed's doc
+			// comment (testing/faultlib/evaluator.go) for the full story.
+			if cfg.ViaGateway {
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
+					result.Passed = false
+					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				}
+			}
 
 			t.Logf("Evaluation: score=%.0f%%, keywords=%v, diagnosis=%v, tools=%v",
 				result.Score*100, result.KeywordPass, result.DiagnosisPass, result.ToolEvidence)
@@ -575,6 +602,16 @@ func TestExternalModeInjection(t *testing.T) {
 			}
 
 			result := faultlib.Evaluate(f, resp.Text)
+
+			// See the identical gate above (first Evaluate call site in this
+			// file) for the full explanation.
+			if cfg.ViaGateway {
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
+					result.Passed = false
+					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				}
+			}
+
 			t.Logf("score=%.0f%%, keywords=%v, diagnosis=%v",
 				result.Score*100, result.KeywordPass, result.DiagnosisPass)
 

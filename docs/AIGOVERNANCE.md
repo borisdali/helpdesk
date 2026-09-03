@@ -65,16 +65,18 @@ dedicated to aiHelpDesk's critical subsystem that we refer to as AI Governance.
 As aiHelpDesk evolves from read-only diagnostics to actively *fixing* infrastructure
 issues, governance becomes critical for trust. The AI Governance system ensures that
 when aiHelpDesk agents are instructed to remedy a problem and so they have to modify
-databases, scale deployments, or restart services, they do so safely, accountably,
+databases, scale deployments or restart services, they do so safely, accountably,
 and with appropriate human oversight.
 
 A distinctive feature of aiHelpDesk governance is **LLM Fabrication Detection** (§1.1):
 the ability to detect when an AI agent claims to have taken an action it never actually
 performed. This addresses a fundamental property of LLMs — they can generate plausible
 success narratives from training data, bypassing all in-tool safeguards if no tool was
-ever called. aiHelpDesk counters this at two independent layers: intra-agent
-post-mutation re-verification (see [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery))
-and inter-agent audit-based delegation verification (see [here](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)).
+ever called. aiHelpDesk counters this at three independent layers: intra-agent
+post-mutation re-verification (see [here](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery)),
+inter-agent audit-based delegation verification (see [here](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)),
+and, for read-only tool content specifically, objective-evidence verification against a
+tool's own typed result (see [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md)).
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -115,6 +117,8 @@ and inter-agent audit-based delegation verification (see [here](MUTATION_TOOLS.m
 │  │  Layer 1: intra-agent post-mutation re-verification (did it stick?) │  │
 │  │  Layer 2: inter-agent audit-based delegation verification           │  │
 │  │           (did the sub-agent actually call the tool?)               │  │
+│  │  Layer 3: objective-evidence content verification                   │  │
+│  │           (does the model's claim match the tool's real result?)    │  │
 │  │  Outcome: unverified_claim journey flag + queryable audit events    │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
 │                                                                           │
@@ -192,7 +196,7 @@ See [here](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) for de
 **Mismatch surfacing — concurrent signals, severity-tiered:**
 
 When `mismatch=true` is detected the following fire simultaneously, so
-that operators, dashboards, and automated incident pipelines all receive
+that operators, dashboards and automated incident pipelines all receive
 the signal through the channel they already watch:
 
 | Signal | Channel | Details |
@@ -228,21 +232,51 @@ curl -s "http://localhost:1199/v1/journeys?trace_id=$TRACE_ID"
 ```
 
 See [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection)
-for the full investigation guide, example webhook payload, and Prometheus query
+for the full investigation guide, example webhook payload and Prometheus query
 patterns.
+
+### Layer 3 — Objective-evidence content verification
+
+Layers 1 and 2 both verify that a claimed *action* really happened (a mutation took
+effect; a delegated tool call actually appears in the audit trail). Neither checks
+whether the *content* of what a model reports about a read-only tool's result is
+accurate — a model can genuinely call `get_replication_status`, then still misdescribe
+what it returned.
+
+Layer 3 closes that gap for a deliberately narrow, growing set of tools: a small,
+type-safe probe reads a specific field directly off the tool's typed result (a pod's
+real restart count, a replication slot's real `active` flag), independent of anything
+the model says. If the probe's threshold fires, the gateway then checks whether the
+model's own response — specifically, the verbatim `EVIDENCE` quote its diagnosis
+protocol already requires — actually engaged with that real value. Only a genuine,
+checkable contradiction (evidence exists, the model's response never demonstrably
+accounted for it) forces a human-reviewed gate; evidence the model correctly cited is
+corroboration, not a red flag.
+
+Unlike Layers 1–2, this is agent-and-tool-scoped by design, not universal: today it
+covers 6 signals on the K8s agent (`get_pods`, `get_events`) and 3 on the database agent
+(`get_active_connections`, `get_replication_status`). Extending coverage is a rule
+addition per tool (often pure YAML, no code change) — see
+[OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full mechanism, what's shipped,
+and how to add a rule.
+
+Surfaced the same way Layer 2's `has_mismatch` is: `vault incidents` prints confirmed/
+unconfirmed evidence inline per chapter (`⚠`/`✓`), and a `--repeat N` certification run's
+aggregate confirmed-vs-unconfirmed split is queryable via `vault accuracy`'s `Confirmed:`
+line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 
 **Coverage:**
 
-| Session path | Layer 1 | Layer 2 |
-|---|---|---|
-| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify |
-| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) |
-| Read-only tool output content | — | ⚠️ content fabrication not detected (structural gap) |
+| Session path | Layer 1 | Layer 2 | Layer 3 |
+|---|---|---|---|
+| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify | ✅ scoped to instrumented tools |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) | ✅ scoped to instrumented tools |
+| Read-only tool output content | — | — | ✅ for the ~9 signals with a declarative rule; unscoped tools still uncovered |
 
 **`client.VerifyTrace` — Layer 2 at the Gateway boundary:**
 
 `internal/client` exposes `Client.VerifyTrace(ctx, traceID, since)`, which gives
-any upstream caller (helpdesk-client, fleet-runner, or a custom integration)
+any upstream caller (helpdesk-client, fleet-runner or a custom integration)
 independent access to the same audit trail the Orchestrator uses:
 
 ```go
@@ -254,7 +288,7 @@ verif, err := c.VerifyTrace(ctx, resp.TraceID, queryStart)
 ```
 
 The method queries `GET /v1/events?event_type=tool_execution&trace_id=X&since=T`
-directly on auditd, retries once after 200 ms for async propagation, and returns
+directly on auditd, retries once after 200 ms for async propagation and returns
 `nil, nil` when `AuditURL` is not configured (verification is opt-in).
 
 **Configuration:** set `HELPDESK_AUDIT_URL` (or `Config.AuditURL` / `--audit-url` flag).
@@ -264,10 +298,11 @@ when connected to auditd. **fleet-runner** calls `VerifyTrace` after each step
 and logs `mismatch=true` when a write or destructive tool was expected but not
 confirmed in the trail.
 
-For full implementation details, unit test coverage, and the investigation
+For full implementation details, unit test coverage and the investigation
 workflow when a mismatch is detected, see:
-- [docs/MUTATION_TOOLS.md §4–§5](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) — implementation details
-- [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) — investigation guide
+- [docs/MUTATION_TOOLS.md §4–§5](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) — implementation details (Layers 1–2)
+- [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) — investigation guide (Layers 1–2)
+- [docs/OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) — full mechanism, shipped rules and how to add one (Layer 3)
 
 ---
 
@@ -280,7 +315,7 @@ behavior of the components):
 
 | § | Component | Status | Description |
 |----|------|--------|-------------|
-| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Two-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification |
+| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Three-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification + objective-evidence content verification |
 | 3 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
 | 4 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | 5 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |
@@ -288,8 +323,8 @@ behavior of the components):
 | 7 | [Audit System](#7-audit-system) | **Implemented** | Tamper-evident logging with hash chains |
 | 8 | [Compliance Reporting](#8-compliance-reporting-cmdgovbot) | **Implemented** | Scheduled compliance snapshots and alerting |
 | 9 | [Explainability](#9-explainability) | **Implemented** | Decision trace, human-readable explanations, `govexplain` query interface |
-| 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity, and purpose |
-| — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail, and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
+| 10 | [Identity & Access](#10-identity--access) | **Implemented** | Three-dimension access control: role, data sensitivity and purpose |
+| — | [Fleet Management](FLEET.md) | **Implemented** | Staged rollout (`fleet-runner`) with canary/wave strategy, approval gating, per-step audit trail and NL fleet planner; governance-integrated throughout (policy enforcement, `fleet_rollout` purpose, service-account identity) |
 | — | [Rollback & Undo](ROLLBACK.md) | **Implemented** | Pre-mutation state capture, two-tier DB rollback (row-capture + WAL decode), rollback API, fleet rollback, CLI |
 
 ---
@@ -383,7 +418,7 @@ Request arrives
       │
       ▼
 ┌─────────────┐
-│ Classify    │ ─── read, write, destructive, or escalation?
+│ Classify    │ ─── read, write, destructive or escalation?
 │ Action      │
 └─────────────┘
       │
@@ -666,8 +701,8 @@ All four are evaluated before the LLM receives any result.
 | **Schedule** | `schedule` (days/hours/tz) | all write/destructive tools | ✓ timestamp check | — |
 
 > **Blast-radius design note:** post-execution evaluation has important limitations for large
-> DML, DDL statements, and distributed topologies. See [GOVPOSTEVAL.md](GOVPOSTEVAL.md)
-> for a full analysis of trade-offs, the rollback problem, and the planned
+> DML, DDL statements and distributed topologies. See [GOVPOSTEVAL.md](GOVPOSTEVAL.md)
+> for a full analysis of trade-offs, the rollback problem and the planned
 > pre-execution COUNT estimation approach.
 
 Configure guardrails in your policy file under a rule's `conditions`:
@@ -759,7 +794,7 @@ rolling window to prevent runaway failure loops. Not yet implemented.
 ## 6. Operating Mode
 
 The operating mode switch controls whether agents are allowed to execute
-write and destructive tools at all, and enforces governance requirements
+write and destructive tools at all and enforces governance requirements
 when they are.
 
 | Mode | Description |
@@ -878,14 +913,14 @@ Key integration points:
 
 - `agentutil.CheckFixModeViolations(cfg)` — validates all five modules from `agentutil.Config`
 - `agentutil.CheckFixModeAuditViolations(auditEnabled, auditURL)` — audit-only check for the Orchestrator (which delegates policy enforcement to sub-agents)
-- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates Gateway incidents, and exits on fatal violations
+- `agentutil.EnforceFixMode(ctx, violations, componentName, auditURL)` — logs, records `governance_violation` audit events, creates Gateway incidents and exits on fatal violations
 - `agents/*/main.go` and `cmd/helpdesk/main.go` — call `EnforceFixMode` immediately after config loading, before any agent initialization
 
 ---
 
 ## 7. Audit System
 
-The audit system records every tool execution, policy decision, delegation, and
+The audit system records every tool execution, policy decision, delegation and
 Gateway request into a tamper-evident, hash-chained log managed by `auditd`.
 
 | Component | Location | Description |
@@ -940,7 +975,7 @@ govbot is stateless and read-only. No audit socket access or cluster privileges
 are required — only network access to the Gateway.
 
 For the full compliance architecture — tool invocation instrumentation, policy
-coverage gap analysis, dead rule detection, compliance history, and the
+coverage gap analysis, dead rule detection, compliance history and the
 historical trend block — see **[COMPLIANCE.md](COMPLIANCE.md)**.
 
 ### 8.1 Compliance Phases
@@ -1037,8 +1072,8 @@ questions about any policy decision:
 Today the audit trail records the *outcome* of a policy decision (`effect`,
 `policy_name`, `message`). What is missing is the *evaluation trace* — the
 step-by-step record of which policies and rules were considered, why each was
-skipped or matched, and which conditions passed or failed. Without the trace
-the `message` field is the only signal, and it only describes the matched rule,
+skipped or matched and which conditions passed or failed. Without the trace
+the `message` field is the only signal and it only describes the matched rule,
 not the full reasoning path.
 
 ### 9.1 Decision Trace
@@ -1244,7 +1279,7 @@ decisions are as important to explain as denied ones.
 
 When called through the Gateway (`GET /api/v1/governance/explain`), the
 caller's own resolved identity and purpose are automatically injected as
-defaults for `user_id`, `service`, `role`, and `purpose` — any explicitly
+defaults for `user_id`, `service`, `role` and `purpose` — any explicitly
 supplied values override them. This means a fleet-runner service account can
 call the explain endpoint with its own Bearer token and get an accurate policy
 evaluation without supplying identity parameters manually.

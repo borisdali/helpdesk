@@ -1,0 +1,76 @@
+series_id: pbs_replica_restart_action
+name: "Sysadmin — Replica Container Restart"
+version: "1.0"
+playbook_type: remediation
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Restart a cleanly-stopped Docker-hosted PostgreSQL replica container. This
+  playbook runs only when the prior replica-connectivity inspection confirmed
+  ExitCode=0 and clean shutdown logs with no sign the primary ever rejected
+  the connection — meaning the replica container itself was stopped or
+  crashed, not that it was refused. Executes docker start and confirms the
+  container is healthy before reporting success. Restarting does not fix a
+  primary-side rejection (wrong pg_hba.conf rule, exhausted wal senders,
+  expired credentials) — the prior playbook's decision table routes those
+  cases to ESCALATE_TO: none instead of here.
+symptoms:
+  - "sysadmin replica-connectivity inspection confirmed container exited with ExitCode=0"
+  - "replica container logs show clean PostgreSQL shutdown (no FATAL/PANIC/corruption/rejection)"
+  - "replica restart is the confirmed correct action"
+guidance: |
+  You are the third stage of a diagnostic chain. Prior agents have confirmed:
+  1. The replica is disconnected (absent from the primary's pg_stat_replication,
+     matching inactive slot).
+  2. The replica's own container exited cleanly (ExitCode=0, clean shutdown in
+     logs, no evidence the primary ever rejected the connection).
+
+  Your job is to restart the replica container and confirm it is healthy.
+  Your target for every tool call below is the REPLICA, not the primary — the
+  connection_string stated at the top of this prompt already points at the
+  replica (handed off explicitly via a TARGET: signal from the prior hop).
+
+  PRECONDITION CHECK — abort if any of these are true:
+  - Prior findings mention "FATAL", "PANIC", "invalid page", "checksum failure",
+    or "OOM" — those require human review, not an automated restart.
+  - Prior findings mention a primary-side rejection (pg_hba.conf, no matching
+    entry, connection refused by the primary) — restarting the replica cannot
+    fix a primary-side problem.
+  - You have any doubt about the prior diagnosis — emit FINDINGS describing
+    the concern and stop.
+
+  Step 1 — Restart the replica container:
+  Call restart_container with the connection_string (target). This runs
+  docker start on the replica container identified in the infrastructure
+  config.
+
+  Step 2 — Confirm the replica is running:
+  Call check_host with the same connection_string. Verify Status=running
+  and Restarting=false. Also check the recent container logs for PostgreSQL
+  startup messages ("database system is ready to accept connections") and,
+  ideally, evidence the replica has resumed streaming (no immediate FATAL
+  reconnect failure in the first few log lines after startup).
+
+  Step 3 — Report outcome:
+  Emit FINDINGS with:
+  - Whether the restart succeeded or failed
+  - The replica container state after restart (Status, ExitCode, StartedAt)
+  - PostgreSQL readiness from the container logs
+  - Any anomalies observed (unexpected exit codes, slow startup, an immediate
+    reconnect failure suggesting the underlying cause was never a crash)
+
+  Do NOT call any write or destructive tools beyond restart_container.
+  Do NOT retry more than once — if the container fails to start, report the
+  failure and stop so a human can investigate.
+  Do NOT emit TRANSITION_TO or ESCALATE_TO — this is a terminal action
+  playbook. Your job ends with FINDINGS.
+
+escalation:
+  - "replica container fails to start after restart_container — may indicate a config or data issue"
+  - "replica does not resume streaming after the container is running — investigate replica-side pg logs"
+  - "prior findings mention OOM, FATAL, PANIC, data corruption, or a primary-side rejection — do not restart automatically"
+target_hints: []

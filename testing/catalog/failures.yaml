@@ -510,7 +510,8 @@ failures:
     description: >
       The streaming replica has fallen behind the primary due to paused
       WAL replay, causing stale reads.
-    external_compat: false  # requires a replica; set FAULTTEST_REPLICA_CONN_STR
+    external_compat: true  # pure libpq, no Docker/OS access needed
+    requires_replica: true  # needs a real replica attached; set FAULTTEST_REPLICA_CONN_STR
     inject:
       type: sql
       target: replica
@@ -544,6 +545,232 @@ failures:
       verify_sql: "SELECT count(*) = 0 FROM pg_stat_replication WHERE replay_lag > interval '60 seconds'"
       verify_timeout: "120s"
     timeout: 60s
+
+  - id: db-replica-disconnected
+    name: "Replica disconnected (walreceiver dropped)"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's connection to the primary has been severed entirely.
+      pg_stat_replication no longer shows the replica at all — a naive check could
+      misread the absent row as "no active replication = healthy," when the correct
+      signal is an inactive slot in pg_replication_slots with growing retained WAL.
+    external_compat: true
+    requires_replica: true
+    # 120s, not the 90s default: injection's own precondition guard can wait
+    # up to 90s on its own for the replica to reconnect after a prior --repeat
+    # rep's teardown (see inject's own comment) — needs headroom above that or
+    # the harness SIGKILLs the injection subprocess before the guard's own,
+    # more informative RAISE EXCEPTION ever gets a chance to fire.
+    inject_timeout: 60s
+    prerequisites: >
+      The injection connection (not the agent's own connection) must be superuser —
+      needed both for pg_hba.conf's COPY ... TO PROGRAM rewrite below and for
+      pg_terminate_backend. A real streaming replica must already be attached to the
+      target primary — injection fails loudly if not.
+    inject:
+      type: sql
+      script_inline: >
+        COPY (SELECT 1) TO PROGRAM
+        'for i in $(seq 1 45); do
+        n=$(psql -tAc "SELECT count(*) FROM pg_stat_replication" -d testdb);
+        if [ "$n" -gt 0 ]; then exit 0; fi;
+        sleep 1; done;
+        echo "db-replica-disconnected fault requires an already-connected streaming
+        replica; none found in pg_stat_replication after waiting 45s for
+        reconnection (relevant for --repeat: the replica needs time to reconnect
+        after a prior rep''s teardown lifts the reject rule)" >&2; exit 1';
+        COPY (SELECT 'host replication all all reject') TO PROGRAM
+        'cat > /tmp/hba_new.conf && cat /var/lib/postgresql/data/pg_hba.conf >> /tmp/hba_new.conf && mv /tmp/hba_new.conf /var/lib/postgresql/data/pg_hba.conf';
+        SELECT pg_reload_conf();
+        SELECT pg_terminate_backend(pid) FROM pg_stat_replication;
+    teardown:
+      type: sql
+      script_inline: >
+        COPY (SELECT 1) TO PROGRAM
+        'tail -n +2 /var/lib/postgresql/data/pg_hba.conf > /tmp/hba_restored.conf && mv /tmp/hba_restored.conf /var/lib/postgresql/data/pg_hba.conf';
+        SELECT pg_reload_conf();
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new writes
+      in over 10 minutes, and the replica's own status page shows no recent
+      activity. The primary connection_string is "{{connection_string}}" — use it
+      verbatim for ALL of your own tool calls (check_connection, get_replication_status,
+      get_active_connections, get_server_info, etc.) — you have no tools capable of
+      querying a different server, so never pass anything else to them. If you
+      determine the replica is genuinely disconnected and need to hand off to
+      sysadmin for a host/container-level check, the replica's host:port is
+      "{{replica_host_port}}" — this is NOT a connection string (no dbname/user/
+      password) and exists only to be quoted verbatim in a TARGET: line per your
+      playbook guidance, never passed to any of your own tools. Please investigate
+      replication health and determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "disconnect"
+          - "walreceiver"
+          - "wal receiver"
+          - "no entry"
+          - "not present"
+          - "inactive slot"
+      expected_diagnosis:
+        category: "replica_disconnected"
+        objective_evidence_signal: replica_disconnected
+        narrative: "The agent should recognize the absent pg_stat_replication row (not a lag figure) combined with an inactive replication slot as a genuine disconnect, and hand off to sysadmin for a host/container-level check — emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage — not TRANSITION_TO: pbs_replication_remediate, which cannot address a disconnect, and not silently misread the absence as healthy. The sysadmin hop should in turn confirm the replica container is healthy and conclude the disconnect is a primary-side rejection (this fault's injection never touches the replica container itself), terminating with ESCALATE_TO: none — not TRANSITION_TO: pbs_replica_restart_action, which is reserved for a genuinely crashed replica container."
+    diagnosis_playbook_series_id: pbs_replication_lag
+    # 180s: injection's own precondition guard can wait up to 90s for the
+    # replica to reconnect after a prior --repeat rep's teardown (see inject's
+    # own comment), on top of the DB hop's own ~20-30s and a second, chained
+    # sysadmin hop (host/container inspection) before the run concludes.
+    timeout: 180s
+
+  - id: db-replica-container-stopped
+    name: "Replica container stopped"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's own container has been stopped cleanly (docker
+      compose stop) — unlike db-replica-disconnected, the primary never
+      rejects anything; the replica simply isn't running. From the primary's
+      side this looks identical to db-replica-disconnected (absent
+      pg_stat_replication row, inactive WAL-retaining slot), so the DB agent
+      must escalate the same way. The distinguishing evidence only appears at
+      the sysadmin hop: ExitCode=0 and clean-shutdown logs with no rejection
+      message, which is the one branch that should conclude
+      TRANSITION_TO: pbs_replica_restart_action rather than ESCALATE_TO: none.
+    requires_replica: true
+    inject:
+      type: docker
+      action: stop
+      service: replica
+    teardown:
+      type: docker
+      action: start
+      service: replica
+      # Give the replica a moment to reattach and stream before the next
+      # --repeat rep's injection runs its own "already-connected" precondition
+      # wait on db-replica-disconnected-style faults sharing this stack.
+      wait: 5s
+    diagnosis_playbook_series_id: pbs_replication_lag
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new
+      writes in over 10 minutes, and the replica's own status page shows no
+      recent activity. The primary connection_string is
+      "{{connection_string}}" — use it verbatim for ALL of your own tool
+      calls (check_connection, get_replication_status, get_active_connections,
+      get_server_info, etc.) — you have no tools capable of querying a
+      different server, so never pass anything else to them. If you determine
+      the replica is genuinely disconnected and need to hand off to sysadmin
+      for a host/container-level check, the replica's host:port is
+      "{{replica_host_port}}" — this is NOT a connection string (no dbname/
+      user/password) and exists only to be quoted verbatim in a TARGET: line
+      per your playbook guidance, never passed to any of your own tools.
+      Please investigate replication health and determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "disconnect"
+          - "walreceiver"
+          - "wal receiver"
+          - "no entry"
+          - "not present"
+          - "inactive slot"
+      expected_diagnosis:
+        category: "replica_disconnected"
+        objective_evidence_signal: replica_disconnected
+        narrative: "The agent should recognize the absent pg_stat_replication row combined with an inactive replication slot as a genuine disconnect, and hand off to sysadmin — emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage — the same first-hop answer as db-replica-disconnected, since the primary-side signal is identical. The sysadmin hop should find the replica container Status=exited with ExitCode=0 and clean-shutdown logs (no rejection message), and correctly conclude TRANSITION_TO: pbs_replica_restart_action — exercising the one branch of pbs_sysadmin_replica_connectivity_triage's decision table that db-replica-disconnected's own injection (a primary-side reject, replica container never touched) cannot reach. The restart playbook should then confirm the container is running again and streaming."
+    # 180s: same two-hop chain as db-replica-disconnected, plus a third hop
+    # (pbs_replica_restart_action actually restarts and confirms the
+    # container) when the sysadmin agent correctly transitions instead of
+    # escalating to none.
+    timeout: 180s
+
+  - id: db-replica-stalled
+    name: "Replica present but not communicating (frozen walreceiver)"
+    category: database
+    severity: high
+    description: >
+      The streaming replica's own process is frozen (Docker cgroup freezer — a
+      stand-in for a real CPU-starved/hung host) — unlike db-replica-disconnected
+      and db-replica-container-stopped, the connection is never torn down: the
+      replica's row in pg_stat_replication stays present with state=streaming
+      the whole time. A check that only asks "is there a row?" misreads this as
+      healthy. The correct signal is reply_lag_seconds — how long since this
+      replica last sent any feedback at all — climbing well past a normal
+      heartbeat interval while the connection otherwise looks unremarkable.
+    requires_replica: true
+    # inject_timeout must clear the inject spec's own 40s wait with real
+    # margin — a tight budget here previously caused a real bug elsewhere
+    # (SIGKILL racing the injection's own guard at nearly the same deadline,
+    # see db-replica-disconnected's own history). 90s gives 50s of headroom.
+    inject_timeout: 90s
+    prerequisites: >
+      A real streaming replica must already be attached to the target primary
+      — this fault freezes that replica's own container; it fails loudly (docker
+      pause on a nonexistent/already-stopped container errors) rather than
+      silently no-op'ing.
+    inject:
+      type: docker
+      action: pause
+      service: replica
+      # 40s: has to thread a real, narrow needle, not just "long enough."
+      # It must clear the shipped objective_evidence.yaml threshold (20s)
+      # with margin so the signal has genuinely fired, but stay well below
+      # Postgres's own wal_sender_timeout (default 60s/1min) — past that,
+      # the PRIMARY itself proactively terminates the connection and the
+      # row disappears from pg_stat_replication entirely, turning this into
+      # an ordinary disconnect instead of the present-but-stalled case this
+      # fault exists to exercise. Confirmed live (2026-09-01): an earlier
+      # 75s wait (already past the 60s cutoff on its own) always lost that
+      # race — see objective_evidence.yaml's own threshold comment for the
+      # full story. 40s leaves 20s of margin on both sides.
+      wait: 40s
+    teardown:
+      type: docker
+      action: unpause
+      service: replica
+      # Give the replica a moment to resume sending feedback and catch back
+      # up before the next --repeat rep's injection runs its own precondition
+      # checks — same reasoning as db-replica-container-stopped's teardown wait.
+      wait: 5s
+    diagnosis_playbook_series_id: pbs_replication_lag
+    prompt: >
+      Downstream consumers report the read replica hasn't reflected any new
+      writes in over a minute, but the replica's own status page still shows
+      it as "connected." The primary connection_string is
+      "{{connection_string}}" — use it verbatim for ALL of your own tool
+      calls (check_connection, get_replication_status, get_active_connections,
+      get_server_info, etc.) — you have no tools capable of querying a
+      different server, so never pass anything else to them. If you determine
+      the replica is present but stalled and need to hand off to sysadmin for
+      a host/process-level check, the replica's host:port is
+      "{{replica_host_port}}" — this is NOT a connection string (no dbname/
+      user/password) and exists only to be quoted verbatim in a TARGET: line
+      per your playbook guidance, never passed to any of your own tools.
+      Please investigate replication health and determine the cause.
+    evaluation:
+      expected_tools:
+        - get_replication_status
+      expected_keywords:
+        any_of:
+          - "stalled"
+          - "reply_lag"
+          - "not communicating"
+          - "frozen"
+          - "no reply"
+          - "stopped sending"
+      expected_diagnosis:
+        category: "replica_stalled"
+        objective_evidence_signal: replica_stalled
+        narrative: "The agent should recognize a replica row present in pg_stat_replication (state=streaming, not absent) combined with an abnormally high reply_lag_seconds as Ending C — present but stalled, not Ending A's ordinary lag and not Ending B's disconnect — and hand off to sysadmin, emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage. The sysadmin hop should find the replica container Status=paused (frozen, not crashed, not exited) and correctly conclude ESCALATE_TO: none — this fault's injection never crashes the container, so pbs_replica_restart_action's own crashed-and-safe-to-restart precondition (exitcode=0, clean shutdown logs) is never satisfied and must not be reached."
+    # 200s: two-hop chain (DB triage + sysadmin triage, both ending in
+    # ESCALATE_TO: none — no third remediation hop for this fault, a paused
+    # container isn't the crashed case pbs_replica_restart_action handles)
+    # plus the inject spec's own 40s wait, with real margin above both.
+    timeout: 200s
 
   - id: db-idle-in-transaction
     name: "Session stuck with uncommitted writes"
@@ -1069,6 +1296,7 @@ failures:
           - "OOM"
       expected_diagnosis:
         category: "oom_killed"
+        objective_evidence_signal: oom_killed
         narrative: >
           The agent should identify exit_code=137 and reason=OOMKilled from
           the pod's last termination state, inspect the container's memory

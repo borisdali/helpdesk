@@ -19,6 +19,7 @@ import (
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/decisions"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 )
@@ -496,6 +497,7 @@ type agentRunResult struct {
 	sawSignalLine    bool   // true iff a TRANSITION_TO:/ESCALATE_TO: line was present at all (see agentEscalation.SawSignalLine)
 	rawText          string // the model's raw, pre-strip response text — see capturedText's doc comment for why this is not the same as capture.body's text
 	findings         string
+	target           string // set when agent emits TARGET: — see agentEscalation.Target
 	diagReport       *audit.DiagnosticReport
 	runID            string
 	playbookSeriesID string
@@ -594,6 +596,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 				esc := parseAgentEscalation(text)
 				res.findings = esc.Findings
 				res.sawSignalLine = esc.SawSignalLine
+				res.target = esc.Target
 				// Validate emitted next-playbook targets against the triage
 				// playbook's declared allow-lists. TRANSITION_TO is checked
 				// against transitions_to (same-domain follow-ons), ESCALATE_TO
@@ -752,6 +755,18 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	const maxChainDepth = 5
 	prev := primary
+	// chainTarget is the last TARGET: connection string seen anywhere in this
+	// chain, carried forward across hops that don't restate their own — see
+	// chainEscalation's own doc comment for why a hop needs it (e.g.
+	// pbs_replica_restart_action's guidance assumes its connection_string
+	// "already points at the replica"). Found live: a hop reliably following
+	// the sub-instruction to re-emit TARGET: before TRANSITION_TO: is not
+	// guaranteed (a cheaper model skipped it in practice), and resetting to
+	// req.ConnectionString (always the top-level primary) the moment one hop
+	// omits it silently sent the NEXT hop to the wrong server — a remediation
+	// hop that then correctly detected the mismatch and refused to act, but
+	// left the real fault unfixed despite a fully correct diagnosis chain.
+	chainTarget := primary.target
 	for len(chain) < maxChainDepth && (prev.escalatedTo != "" || prev.transitionTo != "") {
 		// nextSeries is the target for either signal; isTransition distinguishes them.
 		nextSeries := prev.escalatedTo
@@ -810,11 +825,14 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			if lowConfidenceForceGate(prev.diagReport) {
 				gateReasons = append(gateReasons, "low_confidence")
 			}
-			if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart)); fire {
-				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(reasons, ","))
-				for _, r := range reasons {
-					appendObjectiveEvidenceSignal(extra, r)
-				}
+			outcome := evidence.HopOutcome{Report: prev.diagReport, RawText: prev.rawText, SawSignalLine: prev.sawSignalLine}
+			all, unconfirmed := objectiveEvidenceSignals(audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, prev.traceID, prev.runStart), outcome)
+			for _, r := range all {
+				appendObjectiveEvidenceSignal(extra, r)
+			}
+			appendObjectiveEvidenceBreakdown(extra, all, unconfirmed)
+			if len(unconfirmed) > 0 {
+				gateReasons = append(gateReasons, "objective_evidence:"+strings.Join(unconfirmed, ","))
 			}
 			if !req.SkipTrustGate && g.trustNotYetEarnedForceGate(prev.playbookSeriesID) {
 				gateReasons = append(gateReasons, "trust_not_earned")
@@ -891,7 +909,6 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			finalFindings = prev.findings
-			finalReport = prev.diagReport
 			slog.Info("playbook: gate pending — awaiting operator acknowledgment",
 				"run_id", prev.runID, "gate_type", gateType, "next_series", nextSeries,
 				"confidence_warning", warn)
@@ -942,9 +959,17 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			extra["suggested_next"] = buildSuggestedNext(nextSeries, req, prev.runID, prev.findings)
 			break
 		}
-		chained := g.chainEscalation(r, pb, req, prev, nextPB)
+		// Use the chain's carried-forward target (see chainTarget above),
+		// not just this hop's own restated one — chainEscalation reads
+		// .target off whatever agentRunResult it's given.
+		hopForChain := prev
+		hopForChain.target = chainTarget
+		chained := g.chainEscalation(r, pb, req, hopForChain, nextPB)
 		if chained == nil {
 			break
+		}
+		if chained.target != "" {
+			chainTarget = chained.target
 		}
 		if recordSignalLessWarnings(extra, g.auditURL, g.auditAPIKey, nextPB, *chained) {
 			g.recordProtocolViolationEvent(r.Context(), *chained)
@@ -1041,7 +1066,6 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			finalTransitionedTo = req.RemediationSeriesID
 		}
 		finalFindings = prev.findings
-		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with
 		// TRANSITION_TO or ESCALATE_TO. A run that omits this signal is a bug.
 		// Skipped when recordSignalLessWarnings already appended an equivalent,
@@ -1100,8 +1124,23 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 
 	if runID != "" {
 		gateReason, _ := extra["gate_reason"].(string)
+		// Persist primary.diagReport (this run's own, hop-scoped report), not
+		// finalReport (the cross-hop merge). finalReport exists for the
+		// immediate HTTP response's combined view (extra["diagnostic_report"]
+		// above) — mergeDiagnosticReports re-ranks hypotheses from different
+		// hops purely by raw confidence and demotes the primary run's own
+		// declared root cause whenever a later, unrelated hop reports higher
+		// confidence. Persisting that onto the primary run's own record
+		// previously corrupted incident_narrative.go's TRIAGE chapter (which
+		// reads run.DiagnosticReport directly) and, via evidence.Confirmed's
+		// primaryHypothesis lookup, silently broke objective-evidence
+		// confirmation for the triage hop's own signal whenever a downstream
+		// hop happened to score higher — found live 2026-09-02 on
+		// db-replica-stalled (sysadmin's paused-container hypothesis at 1.0
+		// confidence outranked the triage hop's own reply_lag_seconds
+		// hypothesis at 0.95, even though they answer different questions).
 		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
-			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, finalReport, primary.sawSignalLine, gateReason)
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, primary.diagReport, primary.sawSignalLine, gateReason)
 	}
 }
 
@@ -1137,6 +1176,23 @@ func (g *Gateway) canAutoChain(ctx context.Context, mode, sessionID string, targ
 	}
 }
 
+// derivedPurpose maps a playbook's own type to the X-Purpose value its own
+// tool calls should declare — "triage" playbooks are read-only by contract
+// (diagnostic), "remediation" playbooks perform the actual fix. An untyped
+// playbook (pbType == "", e.g. some non-triage/non-remediation entry points)
+// falls back to the caller's own originally-declared purpose rather than
+// guessing.
+func derivedPurpose(pbType, fallback string) string {
+	switch pbType {
+	case "triage":
+		return "diagnostic"
+	case "remediation":
+		return "remediation"
+	default:
+		return fallback
+	}
+}
+
 // chainEscalation runs nextPB as a chained agent session, using the primary
 // run's findings as context. nextPB must already be fetched by the caller.
 func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, req PlaybookRunRequest, primary agentRunResult, nextPB *audit.Playbook) *agentRunResult {
@@ -1144,8 +1200,17 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		return nil
 	}
 
+	// connectionString defaults to the chain's original target, but a hop can
+	// override it for the next hop via a TARGET: signal line (primary.target)
+	// when its diagnosis concerns a different server — e.g. the DB agent
+	// escalating to sysadmin about a replica while req.ConnectionString stays
+	// pinned to the primary for the whole chain. See agentEscalation.Target.
+	connectionString := req.ConnectionString
+	if primary.target != "" {
+		connectionString = primary.target
+	}
 	chainReq := PlaybookRunRequest{
-		ConnectionString: req.ConnectionString,
+		ConnectionString: connectionString,
 		Namespace:        req.Namespace,
 		Context:          req.Context,
 		PriorRunID:       primary.runID,
@@ -1162,6 +1227,22 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 			chainReq.PriorFindings = prior.FindingsSummary
 		}
 	}
+
+	// X-Purpose drives tool-level policy enforcement on the agent side (see
+	// resolveRequest/proxyToAgentWithTool, forwarded into the A2A message's
+	// metadata.purpose) — derive it from THIS hop's own playbook type rather
+	// than leaving whatever the top-level caller originally declared on the
+	// shared *http.Request r. Found live: a force-mode auto-chain into a real
+	// remediation playbook (pbs_replica_restart_action) still carried the
+	// caller's original "diagnostic" purpose (chainReq never carried Purpose
+	// at all, and r's X-Purpose header is only ever set once, at the very
+	// top) straight into its own restart_container call — canAutoChain had
+	// already authorized the chain into remediation, but the tool-level
+	// policy gate never learned that, and correctly-per-its-own-rule denied
+	// the write. Applies to every triage->remediation transition in the
+	// system, not just this one: the fix lives in chainEscalation, the one
+	// shared function every auto-chained hop goes through.
+	r.Header.Set("X-Purpose", derivedPurpose(nextPB.PlaybookType, req.Purpose))
 
 	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
@@ -1324,19 +1405,27 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 	return true // primary hypothesis not marked — treat as uncertain
 }
 
-// objectiveEvidenceForceGate returns true, with every distinct signal found
-// (deduplicated, in first-seen order), when one or more objective_evidence
-// events were recorded for this hop — a deterministic, code-derived distress
-// signal (e.g. a real pod restart, OOM kill, eviction, or scheduling
-// failure) read directly from a tool's structured result, independent of
-// what the model's own text concludes about it. Unlike lowConfidenceForceGate,
-// this does not depend on the model self-reporting anything: the same tool
-// evidence produces the same gate regardless of the model's stated
-// ESCALATE_TO or CONFIDENCE. Returns false, nil when no such events were
-// recorded — deliberately scoped today to whichever tools populate
-// objective_evidence (currently the K8s agent's get_pods and get_events; see
-// the plan's "generic plumbing, narrow rollout" scoping note before
-// extending this to other tools).
+// objectiveEvidenceSignals partitions the objective_evidence events recorded
+// for this hop into every distinct signal observed (all — reported
+// unconditionally, for audit/CLEAN-cert visibility regardless of what
+// happens next) and the subset outcome's own response never engaged with
+// (unconfirmed — see evidence.Confirmed). Deduplicated, first-seen order.
+//
+// Evidence is a deterministic, code-derived distress signal (e.g. a real pod
+// restart, OOM kill, eviction, or scheduling failure) read directly from a
+// tool's structured result — independent of the model's self-reported
+// CONFIDENCE, same as before. What changed: presence alone used to be
+// sufficient to force a human gate, regardless of whether the model's own
+// conclusion already correctly accounted for it — found live to not scale as
+// objective-evidence coverage grows past K8s to other agents (see
+// db-replica-disconnected's sysadmin escalation, whose textbook-correct
+// diagnosis was gated identically to how a wrong one would be). Now, only
+// evidence the response never demonstrably engaged with (per
+// evidence.Confirmed's structured, non-keyword check against the model's own
+// required verbatim EVIDENCE quote / named resource) still forces a gate —
+// evidence the model correctly cited and acted on is corroboration, not a
+// red flag, and stays visible in objective_evidence_signals without gating
+// or warning anything.
 //
 // Collects every distinct signal rather than stopping at the first: a single
 // hop can legitimately call more than one evidence-producing tool (e.g.
@@ -1347,8 +1436,7 @@ func lowConfidenceForceGate(report *audit.DiagnosticReport) bool {
 // gate_reason, objective_evidence_signals, and the CLEAN cert's
 // warning_distribution — the exact class of bug this project's whole
 // point is to catch, not commit.
-func objectiveEvidenceForceGate(events []audit.Event) (bool, []string) {
-	var signals []string
+func objectiveEvidenceSignals(events []audit.Event, outcome evidence.HopOutcome) (all, unconfirmed []string) {
 	seen := map[string]bool{}
 	for _, ev := range events {
 		if ev.ObjectiveEvidence == nil || ev.ObjectiveEvidence.Signal == "" {
@@ -1359,9 +1447,17 @@ func objectiveEvidenceForceGate(events []audit.Event) (bool, []string) {
 			continue
 		}
 		seen[sig] = true
-		signals = append(signals, sig)
+		all = append(all, sig)
+		confirmed, err := evidence.Confirmed(outcome, *ev.ObjectiveEvidence)
+		if err != nil {
+			slog.Warn("objective evidence: confirmation check failed, treating as unconfirmed",
+				"signal", sig, "err", err)
+		}
+		if err != nil || !confirmed {
+			unconfirmed = append(unconfirmed, sig)
+		}
 	}
-	return len(signals) > 0, signals
+	return all, unconfirmed
 }
 
 // protocolViolation reports whether hop violated the triage response
@@ -1401,16 +1497,60 @@ func appendWarning(extra map[string]any, key, msg string) {
 // human-readable message, so faulttest/CLEAN-cert consumers can bucket by
 // signal instead of string-matching gate_reason.
 func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
+	appendDedupedSignal(extra, "objective_evidence_signals", signal)
+}
+
+// splitConfirmedUnconfirmed partitions all (every distinct signal fired) into
+// confirmed/unconfirmed using unconfirmed (the subset objectiveEvidenceSignals
+// determined the response never demonstrably engaged with) as the key —
+// shared by appendObjectiveEvidenceBreakdown's response-level view and
+// incident_narrative.go's persisted-incident view, so the two never drift
+// apart on what "confirmed" means.
+func splitConfirmedUnconfirmed(all, unconfirmed []string) (confirmed, unconf []string) {
+	isUnconfirmed := make(map[string]bool, len(unconfirmed))
+	for _, s := range unconfirmed {
+		isUnconfirmed[s] = true
+	}
+	for _, s := range all {
+		if isUnconfirmed[s] {
+			unconf = append(unconf, s)
+		} else {
+			confirmed = append(confirmed, s)
+		}
+	}
+	return confirmed, unconf
+}
+
+// appendObjectiveEvidenceBreakdown records, for one hop's evidence.Confirmed
+// results, which signals were confirmed vs unconfirmed — explicit,
+// unconditional visibility into what objectiveEvidenceSignals only otherwise
+// exposes indirectly (a signal's absence from gate_reason/evidence_warnings
+// implying it was confirmed). Deduplicated and accumulated across hops the
+// same way objective_evidence_signals itself is.
+func appendObjectiveEvidenceBreakdown(extra map[string]any, all, unconfirmed []string) {
+	confirmed, unconf := splitConfirmedUnconfirmed(all, unconfirmed)
+	for _, s := range confirmed {
+		appendDedupedSignal(extra, "objective_evidence_confirmed", s)
+	}
+	for _, s := range unconf {
+		appendDedupedSignal(extra, "objective_evidence_unconfirmed", s)
+	}
+}
+
+// appendDedupedSignal appends signal to the string slice stored at
+// extra[key], skipping duplicates — shared by appendObjectiveEvidenceSignal
+// and appendObjectiveEvidenceBreakdown.
+func appendDedupedSignal(extra map[string]any, key, signal string) {
 	if signal == "" {
 		return
 	}
-	existing, _ := extra["objective_evidence_signals"].([]string)
+	existing, _ := extra[key].([]string)
 	for _, s := range existing {
 		if s == signal {
 			return
 		}
 	}
-	extra["objective_evidence_signals"] = append(existing, signal)
+	extra[key] = append(existing, signal)
 }
 
 // recordSignalLessWarnings runs three independent, unconditional checks on
@@ -1421,7 +1561,10 @@ func appendObjectiveEvidenceSignal(extra map[string]any, signal string) {
 // approval for.
 //
 //   - objective_evidence: real, code-derived tool evidence (e.g. a pod
-//     restart/OOM kill) the hop saw but didn't act on.
+//     restart/OOM kill) that the hop's own response never engaged with —
+//     confirmed evidence (the response demonstrably accounts for it, see
+//     objectiveEvidenceSignals) is still reported for visibility but does
+//     not warn here.
 //   - protocol_violation: the triage response protocol itself was violated
 //     (see protocolViolation). Returns true so the caller can additionally
 //     persist a durable, queryable audit event (see checkTargetScope's
@@ -1442,13 +1585,16 @@ func recordSignalLessWarnings(extra map[string]any, auditURL, apiKey string, pb 
 		return false
 	}
 
-	if fire, reasons := objectiveEvidenceForceGate(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart)); fire {
+	outcome := evidence.HopOutcome{Report: hop.diagReport, RawText: hop.rawText, SawSignalLine: hop.sawSignalLine}
+	all, unconfirmed := objectiveEvidenceSignals(audit.FetchObjectiveEvidenceEvents(auditURL, apiKey, hop.traceID, hop.runStart), outcome)
+	for _, r := range all {
+		appendObjectiveEvidenceSignal(extra, r)
+	}
+	appendObjectiveEvidenceBreakdown(extra, all, unconfirmed)
+	if len(unconfirmed) > 0 {
 		appendWarning(extra, "evidence_warnings", fmt.Sprintf(
-			"hop %q (agent %s) recorded objective evidence (%s) but did not escalate or transition",
-			hop.playbookSeriesID, hop.agentName, strings.Join(reasons, ", ")))
-		for _, r := range reasons {
-			appendObjectiveEvidenceSignal(extra, r)
-		}
+			"hop %q (agent %s) recorded unconfirmed objective evidence (%s) — response text never engaged with it, and the hop did not escalate or transition",
+			hop.playbookSeriesID, hop.agentName, strings.Join(unconfirmed, ", ")))
 	}
 
 	if protocolViolation(pb.PlaybookType, hop) {
@@ -2583,8 +2729,16 @@ func injectFields(w http.ResponseWriter, capture *responseCapture, additionalFie
 
 // agentEscalation holds the structured signals parsed from an agent response.
 type agentEscalation struct {
-	EscalateTo    string // series_id for out-of-scope escalations (ESCALATE_TO signal)
-	TransitionTo  string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	EscalateTo   string // series_id for out-of-scope escalations (ESCALATE_TO signal)
+	TransitionTo string // series_id for same-domain triage→remediation transitions (TRANSITION_TO signal)
+	Target       string // optional TARGET: connection string — overrides the next chained
+	// hop's connection_string when this hop's diagnosis concerns a different
+	// server than the one it was launched against (e.g. DB agent escalating to
+	// sysadmin about a replica while its own connection_string stays pinned to
+	// the primary throughout the chain). Deliberately a structured signal line,
+	// not left to free-text FINDINGS extraction — see PlaybookRunRequest.Namespace's
+	// doc comment for why a value load-bearing for correctness shouldn't be
+	// trusted from prose the model writes.
 	Findings      string // one-sentence diagnosis summary
 	CleanText     string // response text with signal lines removed
 	SawSignalLine bool   // true iff a TRANSITION_TO: or ESCALATE_TO: line was present at
@@ -2624,6 +2778,8 @@ func parseAgentEscalation(text string) agentEscalation {
 			}
 		} else if strings.HasPrefix(trimmed, "FINDINGS:") {
 			result.Findings = strings.TrimSpace(strings.TrimPrefix(trimmed, "FINDINGS:"))
+		} else if strings.HasPrefix(trimmed, "TARGET:") {
+			result.Target = strings.TrimSpace(strings.TrimPrefix(trimmed, "TARGET:"))
 		} else {
 			cleaned.WriteString(line)
 			cleaned.WriteByte('\n')
@@ -2751,6 +2907,33 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 	}
 }
 
+// splitOutsideQuotes splits s on sep, skipping any occurrence of sep that
+// falls inside a double-quoted region. Doesn't handle escaped quotes (\") —
+// not needed here, EVIDENCE quotes are plain tool output text, not
+// re-encoded JSON. Toggles a simple in/out-of-quotes flag on each '"'
+// encountered; an odd number of quote characters (a genuinely malformed
+// line) just leaves the parser "inside quotes" for the remainder of the
+// string, which degrades to "don't split further" rather than panicking or
+// misparsing worse.
+func splitOutsideQuotes(s, sep string) []string {
+	var parts []string
+	inQuotes := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && strings.HasPrefix(s[i:], sep) {
+			parts = append(parts, s[start:i])
+			i += len(sep) - 1
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
 // matchHypothesisLine parses a single HYPOTHESIS_N: ... line.
 // Returns nil if the line does not match.
 func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
@@ -2772,8 +2955,19 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 	rest := strings.TrimSpace(line[colonIdx+1:])
 	h := audit.DiagnosticHypothesis{Rank: rank}
 
-	// Split on " | " to get fields.
-	parts := strings.Split(rest, " | ")
+	// Split on " | " to get fields — but not inside a quoted EVIDENCE value.
+	// A model quoting a raw psql -x line verbatim (exactly what the protocol
+	// asks for: "a short verbatim quote from tool output") routinely
+	// produces text like EVIDENCE: "reply_lag_seconds | 52" — a plain
+	// strings.Split here would shred that quote right at its own internal
+	// " | ", truncating h.Evidence down to just "reply_lag_seconds" and
+	// silently losing the actual value. Found live (2026-09-02): this
+	// wasn't specific to any one signal — replica_disconnected's own
+	// confirmation happened to use resource_named_in_quote (checks raw
+	// response text, unaffected), which is what hid this bug until a
+	// numeric signal using the default evidence_quote_contains_value probe
+	// (which depends on this exact parsing) hit it.
+	parts := splitOutsideQuotes(rest, " | ")
 	if len(parts) == 0 {
 		return nil
 	}

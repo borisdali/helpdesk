@@ -33,6 +33,7 @@ it on each deployment platform.
 3. [What a stability cert contains](#3-what-a-stability-cert-contains)
    - [Attribution fields (v0.21.0)](#attribution-fields-v0210)
    - [CLEAN axis fields (v0.24.0)](#clean-axis-fields-v0240)
+   - [Confirmed-evidence field (v0.27.0)](#confirmed-evidence-field-v0270)
    - [Versioning & history fields (v0.25.0)](#versioning--history-fields-v0250)
 4. [STABLE vs. UNSTABLE: the criteria](#4-stable-vs-unstable-the-criteria)
 5. [Running a certification](#5-running-a-certification)
@@ -227,6 +228,12 @@ Three additional columns capture a fourth, independent axis — whether any run 
 | `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). Shown via `vault accuracy`'s `Warning types:` line; not shown in `vault list`. |
 
 `is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires `is_stable`, `is_clean`, *and* `attribution_consistent` (§3) across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended — the same three-condition bar is exposed as `FaultStabilityCert.EarnsTrust()` so both the gateway's real-time gate and the cert store's own regression detection (below) read the identical fact, not two independently-maintained copies of it.
+
+### Confirmed-evidence field (v0.27.0)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `confirmed_distribution` | JSON object | `warning_distribution`'s positive counterpart: per-signal run count of objective evidence that fired *and* was confirmed by the run's own response — e.g. `{"objective_evidence:oom_killed": 4}`. Not a warning signal and not counted toward `warning_count`/`is_clean` — proof the model saw and cited the real data, not a concern. Without this field, a cert with zero warnings can't distinguish "objective evidence never fired" from "it fired and was always correctly confirmed." Shown via `vault accuracy`'s `Confirmed:` line, directly under `Warning types:`. See [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry) for how a signal earns confirmed vs. unconfirmed status. |
 
 ### Versioning & history fields (v0.25.0)
 
@@ -652,6 +659,17 @@ re-running or prompt tuning will change it:
   Warning types : target_drift=5(predictable)
 ```
 
+A `Confirmed:` line (v0.27.0) can appear alongside — or instead of — `Warning types:`,
+independent of whether the cert is `Clean`. It's `warning_distribution`'s positive counterpart:
+objective evidence that fired *and* was demonstrably accounted for by the response, not a
+warning. A cert can be perfectly `Clean` and still show real confirmed evidence — that's the
+common, healthy case, not a contradiction:
+
+```
+  Clean         : yes
+  Confirmed     : objective_evidence:replica_disconnected=3(predictable)
+```
+
 If the cert is older than 30 days, a warning is shown:
 
 ```
@@ -675,9 +693,9 @@ Cert history (last 3)
 ```
 
 Most recent first. Each row's `↳` line (when present) reports *why* it differs from the row below
-it — stability/clean/attribution-consistency flips, `warning_distribution` deltas, and
-`playbook_version`/`taxonomy_version` changes — computed client-side from the full cert rows the
-history endpoint already returns, not a separate lookup. A row with no `↳` line held steady
+it — stability/clean/attribution-consistency flips, `warning_distribution` and
+`confirmed_distribution` deltas, and `playbook_version`/`taxonomy_version` changes — computed
+client-side from the full cert rows the history endpoint already returns, not a separate lookup. A row with no `↳` line held steady
 against the one before it. A single row (a fault certified exactly once so far) is a normal
 state, not shown as a section — there's no trend yet to display. Query it directly without going
 through `vault accuracy`:

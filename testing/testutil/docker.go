@@ -17,10 +17,22 @@ import (
 var DockerComposeDir string
 
 // DockerCompose runs a docker compose command with the given arguments.
+//
+// Also includes docker-compose.repl.yaml when present alongside the base
+// file — needed for any docker-type inject/teardown spec targeting the
+// "replica" service (e.g. db-replica-container-stopped), which
+// docker-compose.yaml alone doesn't declare. Harmless to include
+// unconditionally for services the overlay doesn't touch (e.g. "postgres"):
+// compose only needs the merged config to resolve the target service name to
+// an already-running container for stop/start/kill — it doesn't reconcile or
+// recreate anything on its own.
 func DockerCompose(ctx context.Context, args ...string) (string, error) {
 	cmdArgs := []string{"compose"}
 	if DockerComposeDir != "" {
 		cmdArgs = append(cmdArgs, "-f", DockerComposeDir+"/docker-compose.yaml")
+		if replOverlay := DockerComposeDir + "/docker-compose.repl.yaml"; fileExists(replOverlay) {
+			cmdArgs = append(cmdArgs, "-f", replOverlay)
+		}
 	}
 	cmdArgs = append(cmdArgs, args...)
 
@@ -30,6 +42,11 @@ func DockerCompose(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("docker compose %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output), nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // DockerComposeStop stops a specific service in the compose stack.
@@ -50,6 +67,23 @@ func DockerComposeStart(ctx context.Context, service string) error {
 // container's own PID namespace.
 func DockerComposeKill(ctx context.Context, signal, service string) error {
 	_, err := DockerCompose(ctx, "kill", "--signal="+signal, service)
+	return err
+}
+
+// DockerComposePause freezes every process in a service's container (cgroup
+// freezer, SIGSTOP-equivalent) without closing its TCP connections — unlike
+// stop/kill, the process doesn't get a chance to run at all, so it can't send
+// a clean shutdown message or a FIN. Used to simulate a genuinely frozen/
+// CPU-starved host: from another server's point of view, an existing
+// connection stays open and "alive" while the frozen side goes silent.
+func DockerComposePause(ctx context.Context, service string) error {
+	_, err := DockerCompose(ctx, "pause", service)
+	return err
+}
+
+// DockerComposeUnpause reverses DockerComposePause.
+func DockerComposeUnpause(ctx context.Context, service string) error {
+	_, err := DockerCompose(ctx, "unpause", service)
 	return err
 }
 

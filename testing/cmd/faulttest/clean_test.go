@@ -158,6 +158,68 @@ func TestWarningTypesFor(t *testing.T) {
 	}
 }
 
+func TestConfirmedTypesFor(t *testing.T) {
+	cases := []struct {
+		name string
+		er   EvalResult
+		want []string
+	}{
+		{"no confirmed signals", EvalResult{Passed: true}, nil},
+		{"one confirmed signal", EvalResult{ObjectiveEvidenceConfirmed: []string{"oom_killed"}}, []string{"objective_evidence:oom_killed"}},
+		{
+			"multiple confirmed signals on one run",
+			EvalResult{ObjectiveEvidenceConfirmed: []string{"oom_killed", "replica_disconnected"}},
+			[]string{"objective_evidence:oom_killed", "objective_evidence:replica_disconnected"},
+		},
+		{
+			"unconfirmed-only signals don't appear here — that's warningTypesFor's job",
+			EvalResult{ObjectiveEvidenceSignals: []string{"pod_restarted"}, ObjectiveEvidenceGate: true},
+			nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := confirmedTypesFor(tc.er)
+			if len(got) != len(tc.want) {
+				t.Fatalf("confirmedTypesFor() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("confirmedTypesFor()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestBuildCleanReport_ConfirmedAndUnconfirmed_Independent verifies a run
+// with BOTH a confirmed and an unconfirmed objective-evidence signal
+// populates both distributions correctly and independently — WarningCount
+// (zero-tolerance) must only count the unconfirmed one, not double-count or
+// get confused by the confirmed one sitting alongside it.
+func TestBuildCleanReport_ConfirmedAndUnconfirmed_Independent(t *testing.T) {
+	f := Failure{ID: "db-replica-disconnected", Name: "Replica disconnected"}
+	results := []EvalResult{
+		{Passed: true, ObjectiveEvidenceConfirmed: []string{"replica_disconnected"}},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"idle_in_transaction_stuck"}},
+		{Passed: true, ObjectiveEvidenceGate: true, ObjectiveEvidenceSignals: []string{"idle_in_transaction_stuck"}, ObjectiveEvidenceConfirmed: []string{"replica_disconnected"}},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 2 {
+		t.Errorf("WarningCount: got %d, want 2 (runs 2 and 3 carry an unconfirmed signal)", r.WarningCount)
+	}
+	if r.WarningDistribution["objective_evidence:idle_in_transaction_stuck"] != 2 {
+		t.Errorf("WarningDistribution: got %v, want idle_in_transaction_stuck=2", r.WarningDistribution)
+	}
+	if r.ConfirmedDistribution["objective_evidence:replica_disconnected"] != 2 {
+		t.Errorf("ConfirmedDistribution: got %v, want replica_disconnected=2 (runs 1 and 3)", r.ConfirmedDistribution)
+	}
+	if _, unconfirmedHasConfirmedSignal := r.WarningDistribution["objective_evidence:replica_disconnected"]; unconfirmedHasConfirmedSignal {
+		t.Error("WarningDistribution should not contain replica_disconnected — it was only ever confirmed, never unconfirmed")
+	}
+}
+
 func TestWarningDistributionString(t *testing.T) {
 	cases := []struct {
 		name string

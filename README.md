@@ -124,6 +124,7 @@ aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two gu
 
 - **[Fault Injection Testing](docs/FAULTTEST.md)** is the customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection and automated remediation verification; no Docker or cluster access required
 - **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
+- **[High Availability / Disaster Recovery](docs/HA_DR.md)** is the domain-specific deep dive: what's certified today (replication lag, replica disconnection) and what's on the roadmap (replica promotion, Patroni HA, backup-job monitoring)
 
 ## Gateway REST API
 

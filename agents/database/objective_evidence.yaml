@@ -1,0 +1,78 @@
+# Objective-evidence rules for the database agent.
+#
+# Each rule says: for a given tool's result, threshold a named probe and, if
+# it matches, force a human-reviewed gate with the given signal — regardless
+# of what the diagnosing model concludes or chooses to mention. See
+# internal/evidence's package doc, agents/k8s/objective_evidence.yaml (the
+# same mechanism's first user), and docs/AIGOVERNANCE.md for the full
+# rationale (objectiveEvidenceForceGate, cmd/gateway/playbooks.go).
+#
+# Probes (what fields exist, and how they're read) are Go code, registered
+# in agents/database/tools.go — adding a genuinely new field to threshold
+# needs a small code change there. Everything below — which probes are
+# active, what threshold triggers them, what the resulting signal/detail
+# text is — is authored here and takes effect on the next agent restart, no
+# other code change required. A rule naming an unregistered probe (e.g. a
+# typo) fails the agent's startup loudly; it never silently just does
+# nothing.
+#
+# operator: one of > >= < <= == != ("==" / "!=" only for bool/string probes).
+# detail: optional; rendered as fmt.Sprintf(detail, resource, probe_value) —
+#   must consume exactly those two arguments if present.
+#
+# confirmation_probe/confirmation_operator/confirmation_threshold (all
+# optional): how the gateway decides whether a hop's own response actually
+# confirms this signal, before treating its mere presence as reason to force
+# a human gate (objectiveEvidenceSignals, cmd/gateway/playbooks.go). Default
+# (all three omitted): confirmation_probe=evidence_quote_contains_value,
+# operator="==", threshold=true — does the model's own required verbatim
+# HYPOTHESIS_1 EVIDENCE quote contain the actual fired value? Use
+# resource_named_in_quote instead for bool-kind signals, where quoting a
+# bare "true" is unnatural — checks whether the response names the same
+# resource (replication slot name, etc.) the evidence is about.
+
+- tool: get_active_connections
+  probe: idle_in_transaction_seconds
+  operator: ">"
+  threshold: 300
+  signal: idle_in_transaction_stuck
+  detail: "connection pid %s idle in transaction for %v seconds"
+
+- tool: get_replication_status
+  probe: disconnected
+  operator: "=="
+  threshold: true
+  signal: replica_disconnected
+  detail: "replica disconnected — inactive replication slot %s with retained WAL"
+  confirmation_probe: resource_named_in_quote
+
+# replica_stalled (v0.27.0) covers the case replica_disconnected can't: a
+# replica that IS present in pg_stat_replication (state=streaming) — so an
+# absent-row check reads it as healthy — but has stopped sending reply
+# feedback (pg_stat_replication.reply_time). A frozen/CPU-starved replica
+# process or a network partition that doesn't tear down the TCP connection
+# both look like this.
+#
+# Threshold: 20s — well past a single missed heartbeat (Postgres's own
+# default wal_receiver_status_interval is 10s, so 20s is two missed beats,
+# not noise) but with real margin *below* wal_sender_timeout (Postgres's own
+# default: 60s/1min). That upper bound isn't optional headroom, it's a hard
+# ceiling: once a connection goes silent for wal_sender_timeout, the PRIMARY
+# itself proactively terminates it and the row disappears from
+# pg_stat_replication entirely — at that point this is replica_disconnected,
+# not replica_stalled, regardless of what caused the silence. Confirmed live
+# (2026-09-01): an earlier 60s threshold (matched exactly to
+# wal_sender_timeout, no margin) meant the primary always won the race and
+# tore the connection down before this signal could ever fire — the fault
+# only ever produced a real disconnect, never a stalled-but-present read.
+#
+# Uses the default confirmation probe (evidence_quote_contains_value), same
+# as idle_in_transaction_stuck above — both are numeric threshold signals
+# where quoting the real value back is natural, unlike replica_disconnected's
+# bool signal above.
+- tool: get_replication_status
+  probe: max_reply_lag_seconds
+  operator: ">"
+  threshold: 20
+  signal: replica_stalled
+  detail: "replica %s has not sent a reply in %v seconds — connected but not communicating"

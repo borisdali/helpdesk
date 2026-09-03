@@ -46,6 +46,16 @@ type Failure struct {
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
 	ExternalCompat bool `yaml:"external_compat,omitempty"`
+	// RequiresReplica marks faults that need a real streaming replica already
+	// attached to the target — independent of whether Docker/OS access is
+	// needed (that's ExternalCompat's concern). Used to exclude these faults
+	// from --auto-db mode, whose ephemeral single-instance stack never has a
+	// replica, without also blocking them from --external (a fault can be
+	// pure-libpq AND require a pre-existing replica topology at the same time
+	// — the two concerns were previously conflated by overloading
+	// ExternalCompat for both, which made --external --ids <fault> silently
+	// drop replica-requiring faults even when named explicitly).
+	RequiresReplica bool `yaml:"requires_replica,omitempty"`
 	// DiagnosisPlaybookSeriesID links this fault to a gateway playbook for
 	// diagnosis. When set and ViaGateway is active, the runner calls
 	// POST /api/v1/fleet/playbooks/{id}/run instead of the agent directly.
@@ -106,9 +116,11 @@ func (f Failure) InjectTimeoutDuration() time.Duration {
 
 // IsAutoDBCompat reports whether faulttest can inject this fault against a
 // temporary Docker PostgreSQL it spins up itself (--auto-db mode).
-// True when: external-compat, non-kubernetes, and inject type is not ssh_exec.
+// True when: external-compat, non-kubernetes, doesn't require a replica
+// (--auto-db's ephemeral single-instance stack never has one), and inject
+// type is not ssh_exec.
 func (f Failure) IsAutoDBCompat() bool {
-	if !f.ExternalCompat || f.Category == "kubernetes" {
+	if !f.ExternalCompat || f.Category == "kubernetes" || f.RequiresReplica {
 		return false
 	}
 	t := f.ExternalInject.Type
@@ -116,6 +128,26 @@ func (f Failure) IsAutoDBCompat() bool {
 		t = f.Inject.Type
 	}
 	return t != "ssh_exec"
+}
+
+// NeedsReplica reports whether this fault needs a replica connection
+// configured (--replica-conn / FAULTTEST_REPLICA_CONN_STR) before it can run
+// — either because one of its inject/teardown specs targets the replica
+// directly, or because it's marked RequiresReplica (needs a real replica
+// already attached in the topology even when its own injection never
+// connects to it directly — e.g. a fault that disconnects a replica by
+// acting only on the primary). Callers use this to skip cleanly instead of
+// attempting an injection that will fail loudly for lack of a replica.
+func (f Failure) NeedsReplica() bool {
+	if f.RequiresReplica {
+		return true
+	}
+	for _, spec := range []InjectSpec{f.Inject, f.Teardown, f.ExternalInject, f.ExternalTeardown} {
+		if spec.Target == "replica" {
+			return true
+		}
+	}
+	return false
 }
 
 // InjectSpec describes how to inject or tear down a failure.
@@ -162,6 +194,15 @@ type KeywordSpec struct {
 type DiagnosisSpec struct {
 	Category  string `yaml:"category"`
 	Narrative string `yaml:"narrative,omitempty"`
+	// ObjectiveEvidenceSignal is the deterministic signal name (from the
+	// diagnosing agent's own objective_evidence.yaml) that this diagnosis
+	// should be backed by, when one exists. Optional — most faults have no
+	// corresponding deterministic signal and leave this empty. When set, a
+	// pass requires the signal to appear in the run's confirmed evidence,
+	// not just keyword/category text matching — closing the gap where a
+	// vague hedge ("might be stalled") could score full marks without the
+	// model ever demonstrably engaging with real tool data.
+	ObjectiveEvidenceSignal string `yaml:"objective_evidence_signal,omitempty"`
 }
 
 // HarnessConfig holds runtime configuration for the test harness.

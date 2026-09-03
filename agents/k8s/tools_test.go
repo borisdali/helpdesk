@@ -12,7 +12,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 	corev1 "k8s.io/api/core/v1"
@@ -23,10 +22,27 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 )
 
-// mockK8sToolContext implements tool.Context for k8s agent tests.
+// TestMain loads the real, shipped objective_evidence.yaml before any test
+// runs — deliberately not a hand-written test fixture. This means the
+// existing recordPodDistressEvidence/recordEventDistressEvidence regression
+// tests below (unchanged since before the evidence-package migration) prove
+// the actual file operators would edit reproduces the original hardcoded
+// behavior, not just that the Go evaluation logic can be made to.
+func TestMain(m *testing.M) {
+	rulesByTool, err := evidence.LoadRules("objective_evidence.yaml")
+	if err != nil {
+		panic("agents/k8s/objective_evidence.yaml failed to load — fix the file, don't skip this: " + err.Error())
+	}
+	podEvidenceRules = rulesByTool["get_pods"]
+	eventEvidenceRules = rulesByTool["get_events"]
+	os.Exit(m.Run())
+}
+
+// mockK8sToolContext implements agent.ToolContext for k8s agent tests.
 type mockK8sToolContext struct {
 	context.Context
 }
@@ -49,7 +65,7 @@ func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchR
 func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 func (mockK8sToolContext) RequestConfirmation(string, any) error                { return nil }
 
-func newK8sTestContext() tool.Context {
+func newK8sTestContext() agent.ToolContext {
 	return mockK8sToolContext{context.Background()}
 }
 

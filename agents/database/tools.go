@@ -16,13 +16,15 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
+	"helpdesk/internal/psqlx"
 )
 
 // ephemeralDBs holds DB entries registered at runtime (e.g. by --auto-db faulttest runs).
@@ -835,7 +837,7 @@ func checkConnectionImpl(ctx context.Context, args CheckConnectionArgs) (PsqlRes
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
 
-func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
+func checkConnectionTool(ctx agent.ToolContext, args CheckConnectionArgs) (PsqlResult, error) {
 	return checkConnectionImpl(ctx, args)
 }
 
@@ -868,7 +870,7 @@ func getServerInfoImpl(ctx context.Context, args GetServerInfoArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, error) {
+func getServerInfoTool(ctx agent.ToolContext, args GetServerInfoArgs) (PsqlResult, error) {
 	return getServerInfoImpl(ctx, args)
 }
 
@@ -897,7 +899,7 @@ func getDatabaseInfoImpl(ctx context.Context, args GetDatabaseInfoArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult, error) {
+func getDatabaseInfoTool(ctx agent.ToolContext, args GetDatabaseInfoArgs) (PsqlResult, error) {
 	return getDatabaseInfoImpl(ctx, args)
 }
 
@@ -907,7 +909,84 @@ type GetActiveConnectionsArgs struct {
 	ActiveOnly       bool   `json:"active_only,omitempty" jsonschema:"If true, show only connections currently executing a query (state=active). Default shows all connected sessions including idle ones."`
 }
 
-func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+// ActiveConnection is one row from pg_stat_activity, parsed from the same
+// psql -x output already captured for GetActiveConnectionsResult.Output —
+// not a second query. Numeric fields default to 0 when the underlying psql
+// value is empty (NULL) or unparseable.
+type ActiveConnection struct {
+	PID           int32  `json:"pid"`
+	User          string `json:"user"`
+	Database      string `json:"database"`
+	ClientAddr    string `json:"client_addr"`
+	State         string `json:"state"`
+	WaitEventType string `json:"wait_event_type"`
+	WaitEvent     string `json:"wait_event"`
+	QuerySeconds  int32  `json:"query_seconds"`
+	QueryPreview  string `json:"query_preview"`
+}
+
+// activeConnectionEvidenceSchema declares get_active_connections' one
+// probe: how long a connection has been sitting idle-in-transaction. The
+// State == "idle in transaction" precondition is folded into the probe
+// itself (returns 0 — never trips a "> N seconds" threshold — for any other
+// state), the same pattern podEvidenceSchema (agents/k8s/tools.go) uses for
+// oom_killed's Restarts > 0 precondition: what "idle in transaction" means
+// stays Go; how long is too long is the YAML-tunable knob (see
+// agents/database/objective_evidence.yaml).
+var activeConnectionEvidenceSchema = evidence.NewToolSchema[ActiveConnection]("get_active_connections", func(c ActiveConnection) string { return strconv.Itoa(int(c.PID)) }).
+	Numeric("idle_in_transaction_seconds", func(c ActiveConnection) float64 {
+		if c.State != "idle in transaction" {
+			return 0
+		}
+		return float64(c.QuerySeconds)
+	}).
+	Register()
+
+// activeConnectionEvidenceRules holds the loaded rules for
+// activeConnectionEvidenceSchema, set by main() at startup. Evaluate
+// no-ops on a nil/empty slice — see podEvidenceRules' doc comment.
+var activeConnectionEvidenceRules []evidence.Rule
+
+// GetActiveConnectionsResult is the structured result for
+// get_active_connections. Output is unchanged from before this tool had any
+// typed fields — the LLM and audit trail see exactly the same text as
+// always. Connections is new: the same output, parsed, for
+// objective_evidence probing (see agents/database/objective_evidence.yaml
+// and internal/evidence's package doc).
+type GetActiveConnectionsResult struct {
+	Output      string             `json:"output"`
+	Connections []ActiveConnection `json:"connections,omitempty"`
+}
+
+// parseActiveConnections parses get_active_connections' single-statement
+// psql -x output into typed rows. Returns nil (not an error) if output
+// doesn't parse as expected — a parse gap here should degrade to "no
+// objective-evidence signal available," not break the tool.
+func parseActiveConnections(output string) []ActiveConnection {
+	statements := psqlx.ParseExpanded(output)
+	if len(statements) == 0 {
+		return nil
+	}
+	conns := make([]ActiveConnection, 0, len(statements[0]))
+	for _, rec := range statements[0] {
+		pid, _ := strconv.ParseInt(rec["pid"], 10, 32)
+		querySecs, _ := strconv.ParseInt(rec["query_seconds"], 10, 32)
+		conns = append(conns, ActiveConnection{
+			PID:           int32(pid),
+			User:          rec["user"],
+			Database:      rec["database"],
+			ClientAddr:    rec["client_addr"],
+			State:         rec["state"],
+			WaitEventType: rec["wait_event_type"],
+			WaitEvent:     rec["wait_event"],
+			QuerySeconds:  int32(querySecs),
+			QueryPreview:  rec["query_preview"],
+		})
+	}
+	return conns
+}
+
+func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
 	// Default: show all user connections including idle sessions (connected but not running a query).
 	// Autovacuum workers and background processes have state IS NULL and are excluded automatically.
 	stateFilter := "AND state IS NOT NULL"
@@ -933,15 +1012,19 @@ func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_active_connections")
 	if err != nil {
-		return errorResult("get_active_connections", args.ConnectionString, err), nil
+		return GetActiveConnectionsResult{Output: errorResult("get_active_connections", args.ConnectionString, err).Output}, nil
 	}
 	if strings.TrimSpace(output) == "" || strings.Contains(output, "(0 rows)") {
-		return PsqlResult{Output: "No active connections found."}, nil
+		return GetActiveConnectionsResult{Output: "No active connections found."}, nil
 	}
-	return PsqlResult{Output: output}, nil
+	conns := parseActiveConnections(output)
+	if toolAuditor != nil {
+		evidence.Evaluate(ctx, toolAuditor, activeConnectionEvidenceSchema, conns, activeConnectionEvidenceRules)
+	}
+	return GetActiveConnectionsResult{Output: output, Connections: conns}, nil
 }
 
-func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (PsqlResult, error) {
+func getActiveConnectionsTool(ctx agent.ToolContext, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
 	return getActiveConnectionsImpl(ctx, args)
 }
 
@@ -970,7 +1053,7 @@ func getConnectionStatsImpl(ctx context.Context, args GetConnectionStatsArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (PsqlResult, error) {
+func getConnectionStatsTool(ctx agent.ToolContext, args GetConnectionStatsArgs) (PsqlResult, error) {
 	return getConnectionStatsImpl(ctx, args)
 }
 
@@ -1011,7 +1094,7 @@ func getStatusSummaryImpl(ctx context.Context, args GetStatusSummaryArgs) (PsqlR
 	return PsqlResult{Output: jsonStr}, nil
 }
 
-func getStatusSummaryTool(ctx tool.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+func getStatusSummaryTool(ctx agent.ToolContext, args GetStatusSummaryArgs) (PsqlResult, error) {
 	return getStatusSummaryImpl(ctx, args)
 }
 
@@ -1047,7 +1130,7 @@ func getDatabaseStatsImpl(ctx context.Context, args GetDatabaseStatsArgs) (PsqlR
 	return PsqlResult{Output: output}, nil
 }
 
-func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResult, error) {
+func getDatabaseStatsTool(ctx agent.ToolContext, args GetDatabaseStatsArgs) (PsqlResult, error) {
 	return getDatabaseStatsImpl(ctx, args)
 }
 
@@ -1084,7 +1167,7 @@ func getConfigParameterImpl(ctx context.Context, args GetConfigParameterArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (PsqlResult, error) {
+func getConfigParameterTool(ctx agent.ToolContext, args GetConfigParameterArgs) (PsqlResult, error) {
 	return getConfigParameterImpl(ctx, args)
 }
 
@@ -1093,7 +1176,202 @@ type GetReplicationStatusArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
 }
 
-func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+// ReplicationPeer is one row from pg_stat_replication — a currently
+// connected streaming replica. Absent entirely (zero rows, not a row with
+// zero-ish values) is itself the signal for a disconnected replica; see
+// ReplicationSummary.
+type ReplicationPeer struct {
+	ClientAddr      string `json:"client_addr"`
+	User            string `json:"user"`
+	ApplicationName string `json:"application_name"`
+	State           string `json:"state"`
+	SyncState       string `json:"sync_state"`
+	WriteLagBytes   int64  `json:"write_lag_bytes"`
+	FlushLagBytes   int64  `json:"flush_lag_bytes"`
+	ReplayLagBytes  int64  `json:"replay_lag_bytes"`
+	// ReplyLagSeconds is derived from pg_stat_replication.reply_time — how
+	// long since this standby last sent a feedback message, in one snapshot
+	// (no stored baseline needed, unlike a "hasn't moved" check would). This
+	// is the field that distinguishes a genuinely healthy connection from
+	// one that's present in pg_stat_replication (so absent-row checks like
+	// ReplicationSummary.InactiveSlotsWithLag miss it entirely) but has
+	// silently stopped communicating — e.g. a frozen/CPU-starved replica
+	// process, or a network partition that doesn't tear down the TCP
+	// connection. 0 for a freshly-connected replica that hasn't sent its
+	// first reply yet (reply_time NULL) — that's normal startup, not stale.
+	ReplyLagSeconds int64 `json:"reply_lag_seconds"`
+}
+
+// ReplicationSlot is one row from pg_replication_slots. Unlike
+// pg_stat_replication, a slot persists across a disconnect — an inactive
+// slot with growing retained WAL (LagBytes > 0) is the corroborating signal
+// that a vanished pg_stat_replication row means "disconnected," not
+// "nothing was ever attached here."
+type ReplicationSlot struct {
+	SlotName string `json:"slot_name"`
+	SlotType string `json:"slot_type"`
+	Active   bool   `json:"active"`
+	LagBytes int64  `json:"lag_bytes"`
+}
+
+// GetReplicationStatusResult is the structured result for
+// get_replication_status. Output is unchanged from before this tool had any
+// typed fields. Role/IsInRecovery/Replicas/Slots are new, parsed from that
+// same text (three separate result sets in one psql -x invocation — see
+// internal/psqlx's package doc for how statement boundaries are detected).
+type GetReplicationStatusResult struct {
+	Output       string            `json:"output"`
+	Role         string            `json:"role,omitempty"`
+	IsInRecovery bool              `json:"is_in_recovery,omitempty"`
+	Replicas     []ReplicationPeer `json:"replicas,omitempty"`
+	Slots        []ReplicationSlot `json:"slots,omitempty"`
+}
+
+// ReplicationSummary is a single, synthesized item combining all three of
+// get_replication_status' result sets into the one thing worth an
+// objective_evidence probe: is a replica that should be connected actually
+// disconnected. This is deliberately not a per-row signal (unlike
+// get_pods/get_events/get_active_connections) — "a replica disconnected" is
+// a property of the *whole* pg_stat_replication result being empty, not of
+// any single row in it, so it can't be expressed as "threshold this field
+// on this item." Folding the three-way condition (primary role + zero
+// connected replicas + a corroborating inactive-slot-with-lag) into one
+// synthesized item's bool probe reuses evidence.Evaluate unchanged, the
+// same way podEvidenceSchema folds Restarts>0 into oom_killed's probe
+// instead of expressing it as a second rule.
+type ReplicationSummary struct {
+	Role                  string
+	ConnectedReplicaCount int
+	InactiveSlotsWithLag  []string // slot_name, for any slot with Active=false and LagBytes>0
+	// MaxReplyLagSeconds/StalledReplicaName cover the case InactiveSlotsWithLag
+	// can't: a replica that IS present in pg_stat_replication (so an
+	// absent-row check reads it as healthy) but has stopped sending reply
+	// feedback. MaxReplyLagSeconds is the largest ReplyLagSeconds among
+	// currently-streaming replicas (0 if none connected or none streaming);
+	// StalledReplicaName is whichever replica that value belongs to
+	// (ApplicationName, falling back to ClientAddr) — computed
+	// unconditionally alongside it, not gated on any threshold, since "which
+	// one is worst" is well-defined regardless of whether it crosses one.
+	MaxReplyLagSeconds int64
+	StalledReplicaName string
+}
+
+// replicationEvidenceSchema declares get_replication_status' probes:
+// disconnected (bool, true only when all three conditions hold together —
+// see ReplicationSummary's doc comment, nothing to threshold-tune, a fixed
+// logical condition) and max_reply_lag_seconds (numeric — unlike
+// disconnected, this DOES have a genuine tunable duration, so it's exposed
+// as a plain numeric probe rather than pre-deciding "stalled" in Go, the
+// same pattern get_active_connections' idle_in_transaction_seconds uses).
+// The YAML layer controls whether each probe is active and what
+// signal/detail it produces, matching every other tool's convention.
+var replicationEvidenceSchema = evidence.NewToolSchema[ReplicationSummary]("get_replication_status", func(s ReplicationSummary) string {
+	if len(s.InactiveSlotsWithLag) > 0 {
+		return s.InactiveSlotsWithLag[0]
+	}
+	if s.StalledReplicaName != "" {
+		return s.StalledReplicaName
+	}
+	return ""
+}).
+	Bool("disconnected", func(s ReplicationSummary) bool {
+		return s.Role == "Primary" && s.ConnectedReplicaCount == 0 && len(s.InactiveSlotsWithLag) > 0
+	}).
+	Numeric("max_reply_lag_seconds", func(s ReplicationSummary) float64 {
+		return float64(s.MaxReplyLagSeconds)
+	}).
+	Register()
+
+// replicationEvidenceRules holds the loaded rules for
+// replicationEvidenceSchema, set by main() at startup. See
+// podEvidenceRules' doc comment re: nil/empty.
+var replicationEvidenceRules []evidence.Rule
+
+// parseReplicationStatus parses get_replication_status' three-statement
+// psql -x output into typed fields. Returns the zero GetReplicationStatusResult
+// (aside from Output) if output doesn't parse as expected — same
+// degrade-don't-break convention as parseActiveConnections.
+func parseReplicationStatus(output string) GetReplicationStatusResult {
+	result := GetReplicationStatusResult{Output: output}
+	statements := psqlx.ParseExpanded(output)
+	if len(statements) > 0 && len(statements[0]) > 0 {
+		roleRow := statements[0][0]
+		result.Role = roleRow["role"]
+		result.IsInRecovery = roleRow["is_in_recovery"] == "t"
+	}
+	if len(statements) > 1 {
+		for _, rec := range statements[1] {
+			result.Replicas = append(result.Replicas, ReplicationPeer{
+				ClientAddr:      rec["client_addr"],
+				User:            rec["user"],
+				ApplicationName: rec["application_name"],
+				State:           rec["state"],
+				SyncState:       rec["sync_state"],
+				WriteLagBytes:   parseInt64Field(rec["write_lag_bytes"]),
+				FlushLagBytes:   parseInt64Field(rec["flush_lag_bytes"]),
+				ReplayLagBytes:  parseInt64Field(rec["replay_lag_bytes"]),
+				ReplyLagSeconds: parseInt64Field(rec["reply_lag_seconds"]),
+			})
+		}
+	}
+	if len(statements) > 2 {
+		for _, rec := range statements[2] {
+			result.Slots = append(result.Slots, ReplicationSlot{
+				SlotName: rec["slot_name"],
+				SlotType: rec["slot_type"],
+				Active:   rec["active"] == "t",
+				LagBytes: parseInt64Field(rec["lag_bytes"]),
+			})
+		}
+	}
+	return result
+}
+
+// parseInt64Field parses a psql -x field value as int64, defaulting to 0 for
+// an empty (NULL) or unparseable value.
+func parseInt64Field(s string) int64 {
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v
+}
+
+// replicationSummaryFrom derives the single evidence-probing item from an
+// already-parsed GetReplicationStatusResult.
+func replicationSummaryFrom(r GetReplicationStatusResult) ReplicationSummary {
+	summary := ReplicationSummary{Role: r.Role, ConnectedReplicaCount: len(r.Replicas)}
+	for _, slot := range r.Slots {
+		if !slot.Active && slot.LagBytes > 0 {
+			summary.InactiveSlotsWithLag = append(summary.InactiveSlotsWithLag, slot.SlotName)
+		}
+	}
+	// Only ever computed against the primary — a downstream replica in a
+	// simple (non-cascading) topology has no rows in its own
+	// pg_stat_replication, so this would naturally stay zero there anyway,
+	// but the explicit guard matches disconnected's own Role=="Primary"
+	// check for clarity rather than relying on incidental data absence.
+	// Restricted to state=="streaming": a replica still in "catchup" after a
+	// fresh clone can legitimately have a large gap and infrequent replies
+	// for a while — the same false-positive risk pbs_replication_lag's own
+	// guidance already calls out for lag-based checks — so it's excluded
+	// here rather than double-counted as "stalled."
+	if r.Role == "Primary" {
+		for _, peer := range r.Replicas {
+			if peer.State != "streaming" {
+				continue
+			}
+			if peer.ReplyLagSeconds > summary.MaxReplyLagSeconds {
+				summary.MaxReplyLagSeconds = peer.ReplyLagSeconds
+				name := peer.ApplicationName
+				if name == "" {
+					name = peer.ClientAddr
+				}
+				summary.StalledReplicaName = name
+			}
+		}
+	}
+	return summary
+}
+
+func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
 	query := `SELECT
 		CASE WHEN pg_is_in_recovery() THEN 'Replica' ELSE 'Primary' END as role,
 		pg_is_in_recovery() as is_in_recovery;
@@ -1106,7 +1384,8 @@ func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs
 		sync_state,
 		pg_wal_lsn_diff(sent_lsn, write_lsn) as write_lag_bytes,
 		pg_wal_lsn_diff(sent_lsn, flush_lsn) as flush_lag_bytes,
-		pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes
+		pg_wal_lsn_diff(sent_lsn, replay_lsn) as replay_lag_bytes,
+		COALESCE(extract(epoch from (now() - reply_time))::bigint, 0) as reply_lag_seconds
 	FROM pg_stat_replication;
 
 	SELECT
@@ -1118,12 +1397,17 @@ func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_replication_status")
 	if err != nil {
-		return errorResult("get_replication_status", args.ConnectionString, err), nil
+		return GetReplicationStatusResult{Output: errorResult("get_replication_status", args.ConnectionString, err).Output}, nil
 	}
-	return PsqlResult{Output: output}, nil
+	result := parseReplicationStatus(output)
+	if toolAuditor != nil {
+		summary := []ReplicationSummary{replicationSummaryFrom(result)}
+		evidence.Evaluate(ctx, toolAuditor, replicationEvidenceSchema, summary, replicationEvidenceRules)
+	}
+	return result, nil
 }
 
-func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (PsqlResult, error) {
+func getReplicationStatusTool(ctx agent.ToolContext, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
 	return getReplicationStatusImpl(ctx, args)
 }
 
@@ -1167,7 +1451,7 @@ func getLockInfoImpl(ctx context.Context, args GetLockInfoArgs) (PsqlResult, err
 	return PsqlResult{Output: output}, nil
 }
 
-func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error) {
+func getLockInfoTool(ctx agent.ToolContext, args GetLockInfoArgs) (PsqlResult, error) {
 	return getLockInfoImpl(ctx, args)
 }
 
@@ -1222,7 +1506,7 @@ func getTableStatsImpl(ctx context.Context, args GetTableStatsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, error) {
+func getTableStatsTool(ctx agent.ToolContext, args GetTableStatsArgs) (PsqlResult, error) {
 	return getTableStatsImpl(ctx, args)
 }
 
@@ -1243,7 +1527,7 @@ func getSessionInfoImpl(ctx context.Context, args GetSessionInfoArgs) (PsqlResul
 	return PsqlResult{Output: formatConnectionPlan(plan)}, nil
 }
 
-func getSessionInfoTool(ctx tool.Context, args GetSessionInfoArgs) (PsqlResult, error) {
+func getSessionInfoTool(ctx agent.ToolContext, args GetSessionInfoArgs) (PsqlResult, error) {
 	return getSessionInfoImpl(ctx, args)
 }
 
@@ -1351,7 +1635,7 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
-func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+func cancelQueryTool(ctx agent.ToolContext, args CancelQueryArgs) (PsqlResult, error) {
 	return cancelQueryImpl(ctx, args)
 }
 
@@ -1460,7 +1744,7 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
-func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+func terminateConnectionTool(ctx agent.ToolContext, args TerminateConnectionArgs) (PsqlResult, error) {
 	return terminateConnectionImpl(ctx, args)
 }
 
@@ -1541,7 +1825,7 @@ WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
 	return PsqlResult{Output: output}, nil
 }
 
-func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
+func terminateIdleConnectionsTool(ctx agent.ToolContext, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
 	return terminateIdleConnectionsImpl(ctx, args)
 }
 
@@ -1560,7 +1844,7 @@ func resumeWalReplayImpl(ctx context.Context, args ResumeWalReplayArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func resumeWalReplayTool(ctx tool.Context, args ResumeWalReplayArgs) (PsqlResult, error) {
+func resumeWalReplayTool(ctx agent.ToolContext, args ResumeWalReplayArgs) (PsqlResult, error) {
 	return resumeWalReplayImpl(ctx, args)
 }
 
@@ -1604,7 +1888,7 @@ func runVacuumImpl(ctx context.Context, args RunVacuumArgs) (PsqlResult, error) 
 	return PsqlResult{Output: output}, nil
 }
 
-func runVacuumTool(ctx tool.Context, args RunVacuumArgs) (PsqlResult, error) {
+func runVacuumTool(ctx agent.ToolContext, args RunVacuumArgs) (PsqlResult, error) {
 	return runVacuumImpl(ctx, args)
 }
 
@@ -1630,7 +1914,7 @@ func dropReplicationSlotImpl(ctx context.Context, args DropReplicationSlotArgs) 
 	return PsqlResult{Output: output}, nil
 }
 
-func dropReplicationSlotTool(ctx tool.Context, args DropReplicationSlotArgs) (PsqlResult, error) {
+func dropReplicationSlotTool(ctx agent.ToolContext, args DropReplicationSlotArgs) (PsqlResult, error) {
 	return dropReplicationSlotImpl(ctx, args)
 }
 
@@ -1660,7 +1944,7 @@ func resetPgSettingImpl(ctx context.Context, args ResetPgSettingArgs) (PsqlResul
 	return PsqlResult{Output: out1 + "\n" + out2}, nil
 }
 
-func resetPgSettingTool(ctx tool.Context, args ResetPgSettingArgs) (PsqlResult, error) {
+func resetPgSettingTool(ctx agent.ToolContext, args ResetPgSettingArgs) (PsqlResult, error) {
 	return resetPgSettingImpl(ctx, args)
 }
 
@@ -1678,7 +1962,7 @@ func resetCacheStatsImpl(ctx context.Context, args ResetCacheStatsArgs) (PsqlRes
 	return PsqlResult{Output: "Cache statistics reset. blks_hit and blks_read counters cleared — ratio will reflect only activity after this point.\n" + output}, nil
 }
 
-func resetCacheStatsTool(ctx tool.Context, args ResetCacheStatsArgs) (PsqlResult, error) {
+func resetCacheStatsTool(ctx agent.ToolContext, args ResetCacheStatsArgs) (PsqlResult, error) {
 	return resetCacheStatsImpl(ctx, args)
 }
 
@@ -1744,7 +2028,7 @@ func getPgSettingsImpl(ctx context.Context, args GetPgSettingsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getPgSettingsTool(ctx tool.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+func getPgSettingsTool(ctx agent.ToolContext, args GetPgSettingsArgs) (PsqlResult, error) {
 	return getPgSettingsImpl(ctx, args)
 }
 
@@ -1777,7 +2061,7 @@ func getExtensionsImpl(ctx context.Context, args GetExtensionsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getExtensionsTool(ctx tool.Context, args GetExtensionsArgs) (PsqlResult, error) {
+func getExtensionsTool(ctx agent.ToolContext, args GetExtensionsArgs) (PsqlResult, error) {
 	return getExtensionsImpl(ctx, args)
 }
 
@@ -1826,7 +2110,7 @@ func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, err
 	return PsqlResult{Output: sb.String()}, nil
 }
 
-func getBaselineTool(ctx tool.Context, args GetBaselineArgs) (PsqlResult, error) {
+func getBaselineTool(ctx agent.ToolContext, args GetBaselineArgs) (PsqlResult, error) {
 	result, err := getBaselineImpl(ctx, args)
 	if err == nil && result.Output != "" {
 		// Persist the result so get_saved_snapshots can retrieve it later.
@@ -1891,7 +2175,7 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 	return PsqlResult{Output: output}, nil
 }
 
-func getSlowQueriesTool(ctx tool.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+func getSlowQueriesTool(ctx agent.ToolContext, args GetSlowQueriesArgs) (PsqlResult, error) {
 	return getSlowQueriesImpl(ctx, args)
 }
 
@@ -1933,7 +2217,7 @@ func getVacuumStatusImpl(ctx context.Context, args GetVacuumStatusArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func getVacuumStatusTool(ctx tool.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+func getVacuumStatusTool(ctx agent.ToolContext, args GetVacuumStatusArgs) (PsqlResult, error) {
 	return getVacuumStatusImpl(ctx, args)
 }
 
@@ -1985,7 +2269,7 @@ func getDiskUsageImpl(ctx context.Context, args GetDiskUsageArgs) (PsqlResult, e
 	return PsqlResult{Output: "-- Database Sizes --\n" + dbOut + "\n-- Top " + strconv.Itoa(topN) + " Tables by Disk Usage --\n" + tableOut}, nil
 }
 
-func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+func getDiskUsageTool(ctx agent.ToolContext, args GetDiskUsageArgs) (PsqlResult, error) {
 	return getDiskUsageImpl(ctx, args)
 }
 
@@ -2073,7 +2357,7 @@ func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlR
 	return PsqlResult{Output: output}, nil
 }
 
-func getBgwriterStatsTool(ctx tool.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+func getBgwriterStatsTool(ctx agent.ToolContext, args GetBgwriterStatsArgs) (PsqlResult, error) {
 	return getBgwriterStatsImpl(ctx, args)
 }
 
@@ -2108,7 +2392,7 @@ func getWaitEventsImpl(ctx context.Context, args GetWaitEventsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getWaitEventsTool(ctx tool.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+func getWaitEventsTool(ctx agent.ToolContext, args GetWaitEventsArgs) (PsqlResult, error) {
 	return getWaitEventsImpl(ctx, args)
 }
 
@@ -2167,7 +2451,7 @@ func getBlockingQueriesImpl(ctx context.Context, args GetBlockingQueriesArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getBlockingQueriesTool(ctx tool.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+func getBlockingQueriesTool(ctx agent.ToolContext, args GetBlockingQueriesArgs) (PsqlResult, error) {
 	return getBlockingQueriesImpl(ctx, args)
 }
 
@@ -2212,7 +2496,7 @@ func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, e
 	return PsqlResult{Output: output}, nil
 }
 
-func explainQueryTool(ctx tool.Context, args ExplainQueryArgs) (PsqlResult, error) {
+func explainQueryTool(ctx agent.ToolContext, args ExplainQueryArgs) (PsqlResult, error) {
 	return explainQueryImpl(ctx, args)
 }
 
@@ -2309,7 +2593,7 @@ FROM latest;`, pgLogReadBytes, pgLogReadBytes)
 	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
 }
 
-func getPgLogTool(ctx tool.Context, args GetPgLogArgs) (PsqlResult, error) {
+func getPgLogTool(ctx agent.ToolContext, args GetPgLogArgs) (PsqlResult, error) {
 	return getPgLogImpl(ctx, args)
 }
 
@@ -2465,7 +2749,7 @@ func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlR
 	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
 }
 
-func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+func readUploadedFileTool(ctx agent.ToolContext, args ReadUploadedFileArgs) (PsqlResult, error) {
 	start := time.Now()
 	result, err := readUploadedFileImpl(ctx, args)
 	duration := time.Since(start)
@@ -2644,7 +2928,7 @@ func getSavedSnapshotsImpl(ctx context.Context, args GetSavedSnapshotsArgs) (Psq
 	return PsqlResult{Output: sb.String()}, nil
 }
 
-func getSavedSnapshotsTool(ctx tool.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+func getSavedSnapshotsTool(ctx agent.ToolContext, args GetSavedSnapshotsArgs) (PsqlResult, error) {
 	start := time.Now()
 	result, err := getSavedSnapshotsImpl(ctx, args)
 	duration := time.Since(start)

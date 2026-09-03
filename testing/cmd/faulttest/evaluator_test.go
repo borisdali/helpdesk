@@ -48,6 +48,33 @@ func TestEvaluate_AllPass(t *testing.T) {
 	}
 }
 
+// TestEvidenceSignalConfirmed covers the gate that closes the "vague hedge
+// scores full marks" gap James flagged before the v0.27 release: a fault
+// declaring expected_diagnosis.objective_evidence_signal must have that exact
+// signal present in the run's confirmed evidence, not just fired-but-unconfirmed
+// or absent (e.g. the underlying tool query came back empty).
+func TestEvidenceSignalConfirmed(t *testing.T) {
+	cases := []struct {
+		name      string
+		sig       string
+		confirmed []string
+		want      bool
+	}{
+		{"confirmed present", "replica_stalled", []string{"replica_stalled"}, true},
+		{"confirmed among others", "replica_stalled", []string{"idle_in_transaction_stuck", "replica_stalled"}, true},
+		{"signal fired but not this one", "replica_stalled", []string{"replica_disconnected"}, false},
+		{"no signals confirmed at all — the empty-evidence-query case", "replica_stalled", nil, false},
+		{"confirmed list empty slice", "replica_stalled", []string{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidenceSignalConfirmed(tc.sig, tc.confirmed); got != tc.want {
+				t.Errorf("evidenceSignalConfirmed(%q, %v) = %v, want %v", tc.sig, tc.confirmed, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvaluate_KeywordFail(t *testing.T) {
 	f := Failure{
 		ID:       "test-2",

@@ -47,10 +47,17 @@ the current state of the system, not from the alert label.
 - `vault calibration` checks whether the agent's stated confidence (`CONFIDENCE: 0.92`)
   predicts actual accuracy over time.
 
-**Current gap:** The triggering alert text is passed to the agent as context, but not
-persisted on the `PlaybookRun` record. You cannot look back at a run and see what the
-original alert said, so the "alert said X, aiHelpDesk said Y" comparison is not available
-after the fact. Fix: `trigger_context` field on `PlaybookRun`, v0.20.0 item #2.
+**Resolved (v0.20.0):** the triggering alert text is now persisted as `trigger_context` on
+the `PlaybookRun` record, so the "alert said X, aiHelpDesk said Y" comparison is available
+after the fact, not just at gate time.
+
+**A different kind of check, not a third opinion:** before this diagnosis ever reaches a
+human, a deterministic, code-derived backstop can also force the gate — not another party
+forming a judgment, but a plain comparison between a typed value read off a tool's real
+result and the value the agent's own response quoted. See
+[AIGOVERNANCE.md §1.1 Layer 3](AIGOVERNANCE.md#11-llm-fabrication-detection) and
+[OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full mechanism — it's deliberately
+outside this document's opinion-counting scheme, since it isn't an opinion at all.
 
 ---
 
@@ -105,10 +112,9 @@ judgment. No draft auto-activates under any circumstances.
 - Subsequent `vault versions` data shows whether the activated version actually improved
   — closing the loop on whether the improvement was real.
 
-**Current gap:** The Judge's track record is not measured. APPROVE verdicts are not
-correlated against subsequent `vault versions` improvement scores. You cannot currently
-ask "does this judge's APPROVE actually predict improvement?" Fix: judge accountability
-tracking, v0.20.0 item #3. See [§6](#6-the-accountability-gap-auditing-the-auditors).
+**Resolved (v0.20.0):** the Judge's track record is now measured — `vault judge-accuracy`
+compares judge verdicts recorded at diff time against actual subsequent run outcomes,
+per series. See [§6](#6-the-accountability-gap-auditing-the-auditors).
 
 ---
 
@@ -124,23 +130,23 @@ band returns `OVERCONFIDENT`.
 **What makes it verifiable:**
 
 - The command is queryable at any time: `faulttest vault calibration --gateway $GW`.
-- Bands are model-specific when the model cert PK fix is in place (v0.20.0 item #1).
+- Bands are model-specific — the model cert PK (v0.20.0) keeps different models' figures apart.
 - `HumanRuns` vs `AutoJudgeRuns` breakdown is surfaced in the output.
 
-**Current gaps (both being addressed in v0.20.0):**
+**Resolved (v0.20.0):**
 
-1. **Model cert PK not implemented** — calibration data is blended across model versions.
-   Two models' accuracy figures are added together into one band. Fix: v0.20.0 item #1.
+1. **Model cert PK** — `fault_stability_cert`'s primary key is `(fault_id,
+   diagnosis_model)`, not `fault_id` alone. Two models' accuracy figures are no longer
+   blended into one band.
 
-2. **Auto-judge dominates** — faulttest runs with `--approval-mode force` produce
-   `auto_judge` feedback (LLM scores itself). The command warns when `HumanRuns == 0`,
-   but "calibration" then measures self-consistency, not accuracy against human judgment.
-   Fix: `vault feedback` CLI for submitting human verdicts on historical runs; prominent
-   data quality banner when human coverage is below 50%, v0.20.0 item #5.
+2. **Auto-judge dominance** — a prominent data-quality banner now prints before the
+   calibration table whenever human coverage is below 50% (or zero), so "calibration"
+   measuring self-consistency rather than accuracy against human judgment is surfaced,
+   not silent. Check `Sources:`/the banner in the command output.
 
-Until both fixes are in place: the `vault calibration` table exists and is correct for
-what it measures. Whether what it measures is meaningful depends on the composition of
-the feedback it draws from. Check `Sources:` line in the command output.
+The `vault calibration` table's meaningfulness still depends on the actual composition of
+the feedback it draws from — the banner makes that composition visible, it doesn't make
+thin human coverage go away.
 
 ---
 
@@ -158,9 +164,9 @@ are within bounds. Variance across runs, not just the mean, is what the cert mea
 - Cert age is shown: `STABLE(5) 14d` — the number of days since last certification.
 - A cert issued before a model upgrade is explicitly marked as potentially stale.
 
-**Current gap:** Same as Layer 4 item 1 — `fault_id` alone is the PK, so a cert issued
-under Sonnet 4.6 is overwritten when you run under Opus 4.8. The badge says STABLE but
-doesn't say *for which model*. Fix: v0.20.0 item #1.
+**Resolved (v0.20.0):** same fix as Layer 4 — the cert's primary key includes
+`diagnosis_model`, so a cert issued under Sonnet 4.6 is no longer overwritten by a run
+under Opus 4.8. The badge names the model it certifies.
 
 ---
 
@@ -169,23 +175,24 @@ doesn't say *for which model*. Fix: v0.20.0 item #1.
 Every second-opinion mechanism above is itself a claim. The claim is only as strong as
 the mechanism's own accountability.
 
-**The Judge's track record is currently unmeasured.** The LLM judge in Layer 3 issues
-APPROVE/NEEDS_REVIEW/REJECT verdicts. Whether those verdicts actually predict improvement
-is not tracked. `vault diff --judge APPROVE` might be right 90% of the time or 50% of
-the time — we do not currently know.
+**The Judge's track record is now measured (v0.20.0).** Judge verdicts are stored on
+draft records; once runs accumulate under an activated version, `vault judge-accuracy`
+correlates the activation judge verdict against the actual improvement delta from `vault
+versions`, per series — the judge is accountable to the same measurement infrastructure
+it is part of, and `vault diff --judge APPROVE`'s real track record is queryable rather
+than assumed.
 
-This is not a hypothetical concern. In the pbs_connection_triage case study
+This closed a real, non-hypothetical concern. In the pbs_connection_triage case study
 (see [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md)), `vault suggest-update` identified the failure
 pattern correctly and the judge would likely have approved a draft that would have made the
-failure rate worse. The human layer caught it. But if the judge had approved it
-convincingly, an operator might have activated it without the scrutiny the NEEDS_REVIEW
-path prompted.
+failure rate worse. The human layer caught it that time. Before v0.20.0, if the judge had
+approved it convincingly instead, an operator might have activated it without the scrutiny
+the NEEDS_REVIEW path prompted — and nothing downstream would have flagged that this
+judge's APPROVE verdicts don't hold up. `vault judge-accuracy` now would.
 
-**Fix (v0.20.0 item #3):** Store judge verdicts on draft records. After the first 3+ runs
-accumulate under each activated version, correlate the activation judge verdict with the
-improvement delta from `vault versions`. Surface per-verdict accuracy in `vault
-judge-accuracy`. The judge becomes accountable to the same measurement infrastructure it
-is part of.
+**What's still worth watching:** the correlation needs runs to accumulate under an
+activated version before it's meaningful — a freshly-activated draft has no track record
+yet by construction, not because the mechanism is broken.
 
 The broader principle: **any system that provides a second opinion must itself be subject
 to a second opinion.** The chain terminates at human judgment — but the human judgment
@@ -196,13 +203,13 @@ been reliable.
 
 ## 7. Summary Table
 
-| Layer | First opinion | Second opinion | Third opinion | Verifiable today | Gap |
+| Layer | First opinion | Second opinion | Third opinion | Verifiable today | Notes |
 |-------|--------------|----------------|---------------|-----------------|-----|
-| Diagnosis | Monitoring alert | Agent hypothesis | Human at gate | Partially — alert not stored | `trigger_context` v0.20.0 |
+| Diagnosis | Monitoring alert | Agent hypothesis | Human at gate | Yes — alert stored as `trigger_context` | Also backed by a deterministic, non-opinion check — see [§1](#1-layer-1-diagnosis) |
 | Remediation | Agent plan | Human gate approval | — | Yes | None structural |
-| Playbook improvement | LLM suggest-update | LLM Judge | Human | Yes — but judge unaudited | Judge track record v0.20.0 |
-| Confidence | Agent CONFIDENCE: | Calibration bands | — | Partially — auto_judge dominates | Human feedback + model PK v0.20.0 |
-| Stability | Single run | N-run cert | — | Partially — model not in PK | Model cert PK v0.20.0 |
+| Playbook improvement | LLM suggest-update | LLM Judge | Human | Yes — judge accuracy now tracked | `vault judge-accuracy` |
+| Confidence | Agent CONFIDENCE: | Calibration bands | — | Yes — data-quality banner surfaces thin human coverage | Meaningfulness still depends on feedback composition |
+| Stability | Single run | N-run cert | — | Yes — model is part of the cert's primary key | — |
 
 ---
 
@@ -213,6 +220,8 @@ been reliable.
 | [INFORMED_CONSENT.md](INFORMED_CONSENT.md) | The gate in detail — informed, consent, right to refuse |
 | [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | When the second opinion layer fails: the manual improvement path |
 | [LLM_AS_JUDGE.md](LLM_AS_JUDGE.md) | How the Judge works; APPROVE/NEEDS_REVIEW/REJECT schema |
+| [AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#11-llm-fabrication-detection) | The three LLM fabrication-detection layers — a related but distinct concept from the opinions on this page: checks for whether a claim is *true*, not checks for whether a conclusion is *good* |
+| [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) | The deterministic, code-derived backstop referenced in Layer 1 |
 | [VAULT.md](VAULT.md) | vault calibration, vault accuracy, vault versions |
 | [CONSISTENCY.md](CONSISTENCY.md) | Stability certification — how STABLE(N) is earned |
 | [CUSTOMER_RIGHTS.md](CUSTOMER_RIGHTS.md) | The rights that depend on this layer working correctly |

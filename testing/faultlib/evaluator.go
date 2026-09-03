@@ -225,3 +225,23 @@ func Evaluate(f Failure, responseText string) EvalResult {
 
 	return result
 }
+
+// EvidenceSignalConfirmed reports whether sig appears in confirmed. Callers
+// gate a fault's pass/fail on this when the fault declares
+// expected_diagnosis.objective_evidence_signal AND the run actually went via
+// the gateway (--via-gateway / FAULTTEST_VIA_GATEWAY=true) — only gateway
+// playbook responses carry real confirmed-evidence data; a direct agent call
+// never populates it, so this must not be enforced unconditionally or every
+// non-gateway run of a signal-bearing fault would fail regardless of the
+// model's actual response. Mirrors cmd/faulttest's own evidenceSignalConfirmed
+// (deliberately duplicated, not shared — the two Evaluate implementations are
+// themselves separate for the same package-boundary reason; see this
+// function's sibling Evaluate's own doc comment above).
+func EvidenceSignalConfirmed(sig string, confirmed []string) bool {
+	for _, c := range confirmed {
+		if c == sig {
+			return true
+		}
+	}
+	return false
+}

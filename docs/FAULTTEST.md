@@ -1,5 +1,7 @@
 # aiHelpDesk Fault Injection Testing (external)
 
+TL;DR: Your database, your faults, your [playbooks](PLAYBOOKS.md). Our [verification harness](AIGOVERNANCE.md) and [certification mechanism](CONSISTENCY.md).
+
 `faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
 Point it at a database, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. With `--auto-db`, faulttest spins up a temporary PostgreSQL container itself — no database setup required at all. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
@@ -210,7 +212,7 @@ faulttest run --external \
 
 The `--infra-config` flag is recommended (see [section 4](#4-policy-safety-the-infra-config-guard)).
 
-External mode runs all 17 `external_compat` faults, including the 4 SSH-injectable ones if `--ssh-host` is supplied (see [§3.3](#33-ssh-injection-mode)). Without `--ssh-host`, SSH faults are attempted over the local shell and will fail unless the target is localhost.
+External mode runs all `external_compat` faults (21 as of this writing — run `faulttest list --external` for the current count, since this number grows as the catalog does), including the 4 SSH-injectable ones if `--ssh-host` is supplied (see [§3.3](#33-ssh-injection-mode)). Without `--ssh-host`, SSH faults are attempted over the local shell and will fail unless the target is localhost. Two of these (`db-replication-lag`, `db-replica-disconnected`) additionally require a real replica already attached (`requires_replica: true` in the catalog) — see [HA_DR.md](HA_DR.md).
 
 All teardowns remove injected state completely: tables are dropped, held sessions are terminated, paused replay is resumed.
 
@@ -736,6 +738,8 @@ Fetches the current active Playbook for `--series-id`, synthesises a proposed up
 
 The catalog lives at `testing/catalog/failures.yaml`. It is version-controlled alongside the codebase and versioned with the `version: "1"` field.
 
+For replication and HA-specific faults (`db-replication-lag`, `db-replica-disconnected`) — the reasoning behind each, what's verified vs. what's on the roadmap — see [HA_DR.md](HA_DR.md).
+
 ### 6.1 External-compatible faults
 
 These faults work against any PostgreSQL instance accessible over libpq. No Docker, no Kubernetes, no OS shell access required.
@@ -1251,7 +1255,7 @@ faulttest run --external \
 
 ### 9.1 Overview
 
-Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 31 built-in faults. Customer catalog files layer on top of this without modifying the binary.
+Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 36 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
 A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 
@@ -1460,6 +1464,18 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
   # Mark as externally injectable (no Docker/OS infrastructure needed).
   external_compat: true
 
+  # Optional: set when the fault needs a real streaming replica already
+  # attached to the target — independent of external_compat. A fault can be
+  # pure-libpq (external_compat: true) AND still need a pre-existing replica
+  # topology (requires_replica: true) at the same time; the two are checked
+  # separately. Excludes the fault from --auto-db (whose ephemeral
+  # single-instance stack never has a replica) without blocking --external.
+  # Set this whenever the fault needs a replica to exist, even if its own
+  # inject/teardown never connects to one directly (e.g. an injection that
+  # only touches the primary) — target: replica alone only covers the case
+  # where faulttest itself needs a replica connection string to inject.
+  requires_replica: false
+
   # Optional: override inject/teardown for --external mode.
   # Use type: sql for stateless DDL/DML (CREATE TABLE, INSERT, etc.).
   # Use type: shell_exec for anything that must hold state across calls
@@ -1511,6 +1527,25 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
       narrative: >                          # used by the LLM judge when --judge is set
         The agent should identify <root cause> and recommend <remediation>.
         It should explain <key detail> and mention <expected outcome>.
+      # Optional: only set this when the diagnosing agent has a real,
+      # code-derived objective-evidence signal for this exact condition (see
+      # OBJECTIVE_EVIDENCE.md and agents/database|k8s/objective_evidence.yaml's
+      # `signal:` names — the string here must match one exactly). When set,
+      # a run through `--via-gateway` additionally requires that signal to
+      # appear in the run's confirmed evidence to count as a pass — keyword
+      # and category text matching alone are not enough. This closes a real
+      # gap: a vague hedge ("might be stalled") could otherwise score full
+      # marks on keywords/category without the model ever demonstrably
+      # engaging with real tool data, including the case where the
+      # underlying tool query comes back empty. Not enforced for direct
+      # (non-gateway) runs — only gateway playbook responses carry confirmed-
+      # evidence data, so `make faulttest-fast` and the plain `faultlib.Evaluate`
+      # path never populate it and must not be gated on it.
+      # A structural test (testing/faultlib's
+      # TestObjectiveEvidenceSignal_MatchesRealAgentRules) cross-checks this
+      # string against the real rule files, so a typo here fails at test time
+      # instead of silently making the fault fail every live run.
+      objective_evidence_signal: "my_diagnosis_category"
     # Optional: assert tool A is mentioned before tool B.
     expected_tool_order:
       - [get_session_info, terminate_connection]

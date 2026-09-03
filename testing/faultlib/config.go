@@ -183,8 +183,37 @@ func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
 	r := strings.NewReplacer(
 		"{{connection_string}}", connStr,
 		"{{replica_connection_string}}", cfg.ReplicaConnStr,
+		"{{replica_host_port}}", hostPortOnly(cfg.ReplicaConnStr),
 		"{{kube_context}}", cfg.KubeContext,
 		"{{server_id}}", cfg.ServerID,
 	)
 	return r.Replace(prompt)
+}
+
+// hostPortOnly strips a libpq keyword-value connection string down to just
+// "host:port" — deliberately discarding dbname/user/password. Used for
+// prompt values a triage agent needs only to identify a DIFFERENT target for
+// a cross-agent TARGET: handoff (see cmd/gateway/playbooks.go's
+// agentEscalation.Target), not to connect to directly with its own tools.
+// A bare "host:port" fragment is still enough for resolveHost's own
+// port-matching fallback (agents/sysadmin/tools.go's connStrPort) to resolve
+// the right infra.json entry, but isn't a valid libpq connection string on
+// its own — passing it to check_connection/get_replication_status/etc. fails
+// to parse rather than silently connecting to the wrong server. Found live:
+// giving an agent the full DSN let it just query the other server directly
+// with its own tools instead of escalating, tripping target_drift.
+func hostPortOnly(connStr string) string {
+	var host, port string
+	for _, field := range strings.Fields(connStr) {
+		switch {
+		case strings.HasPrefix(field, "host="):
+			host = strings.TrimPrefix(field, "host=")
+		case strings.HasPrefix(field, "port="):
+			port = strings.TrimPrefix(field, "port=")
+		}
+	}
+	if host == "" || port == "" {
+		return ""
+	}
+	return host + ":" + port
 }

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -21,6 +21,7 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/policy"
 )
 
@@ -468,6 +469,33 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 	return result, err
 }
 
+// podEvidenceSchema declares get_pods' two named, type-safe probes: whether
+// a pod's last termination was OOMKilled, and its restart count. The oom_killed
+// probe folds in the same "Restarts > 0" precondition the original hardcoded
+// version required (a pod OOMKilled with a zero restart count — not
+// something client-go should ever actually report — still won't fire either
+// signal, preserving that edge case exactly) rather than expressing it as a
+// second, separate rule condition.
+//
+// What *rules* apply to these probes (thresholds, resulting signal names,
+// Detail text) is authored declaratively — see agents/k8s/objective_evidence.yaml
+// and internal/evidence's package doc for why. This schema only says what
+// fields exist and how to read them; it's Go code specifically so a typo in
+// a rule's probe name is a load-time map-lookup failure, not a rule that
+// silently never fires.
+var podEvidenceSchema = evidence.NewToolSchema[PodInfo]("get_pods", func(p PodInfo) string { return p.Name }).
+	Bool("oom_killed", func(p PodInfo) bool {
+		return p.Restarts > 0 && p.LastState != nil && p.LastState.OOMKilled
+	}).
+	Numeric("restart_count", func(p PodInfo) float64 { return float64(p.Restarts) }).
+	Register()
+
+// podEvidenceRules holds the loaded rules for podEvidenceSchema, set by
+// main() at startup (loadEvidenceRules). Evaluate no-ops on a nil/empty
+// slice — no rules loaded means no forced-gate signals from get_pods, not a
+// crash — so an agent can still run before/without the rules file present.
+var podEvidenceRules []evidence.Rule
+
 // recordPodDistressEvidence records a deterministic objective_evidence audit
 // event for any pod with real client-go evidence of distress — a nonzero
 // restart count or an OOMKilled last-termination state. This is read directly
@@ -482,26 +510,10 @@ func recordPodDistressEvidence(ctx context.Context, result GetPodsResult) {
 	if toolAuditor == nil {
 		return
 	}
-	for _, pod := range result.Pods {
-		if pod.Restarts <= 0 {
-			continue
-		}
-		signal := "pod_restarted"
-		detail := fmt.Sprintf("pod %s restarted %d time(s)", pod.Name, pod.Restarts)
-		if pod.LastState != nil && pod.LastState.OOMKilled {
-			signal = "oom_killed"
-			detail = fmt.Sprintf("pod %s was OOMKilled (restart count %d)", pod.Name, pod.Restarts)
-		}
-		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
-			Tool:     "get_pods",
-			Resource: pod.Name,
-			Signal:   signal,
-			Detail:   detail,
-		})
-	}
+	evidence.Evaluate(ctx, toolAuditor, podEvidenceSchema, result.Pods, podEvidenceRules)
 }
 
-func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
+func getPodsTool(ctx agent.ToolContext, args GetPodsArgs) (GetPodsResult, error) {
 	return getPodsImpl(ctx, args)
 }
 
@@ -543,7 +555,7 @@ func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult,
 	return result, err
 }
 
-func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
+func getServiceTool(ctx agent.ToolContext, args GetServiceArgs) (GetServiceResult, error) {
 	return getServiceImpl(ctx, args)
 }
 
@@ -653,7 +665,7 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 	return KubectlResult{Output: sb.String()}, nil
 }
 
-func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
+func describeServiceTool(ctx agent.ToolContext, args DescribeServiceArgs) (KubectlResult, error) {
 	return describeServiceImpl(ctx, args)
 }
 
@@ -693,7 +705,7 @@ func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsR
 	return result, err
 }
 
-func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
+func getEndpointsTool(ctx agent.ToolContext, args GetEndpointsArgs) (GetEndpointsResult, error) {
 	return getEndpointsImpl(ctx, args)
 }
 
@@ -739,6 +751,26 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 	return result, err
 }
 
+// eventEvidenceSchema declares get_events' one probe: a Warning-type event's
+// Reason (folded into the probe so a non-Warning event's Reason reads as ""
+// and can never match any rule below — reproducing the original hardcoded
+// "if ev.Type != Warning: skip" precondition without a special case in the
+// rule layer itself). See podEvidenceSchema's doc comment for why this is
+// Go code (typed field access) while the actual reason->signal mapping is
+// declarative YAML (agents/k8s/objective_evidence.yaml).
+var eventEvidenceSchema = evidence.NewToolSchema[EventInfo]("get_events", func(e EventInfo) string { return e.Object }).
+	String("reason", func(e EventInfo) string {
+		if e.Type != "Warning" {
+			return ""
+		}
+		return e.Reason
+	}).
+	Register()
+
+// eventEvidenceRules holds the loaded rules for eventEvidenceSchema, set by
+// main() at startup. See podEvidenceRules' doc comment re: nil/empty.
+var eventEvidenceRules []evidence.Rule
+
 // recordEventDistressEvidence records a deterministic objective_evidence
 // audit event for any Kubernetes event carrying real evidence of resource
 // distress — eviction, scheduling failure, or node pressure — read directly
@@ -754,40 +786,17 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 // Only a small, deliberately fixed vocabulary of Warning-type Reason values
 // is treated as distress — most Warning/Normal events (BackOff, Pulled,
 // Scheduled, Created, Started, ...) are routine noise for this purpose, not
-// evidence a human should be forced to review. Extend this list only when a
-// new Reason is confirmed to carry the same "real, code-derived, worth a
-// forced gate" weight as these.
+// evidence a human should be forced to review. The vocabulary itself now
+// lives in agents/k8s/objective_evidence.yaml, not here — extend it there,
+// not by editing this function.
 func recordEventDistressEvidence(ctx context.Context, result GetEventsResult) {
 	if toolAuditor == nil {
 		return
 	}
-	for _, ev := range result.Events {
-		if ev.Type != "Warning" {
-			continue
-		}
-		var signal string
-		switch ev.Reason {
-		case "Evicted":
-			signal = "evicted"
-		case "FailedScheduling":
-			signal = "failed_scheduling"
-		case "NodeHasDiskPressure":
-			signal = "disk_pressure"
-		case "NodeHasMemoryPressure":
-			signal = "memory_pressure"
-		default:
-			continue
-		}
-		toolAuditor.RecordObjectiveEvidence(ctx, audit.ObjectiveEvidence{
-			Tool:     "get_events",
-			Resource: ev.Object,
-			Signal:   signal,
-			Detail:   ev.Message,
-		})
-	}
+	evidence.Evaluate(ctx, toolAuditor, eventEvidenceSchema, result.Events, eventEvidenceRules)
 }
 
-func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
+func getEventsTool(ctx agent.ToolContext, args GetEventsArgs) (GetEventsResult, error) {
 	return getEventsImpl(ctx, args)
 }
 
@@ -864,7 +873,7 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 	return KubectlResult{Output: output}, nil
 }
 
-func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
+func getPodLogsTool(ctx agent.ToolContext, args GetPodLogsArgs) (KubectlResult, error) {
 	return getPodLogsImpl(ctx, args)
 }
 
@@ -955,7 +964,7 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 	return KubectlResult{Output: output}, nil
 }
 
-func readPodFileTool(ctx tool.Context, args ReadPodFileArgs) (KubectlResult, error) {
+func readPodFileTool(ctx agent.ToolContext, args ReadPodFileArgs) (KubectlResult, error) {
 	return readPodFileImpl(ctx, args)
 }
 
@@ -1027,7 +1036,7 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 	return KubectlResult{Output: sb.String()}, nil
 }
 
-func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
+func describePodTool(ctx agent.ToolContext, args DescribePodArgs) (KubectlResult, error) {
 	return describePodImpl(ctx, args)
 }
 
@@ -1060,7 +1069,7 @@ func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error
 	return result, err
 }
 
-func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
+func getNodesTool(ctx agent.ToolContext, args GetNodesArgs) (GetNodesResult, error) {
 	return getNodesImpl(ctx, args)
 }
 
@@ -1138,7 +1147,7 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
+func deletePodTool(ctx agent.ToolContext, args DeletePodArgs) (KubectlResult, error) {
 	return deletePodImpl(ctx, args)
 }
 
@@ -1210,7 +1219,7 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
+func restartDeploymentTool(ctx agent.ToolContext, args RestartDeploymentArgs) (KubectlResult, error) {
 	return restartDeploymentImpl(ctx, args)
 }
 
@@ -1319,7 +1328,7 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
+func scaleDeploymentTool(ctx agent.ToolContext, args ScaleDeploymentArgs) (KubectlResult, error) {
 	return scaleDeploymentImpl(ctx, args)
 }
 
@@ -1358,7 +1367,7 @@ func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodR
 	return result, err
 }
 
-func getPodResourcesTool(ctx tool.Context, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
+func getPodResourcesTool(ctx agent.ToolContext, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
 	return getPodResourcesImpl(ctx, args)
 }
 
@@ -1392,7 +1401,7 @@ func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStat
 	return result, err
 }
 
-func getNodeStatusTool(ctx tool.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
+func getNodeStatusTool(ctx agent.ToolContext, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
 	return getNodeStatusImpl(ctx, args)
 }
 
@@ -1607,7 +1616,7 @@ func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlRe
 		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines))
 }
 
-func debugNodeDmesgTool(ctx tool.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+func debugNodeDmesgTool(ctx agent.ToolContext, args DebugNodeDmesgArgs) (KubectlResult, error) {
 	return debugNodeDmesgImpl(ctx, args)
 }
 

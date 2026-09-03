@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 )
 
 // IncidentNarrative is the unified timeline view for a single triage incident:
@@ -71,6 +72,18 @@ type TriageChapter struct {
 	// its resolved value. Lets a reader distinguish "explicitly declined"
 	// from a genuine protocol violation without needing the raw transcript.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
+	// ObjectiveEvidenceConfirmed/Unconfirmed mirror the response-level
+	// objective_evidence_confirmed/unconfirmed fields (see
+	// objectiveEvidenceSignals, playbooks.go) — Layer 3 of
+	// docs/AIGOVERNANCE.md's fabrication detection, computed fresh from the
+	// persisted objective_evidence audit events and this chapter's own
+	// transcript rather than stored at run time, same as the three flags
+	// above. Unconfirmed means real, code-derived tool evidence existed that
+	// this chapter's own response never demonstrably engaged with —
+	// confirmed means the opposite: proof the model saw and cited the real
+	// data, not a concern.
+	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
 }
 
 // GateChapter holds the operator approval decision.
@@ -97,6 +110,9 @@ type RemediationChapter struct {
 	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
+	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
+	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
 }
 
 // EscalationHop is one intermediate playbook run reached via ESCALATE_TO,
@@ -122,6 +138,9 @@ type EscalationHop struct {
 	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
+	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
+	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
 }
 
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
@@ -190,6 +209,26 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		return events
 	}
 
+	// oevEventsCache mirrors eventsCache above, for objective_evidence events
+	// (a separate event_type, so a separate auditd query) — same dedup reason,
+	// same reason the per-chapter window still matters below (a force-mode
+	// auto-chain hop sharing a trace_id with another hop must not have that
+	// other hop's evidence leak onto its own chapter, same bug class
+	// hopVerificationFlags's own windowing already guards against for
+	// mismatch/target_drift).
+	oevEventsCache := make(map[string][]audit.Event)
+	lookupOEVEvents := func(traceID string) []audit.Event {
+		if traceID == "" {
+			return nil
+		}
+		if events, ok := oevEventsCache[traceID]; ok {
+			return events
+		}
+		events := audit.FetchObjectiveEvidenceEvents(g.auditURL, g.auditAPIKey, traceID, run.StartedAt)
+		oevEventsCache[traceID] = events
+		return events
+	}
+
 	narrative := IncidentNarrative{
 		IncidentID:     runID,
 		StartedAt:      run.StartedAt,
@@ -207,6 +246,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation =
 		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, triageWindowEnd)
+	narrative.Triage.ObjectiveEvidenceConfirmed, narrative.Triage.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
+		lookupOEVEvents(run.TraceID), run.StartedAt, triageWindowEnd,
+		evidence.HopOutcome{Report: run.DiagnosticReport, RawText: run.AgentTranscript, SawSignalLine: run.SawSignalLine})
 
 	// 2. Gate chapter — present when triage was an informed gate.
 	isGated := run.Outcome == audit.OutcomeTransitioned ||
@@ -280,6 +322,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			}
 			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation =
 				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+			rem.ObjectiveEvidenceConfirmed, rem.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
+				lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
+				evidence.HopOutcome{Report: hop.DiagnosticReport, RawText: hop.AgentTranscript, SawSignalLine: hop.SawSignalLine})
 			narrative.Remediation = rem
 			predecessor = hop
 			break
@@ -304,6 +349,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		}
 		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation =
 			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+		eh.ObjectiveEvidenceConfirmed, eh.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
+			lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
+			evidence.HopOutcome{Report: hop.DiagnosticReport, RawText: hop.AgentTranscript, SawSignalLine: hop.SawSignalLine})
 		if !hop.CompletedAt.IsZero() {
 			t := hop.CompletedAt
 			eh.CompletedAt = &t
@@ -382,6 +430,28 @@ func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismat
 		hasProtocolViolation = hasProtocolViolation || dv.ProtocolViolation
 	}
 	return
+}
+
+// hopObjectiveEvidence computes ObjectiveEvidenceConfirmed/Unconfirmed for one
+// hop — the incident-narrative counterpart to objectiveEvidenceSignals
+// (playbooks.go), which computes the same thing live during a chain's own
+// request. Time-windowed to [start, end) for the same reason
+// hopVerificationFlags is: a force-mode auto-chain can put multiple hops
+// under one shared trace_id, and an unbounded scan would leak a later hop's
+// evidence backward onto an earlier, unrelated chapter.
+func hopObjectiveEvidence(events []audit.Event, start, end time.Time, outcome evidence.HopOutcome) (confirmed, unconfirmed []string) {
+	var windowed []audit.Event
+	for _, ev := range events {
+		if ev.Timestamp.Before(start) {
+			continue
+		}
+		if !end.IsZero() && !ev.Timestamp.Before(end) {
+			continue
+		}
+		windowed = append(windowed, ev)
+	}
+	all, unconf := objectiveEvidenceSignals(windowed, outcome)
+	return splitConfirmedUnconfirmed(all, unconf)
 }
 
 // maxEscalationHops bounds how many prior_run_id hops handleGetIncident will

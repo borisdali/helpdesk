@@ -83,6 +83,26 @@ type EvalResult struct {
 	// warn-only (EvidenceWarnings) case uniformly, without string-parsing
 	// gate_reason. Empty on responses recorded before this field existed.
 	ObjectiveEvidenceSignals []string `json:"objective_evidence_signals,omitempty"`
+	// ObjectiveEvidenceConfirmed/ObjectiveEvidenceUnconfirmed mirror
+	// resp.ObjectiveEvidenceConfirmed/Unconfirmed — the same signals as
+	// ObjectiveEvidenceSignals, partitioned by whether the hop's own
+	// response demonstrably engaged with each one (see evidence.Confirmed,
+	// internal/evidence/confirm.go). Only unconfirmed signals contribute to
+	// gate_reason/evidence_warnings; confirmed ones are visibility-only.
+	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
+	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
+	// EvidenceRequiredButUnconfirmed is true when the fault's catalog entry
+	// declares an expected_diagnosis.objective_evidence_signal but that signal
+	// is absent from ObjectiveEvidenceConfirmed for this run — i.e. the model's
+	// own hypothesis text never demonstrably cited the real tool data behind
+	// the diagnosis it's being scored on. Gates Passed to false when true,
+	// alongside KeywordPass/OrderingPass — closes the gap where keyword and
+	// category text-matching alone could reward a vague hedge ("might be
+	// stalled") that never actually engaged with an empty or unexamined
+	// evidence query. Only applies to the small set of faults that declare
+	// the field; most faults have no corresponding deterministic signal and
+	// are unaffected.
+	EvidenceRequiredButUnconfirmed bool `json:"evidence_required_but_unconfirmed,omitempty"`
 	// Mismatch is true when resp.Mismatch is true — a delegation_verification
 	// event for this run had Mismatch=true: the model narrated calling a tool
 	// (or claimed a write/destructive action) that produced no matching
@@ -541,3 +561,16 @@ func extractHypothesisN(text string, n int) (label string, conf float64) {
 }
 
 func extractPrimaryConfidence(text string) float64 { _, c := extractHypothesisN(text, 1); return c }
+
+// evidenceSignalConfirmed reports whether sig appears in confirmed — used to
+// gate Passed when a fault declares expected_diagnosis.objective_evidence_signal.
+// See EvalResult.EvidenceRequiredButUnconfirmed's doc comment for why this
+// check exists.
+func evidenceSignalConfirmed(sig string, confirmed []string) bool {
+	for _, c := range confirmed {
+		if c == sig {
+			return true
+		}
+	}
+	return false
+}

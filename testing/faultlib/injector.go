@@ -144,6 +144,10 @@ func (i *Injector) execDocker(ctx context.Context, spec InjectSpec) error {
 			sig = "SIGKILL"
 		}
 		return testutil.DockerComposeKill(ctx, sig, spec.Service)
+	case "pause":
+		return testutil.DockerComposePause(ctx, spec.Service)
+	case "unpause":
+		return testutil.DockerComposeUnpause(ctx, spec.Service)
 	default:
 		return fmt.Errorf("unknown docker action: %s", spec.Action)
 	}

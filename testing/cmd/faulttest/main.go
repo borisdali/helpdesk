@@ -403,7 +403,7 @@ func cmdRun(args []string) {
 		}
 
 		// Skip faults that require a replica when none is configured.
-		if faultNeedsReplica(f) && cfg.ReplicaConnStr == "" {
+		if f.NeedsReplica() && cfg.ReplicaConnStr == "" {
 			slog.Warn("skipping fault: requires --replica-conn", "id", f.ID)
 			fmt.Printf("Result: [SKIP] replica connection not configured (pass --replica-conn)\n")
 			continue
@@ -562,6 +562,18 @@ func cmdRun(args []string) {
 				}
 				if len(resp.ObjectiveEvidenceSignals) > 0 {
 					evalResult.ObjectiveEvidenceSignals = resp.ObjectiveEvidenceSignals
+					evalResult.ObjectiveEvidenceConfirmed = resp.ObjectiveEvidenceConfirmed
+					evalResult.ObjectiveEvidenceUnconfirmed = resp.ObjectiveEvidenceUnconfirmed
+				}
+				// When the fault declares an expected deterministic signal, a pass
+				// requires it to be confirmed — not just keyword/category text
+				// matching, which a vague hedge can satisfy without the model ever
+				// demonstrably engaging with real tool data (see
+				// EvidenceRequiredButUnconfirmed's doc comment for the full story).
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed) {
+					evalResult.EvidenceRequiredButUnconfirmed = true
+					evalResult.Passed = false
+					fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score\n", sig)
 				}
 				// Fabrication risk: the agent narrated calling a tool that never
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
@@ -1526,17 +1538,6 @@ failures:
       expected_diagnosis:
         category: availability
 `
-
-// faultNeedsReplica reports whether any inject/teardown spec in the fault
-// targets the replica, meaning --replica-conn is required to run it.
-func faultNeedsReplica(f Failure) bool {
-	for _, spec := range []InjectSpec{f.Inject, f.Teardown, f.ExternalInject, f.ExternalTeardown} {
-		if spec.Target == "replica" {
-			return true
-		}
-	}
-	return false
-}
 
 func findFailure(cat *Catalog, id string) *Failure {
 	for i := range cat.Failures {

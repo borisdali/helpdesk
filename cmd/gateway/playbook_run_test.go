@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/toolregistry"
@@ -307,6 +309,33 @@ func TestParseAgentEscalation_NoSignal(t *testing.T) {
 	}
 	if esc.CleanText != text {
 		t.Errorf("CleanText should equal original text when no signal present")
+	}
+}
+
+func TestParseAgentEscalation_Target(t *testing.T) {
+	text := "The replica is disconnected; primary-side rejection.\n\n" +
+		"FINDINGS: replica rejected by pg_hba.conf\n" +
+		"TARGET: host.docker.internal:15433\n" +
+		"ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Target != "host.docker.internal:15433" {
+		t.Errorf("target = %q, want host.docker.internal:15433", esc.Target)
+	}
+	if esc.EscalateTo != "pbs_sysadmin_replica_connectivity_triage" {
+		t.Errorf("escalate_to = %q", esc.EscalateTo)
+	}
+	if strings.Contains(esc.CleanText, "TARGET:") {
+		t.Error("CleanText should not contain TARGET: line")
+	}
+}
+
+func TestParseAgentEscalation_NoTarget_DefaultsEmpty(t *testing.T) {
+	text := "FINDINGS: routine diagnosis, no server handoff needed\nESCALATE_TO: pbs_something\n"
+	esc := parseAgentEscalation(text)
+
+	if esc.Target != "" {
+		t.Errorf("target = %q, want empty when no TARGET: line is present", esc.Target)
 	}
 }
 
@@ -1107,6 +1136,74 @@ ESCALATE_TO: none`
 	}
 	if report.ActionTaken != "none — escalation recommended" {
 		t.Errorf("ActionTaken = %q", report.ActionTaken)
+	}
+}
+
+// TestSplitOutsideQuotes covers the parser primitive directly, including
+// the exact live-found bug: a quoted EVIDENCE value that itself contains
+// " | " (a model quoting a raw psql -x "field | value" line verbatim,
+// exactly what the protocol's own "verbatim quote from tool output"
+// instruction asks for) must not get shredded at that internal separator.
+func TestSplitOutsideQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"no separator", "hello world", []string{"hello world"}},
+		{"plain split, no quotes", "a | b | c", []string{"a", "b", "c"}},
+		{
+			"separator inside quotes is not split",
+			`text | EVIDENCE: "reply_lag_seconds | 52"`,
+			[]string{"text", `EVIDENCE: "reply_lag_seconds | 52"`},
+		},
+		{
+			"two quoted segments joined by prose, both preserved whole",
+			`text | EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread`,
+			[]string{"text", `EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread`},
+		},
+		{"empty string", "", []string{""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitOutsideQuotes(tc.in, " | ")
+			if len(got) != len(tc.want) {
+				t.Fatalf("splitOutsideQuotes(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("splitOutsideQuotes(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestParseDiagnosticReport_EvidenceQuoteContainsPipe is a regression test
+// for a real bug found live (2026-09-02, db-replica-stalled): the model
+// quoted a raw psql -x line verbatim as its EVIDENCE — exactly per protocol
+// — but that line's own " | " field separator collided with the
+// hypothesis-line parser's field delimiter, truncating h.Evidence down to
+// just "reply_lag_seconds" and silently dropping the actual value ("52").
+// That in turn made evidence_quote_contains_value (internal/evidence)
+// wrongly report the signal as unconfirmed even though the model
+// demonstrably cited the real data — forcing an unnecessary human gate on a
+// textbook-correct diagnosis.
+func TestParseDiagnosticReport_EvidenceQuoteContainsPipe(t *testing.T) {
+	text := `HYPOTHESIS_1: Replica process is stalled or unresponsive; no feedback received in 52 seconds despite active streaming connection | CONFIDENCE: 0.95 | EVIDENCE: "reply_lag_seconds | 52" and "query_seconds | 899" on the WAL sender thread
+HYPOTHESIS_2: Network partition that has not torn down the TCP session | CONFIDENCE: 0.05 | REJECTED: still active
+ROOT_CAUSE: HYPOTHESIS_1`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("expected non-nil DiagnosticReport")
+	}
+	h1 := report.Hypotheses[0]
+	if !strings.Contains(h1.Evidence, "52") {
+		t.Errorf("h1.Evidence = %q, want it to contain %q (the real fired value) — got truncated at the quote's own internal \" | \"", h1.Evidence, "52")
+	}
+	if h1.Confidence != 0.95 {
+		t.Errorf("h1.Confidence = %v, want 0.95 — must not have been consumed by the mis-split either", h1.Confidence)
 	}
 }
 
@@ -3006,6 +3103,106 @@ func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnDiagnosticReport mirrors
+// TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
+// DiagnosticReport instead of escalated_to/transitioned_to: the primary run's
+// persisted diagnostic_report must stay scoped to its own hypotheses, not the
+// cross-hop merge (mergeDiagnosticReports) used for the immediate HTTP
+// response's combined view. Found live 2026-09-02 on db-replica-stalled — the
+// sysadmin hop's unrelated "container paused" hypothesis (confidence 1.0)
+// outranked the triage hop's own reply_lag_seconds hypothesis (confidence
+// 0.95) in the merge, and that merged report got persisted onto the triage
+// run's own record, silently breaking objective-evidence confirmation for the
+// triage hop's own signal (evidence.Confirmed looks up the primary
+// hypothesis's Evidence field via primaryHypothesis, which after the bad
+// merge pointed at the wrong hop's unrelated evidence text).
+func TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnDiagnosticReport(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID:    "pb_diagtest_triage",
+		SeriesID:      "pbs_diagtest_triage",
+		Name:          "Diag Test Triage",
+		ExecutionMode: "agent",
+		AgentName:     "test_db_agent",
+		IsActive:      true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID:    "pb_diagtest_sysadmin",
+		SeriesID:      "pbs_diagtest_sysadmin",
+		Name:          "Diag Test Sysadmin",
+		ExecutionMode: "agent",
+		AgentName:     "test_sysadmin_agent",
+		IsActive:      true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_diagtest_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_diagtest_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "test_db_agent",
+		"FINDINGS: replica reply lag is high\n"+
+			"HYPOTHESIS_1: Replica is stalled but connected | CONFIDENCE: 0.95 | EVIDENCE: \"reply_lag_seconds | 47\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\n"+
+			"ESCALATE_TO: pbs_diagtest_sysadmin\n")
+	_, sysadminCard := mockA2AServerWithText(t, "test_sysadmin_agent",
+		"FINDINGS: container is paused\n"+
+			"HYPOTHESIS_1: Container frozen by cgroup freezer | CONFIDENCE: 1.0 | EVIDENCE: \"paused\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\n")
+	for name, card := range map[string]*a2a.AgentCard{
+		"test_db_agent":       dbCard,
+		"test_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"replica lag","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	runID, _ := resp["run_id"].(string)
+	if runID == "" {
+		t.Fatal("response missing run_id")
+	}
+
+	var patch map[string]any
+	for i := 0; i < 50; i++ {
+		if p := auditSrv.patchFor(runID); p != nil {
+			patch = p
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patch == nil {
+		t.Fatalf("no PATCH captured for primary run %s within timeout", runID)
+	}
+
+	report, _ := patch["diagnostic_report"].(map[string]any)
+	if report == nil {
+		t.Fatalf("primary run's persisted diagnostic_report is missing or not an object: %v", patch["diagnostic_report"])
+	}
+	hyps, _ := report["hypotheses"].([]any)
+	if len(hyps) != 1 {
+		t.Fatalf("primary run's persisted diagnostic_report has %d hypotheses, want 1 (its own only, not merged with the chained hop's) — got: %+v", len(hyps), hyps)
+	}
+	h, _ := hyps[0].(map[string]any)
+	if h["is_primary"] != true {
+		t.Errorf("primary run's own hypothesis has is_primary = %v, want true — it must stay primary on its own record regardless of a later hop's higher confidence", h["is_primary"])
+	}
+	if evidence, _ := h["evidence"].(string); !strings.Contains(evidence, "reply_lag_seconds") {
+		t.Errorf("primary run's persisted evidence = %q, want it to contain \"reply_lag_seconds\" (its own hop's evidence, not the sysadmin hop's unrelated \"paused\")", evidence)
+	}
+}
+
 // TestHandlePlaybookRun_AutoChain_MonitorRecommendation_ChainedHop_PrimaryRecordKeepsOwnSignal
 // mirrors TestHandlePlaybookRun_AutoChain_PrimaryRecordKeepsOwnSignal but for
 // the findingsRecommendMonitor early-exit branch instead of the informed-gate
@@ -3530,6 +3727,315 @@ func TestHandlePlaybookRun_ChainedHop_ObjectiveEvidence_ForcedGate_EscalateToVar
 	}
 	if got := patch["transitioned_to"]; got != "" && got != nil {
 		t.Errorf("primary run's persisted transitioned_to = %v, want empty", got)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_TargetOverride verifies the item-5c
+// TARGET: handoff mechanism end to end: when hop1 (DB triage) emits a
+// TARGET: line alongside ESCALATE_TO, chainEscalation must send hop2
+// (sysadmin) a request built against the TARGET connection string, not the
+// caller's original req.ConnectionString (see chainEscalation,
+// playbooks.go:1158-1161) — this is what lets the DB agent hand sysadmin the
+// replica's connection string while its own chain stays pinned to the
+// primary. Never previously covered by a unit test, only exercised live.
+func TestHandlePlaybookRun_ChainedHop_TargetOverride(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_target_triage", SeriesID: "pbs_target_triage",
+		Name: "Target Override Triage", ExecutionMode: "agent", AgentName: "target_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_target_sysadmin", SeriesID: "pbs_target_sysadmin",
+		Name: "Target Override Sysadmin", ExecutionMode: "agent", AgentName: "target_sysadmin_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_target_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_target_sysadmin": pbSysadmin})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "target_db_agent",
+		"HYPOTHESIS_1: replica rejected by primary | CONFIDENCE: 0.95 | EVIDENCE: \"pg_hba.conf rejects\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica disconnected, primary-side rejection\n"+
+			"TARGET: host.docker.internal:15433\nESCALATE_TO: pbs_target_sysadmin\n")
+
+	var capturedPromptText string
+	sysadminSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if len(req.Params.Message.Parts) > 0 {
+			capturedPromptText = req.Params.Message.Parts[0].Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"kind": "task",
+				"id":   "task-target-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: replica container is healthy\nESCALATE_TO: none\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(sysadminSrv.Close)
+	sysadminCard := &a2a.AgentCard{
+		Name: "target_sysadmin_agent", URL: sysadminSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"target_db_agent":       dbCard,
+		"target_sysadmin_agent": sysadminCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"replica lag","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// The chain must have actually run hop2 (sysadmin).
+	if got := auditSrv.runCount(); got != 2 {
+		t.Fatalf("runCount() = %d, want 2 (triage + sysadmin)", got)
+	}
+	if capturedPromptText == "" {
+		t.Fatal("sysadmin agent never received a prompt")
+	}
+	if !strings.Contains(capturedPromptText, "host.docker.internal:15433") {
+		t.Errorf("sysadmin prompt does not contain the TARGET override (host.docker.internal:15433); got: %s", capturedPromptText)
+	}
+	if strings.Contains(capturedPromptText, "port=15432") {
+		t.Errorf("sysadmin prompt still contains the primary's original connection string (port=15432) — TARGET override did not take effect; got: %s", capturedPromptText)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_TargetOverride_CarriesForwardWhenHopOmitsIt
+// is a real bug found via live testing (db-replica-container-stopped,
+// 2026-09-01): hop2 correctly diagnosed a target (the replica) via TARGET:
+// but then, transitioning to hop3, failed to restate it — a real, observed
+// model-reliability gap, not a hypothetical. chainEscalation's old logic only
+// ever looked at the immediately preceding hop's OWN .target field, so it
+// fell back to req.ConnectionString (the top-level primary) for hop3 — a
+// remediation playbook whose own guidance assumes "connection_string ...
+// already points at the replica." hop3 detected the contradiction and
+// correctly refused to act, but the real fault was left unfixed despite a
+// fully correct 2-hop diagnosis. Fixed via chainTarget, carried forward
+// across hops that don't restate their own (playbooks.go: the loop above
+// chainEscalation's call site). This test's hop2 deliberately emits NO
+// TARGET: line at all — proving hop3 still gets hop1's target.
+func TestHandlePlaybookRun_ChainedHop_TargetOverride_CarriesForwardWhenHopOmitsIt(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_triage", SeriesID: "pbs_targetfwd_triage",
+		Name: "TargetFwd Triage", ExecutionMode: "agent", AgentName: "targetfwd_db_agent", IsActive: true,
+	}
+	pbSysadmin := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_sysadmin", SeriesID: "pbs_targetfwd_sysadmin",
+		Name: "TargetFwd Sysadmin", ExecutionMode: "agent", AgentName: "targetfwd_sysadmin_agent", IsActive: true,
+	}
+	pbRestart := &audit.Playbook{
+		PlaybookID: "pb_targetfwd_restart", SeriesID: "pbs_targetfwd_restart",
+		Name: "TargetFwd Restart", ExecutionMode: "agent", AgentName: "targetfwd_restart_agent", IsActive: true,
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_targetfwd_triage": pbTriage},
+		map[string]*audit.Playbook{
+			"pbs_targetfwd_sysadmin": pbSysadmin,
+			"pbs_targetfwd_restart":  pbRestart,
+		})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "targetfwd_db_agent",
+		"HYPOTHESIS_1: replica disconnected | CONFIDENCE: 0.95 | EVIDENCE: \"inactive slot\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica disconnected\n"+
+			"TARGET: host.docker.internal:15433\nESCALATE_TO: pbs_targetfwd_sysadmin\n")
+	// hop2 deliberately omits its own TARGET: line before transitioning —
+	// the exact real-world failure mode this test guards against.
+	_, sysadminCard := mockA2AServerWithText(t, "targetfwd_sysadmin_agent",
+		"HYPOTHESIS_1: replica container cleanly stopped | CONFIDENCE: 0.9 | EVIDENCE: \"exitcode=0\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: replica container stopped, safe to restart\n"+
+			"TRANSITION_TO: pbs_targetfwd_restart\n")
+
+	var capturedPromptText string
+	restartSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if len(req.Params.Message.Parts) > 0 {
+			capturedPromptText = req.Params.Message.Parts[0].Text
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"kind": "task", "id": "task-targetfwd-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: replica restarted successfully\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(restartSrv.Close)
+	restartCard := &a2a.AgentCard{
+		Name: "targetfwd_restart_agent", URL: restartSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"targetfwd_db_agent":       dbCard,
+		"targetfwd_sysadmin_agent": sysadminCard,
+		"targetfwd_restart_agent":  restartCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"replica down","approval_mode":"force"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := auditSrv.runCount(); got != 3 {
+		t.Fatalf("runCount() = %d, want 3 (triage + sysadmin + restart)", got)
+	}
+	if capturedPromptText == "" {
+		t.Fatal("restart agent never received a prompt")
+	}
+	if !strings.Contains(capturedPromptText, "host.docker.internal:15433") {
+		t.Errorf("restart-hop prompt does not contain hop1's carried-forward TARGET (host.docker.internal:15433) — target was lost when hop2 omitted its own TARGET: line; got: %s", capturedPromptText)
+	}
+	if strings.Contains(capturedPromptText, "port=15432") {
+		t.Errorf("restart-hop prompt still contains the primary's original connection string (port=15432) — chainTarget did not carry forward; got: %s", capturedPromptText)
+	}
+}
+
+// TestHandlePlaybookRun_ChainedHop_PurposeDerivedFromPlaybookType is a real
+// bug found via live testing (db-replica-container-stopped, 2026-09-01):
+// faulttest's default --purpose is "diagnostic", and chainEscalation never
+// updated X-Purpose per hop (chainReq never carried Purpose at all, and the
+// shared *http.Request's header is only ever set once, at the top) — so a
+// force-mode auto-chain into a real playbook_type: remediation playbook
+// still declared "diagnostic" purpose to its own tool calls, and a policy
+// rule denying write/destructive actions under diagnostic purpose correctly
+// (per its own logic) blocked restart_container — even though canAutoChain
+// had already authorized the chain into remediation. Fixed via
+// derivedPurpose, applied in chainEscalation for every chained hop. This
+// test's top-level request declares "diagnostic"; hop2 is playbook_type:
+// remediation and must receive "remediation" in its A2A message metadata.
+func TestHandlePlaybookRun_ChainedHop_PurposeDerivedFromPlaybookType(t *testing.T) {
+	pbTriage := &audit.Playbook{
+		PlaybookID: "pb_purpose_triage", SeriesID: "pbs_purpose_triage",
+		Name: "Purpose Triage", ExecutionMode: "agent", AgentName: "purpose_db_agent", IsActive: true,
+	}
+	pbRemediate := &audit.Playbook{
+		PlaybookID: "pb_purpose_remediate", SeriesID: "pbs_purpose_remediate",
+		Name: "Purpose Remediate", ExecutionMode: "agent", AgentName: "purpose_remediate_agent",
+		IsActive: true, PlaybookType: "remediation",
+	}
+
+	auditSrv := newMockChainAuditd(t,
+		map[string]*audit.Playbook{"pb_purpose_triage": pbTriage},
+		map[string]*audit.Playbook{"pbs_purpose_remediate": pbRemediate})
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	_, dbCard := mockA2AServerWithText(t, "purpose_db_agent",
+		"HYPOTHESIS_1: container cleanly stopped | CONFIDENCE: 0.95 | EVIDENCE: \"exitcode=0\"\n"+
+			"ROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: safe to restart\nTRANSITION_TO: pbs_purpose_remediate\n")
+
+	var capturedPurpose string
+	remediateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     string `json:"id"`
+			Params struct {
+				Message struct {
+					Metadata map[string]any `json:"metadata"`
+				} `json:"message"`
+			} `json:"params"`
+		}
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		if p, ok := req.Params.Message.Metadata["purpose"].(string); ok {
+			capturedPurpose = p
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"kind": "task", "id": "task-purpose-1",
+				"status": map[string]any{
+					"state": "completed",
+					"message": map[string]any{
+						"role": "agent",
+						"parts": []map[string]any{
+							{"kind": "text", "text": "FINDINGS: restarted successfully\n"},
+						},
+					},
+				},
+			},
+		})
+	}))
+	t.Cleanup(remediateSrv.Close)
+	remediateCard := &a2a.AgentCard{
+		Name: "purpose_remediate_agent", URL: remediateSrv.URL, PreferredTransport: a2a.TransportProtocolJSONRPC,
+	}
+
+	for name, card := range map[string]*a2a.AgentCard{
+		"purpose_db_agent":        dbCard,
+		"purpose_remediate_agent": remediateCard,
+	} {
+		client, err := a2aclient.NewFromCard(context.Background(), card)
+		if err != nil {
+			t.Fatalf("create A2A client for %s: %v", name, err)
+		}
+		gw.clients[name] = client
+	}
+
+	rec := postPlaybookRun(t, gw, pbTriage.PlaybookID,
+		`{"connection_string":"host=host.docker.internal port=15432 dbname=testdb","context":"container stopped","approval_mode":"force","purpose":"diagnostic"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := auditSrv.runCount(); got != 2 {
+		t.Fatalf("runCount() = %d, want 2 (triage + remediate)", got)
+	}
+	if capturedPurpose != "remediation" {
+		t.Errorf("remediation hop's A2A metadata.purpose = %q, want %q — chainEscalation must derive purpose from the hop's own playbook_type, not forward the caller's original 'diagnostic' declaration", capturedPurpose, "remediation")
 	}
 }
 
@@ -4823,49 +5329,57 @@ func TestLowConfidenceForceGate(t *testing.T) {
 	}
 }
 
-// ── objectiveEvidenceForceGate ─────────────────────────────────────────────
+// ── objectiveEvidenceSignals ────────────────────────────────────────────────
+//
+// All cases below use an empty evidence.HopOutcome{} — no Report, no
+// RawText — so nothing can ever be confirmed (evidenceQuoteContainsValue
+// requires both a primary hypothesis AND a non-nil ev.Value; none of these
+// events set Value either, matching how every pre-existing caller/mock in
+// this file constructs ObjectiveEvidence without it). This intentionally
+// preserves the exact old objectiveEvidenceForceGate behavior for this
+// unit test's scope (signal collection/dedup — see all vs wantAll below);
+// confirmation-specific behavior (a signal moving out of unconfirmed when
+// the outcome genuinely supports it) is covered separately in
+// TestObjectiveEvidenceSignals_Confirmation.
 
-func TestObjectiveEvidenceForceGate(t *testing.T) {
+func TestObjectiveEvidenceSignals(t *testing.T) {
 	cases := []struct {
-		name        string
-		events      []audit.Event
-		wantFire    bool
-		wantReasons []string
+		name            string
+		events          []audit.Event
+		wantAll         []string
+		wantUnconfirmed []string
 	}{
 		{
-			name:     "no events — no gate",
-			events:   nil,
-			wantFire: false,
+			name:   "no events — nothing",
+			events: nil,
 		},
 		{
-			name: "event with nil ObjectiveEvidence — no gate",
+			name: "event with nil ObjectiveEvidence — nothing",
 			events: []audit.Event{
 				{EventType: audit.EventTypeObjectiveEvidence},
 			},
-			wantFire: false,
 		},
 		{
-			name: "event with empty Signal — no gate",
+			name: "event with empty Signal — nothing",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}},
 			},
-			wantFire: false,
 		},
 		{
-			name: "real pod_restarted signal — gate fires",
+			name: "real pod_restarted signal, no confirming outcome — unconfirmed",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted"},
+			wantAll:         []string{"pod_restarted"},
+			wantUnconfirmed: []string{"pod_restarted"},
 		},
 		{
-			name: "real oom_killed signal — gate fires",
+			name: "real oom_killed signal, no confirming outcome — unconfirmed",
 			events: []audit.Event{
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"oom_killed"},
+			wantAll:         []string{"oom_killed"},
+			wantUnconfirmed: []string{"oom_killed"},
 		},
 		{
 			name: "unrelated events mixed in — real signal still found",
@@ -4874,8 +5388,8 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods"}}, // empty signal, skipped
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted"},
+			wantAll:         []string{"pod_restarted"},
+			wantUnconfirmed: []string{"pod_restarted"},
 		},
 		{
 			// The gap found and fixed in v0.25.0: a hop calling both get_pods
@@ -4887,8 +5401,8 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_events", Signal: "failed_scheduling"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"pod_restarted", "failed_scheduling"},
+			wantAll:         []string{"pod_restarted", "failed_scheduling"},
+			wantUnconfirmed: []string{"pod_restarted", "failed_scheduling"},
 		},
 		{
 			name: "same signal from two different events — deduplicated",
@@ -4896,25 +5410,126 @@ func TestObjectiveEvidenceForceGate(t *testing.T) {
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-a"}},
 				{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Resource: "pod-b"}},
 			},
-			wantFire:    true,
-			wantReasons: []string{"oom_killed"},
+			wantAll:         []string{"oom_killed"},
+			wantUnconfirmed: []string{"oom_killed"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fire, reasons := objectiveEvidenceForceGate(tc.events)
-			if fire != tc.wantFire {
-				t.Errorf("objectiveEvidenceForceGate() fire = %v, want %v", fire, tc.wantFire)
+			all, unconfirmed := objectiveEvidenceSignals(tc.events, evidence.HopOutcome{})
+			if !reflect.DeepEqual(all, tc.wantAll) {
+				t.Errorf("objectiveEvidenceSignals() all = %v, want %v", all, tc.wantAll)
 			}
-			if len(reasons) != len(tc.wantReasons) {
-				t.Fatalf("objectiveEvidenceForceGate() reasons = %v, want %v", reasons, tc.wantReasons)
-			}
-			for i := range reasons {
-				if reasons[i] != tc.wantReasons[i] {
-					t.Errorf("objectiveEvidenceForceGate() reasons[%d] = %q, want %q", i, reasons[i], tc.wantReasons[i])
-				}
+			if !reflect.DeepEqual(unconfirmed, tc.wantUnconfirmed) {
+				t.Errorf("objectiveEvidenceSignals() unconfirmed = %v, want %v", unconfirmed, tc.wantUnconfirmed)
 			}
 		})
+	}
+}
+
+// TestObjectiveEvidenceSignals_Confirmation covers the part
+// TestObjectiveEvidenceSignals deliberately doesn't: a signal whose outcome
+// genuinely supports it moves out of unconfirmed (but stays in all).
+func TestObjectiveEvidenceSignals_Confirmation(t *testing.T) {
+	confirmingOutcome := evidence.HopOutcome{
+		Report: &audit.DiagnosticReport{
+			Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.95, Evidence: "lag_bytes | 95475440"},
+			},
+		},
+	}
+	nonConfirmingOutcome := evidence.HopOutcome{
+		Report: &audit.DiagnosticReport{
+			Hypotheses: []audit.DiagnosticHypothesis{
+				{IsPrimary: true, Confidence: 0.95, Evidence: "everything looks healthy"},
+			},
+		},
+	}
+
+	t.Run("default probe, value quoted verbatim — confirmed, not gated", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_replication_status", Signal: "replica_disconnected", Value: float64(95475440)}},
+		}
+		all, unconfirmed := objectiveEvidenceSignals(events, confirmingOutcome)
+		if !reflect.DeepEqual(all, []string{"replica_disconnected"}) {
+			t.Errorf("all = %v, want [replica_disconnected] — confirmed evidence must still be reported", all)
+		}
+		if len(unconfirmed) != 0 {
+			t.Errorf("unconfirmed = %v, want empty — the model's own quote contains the fired value", unconfirmed)
+		}
+	})
+
+	t.Run("default probe, value never quoted — still unconfirmed", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_replication_status", Signal: "replica_disconnected", Value: float64(95475440)}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, nonConfirmingOutcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected] — quote never mentions the real value", unconfirmed)
+		}
+	})
+
+	t.Run("resource_named_in_quote override — resource named in response text confirms", func(t *testing.T) {
+		outcome := evidence.HopOutcome{RawText: "the replication slot replica_slot is inactive"}
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				Resource: "replica_slot", Value: true, ConfirmationProbe: "resource_named_in_quote",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, outcome)
+		if len(unconfirmed) != 0 {
+			t.Errorf("unconfirmed = %v, want empty — resource is named in the response text", unconfirmed)
+		}
+	})
+
+	t.Run("resource_named_in_quote override — resource never mentioned stays unconfirmed", func(t *testing.T) {
+		outcome := evidence.HopOutcome{RawText: "everything looks healthy"}
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				Resource: "replica_slot", Value: true, ConfirmationProbe: "resource_named_in_quote",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, outcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected]", unconfirmed)
+		}
+	})
+
+	t.Run("unknown confirmation probe — fails conservative, stays unconfirmed", func(t *testing.T) {
+		events := []audit.Event{
+			{ObjectiveEvidence: &audit.ObjectiveEvidence{
+				Tool: "get_replication_status", Signal: "replica_disconnected",
+				ConfirmationProbe: "does_not_exist",
+			}},
+		}
+		_, unconfirmed := objectiveEvidenceSignals(events, confirmingOutcome)
+		if !reflect.DeepEqual(unconfirmed, []string{"replica_disconnected"}) {
+			t.Errorf("unconfirmed = %v, want [replica_disconnected] — an unrecognized probe must not silently pass", unconfirmed)
+		}
+	})
+}
+
+func TestAppendObjectiveEvidenceBreakdown(t *testing.T) {
+	extra := map[string]any{}
+	appendObjectiveEvidenceBreakdown(extra, []string{"replica_disconnected", "idle_in_transaction_stuck"}, []string{"idle_in_transaction_stuck"})
+
+	confirmed, _ := extra["objective_evidence_confirmed"].([]string)
+	unconfirmed, _ := extra["objective_evidence_unconfirmed"].([]string)
+	if !reflect.DeepEqual(confirmed, []string{"replica_disconnected"}) {
+		t.Errorf("objective_evidence_confirmed = %v, want [replica_disconnected]", confirmed)
+	}
+	if !reflect.DeepEqual(unconfirmed, []string{"idle_in_transaction_stuck"}) {
+		t.Errorf("objective_evidence_unconfirmed = %v, want [idle_in_transaction_stuck]", unconfirmed)
+	}
+
+	// A second hop's breakdown accumulates rather than overwrites, same as
+	// objective_evidence_signals itself does across chained hops.
+	appendObjectiveEvidenceBreakdown(extra, []string{"oom_killed"}, nil)
+	confirmed, _ = extra["objective_evidence_confirmed"].([]string)
+	if !reflect.DeepEqual(confirmed, []string{"replica_disconnected", "oom_killed"}) {
+		t.Errorf("objective_evidence_confirmed after second hop = %v, want [replica_disconnected oom_killed]", confirmed)
 	}
 }
 

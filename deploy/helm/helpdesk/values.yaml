@@ -51,6 +51,15 @@ agents:
     #           name: cnpg-app-password
     #           key: password
     extraEnv: []
+    # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): deterministic,
+    # code-derived rules that force-gate a response when a tool result crosses
+    # a threshold, independent of what the diagnosing model concludes. On by
+    # default, using the chart-bundled ruleset (files/objective-evidence-database.yaml,
+    # kept in sync with agents/database/objective_evidence.yaml). Set a
+    # configMap name instead to supply your own rules.
+    objectiveEvidence:
+      enabled: true
+      configMap: ""
 
   k8s:
     replicas: 1
@@ -69,6 +78,13 @@ agents:
       # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
       # K8s agent can query cluster resources via in-cluster kubectl.
       create: true
+    # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): see
+    # agents.database.objectiveEvidence above for the full explanation. On by
+    # default, using the chart-bundled ruleset (files/objective-evidence-k8s.yaml,
+    # kept in sync with agents/k8s/objective_evidence.yaml).
+    objectiveEvidence:
+      enabled: true
+      configMap: ""
 
   sysadmin:
     replicas: 1

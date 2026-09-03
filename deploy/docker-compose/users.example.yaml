@@ -14,7 +14,7 @@
 
 users:
   - id: alice@example.com
-    roles: [dba, sre, operator]
+    roles: [dba, sre, operator, dba_lead]
 
   - id: bob@example.com
     roles: [developer]
