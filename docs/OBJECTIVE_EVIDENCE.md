@@ -234,6 +234,17 @@ HELPDESK_DB_EVIDENCE_RULES=/etc/helpdesk/db-objective-evidence.yaml
 
 Unset means no rules load — the agent runs fine, just without this backstop.
 
+**On by default across all three deployment platforms** (Docker Compose, Helm, host/systemd)
+as of v0.27.0 — each ships the bundled rule files and sets both env vars out of the box.
+This wasn't always true: earlier in that same release, none of the three shipped
+deployment configs set either variable at all, so a fresh install via any of the
+documented paths deployed a database-agent/k8s-agent with the entire framework silently
+inactive (fail-open on an unset env var — no error, no warning). Found and fixed before
+advertising this mechanism publicly, precisely because shipping a differentiating feature
+that's off by default on every documented install path would have undercut the claim.
+See `deploy/docker-compose/docker-compose.yaml`, `deploy/helm/helpdesk/values.yaml`
+(`agents.{database,k8s}.objectiveEvidence`), and `deploy/host/.env.example`.
+
 ## 8. History: from gate-on-presence to gate-on-contradiction
 
 Through v0.25.0, the force-gate fired on **presence alone** — any hop with real objective
@@ -257,15 +268,31 @@ own parsed response as a second typed resource rather than free text to pattern-
 Presence of objective evidence the model correctly engaged with is now corroboration, not
 a red flag — only a genuine, checkable contradiction still forces a gate.
 
+**"Fine for offline test scoring" turned out not to be fine either.** Prompted by
+external feedback (a reviewer asking specifically what the faulttest catalog counts as a
+pass when the evidence query itself comes back empty): `testing/cmd/faulttest`'s own
+`Passed` determination was pure keyword/category/tool-called text matching, with zero
+dependency on confirmed evidence — the exact weakness this section describes for the
+production gate, just unnoticed on the offline side. A fault could score 100% on a hedge
+("might be stalled, couldn't retrieve data") that never engaged with real evidence at all.
+Fixed by adding an optional `expected_diagnosis.objective_evidence_signal` catalog field
+(see [FAULTTEST.md §10](FAULTTEST.md#10-extending-the-built-in-catalog)): when a fault
+declares it, a `--via-gateway` run additionally requires that signal to be confirmed to
+pass, on top of the existing keyword/category/tool checks — deliberately *not* enforced
+on non-gateway runs (`faulttest-fast`, the plain `faultlib.Evaluate` path), since only
+gateway playbook responses carry confirmed-evidence data at all; gating there
+unconditionally would fail every run of a signal-bearing fault regardless of correctness.
+Currently wired on the four faults where the mapping is concretely verified
+(`db-replica-disconnected`, `db-replica-container-stopped`, `db-replica-stalled`,
+`k8s-oomkilled`) — extending it further, as more faults migrate onto this field, is
+mechanical, not risky: a structural test
+(`testing/faultlib`'s `TestObjectiveEvidenceSignal_MatchesRealAgentRules`) cross-checks
+every declared signal against the real rule files, so a typo fails at test time instead
+of silently making a fault fail every live run thereafter.
+
 ## 9. Known gaps
 
-- **Production deployment wiring is incomplete.** `HELPDESK_K8S_EVIDENCE_RULES` and
-  `HELPDESK_DB_EVIDENCE_RULES` are plain env-var paths today, mirroring
-  `HELPDESK_INFRA_CONFIG`'s pattern exactly, but neither the Dockerfile nor the Helm
-  chart / docker-compose deployment actually mounts an `.example.yaml` variant the way
-  `policies.yaml`/`users.yaml` already do. Until that's wired, a real deployment has to
-  set this up manually to get the backstop at all.
-- **Narrow by design, not yet by ceiling.** Eight rules across two agents is deliberately
+- **Narrow by design, not yet by ceiling.** Nine rules across two agents is deliberately
   conservative — every signal here is a tool whose result already carries unambiguous
   structured evidence (a Pod's real restart count, a replication slot's real state).
   Extending coverage is a case-by-case decision per tool, not a mechanical rollout — see

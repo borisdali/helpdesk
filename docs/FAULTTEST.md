@@ -1527,6 +1527,25 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
       narrative: >                          # used by the LLM judge when --judge is set
         The agent should identify <root cause> and recommend <remediation>.
         It should explain <key detail> and mention <expected outcome>.
+      # Optional: only set this when the diagnosing agent has a real,
+      # code-derived objective-evidence signal for this exact condition (see
+      # OBJECTIVE_EVIDENCE.md and agents/database|k8s/objective_evidence.yaml's
+      # `signal:` names — the string here must match one exactly). When set,
+      # a run through `--via-gateway` additionally requires that signal to
+      # appear in the run's confirmed evidence to count as a pass — keyword
+      # and category text matching alone are not enough. This closes a real
+      # gap: a vague hedge ("might be stalled") could otherwise score full
+      # marks on keywords/category without the model ever demonstrably
+      # engaging with real tool data, including the case where the
+      # underlying tool query comes back empty. Not enforced for direct
+      # (non-gateway) runs — only gateway playbook responses carry confirmed-
+      # evidence data, so `make faulttest-fast` and the plain `faultlib.Evaluate`
+      # path never populate it and must not be gated on it.
+      # A structural test (testing/faultlib's
+      # TestObjectiveEvidenceSignal_MatchesRealAgentRules) cross-checks this
+      # string against the real rule files, so a typo here fails at test time
+      # instead of silently making the fault fail every live run.
+      objective_evidence_signal: "my_diagnosis_category"
     # Optional: assert tool A is mentioned before tool B.
     expected_tool_order:
       - [get_session_info, terminate_connection]
