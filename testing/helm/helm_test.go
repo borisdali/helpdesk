@@ -370,6 +370,162 @@ func TestPolicyEnvVarsPropagate(t *testing.T) {
 	}
 }
 
+// TestObjectiveEvidenceEnabledByDefault verifies that both database-agent and
+// k8s-agent get the objective-evidence env var, volume mount, and that the
+// chart's own ConfigMap is populated with the bundled rule files — on by
+// default, no values overrides needed.
+func TestObjectiveEvidenceEnabledByDefault(t *testing.T) {
+	objects := render(t)
+
+	cm, ok := objects["ConfigMap/test-config"]
+	if !ok {
+		t.Fatal("ConfigMap/test-config not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	if _, ok := data["objective-evidence-database.yaml"]; !ok {
+		t.Error("ConfigMap/test-config missing objective-evidence-database.yaml key")
+	}
+	if _, ok := data["objective-evidence-k8s.yaml"]; !ok {
+		t.Error("ConfigMap/test-config missing objective-evidence-k8s.yaml key")
+	}
+
+	components := []struct {
+		deployment, container, envVar, subPath string
+	}{
+		{"Deployment/test-database-agent", "database-agent", "HELPDESK_DB_EVIDENCE_RULES", "objective-evidence-database.yaml"},
+		{"Deployment/test-k8s-agent", "k8s-agent", "HELPDESK_K8S_EVIDENCE_RULES", "objective-evidence-k8s.yaml"},
+	}
+	for _, tc := range components {
+		t.Run(tc.container, func(t *testing.T) {
+			dep, ok := objects[tc.deployment]
+			if !ok {
+				t.Fatalf("Deployment %q not found", tc.deployment)
+			}
+			container := containerByName(t, dep, tc.container)
+			env := containerEnvMap(container)
+			if env[tc.envVar] != "/etc/helpdesk/objective_evidence.yaml" {
+				t.Errorf("%s: want \"/etc/helpdesk/objective_evidence.yaml\", got %q", tc.envVar, env[tc.envVar])
+			}
+
+			mounts, _ := container["volumeMounts"].([]any)
+			var found bool
+			for _, m := range mounts {
+				mount, _ := m.(map[string]any)
+				if mount["name"] == "objective-evidence-config" {
+					found = true
+					if mount["subPath"] != tc.subPath {
+						t.Errorf("subPath: want %q, got %q", tc.subPath, mount["subPath"])
+					}
+					if mount["mountPath"] != "/etc/helpdesk/objective_evidence.yaml" {
+						t.Errorf("mountPath: want \"/etc/helpdesk/objective_evidence.yaml\", got %q", mount["mountPath"])
+					}
+				}
+			}
+			if !found {
+				t.Error("objective-evidence-config volumeMount not found")
+			}
+
+			spec, _ := dep["spec"].(map[string]any)
+			tmpl, _ := spec["template"].(map[string]any)
+			podSpec, _ := tmpl["spec"].(map[string]any)
+			volumes, _ := podSpec["volumes"].([]any)
+			var volFound bool
+			for _, v := range volumes {
+				vol, _ := v.(map[string]any)
+				if vol["name"] == "objective-evidence-config" {
+					volFound = true
+					cmRef, _ := vol["configMap"].(map[string]any)
+					if cmRef["name"] != "test-config" {
+						t.Errorf("volume configMap name: want \"test-config\", got %v", cmRef["name"])
+					}
+				}
+			}
+			if !volFound {
+				t.Error("objective-evidence-config volume not found")
+			}
+		})
+	}
+}
+
+// TestObjectiveEvidenceCustomConfigMap verifies that setting
+// agents.database.objectiveEvidence.configMap points the volume at the
+// user-supplied ConfigMap instead of the chart-bundled one, and the chart's
+// own ConfigMap does not redundantly embed the bundled rules.
+func TestObjectiveEvidenceCustomConfigMap(t *testing.T) {
+	objects := render(t, "agents.database.objectiveEvidence.configMap=my-custom-rules")
+
+	cm, ok := objects["ConfigMap/test-config"]
+	if !ok {
+		t.Fatal("ConfigMap/test-config not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	if _, ok := data["objective-evidence-database.yaml"]; ok {
+		t.Error("ConfigMap/test-config should not embed the bundled database rules when a custom configMap is set")
+	}
+
+	dep := objects["Deployment/test-database-agent"]
+	spec, _ := dep["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	volumes, _ := podSpec["volumes"].([]any)
+	var found bool
+	for _, v := range volumes {
+		vol, _ := v.(map[string]any)
+		if vol["name"] == "objective-evidence-config" {
+			found = true
+			cmRef, _ := vol["configMap"].(map[string]any)
+			if cmRef["name"] != "my-custom-rules" {
+				t.Errorf("volume configMap name: want \"my-custom-rules\", got %v", cmRef["name"])
+			}
+		}
+	}
+	if !found {
+		t.Error("objective-evidence-config volume not found")
+	}
+}
+
+// TestObjectiveEvidenceDisabled verifies that setting
+// agents.<x>.objectiveEvidence.enabled=false removes the env var, volume
+// mount, and volume entirely — and drops the bundled data from the chart's
+// own ConfigMap when both agents disable it.
+func TestObjectiveEvidenceDisabled(t *testing.T) {
+	objects := render(t,
+		"agents.database.objectiveEvidence.enabled=false",
+		"agents.k8s.objectiveEvidence.enabled=false",
+	)
+
+	cm, ok := objects["ConfigMap/test-config"]
+	if !ok {
+		t.Fatal("ConfigMap/test-config not found")
+	}
+	data, _ := cm["data"].(map[string]any)
+	if _, ok := data["objective-evidence-database.yaml"]; ok {
+		t.Error("ConfigMap/test-config should not embed database rules when disabled")
+	}
+	if _, ok := data["objective-evidence-k8s.yaml"]; ok {
+		t.Error("ConfigMap/test-config should not embed k8s rules when disabled")
+	}
+
+	for _, tc := range []struct{ deployment, container, envVar string }{
+		{"Deployment/test-database-agent", "database-agent", "HELPDESK_DB_EVIDENCE_RULES"},
+		{"Deployment/test-k8s-agent", "k8s-agent", "HELPDESK_K8S_EVIDENCE_RULES"},
+	} {
+		dep := objects[tc.deployment]
+		container := containerByName(t, dep, tc.container)
+		env := containerEnvMap(container)
+		if _, ok := env[tc.envVar]; ok {
+			t.Errorf("%s should be absent when objectiveEvidence.enabled=false", tc.envVar)
+		}
+		mounts, _ := container["volumeMounts"].([]any)
+		for _, m := range mounts {
+			mount, _ := m.(map[string]any)
+			if mount["name"] == "objective-evidence-config" {
+				t.Error("objective-evidence-config volumeMount should be absent when disabled")
+			}
+		}
+	}
+}
+
 // TestOperatingModePropagate verifies that governance.operatingMode is
 // propagated to all agents and the orchestrator.
 func TestOperatingModePropagate(t *testing.T) {

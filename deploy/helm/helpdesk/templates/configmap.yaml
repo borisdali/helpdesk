@@ -26,3 +26,11 @@ data:
   {{- if .Values.infrastructure }}
   infrastructure.json: {{ .Values.infrastructure | toJson | quote }}
   {{- end }}
+  {{- if and .Values.agents.database.objectiveEvidence.enabled (not .Values.agents.database.objectiveEvidence.configMap) }}
+  objective-evidence-database.yaml: |
+{{ .Files.Get "files/objective-evidence-database.yaml" | indent 4 }}
+  {{- end }}
+  {{- if and .Values.agents.k8s.objectiveEvidence.enabled (not .Values.agents.k8s.objectiveEvidence.configMap) }}
+  objective-evidence-k8s.yaml: |
+{{ .Files.Get "files/objective-evidence-k8s.yaml" | indent 4 }}
+  {{- end }}

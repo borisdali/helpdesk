@@ -1,6 +1,6 @@
 series_id: pbs_replication_lag
 name: Replication Lag Triage
-version: "1.5"
+version: "1.6"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -23,13 +23,14 @@ description: |
   source of lag (WAL sender state, network, replica load) and assess the risk
   to read workloads and failover readiness.
 root_cause_classes:
-  version: "1.1"
+  version: "1.2"
   classes:
     - replica-cannot-keep-up-with-write-volume
     - stale-replication-slot-accumulating-wal
     - replica-disconnected
     - replica-stalled-but-connected
     - transient-batch-write-spike
+    - wal-replay-administratively-paused
 symptoms:
   - "replica lag > acceptable threshold"
   - "monitoring alert: replication_lag_seconds elevated"
@@ -37,6 +38,7 @@ symptoms:
   - "WAL receiver stopped or in error state"
   - "pg_stat_replication shows large sent_lsn vs replay_lsn delta"
   - "replica appears connected but reply_lag_seconds is abnormally high"
+  - "replica logs show 'recovery has paused' / pg_wal_replay_resume() hint"
 guidance: |
   Begin with get_replication_status to get the full picture: sent_lsn,
   write_lsn, flush_lsn, replay_lsn gaps for each replica, plus WAL sender

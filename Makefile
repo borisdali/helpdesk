@@ -514,8 +514,12 @@ bundle:
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/docker-compose/; \
 	cp policies.example.yaml $$bundledir/docker-compose/; \
 	cp users.example.yaml $$bundledir/docker-compose/; \
+	cp agents/database/objective_evidence.yaml $$bundledir/docker-compose/objective_evidence-database.yaml; \
+	cp agents/k8s/objective_evidence.yaml $$bundledir/docker-compose/objective_evidence-k8s.yaml; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
+	    -e 's|../../agents/database/objective_evidence.yaml|./objective_evidence-database.yaml|' \
+	    -e 's|../../agents/k8s/objective_evidence.yaml|./objective_evidence-k8s.yaml|' \
 	    deploy/docker-compose/docker-compose.yaml \
 	    > $$bundledir/docker-compose/docker-compose.yaml; \
 	\
@@ -536,6 +540,8 @@ bundle:
 	cp deploy/host/.env.example $$bundledir/host/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/host/; \
 	cp policies.example.yaml $$bundledir/host/; \
+	cp agents/database/objective_evidence.yaml $$bundledir/host/objective_evidence-database.yaml; \
+	cp agents/k8s/objective_evidence.yaml $$bundledir/host/objective_evidence-k8s.yaml; \
 	cp -r deploy/host/systemd $$bundledir/host/systemd; \
 	chmod +x $$bundledir/host/startall.sh $$bundledir/host/systemd/install-systemd.sh; \
 	\

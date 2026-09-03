@@ -71,6 +71,10 @@ spec:
             - name: HELPDESK_VERIFY_MAX_DELAY_S
               value: "{{ .Values.agents.k8s.verify.maxDelayS }}"
             {{- end }}
+            {{- if .Values.agents.k8s.objectiveEvidence.enabled }}
+            - name: HELPDESK_K8S_EVIDENCE_RULES
+              value: /etc/helpdesk/objective_evidence.yaml
+            {{- end }}
             {{- include "helpdesk.identityEnv" . | nindent 12 }}
             {{- include "helpdesk.operatingModeEnv" . | nindent 12 }}
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
@@ -86,6 +90,12 @@ spec:
             - name: policy-config
               mountPath: /etc/helpdesk/policies.yaml
               subPath: policies.yaml
+              readOnly: true
+            {{- end }}
+            {{- if .Values.agents.k8s.objectiveEvidence.enabled }}
+            - name: objective-evidence-config
+              mountPath: /etc/helpdesk/objective_evidence.yaml
+              subPath: objective-evidence-k8s.yaml
               readOnly: true
             {{- end }}
             {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
@@ -115,6 +125,11 @@ spec:
         - name: policy-config
           configMap:
             name: {{ required "governance.policy.configMap must be set when governance.policy.enabled is true" .Values.governance.policy.configMap }}
+        {{- end }}
+        {{- if .Values.agents.k8s.objectiveEvidence.enabled }}
+        - name: objective-evidence-config
+          configMap:
+            name: {{ .Values.agents.k8s.objectiveEvidence.configMap | default (printf "%s-config" (include "helpdesk.fullname" .)) }}
         {{- end }}
         {{- include "helpdesk.usersVolume" . | nindent 8 }}
 ---
