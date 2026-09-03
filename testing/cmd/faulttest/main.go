@@ -565,6 +565,16 @@ func cmdRun(args []string) {
 					evalResult.ObjectiveEvidenceConfirmed = resp.ObjectiveEvidenceConfirmed
 					evalResult.ObjectiveEvidenceUnconfirmed = resp.ObjectiveEvidenceUnconfirmed
 				}
+				// When the fault declares an expected deterministic signal, a pass
+				// requires it to be confirmed — not just keyword/category text
+				// matching, which a vague hedge can satisfy without the model ever
+				// demonstrably engaging with real tool data (see
+				// EvidenceRequiredButUnconfirmed's doc comment for the full story).
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed) {
+					evalResult.EvidenceRequiredButUnconfirmed = true
+					evalResult.Passed = false
+					fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score\n", sig)
+				}
 				// Fabrication risk: the agent narrated calling a tool that never
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
 				if resp.Mismatch {

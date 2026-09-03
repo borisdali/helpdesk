@@ -194,6 +194,15 @@ type KeywordSpec struct {
 type DiagnosisSpec struct {
 	Category  string `yaml:"category"`
 	Narrative string `yaml:"narrative,omitempty"`
+	// ObjectiveEvidenceSignal is the deterministic signal name (from the
+	// diagnosing agent's own objective_evidence.yaml) that this diagnosis
+	// should be backed by, when one exists. Optional — most faults have no
+	// corresponding deterministic signal and leave this empty. When set, a
+	// pass requires the signal to appear in the run's confirmed evidence,
+	// not just keyword/category text matching — closing the gap where a
+	// vague hedge ("might be stalled") could score full marks without the
+	// model ever demonstrably engaging with real tool data.
+	ObjectiveEvidenceSignal string `yaml:"objective_evidence_signal,omitempty"`
 }
 
 // HarnessConfig holds runtime configuration for the test harness.

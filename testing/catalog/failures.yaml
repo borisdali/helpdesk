@@ -616,6 +616,7 @@ failures:
           - "inactive slot"
       expected_diagnosis:
         category: "replica_disconnected"
+        objective_evidence_signal: replica_disconnected
         narrative: "The agent should recognize the absent pg_stat_replication row (not a lag figure) combined with an inactive replication slot as a genuine disconnect, and hand off to sysadmin for a host/container-level check — emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage — not TRANSITION_TO: pbs_replication_remediate, which cannot address a disconnect, and not silently misread the absence as healthy. The sysadmin hop should in turn confirm the replica container is healthy and conclude the disconnect is a primary-side rejection (this fault's injection never touches the replica container itself), terminating with ESCALATE_TO: none — not TRANSITION_TO: pbs_replica_restart_action, which is reserved for a genuinely crashed replica container."
     diagnosis_playbook_series_id: pbs_replication_lag
     # 180s: injection's own precondition guard can wait up to 90s for the
@@ -679,6 +680,7 @@ failures:
           - "inactive slot"
       expected_diagnosis:
         category: "replica_disconnected"
+        objective_evidence_signal: replica_disconnected
         narrative: "The agent should recognize the absent pg_stat_replication row combined with an inactive replication slot as a genuine disconnect, and hand off to sysadmin — emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage — the same first-hop answer as db-replica-disconnected, since the primary-side signal is identical. The sysadmin hop should find the replica container Status=exited with ExitCode=0 and clean-shutdown logs (no rejection message), and correctly conclude TRANSITION_TO: pbs_replica_restart_action — exercising the one branch of pbs_sysadmin_replica_connectivity_triage's decision table that db-replica-disconnected's own injection (a primary-side reject, replica container never touched) cannot reach. The restart playbook should then confirm the container is running again and streaming."
     # 180s: same two-hop chain as db-replica-disconnected, plus a third hop
     # (pbs_replica_restart_action actually restarts and confirms the
@@ -762,6 +764,7 @@ failures:
           - "stopped sending"
       expected_diagnosis:
         category: "replica_stalled"
+        objective_evidence_signal: replica_stalled
         narrative: "The agent should recognize a replica row present in pg_stat_replication (state=streaming, not absent) combined with an abnormally high reply_lag_seconds as Ending C — present but stalled, not Ending A's ordinary lag and not Ending B's disconnect — and hand off to sysadmin, emitting TARGET: <replica connection string> and ESCALATE_TO: pbs_sysadmin_replica_connectivity_triage. The sysadmin hop should find the replica container Status=paused (frozen, not crashed, not exited) and correctly conclude ESCALATE_TO: none — this fault's injection never crashes the container, so pbs_replica_restart_action's own crashed-and-safe-to-restart precondition (exitcode=0, clean shutdown logs) is never satisfied and must not be reached."
     # 200s: two-hop chain (DB triage + sysadmin triage, both ending in
     # ESCALATE_TO: none — no third remediation hop for this fault, a paused
@@ -1293,6 +1296,7 @@ failures:
           - "OOM"
       expected_diagnosis:
         category: "oom_killed"
+        objective_evidence_signal: oom_killed
         narrative: >
           The agent should identify exit_code=137 and reason=OOMKilled from
           the pod's last termination state, inspect the container's memory
