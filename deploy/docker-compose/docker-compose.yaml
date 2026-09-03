@@ -7,7 +7,14 @@ services:
       context: ../../..
       dockerfile: helpdesk/Dockerfile
     image: helpdesk:latest
-    entrypoint: ["/bin/sh", "-c", "sleep 4 && exec /usr/local/bin/auditd"]
+    # Fixed shell command, not "exec $@" — an overriding command (e.g.
+    # `docker compose run --rm auditd hashapikey <key>`, a documented way to
+    # invoke the other binaries baked into this same image) was silently
+    # ignored: sh -c's script text never referenced $@, so the passed command
+    # became inert positional args and the full auditd server started anyway,
+    # looking like a hang. Fixed by passing through an overriding command when
+    # one is given, defaulting to the delayed auditd start otherwise.
+    entrypoint: ["/bin/sh", "-c", "if [ \"$#\" -gt 0 ]; then exec \"$@\"; else sleep 4 && exec /usr/local/bin/auditd; fi", "sh"]
     environment:
       HELPDESK_LOG_LEVEL: ${HELPDESK_LOG_LEVEL:-info}
       # Core audit configuration
