@@ -15,7 +15,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 
@@ -76,7 +75,7 @@ func withMockRunnerSequence(calls ...psqlResponse) func() {
 	return func() { cmdRunner = old }
 }
 
-// mockToolContext implements tool.Context for testing.
+// mockToolContext implements agent.ToolContext for testing.
 type mockToolContext struct {
 	context.Context
 }
@@ -95,7 +94,7 @@ func (mockToolContext) Branch() string                       { return "" }
 func (mockToolContext) Artifacts() agent.Artifacts { return nil }
 func (mockToolContext) State() session.State       { return nil }
 
-// tool.Context methods
+// agent.ToolContext methods
 func (mockToolContext) FunctionCallID() string         { return "test-call-id" }
 func (mockToolContext) Actions() *session.EventActions { return nil }
 func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
@@ -104,7 +103,7 @@ func (mockToolContext) SearchMemory(context.Context, string) (*memory.SearchResp
 func (mockToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 func (mockToolContext) RequestConfirmation(string, any) error                { return nil }
 
-func newTestContext() tool.Context {
+func newTestContext() agent.ToolContext {
 	return mockToolContext{context.Background()}
 }
 

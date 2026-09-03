@@ -909,7 +909,6 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			finalFindings = prev.findings
-			finalReport = prev.diagReport
 			slog.Info("playbook: gate pending — awaiting operator acknowledgment",
 				"run_id", prev.runID, "gate_type", gateType, "next_series", nextSeries,
 				"confidence_warning", warn)
@@ -1067,7 +1066,6 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			finalTransitionedTo = req.RemediationSeriesID
 		}
 		finalFindings = prev.findings
-		finalReport = prev.diagReport
 		// Surface the protocol violation: every triage playbook must end with
 		// TRANSITION_TO or ESCALATE_TO. A run that omits this signal is a bug.
 		// Skipped when recordSignalLessWarnings already appended an equivalent,

@@ -12,7 +12,6 @@ import (
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/toolconfirmation"
 	"google.golang.org/genai"
 	corev1 "k8s.io/api/core/v1"
@@ -43,7 +42,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// mockK8sToolContext implements tool.Context for k8s agent tests.
+// mockK8sToolContext implements agent.ToolContext for k8s agent tests.
 type mockK8sToolContext struct {
 	context.Context
 }
@@ -66,7 +65,7 @@ func (mockK8sToolContext) SearchMemory(context.Context, string) (*memory.SearchR
 func (mockK8sToolContext) ToolConfirmation() *toolconfirmation.ToolConfirmation { return nil }
 func (mockK8sToolContext) RequestConfirmation(string, any) error                { return nil }
 
-func newK8sTestContext() tool.Context {
+func newK8sTestContext() agent.ToolContext {
 	return mockK8sToolContext{context.Background()}
 }
 

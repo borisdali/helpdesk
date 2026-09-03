@@ -14,6 +14,7 @@ import (
 	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/google/uuid"
+	"google.golang.org/adk/agent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 )
@@ -113,7 +114,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 		traceID = NewTraceID()
 	}
 
-	delegateFunc := func(ctx tool.Context, args DelegateArgs) (DelegateResult, error) {
+	delegateFunc := func(ctx agent.ToolContext, args DelegateArgs) (DelegateResult, error) {
 		// Mark this invocation as having called delegate_to_agent so
 		// NoDelegationCallback skips correction injection.
 		guard.MarkCalled(ctx.InvocationID())

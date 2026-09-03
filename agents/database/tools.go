@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 
 	"helpdesk/agentutil"
 	"helpdesk/agentutil/retryutil"
@@ -837,7 +837,7 @@ func checkConnectionImpl(ctx context.Context, args CheckConnectionArgs) (PsqlRes
 	return PsqlResult{Output: fmt.Sprintf("Connection successful!\n%s", output)}, nil
 }
 
-func checkConnectionTool(ctx tool.Context, args CheckConnectionArgs) (PsqlResult, error) {
+func checkConnectionTool(ctx agent.ToolContext, args CheckConnectionArgs) (PsqlResult, error) {
 	return checkConnectionImpl(ctx, args)
 }
 
@@ -870,7 +870,7 @@ func getServerInfoImpl(ctx context.Context, args GetServerInfoArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getServerInfoTool(ctx tool.Context, args GetServerInfoArgs) (PsqlResult, error) {
+func getServerInfoTool(ctx agent.ToolContext, args GetServerInfoArgs) (PsqlResult, error) {
 	return getServerInfoImpl(ctx, args)
 }
 
@@ -899,7 +899,7 @@ func getDatabaseInfoImpl(ctx context.Context, args GetDatabaseInfoArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func getDatabaseInfoTool(ctx tool.Context, args GetDatabaseInfoArgs) (PsqlResult, error) {
+func getDatabaseInfoTool(ctx agent.ToolContext, args GetDatabaseInfoArgs) (PsqlResult, error) {
 	return getDatabaseInfoImpl(ctx, args)
 }
 
@@ -1024,7 +1024,7 @@ func getActiveConnectionsImpl(ctx context.Context, args GetActiveConnectionsArgs
 	return GetActiveConnectionsResult{Output: output, Connections: conns}, nil
 }
 
-func getActiveConnectionsTool(ctx tool.Context, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
+func getActiveConnectionsTool(ctx agent.ToolContext, args GetActiveConnectionsArgs) (GetActiveConnectionsResult, error) {
 	return getActiveConnectionsImpl(ctx, args)
 }
 
@@ -1053,7 +1053,7 @@ func getConnectionStatsImpl(ctx context.Context, args GetConnectionStatsArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getConnectionStatsTool(ctx tool.Context, args GetConnectionStatsArgs) (PsqlResult, error) {
+func getConnectionStatsTool(ctx agent.ToolContext, args GetConnectionStatsArgs) (PsqlResult, error) {
 	return getConnectionStatsImpl(ctx, args)
 }
 
@@ -1094,7 +1094,7 @@ func getStatusSummaryImpl(ctx context.Context, args GetStatusSummaryArgs) (PsqlR
 	return PsqlResult{Output: jsonStr}, nil
 }
 
-func getStatusSummaryTool(ctx tool.Context, args GetStatusSummaryArgs) (PsqlResult, error) {
+func getStatusSummaryTool(ctx agent.ToolContext, args GetStatusSummaryArgs) (PsqlResult, error) {
 	return getStatusSummaryImpl(ctx, args)
 }
 
@@ -1130,7 +1130,7 @@ func getDatabaseStatsImpl(ctx context.Context, args GetDatabaseStatsArgs) (PsqlR
 	return PsqlResult{Output: output}, nil
 }
 
-func getDatabaseStatsTool(ctx tool.Context, args GetDatabaseStatsArgs) (PsqlResult, error) {
+func getDatabaseStatsTool(ctx agent.ToolContext, args GetDatabaseStatsArgs) (PsqlResult, error) {
 	return getDatabaseStatsImpl(ctx, args)
 }
 
@@ -1167,7 +1167,7 @@ func getConfigParameterImpl(ctx context.Context, args GetConfigParameterArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getConfigParameterTool(ctx tool.Context, args GetConfigParameterArgs) (PsqlResult, error) {
+func getConfigParameterTool(ctx agent.ToolContext, args GetConfigParameterArgs) (PsqlResult, error) {
 	return getConfigParameterImpl(ctx, args)
 }
 
@@ -1407,7 +1407,7 @@ func getReplicationStatusImpl(ctx context.Context, args GetReplicationStatusArgs
 	return result, nil
 }
 
-func getReplicationStatusTool(ctx tool.Context, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
+func getReplicationStatusTool(ctx agent.ToolContext, args GetReplicationStatusArgs) (GetReplicationStatusResult, error) {
 	return getReplicationStatusImpl(ctx, args)
 }
 
@@ -1451,7 +1451,7 @@ func getLockInfoImpl(ctx context.Context, args GetLockInfoArgs) (PsqlResult, err
 	return PsqlResult{Output: output}, nil
 }
 
-func getLockInfoTool(ctx tool.Context, args GetLockInfoArgs) (PsqlResult, error) {
+func getLockInfoTool(ctx agent.ToolContext, args GetLockInfoArgs) (PsqlResult, error) {
 	return getLockInfoImpl(ctx, args)
 }
 
@@ -1506,7 +1506,7 @@ func getTableStatsImpl(ctx context.Context, args GetTableStatsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getTableStatsTool(ctx tool.Context, args GetTableStatsArgs) (PsqlResult, error) {
+func getTableStatsTool(ctx agent.ToolContext, args GetTableStatsArgs) (PsqlResult, error) {
 	return getTableStatsImpl(ctx, args)
 }
 
@@ -1527,7 +1527,7 @@ func getSessionInfoImpl(ctx context.Context, args GetSessionInfoArgs) (PsqlResul
 	return PsqlResult{Output: formatConnectionPlan(plan)}, nil
 }
 
-func getSessionInfoTool(ctx tool.Context, args GetSessionInfoArgs) (PsqlResult, error) {
+func getSessionInfoTool(ctx agent.ToolContext, args GetSessionInfoArgs) (PsqlResult, error) {
 	return getSessionInfoImpl(ctx, args)
 }
 
@@ -1635,7 +1635,7 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
-func cancelQueryTool(ctx tool.Context, args CancelQueryArgs) (PsqlResult, error) {
+func cancelQueryTool(ctx agent.ToolContext, args CancelQueryArgs) (PsqlResult, error) {
 	return cancelQueryImpl(ctx, args)
 }
 
@@ -1744,7 +1744,7 @@ FROM pg_stat_activity WHERE pid = %d;`, args.PID, args.PID)
 	}, nil
 }
 
-func terminateConnectionTool(ctx tool.Context, args TerminateConnectionArgs) (PsqlResult, error) {
+func terminateConnectionTool(ctx agent.ToolContext, args TerminateConnectionArgs) (PsqlResult, error) {
 	return terminateConnectionImpl(ctx, args)
 }
 
@@ -1825,7 +1825,7 @@ WHERE terminated IS TRUE;`, args.IdleMinutes, dbFilter)
 	return PsqlResult{Output: output}, nil
 }
 
-func terminateIdleConnectionsTool(ctx tool.Context, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
+func terminateIdleConnectionsTool(ctx agent.ToolContext, args TerminateIdleConnectionsArgs) (PsqlResult, error) {
 	return terminateIdleConnectionsImpl(ctx, args)
 }
 
@@ -1844,7 +1844,7 @@ func resumeWalReplayImpl(ctx context.Context, args ResumeWalReplayArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func resumeWalReplayTool(ctx tool.Context, args ResumeWalReplayArgs) (PsqlResult, error) {
+func resumeWalReplayTool(ctx agent.ToolContext, args ResumeWalReplayArgs) (PsqlResult, error) {
 	return resumeWalReplayImpl(ctx, args)
 }
 
@@ -1888,7 +1888,7 @@ func runVacuumImpl(ctx context.Context, args RunVacuumArgs) (PsqlResult, error) 
 	return PsqlResult{Output: output}, nil
 }
 
-func runVacuumTool(ctx tool.Context, args RunVacuumArgs) (PsqlResult, error) {
+func runVacuumTool(ctx agent.ToolContext, args RunVacuumArgs) (PsqlResult, error) {
 	return runVacuumImpl(ctx, args)
 }
 
@@ -1914,7 +1914,7 @@ func dropReplicationSlotImpl(ctx context.Context, args DropReplicationSlotArgs) 
 	return PsqlResult{Output: output}, nil
 }
 
-func dropReplicationSlotTool(ctx tool.Context, args DropReplicationSlotArgs) (PsqlResult, error) {
+func dropReplicationSlotTool(ctx agent.ToolContext, args DropReplicationSlotArgs) (PsqlResult, error) {
 	return dropReplicationSlotImpl(ctx, args)
 }
 
@@ -1944,7 +1944,7 @@ func resetPgSettingImpl(ctx context.Context, args ResetPgSettingArgs) (PsqlResul
 	return PsqlResult{Output: out1 + "\n" + out2}, nil
 }
 
-func resetPgSettingTool(ctx tool.Context, args ResetPgSettingArgs) (PsqlResult, error) {
+func resetPgSettingTool(ctx agent.ToolContext, args ResetPgSettingArgs) (PsqlResult, error) {
 	return resetPgSettingImpl(ctx, args)
 }
 
@@ -1962,7 +1962,7 @@ func resetCacheStatsImpl(ctx context.Context, args ResetCacheStatsArgs) (PsqlRes
 	return PsqlResult{Output: "Cache statistics reset. blks_hit and blks_read counters cleared — ratio will reflect only activity after this point.\n" + output}, nil
 }
 
-func resetCacheStatsTool(ctx tool.Context, args ResetCacheStatsArgs) (PsqlResult, error) {
+func resetCacheStatsTool(ctx agent.ToolContext, args ResetCacheStatsArgs) (PsqlResult, error) {
 	return resetCacheStatsImpl(ctx, args)
 }
 
@@ -2028,7 +2028,7 @@ func getPgSettingsImpl(ctx context.Context, args GetPgSettingsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getPgSettingsTool(ctx tool.Context, args GetPgSettingsArgs) (PsqlResult, error) {
+func getPgSettingsTool(ctx agent.ToolContext, args GetPgSettingsArgs) (PsqlResult, error) {
 	return getPgSettingsImpl(ctx, args)
 }
 
@@ -2061,7 +2061,7 @@ func getExtensionsImpl(ctx context.Context, args GetExtensionsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getExtensionsTool(ctx tool.Context, args GetExtensionsArgs) (PsqlResult, error) {
+func getExtensionsTool(ctx agent.ToolContext, args GetExtensionsArgs) (PsqlResult, error) {
 	return getExtensionsImpl(ctx, args)
 }
 
@@ -2110,7 +2110,7 @@ func getBaselineImpl(ctx context.Context, args GetBaselineArgs) (PsqlResult, err
 	return PsqlResult{Output: sb.String()}, nil
 }
 
-func getBaselineTool(ctx tool.Context, args GetBaselineArgs) (PsqlResult, error) {
+func getBaselineTool(ctx agent.ToolContext, args GetBaselineArgs) (PsqlResult, error) {
 	result, err := getBaselineImpl(ctx, args)
 	if err == nil && result.Output != "" {
 		// Persist the result so get_saved_snapshots can retrieve it later.
@@ -2175,7 +2175,7 @@ func getSlowQueriesImpl(ctx context.Context, args GetSlowQueriesArgs) (PsqlResul
 	return PsqlResult{Output: output}, nil
 }
 
-func getSlowQueriesTool(ctx tool.Context, args GetSlowQueriesArgs) (PsqlResult, error) {
+func getSlowQueriesTool(ctx agent.ToolContext, args GetSlowQueriesArgs) (PsqlResult, error) {
 	return getSlowQueriesImpl(ctx, args)
 }
 
@@ -2217,7 +2217,7 @@ func getVacuumStatusImpl(ctx context.Context, args GetVacuumStatusArgs) (PsqlRes
 	return PsqlResult{Output: output}, nil
 }
 
-func getVacuumStatusTool(ctx tool.Context, args GetVacuumStatusArgs) (PsqlResult, error) {
+func getVacuumStatusTool(ctx agent.ToolContext, args GetVacuumStatusArgs) (PsqlResult, error) {
 	return getVacuumStatusImpl(ctx, args)
 }
 
@@ -2269,7 +2269,7 @@ func getDiskUsageImpl(ctx context.Context, args GetDiskUsageArgs) (PsqlResult, e
 	return PsqlResult{Output: "-- Database Sizes --\n" + dbOut + "\n-- Top " + strconv.Itoa(topN) + " Tables by Disk Usage --\n" + tableOut}, nil
 }
 
-func getDiskUsageTool(ctx tool.Context, args GetDiskUsageArgs) (PsqlResult, error) {
+func getDiskUsageTool(ctx agent.ToolContext, args GetDiskUsageArgs) (PsqlResult, error) {
 	return getDiskUsageImpl(ctx, args)
 }
 
@@ -2357,7 +2357,7 @@ func getBgwriterStatsImpl(ctx context.Context, args GetBgwriterStatsArgs) (PsqlR
 	return PsqlResult{Output: output}, nil
 }
 
-func getBgwriterStatsTool(ctx tool.Context, args GetBgwriterStatsArgs) (PsqlResult, error) {
+func getBgwriterStatsTool(ctx agent.ToolContext, args GetBgwriterStatsArgs) (PsqlResult, error) {
 	return getBgwriterStatsImpl(ctx, args)
 }
 
@@ -2392,7 +2392,7 @@ func getWaitEventsImpl(ctx context.Context, args GetWaitEventsArgs) (PsqlResult,
 	return PsqlResult{Output: output}, nil
 }
 
-func getWaitEventsTool(ctx tool.Context, args GetWaitEventsArgs) (PsqlResult, error) {
+func getWaitEventsTool(ctx agent.ToolContext, args GetWaitEventsArgs) (PsqlResult, error) {
 	return getWaitEventsImpl(ctx, args)
 }
 
@@ -2451,7 +2451,7 @@ func getBlockingQueriesImpl(ctx context.Context, args GetBlockingQueriesArgs) (P
 	return PsqlResult{Output: output}, nil
 }
 
-func getBlockingQueriesTool(ctx tool.Context, args GetBlockingQueriesArgs) (PsqlResult, error) {
+func getBlockingQueriesTool(ctx agent.ToolContext, args GetBlockingQueriesArgs) (PsqlResult, error) {
 	return getBlockingQueriesImpl(ctx, args)
 }
 
@@ -2496,7 +2496,7 @@ func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, e
 	return PsqlResult{Output: output}, nil
 }
 
-func explainQueryTool(ctx tool.Context, args ExplainQueryArgs) (PsqlResult, error) {
+func explainQueryTool(ctx agent.ToolContext, args ExplainQueryArgs) (PsqlResult, error) {
 	return explainQueryImpl(ctx, args)
 }
 
@@ -2593,7 +2593,7 @@ FROM latest;`, pgLogReadBytes, pgLogReadBytes)
 	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
 }
 
-func getPgLogTool(ctx tool.Context, args GetPgLogArgs) (PsqlResult, error) {
+func getPgLogTool(ctx agent.ToolContext, args GetPgLogArgs) (PsqlResult, error) {
 	return getPgLogImpl(ctx, args)
 }
 
@@ -2749,7 +2749,7 @@ func readUploadedFileImpl(ctx context.Context, args ReadUploadedFileArgs) (PsqlR
 	return PsqlResult{Output: header + strings.Join(allLines, "\n")}, nil
 }
 
-func readUploadedFileTool(ctx tool.Context, args ReadUploadedFileArgs) (PsqlResult, error) {
+func readUploadedFileTool(ctx agent.ToolContext, args ReadUploadedFileArgs) (PsqlResult, error) {
 	start := time.Now()
 	result, err := readUploadedFileImpl(ctx, args)
 	duration := time.Since(start)
@@ -2928,7 +2928,7 @@ func getSavedSnapshotsImpl(ctx context.Context, args GetSavedSnapshotsArgs) (Psq
 	return PsqlResult{Output: sb.String()}, nil
 }
 
-func getSavedSnapshotsTool(ctx tool.Context, args GetSavedSnapshotsArgs) (PsqlResult, error) {
+func getSavedSnapshotsTool(ctx agent.ToolContext, args GetSavedSnapshotsArgs) (PsqlResult, error) {
 	start := time.Now()
 	result, err := getSavedSnapshotsImpl(ctx, args)
 	duration := time.Since(start)

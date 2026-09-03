@@ -55,3 +55,25 @@ linters:
         - (*os.File).WriteString
         # io.Copy to pipes/buffers in test helpers — errors unactionable
         - io.Copy
+  exclusions:
+    rules:
+      # ADK-Go v1.6.0 (v0.27.0) marks the v1 remoteagent/adka2a packages
+      # deprecated in favor of their /v2 counterparts — but those import
+      # a2aproject/a2a-go/v2, a major-version bump of our own directly-pinned
+      # A2A dependency (currently v0.3.15), not just an ADK-internal change.
+      # That's the same "adk/v2 migration" already deliberately deferred
+      # (Go 1.25+ requirement, graph-based orchestration, possible HITL
+      # overlap with our own approval-gate mechanism to resolve first) —
+      # tracked as a v0.28+ backlog item, not fixable in isolation here.
+      - path: cmd/helpdesk/orchestrator.go
+        linters:
+          - staticcheck
+        text: "SA1019: \"google.golang.org/adk/agent/remoteagent\" is deprecated"
+      - path: agentutil/serve/serve\.go
+        linters:
+          - staticcheck
+        text: "SA1019: \"google.golang.org/adk/server/adka2a\" is deprecated"
+      - path: agentutil/serve/serve_test\.go
+        linters:
+          - staticcheck
+        text: "SA1019: \"google.golang.org/adk/server/adka2a\" is deprecated"

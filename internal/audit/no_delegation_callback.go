@@ -39,7 +39,7 @@ type correctionArgs struct {
 // message that appears in the LLM's context for the next iteration, prompting
 // it to call delegate_to_agent.
 func NoDelegationCorrectionTool(auditor Auditor, sessionID string) (tool.Tool, error) {
-	fn := func(ctx tool.Context, args correctionArgs) (map[string]any, error) {
+	fn := func(ctx agent.ToolContext, args correctionArgs) (map[string]any, error) {
 		invID := ctx.InvocationID()
 
 		slog.Warn("no_delegation_turn: correction injected",

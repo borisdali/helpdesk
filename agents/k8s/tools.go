@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -513,7 +513,7 @@ func recordPodDistressEvidence(ctx context.Context, result GetPodsResult) {
 	evidence.Evaluate(ctx, toolAuditor, podEvidenceSchema, result.Pods, podEvidenceRules)
 }
 
-func getPodsTool(ctx tool.Context, args GetPodsArgs) (GetPodsResult, error) {
+func getPodsTool(ctx agent.ToolContext, args GetPodsArgs) (GetPodsResult, error) {
 	return getPodsImpl(ctx, args)
 }
 
@@ -555,7 +555,7 @@ func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult,
 	return result, err
 }
 
-func getServiceTool(ctx tool.Context, args GetServiceArgs) (GetServiceResult, error) {
+func getServiceTool(ctx agent.ToolContext, args GetServiceArgs) (GetServiceResult, error) {
 	return getServiceImpl(ctx, args)
 }
 
@@ -665,7 +665,7 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 	return KubectlResult{Output: sb.String()}, nil
 }
 
-func describeServiceTool(ctx tool.Context, args DescribeServiceArgs) (KubectlResult, error) {
+func describeServiceTool(ctx agent.ToolContext, args DescribeServiceArgs) (KubectlResult, error) {
 	return describeServiceImpl(ctx, args)
 }
 
@@ -705,7 +705,7 @@ func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsR
 	return result, err
 }
 
-func getEndpointsTool(ctx tool.Context, args GetEndpointsArgs) (GetEndpointsResult, error) {
+func getEndpointsTool(ctx agent.ToolContext, args GetEndpointsArgs) (GetEndpointsResult, error) {
 	return getEndpointsImpl(ctx, args)
 }
 
@@ -796,7 +796,7 @@ func recordEventDistressEvidence(ctx context.Context, result GetEventsResult) {
 	evidence.Evaluate(ctx, toolAuditor, eventEvidenceSchema, result.Events, eventEvidenceRules)
 }
 
-func getEventsTool(ctx tool.Context, args GetEventsArgs) (GetEventsResult, error) {
+func getEventsTool(ctx agent.ToolContext, args GetEventsArgs) (GetEventsResult, error) {
 	return getEventsImpl(ctx, args)
 }
 
@@ -873,7 +873,7 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 	return KubectlResult{Output: output}, nil
 }
 
-func getPodLogsTool(ctx tool.Context, args GetPodLogsArgs) (KubectlResult, error) {
+func getPodLogsTool(ctx agent.ToolContext, args GetPodLogsArgs) (KubectlResult, error) {
 	return getPodLogsImpl(ctx, args)
 }
 
@@ -964,7 +964,7 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 	return KubectlResult{Output: output}, nil
 }
 
-func readPodFileTool(ctx tool.Context, args ReadPodFileArgs) (KubectlResult, error) {
+func readPodFileTool(ctx agent.ToolContext, args ReadPodFileArgs) (KubectlResult, error) {
 	return readPodFileImpl(ctx, args)
 }
 
@@ -1036,7 +1036,7 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 	return KubectlResult{Output: sb.String()}, nil
 }
 
-func describePodTool(ctx tool.Context, args DescribePodArgs) (KubectlResult, error) {
+func describePodTool(ctx agent.ToolContext, args DescribePodArgs) (KubectlResult, error) {
 	return describePodImpl(ctx, args)
 }
 
@@ -1069,7 +1069,7 @@ func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error
 	return result, err
 }
 
-func getNodesTool(ctx tool.Context, args GetNodesArgs) (GetNodesResult, error) {
+func getNodesTool(ctx agent.ToolContext, args GetNodesArgs) (GetNodesResult, error) {
 	return getNodesImpl(ctx, args)
 }
 
@@ -1147,7 +1147,7 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func deletePodTool(ctx tool.Context, args DeletePodArgs) (KubectlResult, error) {
+func deletePodTool(ctx agent.ToolContext, args DeletePodArgs) (KubectlResult, error) {
 	return deletePodImpl(ctx, args)
 }
 
@@ -1219,7 +1219,7 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func restartDeploymentTool(ctx tool.Context, args RestartDeploymentArgs) (KubectlResult, error) {
+func restartDeploymentTool(ctx agent.ToolContext, args RestartDeploymentArgs) (KubectlResult, error) {
 	return restartDeploymentImpl(ctx, args)
 }
 
@@ -1328,7 +1328,7 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
 }
 
-func scaleDeploymentTool(ctx tool.Context, args ScaleDeploymentArgs) (KubectlResult, error) {
+func scaleDeploymentTool(ctx agent.ToolContext, args ScaleDeploymentArgs) (KubectlResult, error) {
 	return scaleDeploymentImpl(ctx, args)
 }
 
@@ -1367,7 +1367,7 @@ func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodR
 	return result, err
 }
 
-func getPodResourcesTool(ctx tool.Context, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
+func getPodResourcesTool(ctx agent.ToolContext, args GetPodResourcesArgs) (GetPodResourcesResult, error) {
 	return getPodResourcesImpl(ctx, args)
 }
 
@@ -1401,7 +1401,7 @@ func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStat
 	return result, err
 }
 
-func getNodeStatusTool(ctx tool.Context, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
+func getNodeStatusTool(ctx agent.ToolContext, args GetNodeStatusArgs) (GetNodeStatusResult, error) {
 	return getNodeStatusImpl(ctx, args)
 }
 
@@ -1616,7 +1616,7 @@ func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlRe
 		fmt.Sprintf("dmesg 2>&1 | tail -n %d", lines))
 }
 
-func debugNodeDmesgTool(ctx tool.Context, args DebugNodeDmesgArgs) (KubectlResult, error) {
+func debugNodeDmesgTool(ctx agent.ToolContext, args DebugNodeDmesgArgs) (KubectlResult, error) {
 	return debugNodeDmesgImpl(ctx, args)
 }
 

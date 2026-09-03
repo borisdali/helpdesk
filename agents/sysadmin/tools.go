@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/adk/tool"
+	"google.golang.org/adk/agent"
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
@@ -540,7 +540,7 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	}, nil
 }
 
-func checkHostTool(ctx tool.Context, args CheckHostArgs) (CheckHostResult, error) {
+func checkHostTool(ctx agent.ToolContext, args CheckHostArgs) (CheckHostResult, error) {
 	start := time.Now()
 	result, err := checkHostImpl(ctx, args)
 	duration := time.Since(start)
@@ -643,7 +643,7 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 	}, nil
 }
 
-func getHostLogsTool(ctx tool.Context, args GetHostLogsArgs) (HostLogsResult, error) {
+func getHostLogsTool(ctx agent.ToolContext, args GetHostLogsArgs) (HostLogsResult, error) {
 	start := time.Now()
 	result, err := getHostLogsImpl(ctx, args)
 	duration := time.Since(start)
@@ -700,7 +700,7 @@ func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) 
 	}, nil
 }
 
-func checkDiskTool(ctx tool.Context, args CheckDiskArgs) (DiskResult, error) {
+func checkDiskTool(ctx agent.ToolContext, args CheckDiskArgs) (DiskResult, error) {
 	start := time.Now()
 	result, err := checkDiskImpl(ctx, args)
 	duration := time.Since(start)
@@ -757,7 +757,7 @@ func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, e
 	}, nil
 }
 
-func checkMemoryTool(ctx tool.Context, args CheckMemoryArgs) (MemoryResult, error) {
+func checkMemoryTool(ctx agent.ToolContext, args CheckMemoryArgs) (MemoryResult, error) {
 	start := time.Now()
 	result, err := checkMemoryImpl(ctx, args)
 	duration := time.Since(start)
@@ -860,7 +860,7 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 	}, nil
 }
 
-func readPgLogFileTool(ctx tool.Context, args ReadPgLogFileArgs) (PgLogFileResult, error) {
+func readPgLogFileTool(ctx agent.ToolContext, args ReadPgLogFileArgs) (PgLogFileResult, error) {
 	start := time.Now()
 	result, err := readPgLogFileImpl(ctx, args)
 	duration := time.Since(start)
@@ -1045,7 +1045,7 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	}, runErr
 }
 
-func restartContainerTool(ctx tool.Context, args RestartContainerArgs) (RestartResult, error) {
+func restartContainerTool(ctx agent.ToolContext, args RestartContainerArgs) (RestartResult, error) {
 	return restartContainerImpl(ctx, args)
 }
 
@@ -1111,7 +1111,7 @@ func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartRe
 	}, runErr
 }
 
-func restartServiceTool(ctx tool.Context, args RestartServiceArgs) (RestartResult, error) {
+func restartServiceTool(ctx agent.ToolContext, args RestartServiceArgs) (RestartResult, error) {
 	return restartServiceImpl(ctx, args)
 }
 
