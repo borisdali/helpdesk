@@ -28,8 +28,14 @@ services:
       # Infrastructure config — enables tag/sensitivity resolution in the
       # /v1/governance/explain endpoint without relying on caller-supplied values.
       HELPDESK_INFRA_CONFIG: /etc/helpdesk/infrastructure.json
-      # Identity & access control for auditd endpoints (agents authenticate here)
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      # Identity & access control for auditd endpoints (agents authenticate here).
+      # static (not none): matches every agent in this file, which already
+      # defaults to static — auditd/gateway were the only two services left on
+      # the permissive "none" default, silently breaking role-based checks
+      # (e.g. approval_override_roles) for any human operator, found live
+      # during the debugging of faulttest's approval-mode clamp. The demo-*
+      # services below already run static successfully — same pattern.
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       # Approval notification (optional)
       HELPDESK_APPROVAL_WEBHOOK: ${HELPDESK_APPROVAL_WEBHOOK:-}
@@ -287,8 +293,13 @@ services:
       HELPDESK_AGENT_API_KEY: ${HELPDESK_AGENT_API_KEY:-gateway-api-key}
       # API key for operator CLIs exec'd inside this container (govexplain, srebot).
       HELPDESK_CLIENT_API_KEY: ${HELPDESK_CLIENT_API_KEY:-}
-      # Identity & access (optional; defaults to "none" — unverified X-User headers)
-      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-none}
+      # Identity & access. static (not none): matches every agent in this file,
+      # which already defaults to static — gateway/auditd were the only two
+      # services left on the permissive "none" default, silently breaking
+      # role-based checks (e.g. approval_override_roles) for any human
+      # operator, found live during the debugging of faulttest's approval-mode
+      # clamp. The demo-* services below already run static successfully.
+      HELPDESK_IDENTITY_PROVIDER: ${HELPDESK_IDENTITY_PROVIDER:-static}
       HELPDESK_USERS_FILE: /etc/helpdesk/users.yaml
       HELPDESK_JWT_JWKS_URL: ${HELPDESK_JWT_JWKS_URL:-}
       HELPDESK_JWT_ISSUER: ${HELPDESK_JWT_ISSUER:-}

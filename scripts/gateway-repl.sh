@@ -21,6 +21,15 @@ set -e
 
 GATEWAY_URL="${1:-http://localhost:8080}"
 
+# X-User identity sent on every request. Override with HELPDESK_OPERATOR.
+# Previously defaulted to $USER/whoami — fine under
+# HELPDESK_IDENTITY_PROVIDER=none, but under =static the gateway requires
+# X-User to match a real users.yaml entry and errors out otherwise; your
+# shell login name is unlikely to be one. alice@example.com (same default
+# show-fleet-job.sh already uses) matches the bundled example config —
+# override HELPDESK_OPERATOR if your users.yaml differs.
+OPERATOR_USER="${HELPDESK_OPERATOR:-alice@example.com}"
+
 # Colors
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
@@ -183,7 +192,7 @@ call_tool() {
     local response
     response=$(curl -s -X POST "${GATEWAY_URL}/api/v1/${agent_type}/${tool}" \
         -H "Content-Type: application/json" \
-        -H "X-User: ${USER:-$(whoami)}" \
+        -H "X-User: ${OPERATOR_USER}" \
         -d "$params")
 
     local state=$(echo "$response" | jq -r '.state // "unknown"')
@@ -245,7 +254,7 @@ Context: The '$db_id' database ($db_name) has connection_string: $db_conn"
     local response
     response=$(curl -s -X POST "${GATEWAY_URL}/api/v1/query" \
         -H "Content-Type: application/json" \
-        -H "X-User: ${USER:-$(whoami)}" \
+        -H "X-User: ${OPERATOR_USER}" \
         -d "{\"agent\": \"$agent\", \"message\": $(echo "$enriched_q" | jq -Rs .)}")
 
     local state=$(echo "$response" | jq -r '.state // "unknown"')
