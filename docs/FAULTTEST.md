@@ -68,7 +68,7 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
   │                                 │
   │  1. Inject         ─────────────┼──► ExternalInject SQL runs against your DB
   │                                 │
-  │  2. Prompt agent   ─────────────┼──► POST /api/v1/query  (gateway)
+  │  2. Prompt agent   ─────────────┼──► POST /api/v1/query  (Gateway)
   │                    ◄────────────┼─── agent response text
   │                                 │
   │  3. Evaluate                    │    score keywords, diagnosis category, tool calls
@@ -121,8 +121,10 @@ into `score` itself:
    deliberately an unweighted veto, not a fifth weighted dimension: a confirmed vs.
    unconfirmed diagnosis is a different *kind* of trust claim, not a "somewhat worse" one,
    so a partial score contribution that a strong keyword/tool score could outweigh would
-   defeat the point. Not enforced on non-gateway runs (`faulttest-fast`, the plain
-   `faultlib.Evaluate` path) — only gateway playbook responses carry confirmed-evidence
+   defeat the point. 
+
+   Note: This is not enforced on the non-gateway runs (`faulttest-fast`, the plain
+   `faultlib.Evaluate` path). Only Gateway playbook responses carry confirmed-evidence
    data at all. See [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
    for why this gate exists.
 
@@ -155,11 +157,11 @@ kubectl run faulttest --image=ghcr.io/org/helpdesk:v0.8.0 --rm -it \
 
 The `faulttest` binary is self-contained: the built-in catalog is compiled into it. No source tree or extra files are required at runtime.
 
-**Database agent running**: `faulttest` sends prompts over the A2A protocol to whichever agent you point it at. The gateway is the most convenient entry point for authenticated queries:
+**Database agent running**: `faulttest` sends prompts over the A2A protocol to whichever agent you point it at. The Gateway is the most convenient entry point for authenticated queries:
 
 ```bash
 helpdesk-client --gateway http://your-gateway:8080 --api-key sk-...
-# Agents reachable via the gateway at POST /api/v1/query
+# Agents reachable via the Gateway at POST /api/v1/query
 ```
 
 Alternatively, point directly at the database agent's A2A port (default 1100).
@@ -312,7 +314,7 @@ When no remediation is attempted, `overall_score` equals `score` (the diagnosis-
 
 **Remediation judge (`--remediation-judge`):**
 
-The time-based `remediation_score` answers *did it recover?* — not *was the approach good?* Adding `--remediation-judge` evaluates the qualitative approach: blast radius, tool choice, and step sequencing. After each remediation, faulttest fetches the executed steps from the gateway and sends them to the LLM judge, which scores on a 0–3 scale:
+The time-based `remediation_score` answers *did it recover?* — not *was the approach good?* Adding `--remediation-judge` evaluates the qualitative approach: blast radius, tool choice, and step sequencing. After each remediation, faulttest fetches the executed steps from the Gateway and sends them to the LLM judge, which scores on a 0–3 scale:
 
 | Judge score | Normalised | Meaning |
 |:-----------:|:----------:|---------|
@@ -449,13 +451,13 @@ Plain-text passwords in `infrastructure.json` are not acceptable in most environ
 }
 ```
 
-At runtime the gateway (and any other component reading `infrastructure.json`) appends `password=<value>` to the connection string from the named environment variable. The file itself never contains the password.
+At runtime the Gateway (and any other component reading `infrastructure.json`) appends `password=<value>` to the connection string from the named environment variable. The file itself never contains the password.
 
 ```bash
-# Pass the password via environment variable — the gateway resolves it at call time
+# Pass the password via environment variable — the Gateway resolves it at call time
 export STAGING_DB_PASSWORD="$(vault read -field=password secret/staging-db)"
 
-# Use the alias in --agent-conn so the gateway finds the registered entry;
+# Use the alias in --agent-conn so the Gateway finds the registered entry;
 # use --conn with the full DSN for injection (faulttest resolves its own connection)
 faulttest run --external \
   --conn "host=staging-db port=5432 dbname=mydb user=myuser password=$STAGING_DB_PASSWORD" \
@@ -513,7 +515,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--conn` | `FAULTTEST_CONN_STR` | — | PostgreSQL connection string used for fault injection and teardown |
 | `--agent-conn` | `FAULTTEST_AGENT_CONN_STR` | `--conn` | Connection identifier sent to the agent in prompts. Defaults to `--conn`. Use this when the agent should see a registered alias from `infrastructure.json` (e.g. `staging-db`) while `--conn` holds the full DSN with password for injection. |
 | `--replica-conn` | `FAULTTEST_REPLICA_CONN_STR` | — | Replica connection string (replication-lag fault) |
-| `--db-agent` | — | — | Database agent A2A URL or gateway URL |
+| `--db-agent` | — | — | Database agent A2A URL or Gateway URL |
 | `--k8s-agent` | — | — | Kubernetes agent A2A URL |
 | `--sysadmin-agent` | — | — | SysAdmin agent A2A URL |
 | `--orchestrator` | — | — | Orchestrator A2A URL (compound faults) |
@@ -524,14 +526,14 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--external` | — | true¹ | Only external_compat faults; SQL injection only |
 | `--ssh-user` | `USER` | current user | SSH username for ssh_exec faults |
 | `--ssh-key` | — | — | SSH private key path |
-| `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
+| `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the Gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
 | `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. When combined with `--judge`, post-incident triage feedback is auto-submitted from the judge's verdict (tagged `feedback_source: "auto_judge"`); see [Automatic post-incident feedback](#post-recovery-feedback-prompt). |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
 | `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy`, and `run --repeat` — pick it up automatically. |
-| `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for gateway auth |
-| `--purpose` | — | `diagnostic` | Purpose declared in gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your gateway policy enforces declared purposes. |
+| `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for Gateway auth |
+| `--purpose` | — | `diagnostic` | Purpose declared in Gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your Gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
-| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
+| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the Gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
 | `--agent-model` | `HELPDESK_MODEL_NAME` | — | Name of the triage agent model. Stored as `diagnosis_model` in the stability cert when `--repeat N` is used. Defaults to `HELPDESK_MODEL_NAME`. Set this explicitly when certifying against a specific model so certs can be distinguished across model upgrades in `vault accuracy`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
@@ -541,7 +543,7 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--testing-dir` | — | auto-detected | Path to the `testing/` directory |
 | `--catalog` | — | — | Additional customer catalog file (repeatable) |
 | `--source` | — | all | Filter by source: `builtin` or `custom` |
-| `--gate-escalation` | `FAULTTEST_GATE_ESCALATION` | `false` | Send `gate_escalation=true` on playbook run requests. The gateway intercepts the `ESCALATE_TO` signal at the phase boundary and opens a pending gate instead of auto-escalating. Combine with `--emit-and-wait` for non-interactive environments. |
+| `--gate-escalation` | `FAULTTEST_GATE_ESCALATION` | `false` | Send `gate_escalation=true` on playbook run requests. The Gateway intercepts the `ESCALATE_TO` signal at the phase boundary and opens a pending gate instead of auto-escalating. Combine with `--emit-and-wait` for non-interactive environments. |
 | `--emit-and-wait` | `FAULTTEST_EMIT_AND_WAIT` | `false` | Replace `/dev/tty` prompts with HTTP polling. Gate: polls `GET /api/v1/fleet/playbook-runs/{id}` every 15 s until resolved externally. Step: long-polls auditd `GET /v1/approvals/{id}/wait`. Required for Kubernetes Jobs and Docker containers where `/dev/tty` is unavailable. Requires `--approval-mode manual` and an external resolver (e.g. the Decision Hub or the git webhook adapter). |
 | `--report-dir` | — | `.` | Directory to write the JSON report (useful when running in a container with a mounted volume) |
 | `--notify-url` | — | — | Webhook URL (e.g. a Slack incoming webhook) POSTed to on run completion with the full JSON `Report`. As of v0.25.0, also used for `cert_regression` alerts (distinguished by a top-level `"event"` field, absent on the end-of-run report) — fired immediately when a `--repeat N` recertification detects a fault+model losing trust-earning status, not just once the whole run finishes. See [CONSISTENCY.md §7.3](CONSISTENCY.md#73-cert-history-and-regression-alerts). |
@@ -622,7 +624,7 @@ The vault is aiHelpDesk's library of fault→remedy pairings and the engine of t
 faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
+Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the Gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
 
 ```
 FAULT                            PLATFORM   PLAYBOOK                   FAULT TEST             INCIDENTS
@@ -653,8 +655,8 @@ Status values:
 | `PASS` / `FAIL` | Last run result |
 | `(never)` | Fault has a Playbook linked but has never been run |
 | `NO PLAYBOOK` | No `remediation.playbook_id` configured in the catalog |
-| `PLAYBOOK NOT FOUND` | Playbook ID configured but not found on the gateway (`--gateway` required) |
-| `READY` | Playbook exists on the gateway and has 0 runs — ready to use |
+| `PLAYBOOK NOT FOUND` | Playbook ID configured but not found on the Gateway (`--gateway` required) |
+| `READY` | Playbook exists on the Gateway and has 0 runs — ready to use |
 
 #### vault status
 
@@ -747,7 +749,7 @@ faulttest vault suggest \
   --api-key sk-...
 ```
 
-Manually synthesises a Playbook draft from any audit trace ID and prints it to stdout. When the gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
+Manually synthesises a Playbook draft from any audit trace ID and prints it to stdout. When the Gateway's auditd is configured, the draft is also **automatically saved** to the Vault as an inactive draft (`source=generated`, `is_active=false`) and the `playbook_id` of the saved draft is printed. Activate it with `POST /api/v1/fleet/playbooks/{id}/activate` when ready.
 
 Note: when `faulttest run --remediate` passes, vault auto-suggest runs automatically — you only need to call this manually for traces from real incidents outside of faulttest runs.
 
@@ -870,7 +872,7 @@ When writing customer catalog entries, prefer specific queries that directly ver
 
 ### 7.1 Zero-setup smoke test (auto-DB)
 
-The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down, and writes a report. No database setup required — just Docker and a reachable gateway.
+The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down, and writes a report. No database setup required — just Docker and a reachable Gateway.
 
 ```bash
 faulttest run --auto-db \
@@ -981,7 +983,7 @@ faulttest teardown --id db-idle-in-transaction \
 `faulttest` is included in the standard helpdesk Docker image. Docker Compose users can run it without downloading a separate binary by using `docker run` or `docker compose run` against the same image their deployment uses.
 
 ```bash
-# One-off run against a staging database (gateway on the same Docker network).
+# One-off run against a staging database (Gateway on the same Docker network).
 # -v $(pwd):/output -w /output writes the JSON report to the host's current directory.
 # Add -e for each password_env variable referenced in infrastructure.json.
 docker run --rm \
@@ -997,7 +999,7 @@ docker run --rm \
     --infra-config /infrastructure.json
 ```
 
-If the gateway is reachable on the host network:
+If the Gateway is reachable on the host network:
 
 ```bash
 docker run --rm --network host \
@@ -1255,7 +1257,7 @@ The JSON report contains one entry per fault:
 | Priority | Mode | How | When available |
 |----------|------|-----|----------------|
 | 1 | `audit` | Exact tool names from auditd's `tool_execution` events | `--audit-url` is set and auditd is reachable |
-| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a gateway `/api/v1/query`, or a gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
+| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a Gateway `/api/v1/query`, or a Gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
 | 3 | `text_fallback` | Keyword pattern matching against the agent's response text | All other cases |
 
 `audit` mode is the most accurate: it queries auditd directly for `tool_execution` events in the time window of the agent call, giving exact tool names regardless of which agent or transport was used. `text_fallback` is least reliable — a tool name appearing in the response text does not prove the tool was actually called. The mode used is recorded in `tool_evidence_mode` so you can assess reliability.
@@ -1571,7 +1573,7 @@ The built-in catalog lives at `testing/catalog/failures.yaml` and is compiled in
       # marks on keywords/category without the model ever demonstrably
       # engaging with real tool data, including the case where the
       # underlying tool query comes back empty. Not enforced for direct
-      # (non-gateway) runs — only gateway playbook responses carry confirmed-
+      # (non-gateway) runs — only Gateway playbook responses carry confirmed-
       # evidence data, so `make faulttest-fast` and the plain `faultlib.Evaluate`
       # path never populate it and must not be gated on it.
       # A structural test (testing/faultlib's
