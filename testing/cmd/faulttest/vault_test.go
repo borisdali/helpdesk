@@ -5324,8 +5324,8 @@ func TestPrintFaultStabilityCert_ShowsCleanLine_WhenClean(t *testing.T) {
 	if !strings.Contains(out, "Clean         : yes") {
 		t.Errorf("expected clean Clean line in output:\n%s", out)
 	}
-	if strings.Contains(out, "Warning types") {
-		t.Errorf("Warning types line should not appear when there's no distribution to show:\n%s", out)
+	if strings.Contains(out, "Signal types") {
+		t.Errorf("Signal types line should not appear when there's no distribution to show:\n%s", out)
 	}
 }
 
@@ -5348,8 +5348,8 @@ func TestPrintFaultStabilityCert_ShowsWarningTypesLine(t *testing.T) {
 		printFaultStabilityCert(srv.URL, "", "k8s-crashloop", "")
 	})
 
-	if !strings.Contains(out, "Warning types : objective_evidence=1(varies), protocol_violation=1(varies)") {
-		t.Errorf("expected Warning types line in output:\n%s", out)
+	if !strings.Contains(out, "Signal types  : objective_evidence=1(varies), protocol_violation=1(varies)") {
+		t.Errorf("expected Signal types line in output:\n%s", out)
 	}
 }
 

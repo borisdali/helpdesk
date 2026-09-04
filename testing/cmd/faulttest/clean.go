@@ -157,7 +157,7 @@ func (r CleanReport) isClean() bool {
 func (r CleanReport) Print() {
 	fmt.Printf("    Warnings:     %d/%d run(s) tripped a verified warning signal\n", r.WarningCount, r.N)
 	if dist := warningDistributionString(r.WarningDistribution, r.N); dist != "" {
-		fmt.Printf("    Warning types: %s\n", dist)
+		fmt.Printf("    Signal types: %s\n", dist)
 	}
 	if dist := warningDistributionString(r.ConfirmedDistribution, r.N); dist != "" {
 		fmt.Printf("    Confirmed:     %s\n", dist)

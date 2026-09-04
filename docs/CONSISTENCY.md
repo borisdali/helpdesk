@@ -225,7 +225,7 @@ Three additional columns capture a fourth, independent axis — whether any run 
 |-------|------|-------------|
 | `warning_count` | int | Number of the cert's N runs that tripped a verified warning signal |
 | `is_clean` | bool | `true` only when `warning_count == 0` — zero-tolerance, no percentage threshold |
-| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). Shown via `vault accuracy`'s `Warning types:` line; not shown in `vault list`. |
+| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). Shown via `vault accuracy`'s `Signal types:` line; not shown in `vault list`. |
 
 `is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires `is_stable`, `is_clean`, *and* `attribution_consistent` (§3) across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended — the same three-condition bar is exposed as `FaultStabilityCert.EarnsTrust()` so both the gateway's real-time gate and the cert store's own regression detection (below) read the identical fact, not two independently-maintained copies of it.
 
@@ -233,7 +233,7 @@ Three additional columns capture a fourth, independent axis — whether any run 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `confirmed_distribution` | JSON object | `warning_distribution`'s positive counterpart: per-signal run count of objective evidence that fired *and* was confirmed by the run's own response — e.g. `{"objective_evidence:oom_killed": 4}`. Not a warning signal and not counted toward `warning_count`/`is_clean` — proof the model saw and cited the real data, not a concern. Without this field, a cert with zero warnings can't distinguish "objective evidence never fired" from "it fired and was always correctly confirmed." Shown via `vault accuracy`'s `Confirmed:` line, directly under `Warning types:`. See [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry) for how a signal earns confirmed vs. unconfirmed status. |
+| `confirmed_distribution` | JSON object | `warning_distribution`'s positive counterpart: per-signal run count of objective evidence that fired *and* was confirmed by the run's own response — e.g. `{"objective_evidence:oom_killed": 4}`. Not a warning signal and not counted toward `warning_count`/`is_clean` — proof the model saw and cited the real data, not a concern. Without this field, a cert with zero warnings can't distinguish "objective evidence never fired" from "it fired and was always correctly confirmed." Shown via `vault accuracy`'s `Confirmed:` line, directly under `Signal types:`. See [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry) for how a signal earns confirmed vs. unconfirmed status. |
 
 ### Versioning & history fields (v0.25.0)
 
@@ -638,7 +638,7 @@ Triage consistency
 If no feedback has been submitted yet for the fault, `vault accuracy` still shows the cert block
 rather than returning early — the consistency signal is available independently of accuracy data.
 
-When `Clean` is `no`, a `Warning types:` line appears directly underneath, breaking down
+When `Clean` is `no`, a `Signal types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
 the five signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
 count: `(predictable)` when the signal fired on *every* run (structurally baked into this
@@ -648,7 +648,7 @@ actually worth investigating):
 
 ```
   Clean         : no  (2/5 run(s) tripped a verified warning signal)
-  Warning types : objective_evidence:pod_restarted=1(varies), protocol_violation=1(varies)
+  Signal types  : objective_evidence:pod_restarted=1(varies), protocol_violation=1(varies)
 ```
 
 A predictable signal looks like this instead — worth knowing at a glance that no amount of
@@ -656,10 +656,10 @@ re-running or prompt tuning will change it:
 
 ```
   Clean         : no  (5/5 run(s) tripped a verified warning signal)
-  Warning types : target_drift=5(predictable)
+  Signal types  : target_drift=5(predictable)
 ```
 
-A `Confirmed:` line (v0.27.0) can appear alongside — or instead of — `Warning types:`,
+A `Confirmed:` line (v0.27.0) can appear alongside — or instead of — `Signal types:`,
 independent of whether the cert is `Clean`. It's `warning_distribution`'s positive counterpart:
 objective evidence that fired *and* was demonstrably accounted for by the response, not a
 warning. A cert can be perfectly `Clean` and still show real confirmed evidence — that's the

@@ -1647,7 +1647,7 @@ func printFaultStabilityCert(gatewayURL, apiKey, faultID, currentModel string) {
 	}
 	fmt.Printf("  Clean         : %s\n", cleanVerdict)
 	if dist := warningDistributionString(cert.WarningDistribution, cert.NRuns); dist != "" {
-		fmt.Printf("  Warning types : %s\n", dist)
+		fmt.Printf("  Signal types  : %s\n", dist)
 	}
 	if dist := warningDistributionString(cert.ConfirmedDistribution, cert.NRuns); dist != "" {
 		fmt.Printf("  Confirmed     : %s\n", dist)

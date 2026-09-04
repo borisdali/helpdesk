@@ -18,6 +18,7 @@ The tool was designed for two complementary use cases:
 ## Table of Contents
 
 1. [How it works](#1-how-it-works)
+   - [Scoring formula](#11-scoring-formula)
 2. [Prerequisites](#2-prerequisites)
 3. [Modes of operation](#3-modes-of-operation)
    - [Auto-DB mode (zero setup)](#31-auto-db-mode-zero-setup)
@@ -86,6 +87,8 @@ faulttest run --external --conn "host=staging-db port=5432 ..."
   Evaluation scores posted to auditd (when --gateway is set)
 ```
 
+### 1.1 Scoring formula
+
 Each fault is scored on three weighted dimensions. The weights depend on whether
 the [LLM-as-judge](LLM_AS_JUDGE.md) is enabled (via `--judge`):
 
@@ -95,7 +98,31 @@ the [LLM-as-judge](LLM_AS_JUDGE.md) is enabled (via `--judge`):
 | Diagnosis (category match or judge score) | 30% | 40% |
 | Tool evidence | 20% | 40% |
 
-A fault passes when the weighted score reaches 60% or higher. Ordering assertions (e.g., `get_session_info` must precede `terminate_connection`) are also evaluated and gate the pass verdict independently of the score.
+This weighted combination produces `score` (0.0–1.0). `passed` is **not** simply
+`score >= 0.6` — it's four independent gates, all of which must hold. The first three
+only ever make `passed` stricter than the raw score threshold; none of them feed back
+into `score` itself:
+
+1. **`score >= 0.6`** — the weighted combination above clears the bar.
+2. **`keyword_pass`** — at least one `expected_keywords.any_of` entry was found (vacuously
+   true when none are declared).
+3. **`ordering_pass`** — `expected_tool_order` constraints hold (e.g. `get_session_info`
+   evidence must precede `terminate_connection` evidence).
+4. **Evidence-content gate** (`evidence_required_but_unconfirmed`) — when a fault declares
+   `expected_diagnosis.objective_evidence_signal` (see [§10](#10-extending-the-built-in-catalog))
+   *and* the run went `--via-gateway`, that signal must also appear in the run's
+   `objective_evidence_confirmed` list — not just have fired, but have been demonstrably
+   cited in the model's own hypothesis text (see
+   [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)).
+   If declared and unconfirmed, `passed` is force-set to `false` **regardless of `score`** —
+   a fault can score 100% on keywords/category/tools and still fail here. This is
+   deliberately an unweighted veto, not a fifth weighted dimension: a confirmed vs.
+   unconfirmed diagnosis is a different *kind* of trust claim, not a "somewhat worse" one,
+   so a partial score contribution that a strong keyword/tool score could outweigh would
+   defeat the point. Not enforced on non-gateway runs (`faulttest-fast`, the plain
+   `faultlib.Evaluate` path) — only gateway playbook responses carry confirmed-evidence
+   data at all. See [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+   for why this gate exists.
 
 When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
 
@@ -273,8 +300,11 @@ Each remediation attempt produces a `remediation_score` (0.0–1.0) based on rec
 The `overall_score` combines diagnosis and remediation:
 
 ```
-overall_score = diagnosis_score × 0.6 + remediation_score × 0.4
+overall_score = score × 0.6 + remediation_score × 0.4
 ```
+
+(`score` here is the full weighted diagnosis composite from §1 — keyword + diagnosis +
+tool evidence — not `diagnosis_score` alone.)
 
 When no remediation is attempted, `overall_score` equals `score` (the diagnosis-only score). This means a fault that was correctly diagnosed but not remediated is not penalised — remediation is strictly additive.
 
@@ -915,7 +945,7 @@ Passed: 9/10  Failed: 1  Skipped: 0
 Report: faulttest-a3f2b1c4.json
 ```
 
-The `overall_score` in the report combines `diagnosis_score × 0.6 + remediation_score × 0.4`. Faults without a remediation spec show only the diagnosis score. The `Remediation Judge:` line only appears when `--remediation-judge` is enabled and the judge LLM returns a result.
+The `overall_score` in the report combines `score × 0.6 + remediation_score × 0.4` (see §1.1). Faults without a remediation spec show only `score`. The `Remediation Judge:` line only appears when `--remediation-judge` is enabled and the judge LLM returns a result.
 
 ### 7.4 Interactive single-fault injection
 
@@ -1203,14 +1233,15 @@ The JSON report contains one entry per fault:
 | `tool_evidence` | At least 50% of expected tools were confirmed called |
 | `tool_evidence_mode` | How tool evidence was determined — three-tier fallback (see below). Omitted when no tools were expected. |
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
-| `score` | Weighted combination — see the weights table in §1 |
-| `passed` | `score >= 0.6` **and** `ordering_pass = true` |
+| `score` | Weighted combination — see the weights table in [§1.1](#11-scoring-formula) |
+| `passed` | Four independent gates, all required — see [§1.1](#11-scoring-formula): `score >= 0.6`, `keyword_pass`, `ordering_pass`, and (when the fault declares `objective_evidence_signal` on a `--via-gateway` run) the evidence-content gate |
+| `evidence_required_but_unconfirmed` | `true` when the fault declared `objective_evidence_signal` but it wasn't confirmed — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. |
 | `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
 | `judge_model` | Model that produced the judge score (omitted when skipped) |
 | `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |
 | `remediation_score` | 0.0–1.0: `1.0` if recovered within half the verify timeout, `0.75` within the full timeout, `0.0` if timed out. Only present when `--remediate` was set. |
 | `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
-| `overall_score` | `diagnosis_score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
+| `overall_score` | `score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
 | `remediation_judge_score` | 0.0–1.0 mapped from the judge's 0–3 score. Only present when `--remediation-judge` was set and the judge call succeeded. |
 | `remediation_judge_reasoning` | One-sentence explanation from the remediation judge LLM (omitted when skipped). |
 | `remediation_judge_skipped` | `true` when `--remediation-judge` was not set, no steps were recorded, or the judge call failed. |

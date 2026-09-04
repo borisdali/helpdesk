@@ -278,7 +278,11 @@ production gate, just unnoticed on the offline side. A fault could score 100% on
 Fixed by adding an optional `expected_diagnosis.objective_evidence_signal` catalog field
 (see [FAULTTEST.md §10](FAULTTEST.md#10-extending-the-built-in-catalog)): when a fault
 declares it, a `--via-gateway` run additionally requires that signal to be confirmed to
-pass, on top of the existing keyword/category/tool checks — deliberately *not* enforced
+pass, on top of the existing keyword/category/tool checks. This is an unweighted veto on
+`passed`, not a fifth scored dimension — it never touches `score` itself, so a run can
+score 100% on keywords/category/tools and still fail here; see
+[FAULTTEST.md §1.1](FAULTTEST.md#11-scoring-formula) for the exact four-gate mechanics.
+Deliberately *not* enforced
 on non-gateway runs (`faulttest-fast`, the plain `faultlib.Evaluate` path), since only
 gateway playbook responses carry confirmed-evidence data at all; gating there
 unconditionally would fail every run of a signal-bearing fault regardless of correctness.
