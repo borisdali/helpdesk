@@ -49,7 +49,7 @@ func TestEvaluate_AllPass(t *testing.T) {
 }
 
 // TestEvidenceSignalConfirmed covers the gate that closes the "vague hedge
-// scores full marks" gap James flagged before the v0.27 release: a fault
+// scores full marks" gap that was flagged before the v0.27 release: a fault
 // declaring expected_diagnosis.objective_evidence_signal must have that exact
 // signal present in the run's confirmed evidence, not just fired-but-unconfirmed
 // or absent (e.g. the underlying tool query came back empty).
