@@ -111,11 +111,13 @@ into `score` itself:
 4. **Evidence-content gate** (`evidence_required_but_unconfirmed`) — when a fault declares
    `expected_diagnosis.objective_evidence_signal` (see [§10](#10-extending-the-built-in-catalog))
    *and* the run went `--via-gateway`, that signal must also appear in the run's
-   `objective_evidence_confirmed` list — not just have fired, but have been demonstrably
+   `objective_evidence_confirmed` list. Not just have fired, but have been demonstrably
    cited in the model's own hypothesis text (see
    [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)).
-   If declared and unconfirmed, `passed` is force-set to `false` **regardless of `score`** —
-   a fault can score 100% on keywords/category/tools and still fail here. This is
+
+   If declared and unconfirmed, aiHelpDesk force-sets the `passed` to `false`... **regardless of `score`**.
+
+   That is, a fault can score 100% on `keywords`/`category`/`tools` and still fail here. This is
    deliberately an unweighted veto, not a fifth weighted dimension: a confirmed vs.
    unconfirmed diagnosis is a different *kind* of trust claim, not a "somewhat worse" one,
    so a partial score contribution that a strong keyword/tool score could outweigh would
