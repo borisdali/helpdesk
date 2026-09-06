@@ -2,9 +2,9 @@
 
 The raw sample commands and deliberations presented below complement these two blog posts:
 
-- **[The Hand-Off Tax, Part 1: What a 3-Hop Escalation Chain Actually Buys You?](https://levelup.gitconnected.com/the-hand-off-tax-part-1-what-a-3-hop-escalation-chain-actually-buys-you-d708f4912d4c)**
+- **[The Hand-Off Tax, Part 1: What a 3-Hop Escalation Chain Actually Buys You?](https://levelup.gitconnected.com/the-hand-off-tax-part-1-what-a-3-hop-escalation-chain-actually-buys-you-d708f4912d4c)**  
   Cross-team incidents don’t cost you time because the fix is hard. They cost you time because of the hand-offs, the routing, the re-explaining, the “let me loop in platform folks.” Here’s how we cut that out of the loop and what happened when we made the system prove it live to us
-- **[The Hand-Off Tax, Part 2: We Turned Off the Playbooks and Watched](https://itnext.io/the-hand-off-tax-part-2-we-turned-off-the-playbooks-and-watched-fade1e510391)**
+- **[The Hand-Off Tax, Part 2: We Turned Off the Playbooks and Watched](https://itnext.io/the-hand-off-tax-part-2-we-turned-off-the-playbooks-and-watched-fade1e510391)**  
   Welcome back, Crystal Ball! Same fault, same model, same tools, same connection string used by the guided playbook. And yet, wrong diagnosis and the structural safety net that saved the day.
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.

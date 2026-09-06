@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[How the Page Stopped Being a Guessing Game](https://itnext.io/show-your-work-how-the-page-stopped-being-a-guessing-game-0e80fa3f35c9)**
+- **[How the Page Stopped Being a Guessing Game](https://itnext.io/show-your-work-how-the-page-stopped-being-a-guessing-game-0e80fa3f35c9)**  
   Trust, but verify at 2am: the page that told the truth
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.

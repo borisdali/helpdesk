@@ -2,7 +2,7 @@
 
 The raw sample commands and deliberations presented below complement this blog post: 
 
-- **[Trust Has Three Dimensions. Demand from your AI SRE vendor to show a cert with all three.](https://itnext.io/trust-has-three-dimensions-demand-from-your-ai-sre-vendor-to-show-a-cert-with-all-three-0f361a443807#bf32)**
+- **[Trust Has Three Dimensions. Demand from your AI SRE vendor to show a cert with all three.](https://itnext.io/trust-has-three-dimensions-demand-from-your-ai-sre-vendor-to-show-a-cert-with-all-three-0f361a443807#bf32)**  
   Your Agent got it right. Can you prove that it knew why? The cert may be telling the truth, but does it have enough depth to back up that claim?
 
 For background on aiHelpDesk Consistency Certification badge, see [here](../CONSISTENCY.md). aiHelpDesk [release 0.21](https://github.com/borisdali/helpdesk/releases/tag/v0.21.0) makes the certs 3D. See [here](../ATTRIBUTION_CERTS.md) for background on attribution-aware certs.

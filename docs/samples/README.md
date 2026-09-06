@@ -25,5 +25,6 @@ The samples presented here can be used standalone or as the complementary materi
 | 030 | Show Your Work: Michael and the Night the Page Stopped Being a Guessing Game | Trust, but verify at 2am: the page that told the truth | [link](https://itnext.io/show-your-work-how-the-page-stopped-being-a-guessing-game-0e80fa3f35c9) | [SAMPLE016.md ](SAMPLE016.md) | K8s | 
 | 031 | The AI that Un-Trusts Itself: The Page that Never Came | How aiHelpDesk revokes its own permission before you have to ask. A story about the cert that doesn't silently go stale | [link](https://itnext.io/the-ai-that-un-trusts-itself-the-page-that-never-came-6cc9df173533) | [SAMPLE017.md ](SAMPLE017.md) | K8s | 
 | 035 | The Last One That Still Needed Him | Why the one hop Michael still checked out of habit finally stopped needing him. Part three of a series on trust that's earned and now, finally, complete. | [link](https://itnext.io/the-last-one-that-still-needed-him-14af8f324776) | [SAMPLE018.md ](SAMPLE018.md) | Docker/Podman | 
+| 036 | AI-Based DB Replication Triage and Remediation. The Evaluation Story | Dana had a rule for vendor demos: whoever built the product was not allowed to showcase it | [link](https://itnext.io/ai-based-db-replication-triage-and-remediation-the-evaluation-story-140cef5f5677) | [SAMPLE019.md ](SAMPLE019.md) | Docker/Podman | 
 
 

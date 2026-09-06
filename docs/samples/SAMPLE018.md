@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[The Last One That Still Needed Him](https://itnext.io/the-last-one-that-still-needed-him-14af8f324776)**
+- **[The Last One That Still Needed Him](https://itnext.io/the-last-one-that-still-needed-him-14af8f324776)**  
   Why the one hop Michael still checked out of habit finally stopped needing him. Part three of a series on trust that's earned and now, finally, complete.
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.

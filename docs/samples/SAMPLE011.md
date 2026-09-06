@@ -2,7 +2,7 @@
 
 The raw sample commands and deliberations presented below complement this blog post: 
 
-- **[Your AI Just Rewrote Its Own Playbook. How Do You Know It Got Better?](https://levelup.gitconnected.com/your-ai-just-rewrote-its-own-playbook-how-do-you-know-it-got-better-85322fdec17c)**
+- **[Your AI Just Rewrote Its Own Playbook. How Do You Know It Got Better?](https://levelup.gitconnected.com/your-ai-just-rewrote-its-own-playbook-how-do-you-know-it-got-better-85322fdec17c)**  
   Every AI system will eventually propose a change that makes things worse. The question is whether you’ll know before or after it runs on your production database at 2am.
 
 It all starts with the [Vault](../VAULT.md). If you need a background, start there. Next, head over to [this page](../VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](../INCIDENTS.md) data into a learning signal.
