@@ -170,7 +170,6 @@ Report written to ./faulttest-08313fe4.json
 Nice! Before drawing any conclusions let's get the diagnosis accuracy breakdown report that shows the full consistency certification cert for that fault. That's what [`vault accuracy`](../VAULT.md#vault-accuracy) is there for! (and yes, it also shows how often the agent's root-cause hypothesis was confirmed correct by operators, but that's of less interest at the moment). Let's get it:
 
 ```
-Gateway: http://gateway:8080  ·  version: v0.26.0-35-g3a0d5c0-3a0d5c0  ·  host: e2b4d78448f8
 [boris@ ~/helpdesk]$ docker run --rm --network helpdesk_default \
     -v "$(pwd)/testing:/testing-docker/testing" \
     -v "$(pwd)/.faulttest-history:/root/.faulttest" \
@@ -180,6 +179,8 @@ Gateway: http://gateway:8080  ·  version: v0.26.0-35-g3a0d5c0-3a0d5c0  ·  host
         db-replica-stalled \
         --gateway http://gateway:8080 \
         --api-key "$HELPDESK_CLIENT_API_KEY"
+
+Gateway: http://gateway:8080  ·  version: v0.26.0-35-g3a0d5c0-3a0d5c0  ·  host: e2b4d78448f8
 
 Diagnosis accuracy for series: pbs_replication_lag
 
@@ -206,6 +207,14 @@ Triage consistency
   Attribution (taxonomy 1.2)
   Primary class  : replica-stalled-but-connected
   Consistent     : yes  (3/3 runs)
+
+Cert history (last 4)
+  2026-09-03 17:07 UTC   STABLE   CLEAN attr=consistent (3 runs)
+      ↳ changed since 2026-09-03 16:06 UTC: trust earned (now STABLE+CLEAN+attribution-consistent); stability: UNSTABLE→STABLE; warning_distribution: objective_evidence:replica_stalled 0→3; confirmed_distribution: objective_evidence:         replica_stalled 0→3
+  2026-09-03 16:06 UTC   UNSTABLE CLEAN attr=consistent (3 runs)
+  2026-09-03 15:45 UTC   UNSTABLE CLEAN attr=consistent (3 runs)
+      ↳ changed since 2026-09-03 14:31 UTC: trust regressed (was STABLE+CLEAN+attribution-consistent); stability: STABLE→UNSTABLE; warning_distribution: objective_evidence:replica_stalled 3→0; confirmed_distribution: objective_evidence:      replica_stalled 3→0
+  2026-09-03 14:31 UTC   STABLE   CLEAN attr=consistent (3 runs)
 ```
 
 That confirms it! Nice, clean run, full success with everything working together correctly. Here's the breakdown:
@@ -220,6 +229,9 @@ That confirms it! Nice, clean run, full success with everything working together
     The triage hop and the `::hop:pbs_sysadmin_replica_connectivity_triage` escalation hop.
 
   - 100% accuracy, consistent attribution (replica-stalled-but-connected, 3/3).
+
+  - And a bonus! Note the cert history section that shows the exact trust-regression-then-recovery story (UNSTABLE→STABLE once the API keys landed correctly). We [described it in detail](https://itnext.io/the-ai-that-un-trusts-itself-the-page-that-never-came-6cc9df173533) previously, but it's nice to see it firing here as well.
+
 
 W00t! `db-replica-stalled` is fully certified and done.
 
