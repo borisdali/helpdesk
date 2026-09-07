@@ -244,7 +244,7 @@ Layer 2 verifies that a claimed *action* — a delegated tool call — really ha
 It says nothing about a claim of a different shape: a diagnosis's `EVIDENCE` quote (the
 verbatim short quote the protocol requires each `HYPOTHESIS_N:` line to cite) could be
 entirely invented, referencing a value that was never actually returned by any tool in
-that hop, and Layer 2 has no opinion on it — the tool call itself may be perfectly real.
+that hop and Layer 2 has no opinion on it — the tool call itself may be perfectly real.
 
 Layer 3 closes that gap the same way Layer 2 closes its own: check the model's
 self-report against the real audit trail, not against another model's judgment. For
@@ -280,11 +280,11 @@ Surfaced as `has_unverified_evidence`/`outcome: unverified_evidence` everywhere
 
 ### Layer 4 — Objective-evidence content verification
 
-Layers 1–3 all verify that something claimed — an action, a delegation, or a quoted
+Layers 1–3 all verify that something claimed — an action, a delegation or a quoted
 fact — really happened or really came from somewhere real. None of them checks whether
 the *content* of what a model reports about a read-only tool's result is *accurate* for
 a specific, known-important field — a model can genuinely call `get_replication_status`,
-quote something real from its output, and still misdescribe what actually matters in it.
+quote something real from its output and still misdescribe what actually matters in it.
 
 Layer 4 closes that gap for a deliberately narrow, growing set of tools: a small,
 type-safe probe reads a specific field directly off the tool's typed result (a pod's
@@ -304,7 +304,7 @@ addition per tool (often pure YAML, no code change) — see
 and how to add a rule.
 
 Surfaced the same way Layer 2's `has_mismatch` is: `vault incidents` prints confirmed/
-unconfirmed evidence inline per chapter (`⚠`/`✓`), and a `--repeat N` certification run's
+unconfirmed evidence inline per chapter (`⚠`/`✓`) and a `--repeat N` certification run's
 aggregate confirmed-vs-unconfirmed split is queryable via `vault accuracy`'s `Confirmed:`
 line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 

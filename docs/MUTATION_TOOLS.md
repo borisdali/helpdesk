@@ -792,7 +792,7 @@ After every `delegate_to_agent` call returns, the orchestrator:
    - `destructive_confirmed` — which of those were destructive
    - `mismatch` — `true` when the delegation was write-or-destructive but no
      tool of that class or stronger is in the trail (destructive satisfies write) —
-     unless the agent's response, or the audit trail itself, corroborates a
+     unless the agent's response or the audit trail itself, corroborates a
      genuine decline; see
      [§5.10](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
 4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
@@ -1182,7 +1182,7 @@ case.
 §5.2's write/destructive-absence check is unconditional: no confirmed tool of
 that class or stronger means `Mismatch=true`, full stop. That's correct for a
 silent failure, but it has no way to recognize a *legitimate* decline — the
-agent investigated, found nothing that warranted a write, and correctly
+agent investigated, found nothing that warranted a write and correctly
 escalated or transitioned instead of acting. This was found live, not
 hypothetically: running `host-container-stopped` through the real 3-hop
 DB→sysadmin→K8s chain, the sysadmin agent's own diagnosis was sound (container
@@ -1198,14 +1198,14 @@ model's self-report alone — an `ACTION_TAKEN: none` line (matched
 case-insensitively, markdown-bold tolerant) *and* a well-formed
 `ESCALATE_TO:`/`TRANSITION_TO:` line with a non-`none` target, in the same
 response text. Either alone is not sufficient: `ACTION_TAKEN: none` with no
-handoff line, or a handoff line with no `ACTION_TAKEN: none`, both still
+handoff line or a handoff line with no `ACTION_TAKEN: none`, both still
 mismatch. Requiring both together is a materially stronger bar than either
 alone — a genuinely broken or silently-failing call is unlikely to also emit a
 clean, well-formed handoff line — while still being cheaper than corroborating
 against independent tool-execution evidence (an earlier, rejected design:
 "any confirmed tool call of any class, with no unconfirmed narration" was
 replayed against the existing negative-case test,
-`TestBuildDelegationVerification_WriteAction_Mismatch`, and found to silently
+`TestBuildDelegationVerification_WriteAction_Mismatch` and found to silently
 defeat the check's own purpose — that fixture is exactly "called a read tool,
 never wrote").
 
@@ -1216,7 +1216,7 @@ both `ActionWrite` and `ActionDestructive`:
 ```go
 if verif.Mismatch && declinedActionSignal(responseText) {
     verif.Mismatch = false
-    verif.MismatchReason = "no write/destructive tool executed, and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
+    verif.MismatchReason = "no write/destructive tool executed and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
 }
 ```
 
@@ -1240,7 +1240,7 @@ cleanly" — but it can't cover a *terminal* hop whose only write attempt is
 denied by policy, since a terminal hop has nowhere to hand off to and so can
 never emit the `ESCALATE_TO:`/`TRANSITION_TO:` line the check requires. Found
 live on the same 3-hop chain: `pbs_db_restart_action`'s `restart_container`
-call is denied by a `diagnostic`-purpose policy on every faulttest run, and
+call is denied by a `diagnostic`-purpose policy on every faulttest run and
 that playbook's guidance explicitly forbids emitting any further
 escalation/transition signal after reporting the denial — so
 `declinedActionSignal` correctly, but unhelpfully, never fires for it.
@@ -1271,7 +1271,7 @@ missing write. `hasActionClassDenial` requires the specific denied `Action` to
 match.
 
 **Both corroboration paths share one policy-events fetch.** `buildDelegationVerification`
-fetches `policy_decision` events lazily, on first need, and reuses the result
+fetches `policy_decision` events lazily, on first need and reuses the result
 for both this check and §5.7's suppression — at most one HTTP round trip per
 call regardless of how many of the two checks end up needing it.
 
@@ -1283,7 +1283,7 @@ former necessarily satisfies the latter too. This isn't a gap: it means a
 policy-denied write always correctly explains an unconfirmed narration in the
 same hop as well. `declinedActionSignal`'s downgrade has no such overlap — it
 never touches `policyEvents` at all — so it *can* fire independently of
-narration-mismatch, and does: found while adding test coverage for this
+narration-mismatch and does: found while adding test coverage for this
 section that an *unrelated* narrated-but-unconfirmed tool call left
 `MismatchReason` stale (still describing the now-irrelevant corroborated
 decline) after the narration check correctly re-set `Mismatch=true` for its
@@ -1351,7 +1351,7 @@ Checks *every* hypothesis with an Evidence field, not just the primary — a
 fabricated quote backing a rejected hypothesis is just as much a trust
 problem as one backing the root cause. Matches against any `tool_execution`
 event in the hop's window, not a specifically-named one: the diagnosis
-protocol doesn't have hypotheses name which tool a quote came from, and
+protocol doesn't have hypotheses name which tool a quote came from and
 requiring that would be a separate, larger protocol change, not done here.
 
 **Matching is deterministic, same discipline as every other check in this
@@ -1359,7 +1359,7 @@ document — no fuzzy or LLM-judged provenance.** `evidenceQuoteVerified`
 tries, in order: (1) a normalized substring match (lowercased, whitespace
 collapsed) against any tool output; (2) failing that, a numeric-aware
 fallback — extract every numeric token from both the quote and a candidate
-output, strip thousands-separator commas, and require *all* of the quote's
+output, strip thousands-separator commas and require *all* of the quote's
 numbers to appear among that output's numbers. The fallback exists because
 real evidence quotes in this codebase are frequently raw numeric tool output
 (byte counts, timeouts, row counts) that a model can legitimately reformat
