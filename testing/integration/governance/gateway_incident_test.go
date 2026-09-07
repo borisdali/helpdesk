@@ -295,10 +295,11 @@ func TestIntegration_GatewayIncident_FourHopTwoEscalations(t *testing.T) {
 // TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters seeds a
 // real 2-hop chain (triage → escalation) against the real auditd binary, with
 // a delegation_verification event carrying Mismatch=true on the triage hop's
-// trace and one carrying TargetDrift on the escalation hop's trace, then
-// verifies the real gateway's GET /api/v1/incidents/{runID} surfaces both
-// flags on their correct, distinct chapters — closing the gap where a
-// confident narrative gave no indication that a hop's Journey was flagged.
+// trace and events carrying TargetDrift and UnverifiedEvidence (v0.28.0,
+// content-provenance) on the escalation hop's trace, then verifies the real
+// gateway's GET /api/v1/incidents/{runID} surfaces all three flags on their
+// correct, distinct chapters — closing the gap where a confident narrative
+// gave no indication that a hop's Journey was flagged.
 //
 // Note: recordRun sets trace_id directly on the PlaybookRun row, but that
 // alone does not make the trace a discoverable Journey — QueryJourneys only
@@ -371,6 +372,18 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 			"target_drift": []string{"host=localhost port=15432 dbname=testdb"},
 		},
 	})
+	post(t, auditdAddr, "/v1/events", map[string]any{
+		"event_id":   fmt.Sprintf("gv-%d", time.Now().UnixNano()),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   escalateTrace,
+		"session":    map[string]any{"id": "vflags-session-" + suffix},
+		"delegation_verification": map[string]any{
+			"agent":               "sysadmin_agent",
+			"action_class":        "read",
+			"unverified_evidence": []string{"lag_bytes | 999999999"},
+		},
+	})
 
 	narrative := getIncidentFromGateway(t, triageRunID)
 
@@ -383,6 +396,9 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 	}
 	if hasDrift, _ := triage["has_target_drift"].(bool); hasDrift {
 		t.Errorf("triage.has_target_drift = %v, want false (drift is on the escalation hop, not triage)", triage["has_target_drift"])
+	}
+	if hasUnverified, _ := triage["has_unverified_evidence"].(bool); hasUnverified {
+		t.Errorf("triage.has_unverified_evidence = %v, want false (unverified evidence is on the escalation hop, not triage)", triage["has_unverified_evidence"])
 	}
 
 	escalations, _ := narrative["escalations"].([]any)
@@ -399,8 +415,11 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 	if hasMismatch, _ := hop["has_mismatch"].(bool); hasMismatch {
 		t.Errorf("escalations[0].has_mismatch = %v, want false (mismatch is on triage, not this hop)", hop["has_mismatch"])
 	}
+	if hasUnverified, _ := hop["has_unverified_evidence"].(bool); !hasUnverified {
+		t.Errorf("escalations[0].has_unverified_evidence = %v, want true", hop["has_unverified_evidence"])
+	}
 
-	t.Logf("verification flags surfaced correctly: triage.has_mismatch=true, escalation.has_target_drift=true")
+	t.Logf("verification flags surfaced correctly: triage.has_mismatch=true, escalation.has_target_drift=true, escalation.has_unverified_evidence=true")
 }
 
 // TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcrossHops
