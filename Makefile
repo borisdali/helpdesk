@@ -272,10 +272,17 @@ faulttest-gateway:
 		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
 		exit 1; \
 	fi
+	@if [ -z "$(FAULTTEST_API_KEY)" ]; then \
+		echo "Error: FAULTTEST_API_KEY is not set"; \
+		echo "  The gateway defaults to HELPDESK_IDENTITY_PROVIDER=static, which"; \
+		echo "  requires a Bearer token on every request. users.example.yaml ships"; \
+		echo "  a pre-hashed 'faulttest' service account for exactly this purpose:"; \
+		echo "    export FAULTTEST_API_KEY=faulttest-api-key"; \
+		exit 1; \
+	fi
 	@if ! curl -sf "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
 		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
 		echo "  Start the full stack first:"; \
-		echo "    HELPDESK_IDENTITY_PROVIDER=none \\"; \
 		echo "    docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait"; \
 		exit 1; \
 	fi
@@ -286,6 +293,7 @@ faulttest-gateway:
 	FAULTTEST_REMEDIATE=true \
 	FAULTTEST_EXTERNAL=true \
 	FAULTTEST_GATE_ESCALATION=true \
+	FAULTTEST_API_KEY="$(FAULTTEST_API_KEY)" \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
@@ -298,10 +306,17 @@ faulttest-gateway-nocache:
 		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
 		exit 1; \
 	fi
+	@if [ -z "$(FAULTTEST_API_KEY)" ]; then \
+		echo "Error: FAULTTEST_API_KEY is not set"; \
+		echo "  The gateway defaults to HELPDESK_IDENTITY_PROVIDER=static, which"; \
+		echo "  requires a Bearer token on every request. users.example.yaml ships"; \
+		echo "  a pre-hashed 'faulttest' service account for exactly this purpose:"; \
+		echo "    export FAULTTEST_API_KEY=faulttest-api-key"; \
+		exit 1; \
+	fi
 	@if ! curl -sf "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
 		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
 		echo "  Start the full stack first:"; \
-		echo "    HELPDESK_IDENTITY_PROVIDER=none \\"; \
 		echo "    docker compose -f deploy/docker-compose/docker-compose.yaml up -d --wait"; \
 		exit 1; \
 	fi
@@ -312,6 +327,7 @@ faulttest-gateway-nocache:
 	FAULTTEST_REMEDIATE=true \
 	FAULTTEST_EXTERNAL=true \
 	FAULTTEST_GATE_ESCALATION=true \
+	FAULTTEST_API_KEY="$(FAULTTEST_API_KEY)" \
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test --count=1 -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
