@@ -55,9 +55,14 @@ func main() {
 	}
 
 	// Load objective_evidence rules if available. See loadK8sEvidenceRules'
-	// own doc comment for the unset/malformed-file behavior.
+	// own doc comment for the malformed-file behavior (loud Error there) —
+	// this branch handles the other, previously-silent failure mode: the env
+	// var simply not being set at all. See agents/database/main.go's mirror
+	// of this same fix (2026-09-07) for the live incident that found it.
 	if rulesPath := os.Getenv("HELPDESK_K8S_EVIDENCE_RULES"); rulesPath != "" {
 		podEvidenceRules, eventEvidenceRules = loadK8sEvidenceRules(rulesPath)
+	} else {
+		slog.Warn("HELPDESK_K8S_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_pods/get_events, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
 
 	// Initialize audit store if enabled

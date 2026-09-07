@@ -2209,7 +2209,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("TRANSITION_TO: <series_id>   — use this when the Expert Guidance 'Final step' specifies TRANSITION_TO (same-domain handoff to the expected remediation playbook)\n")
 	b.WriteString("ESCALATE_TO: <series_id or \"none\">   — use this for true out-of-scope escalations to a different domain; use \"none\" if no escalation is needed\n")
 	b.WriteString("Emit exactly one of TRANSITION_TO or ESCALATE_TO (not both). Follow the 'Final step' in Expert Guidance to determine which signal and which series_id.\n\n")
-	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a short verbatim quote from a tool output; every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
+	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a single short verbatim quote copied exactly from one tool's output — never join two facts with \"and\"/\",\" into one quote, never paraphrase or summarize what a tool returned, and never combine output from more than one tool call into a single quote (if two facts matter, put the second in a REJECTED reason or FINDINGS instead); every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
 
 	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
 
