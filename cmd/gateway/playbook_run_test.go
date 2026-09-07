@@ -2125,6 +2125,88 @@ func TestCheckEvidenceProvenance_QuoteFabricated(t *testing.T) {
 	}
 }
 
+// TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal reproduces the live
+// false positive found 2026-09-07 on db-replica-disconnected: a model citing
+// two separately-sourced real facts as `"fact one" and "fact two"` leaves
+// exactly this shape in DiagnosticHypothesis.Evidence (parseDiagnosticReport
+// only strips the outermost quote pair). Neither fact alone appears in any
+// single tool output as the whole concatenated string, but each individually
+// does — the quote must verify once split, not get flagged as one blob.
+func TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "-[ RECORD 1 ]-----------\nslot_name | replica_slot\nslot_type | physical\nactive    | f\nlag_bytes | 28610712\n",
+		}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_active_connections",
+			Result: "(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `slot_name | replica_slot` + "\n" + `lag_bytes | 28610712" and "(0 rows)`},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(unverified) != 0 {
+		t.Errorf("expected no unverified quotes (both halves trace to real output), got %v", unverified)
+	}
+}
+
+// TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated proves splitting
+// still catches a genuinely fabricated (or merely paraphrased, non-verbatim)
+// half — only that half is reported, not the whole compound quote, so the
+// operator sees exactly which claim didn't check out.
+func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "slot_name | replica_slot\nlag_bytes | 28610712\n",
+		}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_active_connections",
+			Result: "(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `lag_bytes | 28610712" and "No active connections found.`},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(unverified) != 1 || unverified[0] != "No active connections found." {
+		t.Errorf("expected only the paraphrased half flagged, got %v", unverified)
+	}
+}
+
+// TestSplitEvidenceQuoteParts covers the joiner patterns a compound EVIDENCE
+// quote can leave behind, and confirms a quote with no joiner (the common
+// case) is returned unchanged as a single element.
+func TestSplitEvidenceQuoteParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		quote string
+		want  []string
+	}{
+		{"no joiner", "lag_bytes | 28610712", []string{"lag_bytes | 28610712"}},
+		{"and-joined", `fact one" and "fact two`, []string{"fact one", "fact two"}},
+		{"comma-joined", `fact one", "fact two`, []string{"fact one", "fact two"}},
+		{"three-way and-joined", `a" and "b" and "c`, []string{"a", "b", "c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitEvidenceQuoteParts(tt.quote)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitEvidenceQuoteParts(%q) = %v, want %v", tt.quote, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("part %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestCheckEvidenceProvenance_ChecksEveryHypothesis proves a fabricated quote
 // on a REJECTED hypothesis is caught too, not just the primary — a fabricated
 // quote backing a rejected hypothesis is just as much a trust problem as one

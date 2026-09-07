@@ -3493,6 +3493,23 @@ func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfi
 // protocol doesn't have hypotheses name which tool a quote came from, and
 // requiring that would be a separate, bigger protocol change.
 //
+// A quote is first split into its individually-quoted spans
+// (splitEvidenceQuoteParts); a compound one — a model citing two separate
+// facts as `"fact one" and "fact two"` produces exactly one Evidence string
+// containing both — has each span verified on its own, never as one joined
+// whole. Checking the whole joined string first (tried and reverted) turns
+// out to be unsafe, not just less precise: the numeric-reformatting fallback
+// in evidenceQuoteVerified compares values only, so a real number in one
+// span would silently wave through arbitrary fabricated prose glued next to
+// it in another span. Splitting first, and reporting exactly which span
+// didn't verify, closes that gap and avoids indicting a real span just
+// because it happened to share an Evidence field with a fabricated one
+// (found live 2026-09-07: db-replica-disconnected's own slot data, correctly
+// quoted, got flagged alongside an unrelated paraphrase). Still fully
+// deterministic, no fuzzy matching: splitting only recognizes the literal
+// `"..." and/,"..."` shape a compound citation actually has after
+// parseDiagnosticReport strips just the outermost quote pair.
+//
 // Deliberately does NOT verify that the conclusion drawn from a verified-real
 // quote is correct — only that the quote itself traces back to something real.
 // See OBJECTIVE_EVIDENCE.md §8 for why this project rejects fuzzy/LLM-judged
@@ -3518,11 +3535,50 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 		}
 	}
 	for _, q := range quotes {
-		if !evidenceQuoteVerified(q, outputs) {
-			unverified = append(unverified, q)
+		parts := splitEvidenceQuoteParts(q)
+		if len(parts) < 2 {
+			// Common case: one genuine verbatim span, checked as a whole
+			// (substring match, numeric-reformatting fallback).
+			if !evidenceQuoteVerified(q, outputs) {
+				unverified = append(unverified, q)
+			}
+			continue
+		}
+		// Compound quote: verify each span on its own. Deliberately does NOT
+		// also try the whole joined string first — the numeric fallback
+		// compares values only, ignoring surrounding prose, so a real number
+		// in one span would otherwise wave through arbitrary fabricated
+		// prose in another span glued next to it.
+		for _, p := range parts {
+			if p != "" && !evidenceQuoteVerified(p, outputs) {
+				unverified = append(unverified, p)
+			}
 		}
 	}
 	return unverified
+}
+
+// evidenceQuoteJoinerRe matches the literal `"..."` gap left inside an
+// EVIDENCE value when a model glues two separately-quoted facts together
+// with "and" or "," instead of citing one single verbatim span, e.g.
+// `"...lag_bytes | 28610712" and "No active connections found."` —
+// parseDiagnosticReport only strips the outermost quote pair off the raw
+// EVIDENCE: "..." line, so this inner `" and "` / `", "` gap survives intact
+// into DiagnosticHypothesis.Evidence and is the only reliable, syntactic (not
+// fuzzy) signal that a quote is actually a compound of two or more
+// separately-sourced spans.
+var evidenceQuoteJoinerRe = regexp.MustCompile(`"\s*(?:and|,)\s*"`)
+
+// splitEvidenceQuoteParts splits a possibly-compound EVIDENCE quote into its
+// individually-quoted spans (see evidenceQuoteJoinerRe), trimming whitespace
+// off each. Returns a single-element slice unchanged when no joiner is
+// present — the common case of one genuine verbatim span.
+func splitEvidenceQuoteParts(quote string) []string {
+	parts := evidenceQuoteJoinerRe.Split(quote, -1)
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }
 
 // appendEvidenceProvenance accumulates unverified evidence quotes into extra
