@@ -91,11 +91,26 @@ type EvalResult struct {
 	// gate_reason/evidence_warnings; confirmed ones are visibility-only.
 	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
 	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
+	// EvidenceCoverageGap is true when the fault's catalog entry declares an
+	// expected_diagnosis.objective_evidence_signal but that signal is absent
+	// from ObjectiveEvidenceSignals entirely — the agent's tool calls never
+	// reached the code path that would produce this evidence at all. Distinct
+	// from EvidenceRequiredButUnconfirmed below: this is a coverage problem
+	// (the tool never fired, or the playbook never told the agent to call it)
+	// rather than a confirmation problem (the tool fired and the agent still
+	// didn't engage with the real value). Separated on real feedback: both
+	// correctly fail Passed, but they call for different fixes — tooling/
+	// prompt coverage vs. confirmation/quoting logic — and collapsing them
+	// into one flag hid which team owns a given red run. Gates Passed to
+	// false when true, same as EvidenceRequiredButUnconfirmed.
+	EvidenceCoverageGap bool `json:"evidence_coverage_gap,omitempty"`
 	// EvidenceRequiredButUnconfirmed is true when the fault's catalog entry
-	// declares an expected_diagnosis.objective_evidence_signal but that signal
-	// is absent from ObjectiveEvidenceConfirmed for this run — i.e. the model's
-	// own hypothesis text never demonstrably cited the real tool data behind
-	// the diagnosis it's being scored on. Gates Passed to false when true,
+	// declares an expected_diagnosis.objective_evidence_signal, that signal
+	// DID fire (present in ObjectiveEvidenceSignals — see EvidenceCoverageGap
+	// above for the case where it never fired at all), but it's still absent
+	// from ObjectiveEvidenceConfirmed for this run — i.e. the model's own
+	// hypothesis text never demonstrably cited the real tool data behind the
+	// diagnosis it's being scored on. Gates Passed to false when true,
 	// alongside KeywordPass/OrderingPass — closes the gap where keyword and
 	// category text-matching alone could reward a vague hedge ("might be
 	// stalled") that never actually engaged with an empty or unexamined
@@ -163,19 +178,22 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the five
+// hasCleanWarning returns true when this run tripped any of the seven
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
 // saw but didn't act on, an outright protocol violation (omitted the
 // required TRANSITION_TO/ESCALATE_TO signal entirely), target-scope drift
-// (the agent queried a server other than the one it was asked about), or a
+// (the agent queried a server other than the one it was asked about), a
 // fabrication mismatch (the agent narrated calling a tool that never
-// actually executed). Used to compute the CLEAN stability axis —
-// deliberately excludes low_confidence/confidence_warning, which are
+// actually executed), a catalog-declared evidence signal that never fired at
+// all (EvidenceCoverageGap), or one that fired but was never confirmed
+// (EvidenceRequiredButUnconfirmed). Used to compute the CLEAN stability
+// axis — deliberately excludes low_confidence/confidence_warning, which are
 // self-reported and already substantially captured by the existing
 // evaluation-stability axis (judge/confidence variance).
 func hasCleanWarning(er EvalResult) bool {
-	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch ||
+		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed
 }
 
 // Tool-evidence text matching uses faultlib.ToolPatterns directly (item 7

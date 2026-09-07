@@ -568,12 +568,23 @@ func cmdRun(args []string) {
 				// When the fault declares an expected deterministic signal, a pass
 				// requires it to be confirmed — not just keyword/category text
 				// matching, which a vague hedge can satisfy without the model ever
-				// demonstrably engaging with real tool data (see
-				// EvidenceRequiredButUnconfirmed's doc comment for the full story).
-				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed) {
-					evalResult.EvidenceRequiredButUnconfirmed = true
-					evalResult.Passed = false
-					fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score\n", sig)
+				// demonstrably engaging with real tool data. Split into two distinct
+				// failure buckets (see EvidenceCoverageGap/EvidenceRequiredButUnconfirmed's
+				// doc comments for the full story) rather than one flat flag: whether
+				// the signal never fired at all (a coverage gap — tooling/prompt issue)
+				// or fired but was never confirmed (a confirmation/quoting issue) points
+				// at a different team/fix, and collapsing them hid which one applied.
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					switch {
+					case !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceSignals):
+						evalResult.EvidenceCoverageGap = true
+						evalResult.Passed = false
+						fmt.Printf("  ⚠  EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score\n", sig)
+					case !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed):
+						evalResult.EvidenceRequiredButUnconfirmed = true
+						evalResult.Passed = false
+						fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score\n", sig)
+					}
 				}
 				// Fabrication risk: the agent narrated calling a tool that never
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).

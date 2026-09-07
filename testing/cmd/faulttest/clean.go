@@ -64,6 +64,18 @@ func warningTypesFor(er EvalResult) []string {
 		// unbounded number of distinct WarningDistribution buckets.
 		types = append(types, "mismatch")
 	}
+	// Kept as their own buckets, distinct from the objective_evidence:<signal>
+	// bucket above — that one tracks the production force-gate signal firing
+	// at all (confirmed or not); these two track the fault catalog's own
+	// declared-signal check specifically, and further split *why* it failed
+	// (coverage vs. confirmation), which the catalog gate's single bool used
+	// to collapse. See EvidenceCoverageGap/EvidenceRequiredButUnconfirmed.
+	if er.EvidenceCoverageGap {
+		types = append(types, "evidence_coverage_gap")
+	}
+	if er.EvidenceRequiredButUnconfirmed {
+		types = append(types, "evidence_unconfirmed")
+	}
 	return types
 }
 

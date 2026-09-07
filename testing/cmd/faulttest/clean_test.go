@@ -142,6 +142,13 @@ func TestWarningTypesFor(t *testing.T) {
 		{"gate fired but signals empty — falls back to flat bucket", EvalResult{ObjectiveEvidenceGate: true}, []string{"objective_evidence"}},
 		{"mismatch", EvalResult{Mismatch: true}, []string{"mismatch"}},
 		{"all five types on one run", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, TargetDrift: true, Mismatch: true}, []string{"objective_evidence", "protocol_violation", "target_drift", "mismatch"}},
+		{"catalog evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, []string{"evidence_coverage_gap"}},
+		{"catalog evidence unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, []string{"evidence_unconfirmed"}},
+		{
+			"coverage gap and unconfirmed are distinct buckets, not the same one",
+			EvalResult{EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true},
+			[]string{"evidence_coverage_gap", "evidence_unconfirmed"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -220,6 +227,42 @@ func TestBuildCleanReport_ConfirmedAndUnconfirmed_Independent(t *testing.T) {
 	}
 }
 
+// TestBuildCleanReport_CoverageGapVsUnconfirmed_SideBySide verifies the two
+// evidence-veto failure buckets James asked to see separated — "did the
+// signal never fire at all" vs. "it fired but was never confirmed" — show up
+// as distinct, independently-counted lines in the printed --repeat N report,
+// not collapsed into one flat "evidence" bucket a reader would have to go
+// dig through raw JSON to tell apart.
+func TestBuildCleanReport_CoverageGapVsUnconfirmed_SideBySide(t *testing.T) {
+	f := Failure{ID: "db-replica-disconnected", Name: "Replica disconnected"}
+	results := []EvalResult{
+		{Passed: false, EvidenceCoverageGap: true},
+		{Passed: false, EvidenceCoverageGap: true},
+		{Passed: false, EvidenceRequiredButUnconfirmed: true},
+		{Passed: true},
+		{Passed: true},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 3 {
+		t.Errorf("WarningCount: got %d, want 3 (2 coverage gaps + 1 unconfirmed)", r.WarningCount)
+	}
+	if r.WarningDistribution["evidence_coverage_gap"] != 2 {
+		t.Errorf("WarningDistribution[evidence_coverage_gap]: got %d, want 2", r.WarningDistribution["evidence_coverage_gap"])
+	}
+	if r.WarningDistribution["evidence_unconfirmed"] != 1 {
+		t.Errorf("WarningDistribution[evidence_unconfirmed]: got %d, want 1", r.WarningDistribution["evidence_unconfirmed"])
+	}
+
+	out := captureStdout(func() { r.Print() })
+	if !strings.Contains(out, "evidence_coverage_gap=2(varies)") {
+		t.Errorf("expected the coverage-gap count as its own line:\n%s", out)
+	}
+	if !strings.Contains(out, "evidence_unconfirmed=1(varies)") {
+		t.Errorf("expected the unconfirmed count as its own, separate line:\n%s", out)
+	}
+}
+
 func TestWarningDistributionString(t *testing.T) {
 	cases := []struct {
 		name string
@@ -259,7 +302,9 @@ func TestHasCleanWarning(t *testing.T) {
 		{"objective evidence gate", EvalResult{ObjectiveEvidenceGate: true}, true},
 		{"target drift", EvalResult{TargetDrift: true}, true},
 		{"mismatch", EvalResult{Mismatch: true}, true},
-		{"all five", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true, Mismatch: true}, true},
+		{"evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, true},
+		{"evidence required but unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, true},
+		{"all seven", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true, Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
