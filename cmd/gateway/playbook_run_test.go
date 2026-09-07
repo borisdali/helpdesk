@@ -2191,6 +2191,7 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 		{"and-joined", `fact one" and "fact two`, []string{"fact one", "fact two"}},
 		{"comma-joined", `fact one", "fact two`, []string{"fact one", "fact two"}},
 		{"three-way and-joined", `a" and "b" and "c`, []string{"a", "b", "c"}},
+		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "fact two"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

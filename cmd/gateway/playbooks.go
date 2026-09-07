@@ -3567,7 +3567,7 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 // into DiagnosticHypothesis.Evidence and is the only reliable, syntactic (not
 // fuzzy) signal that a quote is actually a compound of two or more
 // separately-sourced spans.
-var evidenceQuoteJoinerRe = regexp.MustCompile(`"\s*(?:and|,)\s*"`)
+var evidenceQuoteJoinerRe = regexp.MustCompile(`(?i)"\s*(?:and|,)\s*"`)
 
 // splitEvidenceQuoteParts splits a possibly-compound EVIDENCE quote into its
 // individually-quoted spans (see evidenceQuoteJoinerRe), trimming whitespace
