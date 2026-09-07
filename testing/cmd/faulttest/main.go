@@ -575,12 +575,13 @@ func cmdRun(args []string) {
 				// or fired but was never confirmed (a confirmation/quoting issue) points
 				// at a different team/fix, and collapsing them hid which one applied.
 				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := classifyEvidenceGate(sig, evalResult.ObjectiveEvidenceSignals, evalResult.ObjectiveEvidenceConfirmed)
 					switch {
-					case !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceSignals):
+					case coverageGap:
 						evalResult.EvidenceCoverageGap = true
 						evalResult.Passed = false
 						fmt.Printf("  ⚠  EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score\n", sig)
-					case !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed):
+					case unconfirmed:
 						evalResult.EvidenceRequiredButUnconfirmed = true
 						evalResult.Passed = false
 						fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score\n", sig)

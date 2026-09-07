@@ -322,11 +322,12 @@ func TestFaultInjection(t *testing.T) {
 			// comment (testing/faultlib/evaluator.go) for the full story.
 			if cfg.ViaGateway {
 				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := faultlib.ClassifyEvidenceGate(sig, resp.ObjectiveEvidenceSignals, resp.ObjectiveEvidenceConfirmed)
 					switch {
-					case !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceSignals):
+					case coverageGap:
 						result.Passed = false
 						t.Logf("EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score", sig)
-					case !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed):
+					case unconfirmed:
 						result.Passed = false
 						t.Logf("EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score", sig)
 					}
@@ -613,11 +614,12 @@ func TestExternalModeInjection(t *testing.T) {
 			// file) for the full explanation.
 			if cfg.ViaGateway {
 				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := faultlib.ClassifyEvidenceGate(sig, resp.ObjectiveEvidenceSignals, resp.ObjectiveEvidenceConfirmed)
 					switch {
-					case !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceSignals):
+					case coverageGap:
 						result.Passed = false
 						t.Logf("EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score", sig)
-					case !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed):
+					case unconfirmed:
 						result.Passed = false
 						t.Logf("EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score", sig)
 					}
