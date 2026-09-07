@@ -4908,8 +4908,8 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			fmt.Println("           ⚠ unverified evidence — an EVIDENCE quote didn't match any real tool output")
 		}
 	}
-	// printObjectiveEvidence surfaces Layer 3 (docs/AIGOVERNANCE.md §1.1) inline,
-	// same reasoning as printFlags above for Layers 1-2: a reader shouldn't have
+	// printObjectiveEvidence surfaces Layer 4 (docs/AIGOVERNANCE.md §1.1) inline,
+	// same reasoning as printFlags above for Layers 1-3: a reader shouldn't have
 	// to separately know to look for this. Unconfirmed is the one worth a
 	// warning glyph — real, code-derived tool evidence this chapter's own
 	// response never demonstrably engaged with. Confirmed is reported plainly,

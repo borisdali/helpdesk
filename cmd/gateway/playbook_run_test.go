@@ -1955,6 +1955,115 @@ func TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops(t *testing.T) {
 	}
 }
 
+// TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted mirrors
+// TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted exactly, for the new
+// content-provenance signal (v0.28.0, fabrication-detection Layer 3) — proves
+// the actual call site in handlePlaybookRunAsAgent is wired correctly (right
+// arguments passed to checkEvidenceProvenance, the resulting event actually
+// persisted, the resulting extra field actually reaches the HTTP response),
+// not just that checkEvidenceProvenance itself behaves correctly in isolation.
+func TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted(t *testing.T) {
+	text := `HYPOTHESIS_1: Replica disconnected due to primary rejection | CONFIDENCE: 0.95 | EVIDENCE: "lag_bytes | 999999999"
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Replica disconnected; primary rejecting reconnection attempts.
+ACTION_TAKEN: none — escalation recommended
+ESCALATE_TO: none`
+	agentSrv, card := mockA2AServerWithText(t, agentNameDB, text)
+	_ = agentSrv
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// Auditd serves a real tool_execution event whose Result does NOT contain
+	// the quoted evidence value — the quote is fabricated, not sourced from
+	// this hop's real tool output.
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("event_type") == "tool_execution" {
+			json.NewEncoder(w).Encode([]audit.Event{ //nolint:errcheck
+				{
+					EventType: audit.EventTypeToolExecution,
+					Tool: &audit.ToolExecution{
+						Name:   "get_replication_status",
+						Result: "slot_name | replica_slot\nactive | f\nlag_bytes | 28633584",
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]audit.Event{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_unvevid01",
+		SeriesID:      "pbs_replication_lag",
+		Name:          "Replication Lag Triage",
+		Guidance:      "Step 1: run get_replication_status.",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	req := PlaybookRunRequest{ConnectionString: "host=localhost port=15432 dbname=testdb", Context: "replica seems disconnected"}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/playbooks/pb_unvevid01/run", nil)
+	w := httptest.NewRecorder()
+
+	gw.handlePlaybookRunAsAgent(w, r, pb, req, "plr_unvevid01", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var evidenceEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification &&
+			e.DelegationVerification != nil && len(e.DelegationVerification.UnverifiedEvidence) > 0 {
+			evidenceEvent = e
+			break
+		}
+	}
+	if evidenceEvent == nil {
+		t.Fatalf("no delegation_verification event with UnverifiedEvidence populated was recorded; got %d total events", len(events))
+	}
+	if evidenceEvent.TraceID == "" {
+		t.Error("TraceID is empty — event will not attach to the run's journey")
+	}
+	if !strings.HasPrefix(evidenceEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", evidenceEvent.EventID)
+	}
+	if evidenceEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch = true, want false: this event records an unverified quote, not a fabricated tool call")
+	}
+	want := []string{`lag_bytes | 999999999`}
+	if len(evidenceEvent.DelegationVerification.UnverifiedEvidence) != 1 || evidenceEvent.DelegationVerification.UnverifiedEvidence[0] != want[0] {
+		t.Errorf("UnverifiedEvidence = %v, want %v", evidenceEvent.DelegationVerification.UnverifiedEvidence, want)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, w.Body.String())
+	}
+	respEvidence, ok := resp["unverified_evidence"].([]any)
+	if !ok || len(respEvidence) != 1 {
+		t.Fatalf("response unverified_evidence = %v, want 1 entry", resp["unverified_evidence"])
+	}
+	if respEvidence[0] != want[0] {
+		t.Errorf("response unverified_evidence[0] = %v, want %q", respEvidence[0], want[0])
+	}
+}
+
 // ── checkEvidenceProvenance / evidenceQuoteVerified ────────────────────────
 
 func TestCheckEvidenceProvenance_NoAuditURL(t *testing.T) {

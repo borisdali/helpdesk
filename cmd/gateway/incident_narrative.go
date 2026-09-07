@@ -76,7 +76,7 @@ type TriageChapter struct {
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed mirror the response-level
 	// objective_evidence_confirmed/unconfirmed fields (see
-	// objectiveEvidenceSignals, playbooks.go) — Layer 3 of
+	// objectiveEvidenceSignals, playbooks.go) — Layer 4 of
 	// docs/AIGOVERNANCE.md's fabrication detection, computed fresh from the
 	// persisted objective_evidence audit events and this chapter's own
 	// transcript rather than stored at run time, same as the three flags

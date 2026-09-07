@@ -201,8 +201,9 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 			"tr_flag01": {{
 				Timestamp: run.StartedAt.Add(time.Second),
 				DelegationVerification: &audit.DelegationVerification{
-					Mismatch:          true,
-					ProtocolViolation: true,
+					Mismatch:           true,
+					ProtocolViolation:  true,
+					UnverifiedEvidence: []string{"lag_bytes | 999999999"},
 				},
 			}},
 		},
@@ -231,12 +232,15 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	if !n.Triage.HasProtocolViolation {
 		t.Error("Triage.HasProtocolViolation = false, want true — should surface inline without a separate Journey lookup")
 	}
+	if !n.Triage.HasUnverifiedEvidence {
+		t.Error("Triage.HasUnverifiedEvidence = false, want true — should surface inline without a separate Journey lookup")
+	}
 }
 
 // TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter verifies that real
 // objective_evidence events, cross-checked against the run's own stored
 // response, surface as ObjectiveEvidenceConfirmed/Unconfirmed inline on the
-// Triage chapter — the Layer 3 (docs/AIGOVERNANCE.md §1.1) counterpart to
+// Triage chapter — the Layer 4 (docs/AIGOVERNANCE.md §1.1) counterpart to
 // HasMismatch/HasTargetDrift above, proven through the real handler, not just
 // hopObjectiveEvidence in isolation.
 func TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter(t *testing.T) {
