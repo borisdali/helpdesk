@@ -238,6 +238,7 @@ response — this is the authoritative record of what the sub-agent actually did
 | `mismatch` | `true` when either (a) the delegation was `write`/`destructive` but no tool of that class or stronger is in the trail, or (b) — regardless of `action_class`, including `read` — the model's own reasoning named a tool it never actually invoked (see `narrated_not_confirmed`) and no policy denial explains the absence |
 | `narrated_not_confirmed` | Tool names the model's own reasoning (`agent_reasoning` events' `tool_calls`) claimed to invoke, with no matching `tool_execution` event anywhere in the trace. Empty when `mismatch` is the write/destructive-absence kind instead. See [MUTATION_TOOLS.md §5.7](MUTATION_TOOLS.md#57-narrated-but-unconfirmed-tool-calls-read-action-coverage) |
 | `target_drift` | Connection strings a tool call in this hop actually used that differ from the run's intended target. Independent of `mismatch` — a real, confirmed tool call can still target the wrong server. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) |
+| `unverified_evidence` | Hypothesis `EVIDENCE` quotes (v0.28.0) that didn't match, after normalization, any real `tool_execution` output recorded for this hop. Independent of `mismatch` — the tool call itself can be real and correctly confirmed while the quote is fabricated. Content-provenance, fabrication-detection Layer 3. See [MUTATION_TOOLS.md §5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance) |
 
 When `mismatch=true`, these signals fire simultaneously:
 - The journey `outcome` is elevated to `unverified_claim`
@@ -252,6 +253,16 @@ When `target_drift` is non-empty (independent of `mismatch`), the journey `outco
 this output as-is," for different reasons) and `has_target_drift: true` appears on the journey and
 the owning incident-narrative chapter, same channels as above minus the auditor alert (target drift
 is not a fabrication signal, so it doesn't feed `checkFabricationMismatch`).
+
+When `unverified_evidence` is non-empty (independent of `mismatch`/`target_drift`), the journey
+`outcome` is instead `unverified_evidence` — its own outcome string, tied at the same priority as
+the other three, deliberately not folded into `unverified_claim`, which is already
+Mismatch-specific — and `has_unverified_evidence: true` appears on the journey and the owning
+incident-narrative chapter (`vault incidents` prints an inline `⚠ unverified evidence` line). Same
+channels as `target_drift`: no Prometheus counter, no auditor CRITICAL alert — this is a broader,
+general-purpose text check with more false-positive surface than the write/destructive-absence
+check that feeds those, so it's kept off that path the same way `narrated_tool_not_confirmed` is
+(§ above), for the same reason.
 
 The orchestrator prompt instructs the LLM to report mismatches to the user and
 **not** claim success.

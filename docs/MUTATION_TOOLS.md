@@ -42,6 +42,7 @@ databases or your infra.
    - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
    - [Fabrication-Risk Visibility (5.9)](#59-fabrication-risk-visibility-checkfabricationrisk)
    - [Corroborated Decline (5.10)](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
+   - [Content-Provenance Verification (5.11)](#511-content-provenance-verification-checkevidenceprovenance)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -1316,6 +1317,128 @@ process via the exact `event_type=policy_decision&trace_id=X` shape
 `hasActionClassDenial` depends on — the only existing coverage for
 `policy_decision` events against a real backend validated single-event-by-ID
 lookup, never this query shape).
+
+---
+
+### 5.11 Content-Provenance Verification (`checkEvidenceProvenance`)
+
+Every check above verifies that a claimed *action* really happened — a
+mutation took effect (§4), a delegated tool call actually appears in the
+audit trail (§5.2–§5.10). None of them says anything about a claim of a
+different shape: a diagnosis's `EVIDENCE` quote (the verbatim short quote the
+protocol requires each `HYPOTHESIS_N:` line to cite) could be entirely
+invented — referencing a value no tool in that hop ever actually returned —
+while the tool call itself is perfectly real and correctly confirmed by
+§5.2's own check. A hop can pass every check in this document and still have
+fabricated the one thing an operator is most likely to actually read.
+
+This shipped as fabrication-detection **Layer 3** (v0.28.0) — see
+[AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#layer-3--content-provenance-verification)
+for where it sits relative to the other three layers. The closest sibling
+here is §5.9's fabrication-risk check: both verify a self-report against the
+real audit trail rather than trusting the model's own account, just applied
+to a claimed *action* (§5.9) versus a quoted *fact* (this section).
+
+**The check**: `checkEvidenceProvenance` (`cmd/gateway/playbooks.go`) takes
+the hop's parsed `DiagnosticReport` and, for every hypothesis with a
+non-empty `Evidence` field, fetches this hop's real `tool_execution` events
+via the already-existing `audit.FetchToolExecutionEvents` — the same
+primitive §5.6's `checkTargetScope` uses, no new fetch mechanism needed —
+and checks whether the quote traces back to something real in their recorded
+`Result` output.
+
+Checks *every* hypothesis with an Evidence field, not just the primary — a
+fabricated quote backing a rejected hypothesis is just as much a trust
+problem as one backing the root cause. Matches against any `tool_execution`
+event in the hop's window, not a specifically-named one: the diagnosis
+protocol doesn't have hypotheses name which tool a quote came from, and
+requiring that would be a separate, larger protocol change, not done here.
+
+**Matching is deterministic, same discipline as every other check in this
+document — no fuzzy or LLM-judged provenance.** `evidenceQuoteVerified`
+tries, in order: (1) a normalized substring match (lowercased, whitespace
+collapsed) against any tool output; (2) failing that, a numeric-aware
+fallback — extract every numeric token from both the quote and a candidate
+output, strip thousands-separator commas, and require *all* of the quote's
+numbers to appear among that output's numbers. The fallback exists because
+real evidence quotes in this codebase are frequently raw numeric tool output
+(byte counts, timeouts, row counts) that a model can legitimately reformat
+for readability (`28633584` quoted as `"28,633,584"`) without fabricating
+anything — deliberately no unit conversion (MB vs. bytes) and no tolerance
+window, since either would introduce exactly the kind of judgment call this
+project rejects for governance-relevant checks (see
+[OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+for the fuller argument, made originally against fuzzy-matching a different
+check).
+
+```go
+if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverified) > 0 {
+    appendEvidenceProvenance(extra, unverified)
+    // ... persist as a delegation_verification event, same pattern as §5.6's drift event
+}
+```
+
+Called for both the primary hop and every auto-chained hop — deliberately
+broader than §5.6's `checkTargetScope`, which only ever runs on the primary
+hop (a separate, narrower, pre-existing scope decision, not touched here).
+Content-provenance is architecturally closer to §5.9's fabrication check,
+which already covers every hop, so it follows that scope instead.
+
+```json
+{
+  "unverified_evidence": ["lag_bytes | 999999999"]
+}
+```
+
+**Deliberately narrower than it might sound.** This verifies a quote is
+*real*, not that the *conclusion* drawn from it is correct — a 100%-genuine,
+verbatim quote can still fail to support the hypothesis built on it, which
+is a reasoning-validity question and explicitly out of scope, same boundary
+[Layer 4](AIGOVERNANCE.md#layer-4--objective-evidence-content-verification)
+states for itself. **Warn-only by design, not a hard gate**: unlike Layer 4's
+narrow, type-safe field checks, this is a broad, general-purpose text check
+with a real (if bounded) false-positive surface that Layer 4's exact-value
+matching doesn't share.
+
+**Now feeds the CLEAN cert** (`hasCleanWarning`/`warningTypesFor` in
+faulttest), the eighth signal — a flat `unverified_evidence` bucket (not
+quote-keyed, same reasoning as `mismatch`'s flat bucket in §5.9: an arbitrary
+set of quote strings would produce an unbounded number of distinct
+`WarningDistribution` buckets). Tied at the same Journey-outcome priority (9,
+`unverified_evidence`) as `unverified_claim`/`target_drift_detected`/
+`protocol_violation` — a new, distinct outcome string, deliberately *not*
+folded into `unverified_claim`, which is already Mismatch-specific; reusing
+it would have blurred two different mechanisms behind one label. See
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+
+**Test coverage**: `cmd/gateway/playbook_run_test.go` —
+`TestCheckEvidenceProvenance_NoAuditURL`, `_NilReport`, `_NoHypotheses`,
+`_QuoteVerified`, `_QuoteFabricated`, `_ChecksEveryHypothesis`,
+`_NumericReformatting`, `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
+`_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
+`TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
+`TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end
+through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`).
+`cmd/gateway/incident_narrative_test.go` — `hopVerificationFlags`'s new 4th
+return value covered by two new cases, plus
+`TestHandleGetIncident_VerificationFlags_SurfaceOnChapter` extended.
+`internal/audit/store_test.go` — `TestQueryJourneys_HasUnverifiedEvidence`
+(real SQLite store, full `store.Record`+`store.QueryJourneys` round trip),
+`TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied` extended to
+four signals.
+`testing/integration/governance/gateway_incident_test.go` —
+`TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters` extended
+with a real cross-hop-attribution case (real spawned auditd + gateway
+binaries) — the same test that exists because a prior cross-hop leak bug was
+found live, now also proving `unverified_evidence` on one hop doesn't leak
+onto another sharing the same trace_id.
+`testing/e2e/playbooks_test.go` — the live-LLM shape-only check extended
+with a 4th field.
+`testing/faultlib/runner_test.go` — `TestRunViaPlaybook_UnverifiedEvidencePopulated`
+(decode-wiring, same class of gap `TestRunViaPlaybook_MismatchPopulated`
+exists to catch).
+`testing/cmd/faulttest/clean_test.go` — `TestWarningTypesFor`,
+`TestHasCleanWarning` extended with an `UnverifiedEvidence` case.
 
 ---
 
