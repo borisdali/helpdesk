@@ -117,9 +117,12 @@ tool's own typed result (see [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md)).
 │  │  Layer 1: intra-agent post-mutation re-verification (did it stick?) │  │
 │  │  Layer 2: inter-agent audit-based delegation verification           │  │
 │  │           (did the sub-agent actually call the tool?)               │  │
-│  │  Layer 3: objective-evidence content verification                   │  │
+│  │  Layer 3: content-provenance verification                           │  │
+│  │           (does a claimed EVIDENCE quote trace back to real output?)│  │
+│  │  Layer 4: objective-evidence content verification                   │  │
 │  │           (does the model's claim match the tool's real result?)    │  │
-│  │  Outcome: unverified_claim journey flag + queryable audit events    │  │
+│  │  Outcome: unverified_claim/unverified_evidence journey flag +       │  │
+│  │           queryable audit events                                    │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
 │                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘
@@ -134,7 +137,7 @@ the connection" message entirely from pattern memory, without ever invoking
 (blast radius, approval checks, policy engine, Level 2 verification) are
 reachable — they simply never run.
 
-aiHelpDesk addresses this through two independent detection layers:
+aiHelpDesk addresses this through four independent detection layers:
 
 ### Layer 1 — Intra-agent post-mutation verification
 
@@ -235,15 +238,55 @@ See [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-d
 for the full investigation guide, example webhook payload and Prometheus query
 patterns.
 
-### Layer 3 — Objective-evidence content verification
+### Layer 3 — Content-provenance verification
 
-Layers 1 and 2 both verify that a claimed *action* really happened (a mutation took
-effect; a delegated tool call actually appears in the audit trail). Neither checks
-whether the *content* of what a model reports about a read-only tool's result is
-accurate — a model can genuinely call `get_replication_status`, then still misdescribe
-what it returned.
+Layer 2 verifies that a claimed *action* — a delegated tool call — really happened.
+It says nothing about a claim of a different shape: a diagnosis's `EVIDENCE` quote (the
+verbatim short quote the protocol requires each `HYPOTHESIS_N:` line to cite) could be
+entirely invented, referencing a value that was never actually returned by any tool in
+that hop, and Layer 2 has no opinion on it — the tool call itself may be perfectly real.
 
-Layer 3 closes that gap for a deliberately narrow, growing set of tools: a small,
+Layer 3 closes that gap the same way Layer 2 closes its own: check the model's
+self-report against the real audit trail, not against another model's judgment. For
+every hypothesis with a non-empty `Evidence` field, `checkEvidenceProvenance`
+(`cmd/gateway/playbooks.go`) fetches this hop's real `tool_execution` events and checks
+whether the quote appears, after conservative normalization, in any of their recorded
+output — or, failing that, whether every numeric value named in the quote appears among
+the real numeric values in some single output (closes the common case of a real number
+legitimately reformatted for readability — `28633584` quoted as `"28,633,584"` — without
+weakening the check to fuzzy or LLM-judged matching, which this project rejects for
+every governance-relevant check; see [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+for the fuller argument against fuzzy matching in this role).
+
+Checks *every* hypothesis with an Evidence field, not just the primary — a fabricated
+quote backing a rejected hypothesis is just as much a trust problem as one backing the
+root cause. Matches against any tool_execution event in the hop's window, not a
+specifically-named one, since the diagnosis protocol doesn't have hypotheses name which
+tool a quote came from.
+
+**Deliberately narrower than it might sound**: this verifies a quote is *real*, not
+that the *conclusion* drawn from it is correct. A 100%-genuine, verbatim quote can still
+fail to support the hypothesis built on it — that's a reasoning-validity question, out
+of scope here by design, same as [Layer 4](#layer-4--objective-evidence-content-verification)'s
+own stated boundary below. Warn-only, not a hard gate: unlike Layer 4's narrow,
+type-safe field checks, this is a broad, general-purpose text check with a real
+(if bounded) false-positive surface — legitimate formatting differences the numeric
+fallback doesn't happen to catch.
+
+Surfaced as `has_unverified_evidence`/`outcome: unverified_evidence` everywhere
+`has_mismatch`/`unverified_claim` do above, including inline on the incident narrative
+(`⚠ unverified evidence`) — same event type (`delegation_verification`), a new field
+(`UnverifiedEvidence`) alongside `Mismatch`/`TargetDrift`/`ProtocolViolation`.
+
+### Layer 4 — Objective-evidence content verification
+
+Layers 1–3 all verify that something claimed — an action, a delegation, or a quoted
+fact — really happened or really came from somewhere real. None of them checks whether
+the *content* of what a model reports about a read-only tool's result is *accurate* for
+a specific, known-important field — a model can genuinely call `get_replication_status`,
+quote something real from its output, and still misdescribe what actually matters in it.
+
+Layer 4 closes that gap for a deliberately narrow, growing set of tools: a small,
 type-safe probe reads a specific field directly off the tool's typed result (a pod's
 real restart count, a replication slot's real `active` flag), independent of anything
 the model says. If the probe's threshold fires, the gateway then checks whether the
@@ -253,7 +296,7 @@ checkable contradiction (evidence exists, the model's response never demonstrabl
 accounted for it) forces a human-reviewed gate; evidence the model correctly cited is
 corroboration, not a red flag.
 
-Unlike Layers 1–2, this is agent-and-tool-scoped by design, not universal: today it
+Unlike Layers 1–3, this is agent-and-tool-scoped by design, not universal: today it
 covers 6 signals on the K8s agent (`get_pods`, `get_events`) and 3 on the database agent
 (`get_active_connections`, `get_replication_status`). Extending coverage is a rule
 addition per tool (often pure YAML, no code change) — see
@@ -267,11 +310,11 @@ line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 
 **Coverage:**
 
-| Session path | Layer 1 | Layer 2 | Layer 3 |
-|---|---|---|---|
-| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify | ✅ scoped to instrumented tools |
-| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) | ✅ scoped to instrumented tools |
-| Read-only tool output content | — | — | ✅ for the ~9 signals with a declarative rule; unscoped tools still uncovered |
+| Session path | Layer 1 | Layer 2 | Layer 3 | Layer 4 |
+|---|---|---|---|---|
+| Orchestrator → `delegate_to_agent` → sub-agent | ✅ intra-agent verify | ✅ audit-based delegation verify | ✅ any hypothesis with an Evidence quote | ✅ scoped to instrumented tools |
+| Direct call via Gateway → sub-agent | ✅ intra-agent verify | ✅ `client.VerifyTrace` (see below) | ✅ any hypothesis with an Evidence quote | ✅ scoped to instrumented tools |
+| Read-only tool output content | — | — | ✅ universal, no registration needed | ✅ for the ~9 signals with a declarative rule; unscoped tools still uncovered |
 
 **`client.VerifyTrace` — Layer 2 at the Gateway boundary:**
 
@@ -302,7 +345,7 @@ For full implementation details, unit test coverage and the investigation
 workflow when a mismatch is detected, see:
 - [docs/MUTATION_TOOLS.md §4–§5](MUTATION_TOOLS.md#4-safeguards-and-automatic-recovery) — implementation details (Layers 1–2)
 - [docs/JOURNEYS.md §8](JOURNEYS.md#8-unverified-claims-and-llm-fabrication-detection) — investigation guide (Layers 1–2)
-- [docs/OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) — full mechanism, shipped rules and how to add one (Layer 3)
+- [docs/OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) — full mechanism, shipped rules and how to add one (Layer 4)
 
 ---
 
@@ -315,7 +358,7 @@ behavior of the components):
 
 | § | Component | Status | Description |
 |----|------|--------|-------------|
-| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Three-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification + objective-evidence content verification |
+| 1.1 | [LLM Fabrication Detection](#11-llm-fabrication-detection) | **Implemented** | Four-layer detection: intra-agent post-mutation re-verification + inter-agent audit-based delegation verification + content-provenance verification + objective-evidence content verification |
 | 3 | [Policy Engine](#3-policy-engine) | **Implemented** | Rule-based access control |
 | 4 | [Approval Workflows](#4-approval-workflows) | **Implemented** | Human-in-the-loop for risky ops |
 | 5 | [Guardrails](#5-guardrails) | **Implemented** | 4 guardrails: DB/K8s blast radius, transaction age, schedule; rate limits and circuit breaker planned |

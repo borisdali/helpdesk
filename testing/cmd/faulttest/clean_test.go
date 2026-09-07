@@ -144,6 +144,7 @@ func TestWarningTypesFor(t *testing.T) {
 		{"all five types on one run", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, TargetDrift: true, Mismatch: true}, []string{"objective_evidence", "protocol_violation", "target_drift", "mismatch"}},
 		{"catalog evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, []string{"evidence_coverage_gap"}},
 		{"catalog evidence unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, []string{"evidence_unconfirmed"}},
+		{"unverified evidence (content-provenance)", EvalResult{UnverifiedEvidence: true}, []string{"unverified_evidence"}},
 		{
 			"coverage gap and unconfirmed are distinct buckets, not the same one",
 			EvalResult{EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true},
@@ -304,7 +305,13 @@ func TestHasCleanWarning(t *testing.T) {
 		{"mismatch", EvalResult{Mismatch: true}, true},
 		{"evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, true},
 		{"evidence required but unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, true},
-		{"all seven", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true, Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true}, true},
+		{"unverified evidence (content-provenance)", EvalResult{UnverifiedEvidence: true}, true},
+		{
+			"all eight", EvalResult{
+				EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true,
+				Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true, UnverifiedEvidence: true,
+			}, true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

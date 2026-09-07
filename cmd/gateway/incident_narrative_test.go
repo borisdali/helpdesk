@@ -1181,10 +1181,10 @@ func TestHopVerificationFlags(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                                                 string
-		events                                               []audit.Event
-		start, end                                           time.Time
-		wantMismatch, wantTargetDrift, wantProtocolViolation bool
+		name                                                                         string
+		events                                                                       []audit.Event
+		start, end                                                                   time.Time
+		wantMismatch, wantTargetDrift, wantProtocolViolation, wantUnverifiedEvidence bool
 	}{
 		{
 			name:   "empty events",
@@ -1227,9 +1227,16 @@ func TestHopVerificationFlags(t *testing.T) {
 				{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{Mismatch: true}},
 				{Timestamp: start.Add(2 * time.Second), DelegationVerification: &audit.DelegationVerification{TargetDrift: []string{"host=x"}}},
 				{Timestamp: start.Add(3 * time.Second), DelegationVerification: &audit.DelegationVerification{ProtocolViolation: true}},
+				{Timestamp: start.Add(4 * time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"lag_bytes=28633584"}}},
 			},
 			start: start, end: end,
-			wantMismatch: true, wantTargetDrift: true, wantProtocolViolation: true,
+			wantMismatch: true, wantTargetDrift: true, wantProtocolViolation: true, wantUnverifiedEvidence: true,
+		},
+		{
+			name:   "unverified evidence signal sets HasUnverifiedEvidence independently of the other three",
+			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"fabricated quote"}}}},
+			start:  start, end: end,
+			wantUnverifiedEvidence: true,
 		},
 		{
 			name:   "event with nil DelegationVerification is skipped, not a panic",
@@ -1247,10 +1254,10 @@ func TestHopVerificationFlags(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotMismatch, gotTargetDrift, gotProtocolViolation := hopVerificationFlags(tc.events, tc.start, tc.end)
-			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation {
-				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v), want (mismatch=%v, drift=%v, violation=%v)",
-					gotMismatch, gotTargetDrift, gotProtocolViolation, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation)
+			gotMismatch, gotTargetDrift, gotProtocolViolation, gotUnverifiedEvidence := hopVerificationFlags(tc.events, tc.start, tc.end)
+			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation || gotUnverifiedEvidence != tc.wantUnverifiedEvidence {
+				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v, unverified_evidence=%v), want (mismatch=%v, drift=%v, violation=%v, unverified_evidence=%v)",
+					gotMismatch, gotTargetDrift, gotProtocolViolation, gotUnverifiedEvidence, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation, tc.wantUnverifiedEvidence)
 			}
 		})
 	}

@@ -593,6 +593,12 @@ func cmdRun(args []string) {
 					evalResult.Mismatch = true
 					fmt.Printf("  ⚠  FABRICATION RISK: mismatch (narrated tool call not confirmed)\n")
 				}
+				// Content-provenance: an EVIDENCE quote didn't match any real tool
+				// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
+				if len(resp.UnverifiedEvidence) > 0 {
+					evalResult.UnverifiedEvidence = true
+					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE: %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+				}
 
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.

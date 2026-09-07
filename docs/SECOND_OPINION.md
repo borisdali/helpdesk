@@ -55,7 +55,7 @@ after the fact, not just at gate time.
 human, a deterministic, code-derived backstop can also force the gate — not another party
 forming a judgment, but a plain comparison between a typed value read off a tool's real
 result and the value the agent's own response quoted. See
-[AIGOVERNANCE.md §1.1 Layer 3](AIGOVERNANCE.md#11-llm-fabrication-detection) and
+[AIGOVERNANCE.md §1.1 Layer 4](AIGOVERNANCE.md#11-llm-fabrication-detection) and
 [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for the full mechanism — it's deliberately
 outside this document's opinion-counting scheme, since it isn't an opinion at all.
 

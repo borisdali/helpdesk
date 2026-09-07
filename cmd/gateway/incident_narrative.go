@@ -54,18 +54,20 @@ type TriageChapter struct {
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	Transcript       string                  `json:"transcript,omitempty"`
 	// TraceID identifies this chapter's Journey — the WHAT view behind this
-	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation below.
+	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation/
+	// HasUnverifiedEvidence below.
 	TraceID string `json:"trace_id,omitempty"`
-	// HasMismatch/HasTargetDrift/HasProtocolViolation mirror the corresponding
+	// HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence mirror the corresponding
 	// Journey's flags (GET /v1/journeys?trace_id=X) — surfaced inline here so a
 	// reader doesn't have to separately look up the Journey to know this
 	// chapter's tool calls weren't fully verified. Absent (false) can mean
 	// either "verified clean" or "no Journey data exists for this trace"
 	// (fail-open by design, same ambiguity already present at the Journey
 	// layer) — not a positive attestation either way.
-	HasMismatch          bool `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	HasMismatch           bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift        bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation  bool `json:"has_protocol_violation,omitempty"`
+	HasUnverifiedEvidence bool `json:"has_unverified_evidence,omitempty"`
 	// SawSignalLine is read directly off the persisted PlaybookRun (not a
 	// Journey lookup like the three flags above) — true iff the agent's raw
 	// response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of
@@ -103,11 +105,12 @@ type RemediationChapter struct {
 	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
 	Findings   string                   `json:"findings,omitempty"`
 	Transcript string                   `json:"transcript,omitempty"`
-	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
-	TraceID              string `json:"trace_id,omitempty"`
-	HasMismatch          bool   `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool   `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
+	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence — see TriageChapter's doc comment.
+	TraceID               string `json:"trace_id,omitempty"`
+	HasMismatch           bool   `json:"has_mismatch,omitempty"`
+	HasTargetDrift        bool   `json:"has_target_drift,omitempty"`
+	HasProtocolViolation  bool   `json:"has_protocol_violation,omitempty"`
+	HasUnverifiedEvidence bool   `json:"has_unverified_evidence,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
@@ -132,10 +135,11 @@ type EscalationHop struct {
 	TraceID          string                   `json:"trace_id,omitempty"`
 	StartedAt        time.Time                `json:"started_at"`
 	CompletedAt      *time.Time               `json:"completed_at,omitempty"`
-	// HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
-	HasMismatch          bool `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence — see TriageChapter's doc comment.
+	HasMismatch           bool `json:"has_mismatch,omitempty"`
+	HasTargetDrift        bool `json:"has_target_drift,omitempty"`
+	HasProtocolViolation  bool `json:"has_protocol_violation,omitempty"`
+	HasUnverifiedEvidence bool `json:"has_unverified_evidence,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
@@ -244,7 +248,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			SawSignalLine:    run.SawSignalLine,
 		},
 	}
-	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation =
+	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation, narrative.Triage.HasUnverifiedEvidence =
 		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, triageWindowEnd)
 	narrative.Triage.ObjectiveEvidenceConfirmed, narrative.Triage.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 		lookupOEVEvents(run.TraceID), run.StartedAt, triageWindowEnd,
@@ -320,7 +324,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 				TraceID:       hop.TraceID,
 				SawSignalLine: hop.SawSignalLine,
 			}
-			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation =
+			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation, rem.HasUnverifiedEvidence =
 				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
 			rem.ObjectiveEvidenceConfirmed, rem.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 				lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
@@ -347,7 +351,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			StartedAt:        hop.StartedAt,
 			SawSignalLine:    hop.SawSignalLine,
 		}
-		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation =
+		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation, eh.HasUnverifiedEvidence =
 			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
 		eh.ObjectiveEvidenceConfirmed, eh.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 			lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
@@ -408,15 +412,16 @@ func (g *Gateway) fetchGateAcknowledgedEvent(ctx context.Context, runID string) 
 	return &events[0]
 }
 
-// hopVerificationFlags computes HasMismatch/HasTargetDrift/HasProtocolViolation for
-// one hop by filtering the trace's delegation_verification events to those recorded
-// within this hop's own [start, end) window — end exclusive when non-zero, unbounded
-// when zero (still-open/most-recent hop). Needed because force-mode auto-chaining
-// can put multiple hops under one shared trace_id (chainEscalation) when the caller
-// supplies its own X-Trace-ID — a whole-trace aggregate can't distinguish between
-// them; found live via the real 3-hop DB→sysadmin→K8s chain, where a later hop's
-// genuine mismatch was leaking backward onto an earlier, actually-clean hop.
-func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
+// hopVerificationFlags computes HasMismatch/HasTargetDrift/HasProtocolViolation/
+// HasUnverifiedEvidence for one hop by filtering the trace's delegation_verification
+// events to those recorded within this hop's own [start, end) window — end exclusive
+// when non-zero, unbounded when zero (still-open/most-recent hop). Needed because
+// force-mode auto-chaining can put multiple hops under one shared trace_id
+// (chainEscalation) when the caller supplies its own X-Trace-ID — a whole-trace
+// aggregate can't distinguish between them; found live via the real 3-hop
+// DB→sysadmin→K8s chain, where a later hop's genuine mismatch was leaking backward
+// onto an earlier, actually-clean hop.
+func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismatch, hasTargetDrift, hasProtocolViolation, hasUnverifiedEvidence bool) {
 	for _, ev := range events {
 		dv := ev.DelegationVerification
 		if dv == nil || ev.Timestamp.Before(start) {
@@ -428,6 +433,7 @@ func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismat
 		hasMismatch = hasMismatch || dv.Mismatch
 		hasTargetDrift = hasTargetDrift || len(dv.TargetDrift) > 0
 		hasProtocolViolation = hasProtocolViolation || dv.ProtocolViolation
+		hasUnverifiedEvidence = hasUnverifiedEvidence || len(dv.UnverifiedEvidence) > 0
 	}
 	return
 }

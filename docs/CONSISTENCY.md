@@ -219,13 +219,13 @@ Stability certs are stored with a composite primary key of `(fault_id, diagnosis
 
 ### CLEAN axis fields (v0.24.0)
 
-Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which seven signals count and which two are deliberately excluded.
+Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which eight signals count and which two are deliberately excluded.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `warning_count` | int | Number of the cert's N runs that tripped a verified warning signal |
 | `is_clean` | bool | `true` only when `warning_count == 0` — zero-tolerance, no percentage threshold |
-| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1, "evidence_coverage_gap": 1, "evidence_unconfirmed": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). `evidence_coverage_gap`/`evidence_unconfirmed` (v0.28.0) are the fault catalog's own declared-signal check, split into "never fired" vs. "fired but unconfirmed" — distinct from the `objective_evidence` bucket above, which tracks the production force-gate instead. Shown via `vault accuracy`'s `Signal types:` line; not shown in `vault list`. |
+| `warning_distribution` | JSON object | Per-type run count, mirroring `attribution_distribution`'s shape: `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1, "evidence_coverage_gap": 1, "evidence_unconfirmed": 1, "unverified_evidence": 1}`. The `objective_evidence` bucket is signal-keyed when the response carries `objective_evidence_signals`, falling back to the flat `objective_evidence` bucket for older responses; `mismatch` stays a flat bucket always (arbitrary tool names, not a small fixed vocabulary). `evidence_coverage_gap`/`evidence_unconfirmed` (v0.28.0) are the fault catalog's own declared-signal check, split into "never fired" vs. "fired but unconfirmed" — distinct from the `objective_evidence` bucket above, which tracks the production force-gate instead. `unverified_evidence` (v0.28.0, content-provenance — [AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)) is different again: applies to any run, not just faulttest catalog faults, and checks a quote is real rather than a value is correct. Shown via `vault accuracy`'s `Signal types:` line; not shown in `vault list`. |
 
 `is_stable` and `is_clean` are independent booleans on the same row — a cert can be any combination of the two. This axis also has a second purpose the other three don't: `cmd/gateway/playbooks.go`'s `trustNotYetEarnedForceGate` requires `is_stable`, `is_clean`, *and* `attribution_consistent` (§3) across every cert for a playbook series before a real (non-faulttest) run of that series is allowed to auto-chain unattended — the same three-condition bar is exposed as `FaultStabilityCert.EarnsTrust()` so both the gateway's real-time gate and the cert store's own regression detection (below) read the identical fact, not two independently-maintained copies of it.
 
@@ -640,7 +640,7 @@ rather than returning early — the consistency signal is available independentl
 
 When `Clean` is `no`, a `Signal types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
-the seven signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
+the eight signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
 count: `(predictable)` when the signal fired on *every* run (structurally baked into this
 fault/playbook/model combination — not fixable by prompting, chasing it with guidance changes is
 a dead end) vs. `(varies)` when it fired on some but not all otherwise-identical runs (the case

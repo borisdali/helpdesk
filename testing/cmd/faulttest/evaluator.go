@@ -128,6 +128,16 @@ type EvalResult struct {
 	// as TargetDrift's "target_drift_detected" and ProtocolViolation's own
 	// outcome — all three mean "don't trust this output as-is."
 	Mismatch bool `json:"mismatch,omitempty"`
+	// UnverifiedEvidence is true when resp.UnverifiedEvidence is non-empty — a
+	// hypothesis EVIDENCE quote couldn't be matched against any real
+	// tool_execution output recorded for this run (content-provenance,
+	// fabrication-detection Layer 3, v0.28.0). See checkEvidenceProvenance
+	// (cmd/gateway/playbooks.go). The content-level sibling of Mismatch above:
+	// that verifies a claimed action really happened, this verifies a claimed
+	// fact really came from somewhere real. Tied at the same Journey-outcome
+	// priority as Mismatch/TargetDrift/ProtocolViolation — "don't trust this
+	// output as-is."
+	UnverifiedEvidence bool `json:"unverified_evidence,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -178,7 +188,7 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the seven
+// hasCleanWarning returns true when this run tripped any of the eight
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
 // saw but didn't act on, an outright protocol violation (omitted the
@@ -186,14 +196,16 @@ type HypothesisEntry struct {
 // (the agent queried a server other than the one it was asked about), a
 // fabrication mismatch (the agent narrated calling a tool that never
 // actually executed), a catalog-declared evidence signal that never fired at
-// all (EvidenceCoverageGap), or one that fired but was never confirmed
-// (EvidenceRequiredButUnconfirmed). Used to compute the CLEAN stability
-// axis — deliberately excludes low_confidence/confidence_warning, which are
+// all (EvidenceCoverageGap), one that fired but was never confirmed
+// (EvidenceRequiredButUnconfirmed), or an EVIDENCE quote that didn't match any
+// real tool output (UnverifiedEvidence, content-provenance, fabrication-
+// detection Layer 3, v0.28.0). Used to compute the CLEAN stability axis —
+// deliberately excludes low_confidence/confidence_warning, which are
 // self-reported and already substantially captured by the existing
 // evaluation-stability axis (judge/confidence variance).
 func hasCleanWarning(er EvalResult) bool {
 	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch ||
-		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed
+		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed || er.UnverifiedEvidence
 }
 
 // Tool-evidence text matching uses faultlib.ToolPatterns directly (item 7

@@ -716,6 +716,37 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Content-provenance check (fabrication-detection Layer 3, v0.28.0): does
+	// each hypothesis's EVIDENCE quote trace back to something real in this
+	// hop's own tool_execution output.
+	if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverified) > 0 {
+		appendEvidenceProvenance(extra, unverified)
+		slog.Warn("playbook run: unverified evidence quote detected",
+			"trace_id", primary.traceID, "count", len(unverified))
+		// Persist as a durable, queryable audit event, same pattern as the target
+		// drift event above — independent of whatever delegation_verification
+		// event proxyToAgentWithTool already recorded for this hop.
+		if g.auditor != nil {
+			evidenceEvent := &audit.Event{
+				EventID:   "gv_" + uuid.New().String()[:8],
+				Timestamp: time.Now().UTC(),
+				EventType: audit.EventTypeDelegationVerification,
+				TraceID:   primary.traceID,
+				Session: audit.Session{
+					ID: primary.traceID,
+				},
+				DelegationVerification: &audit.DelegationVerification{
+					Agent:              primary.agentName,
+					ActionClass:        audit.ActionRead,
+					UnverifiedEvidence: unverified,
+				},
+			}
+			if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
+				slog.Warn("playbook run: failed to record unverified evidence event", "trace_id", primary.traceID, "err", err)
+			}
+		}
+	}
+
 	// Oracle mode: skip chaining and structured output; inject warning then return.
 	if g.crystalBall {
 		extra["crystal_ball"] = true
@@ -977,6 +1008,30 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
 		chainedMismatch, chainedNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart)
 		appendFabricationRisk(extra, chainedMismatch, chainedNarrated)
+		if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart, chained.diagReport); len(unverified) > 0 {
+			appendEvidenceProvenance(extra, unverified)
+			slog.Warn("playbook run: unverified evidence quote detected on chained hop",
+				"trace_id", chained.traceID, "count", len(unverified))
+			if g.auditor != nil {
+				evidenceEvent := &audit.Event{
+					EventID:   "gv_" + uuid.New().String()[:8],
+					Timestamp: time.Now().UTC(),
+					EventType: audit.EventTypeDelegationVerification,
+					TraceID:   chained.traceID,
+					Session: audit.Session{
+						ID: chained.traceID,
+					},
+					DelegationVerification: &audit.DelegationVerification{
+						Agent:              chained.agentName,
+						ActionClass:        audit.ActionRead,
+						UnverifiedEvidence: unverified,
+					},
+				}
+				if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
+					slog.Warn("playbook run: failed to record unverified evidence event", "trace_id", chained.traceID, "err", err)
+				}
+			}
+		}
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -3424,6 +3479,159 @@ func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfi
 		}
 	}
 	extra["narrated_not_confirmed"] = existing
+}
+
+// checkEvidenceProvenance verifies each hypothesis's EVIDENCE quote against the
+// hop's real tool_execution output — content-provenance (fabrication-detection
+// Layer 3, v0.28.0), the sibling of checkFabricationRisk's action-provenance
+// check above: that one verifies a claimed tool call really happened; this
+// verifies a claimed fact really came from somewhere real. Checks every
+// hypothesis with a non-empty Evidence field, not just the primary — a
+// fabricated quote backing a rejected hypothesis is just as much a trust
+// problem as one backing the root cause. Matches against any tool_execution
+// event in the hop's window, not a specifically-named one — the diagnosis
+// protocol doesn't have hypotheses name which tool a quote came from, and
+// requiring that would be a separate, bigger protocol change.
+//
+// Deliberately does NOT verify that the conclusion drawn from a verified-real
+// quote is correct — only that the quote itself traces back to something real.
+// See OBJECTIVE_EVIDENCE.md §8 for why this project rejects fuzzy/LLM-judged
+// matching for governance-relevant checks; this one stays fully deterministic.
+func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, report *audit.DiagnosticReport) (unverified []string) {
+	if auditURL == "" || traceID == "" || report == nil {
+		return nil
+	}
+	var quotes []string
+	for _, h := range report.Hypotheses {
+		if h.Evidence != "" {
+			quotes = append(quotes, h.Evidence)
+		}
+	}
+	if len(quotes) == 0 {
+		return nil
+	}
+	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
+	var outputs []string
+	for _, ev := range events {
+		if ev.Tool != nil && ev.Tool.Result != "" {
+			outputs = append(outputs, ev.Tool.Result)
+		}
+	}
+	for _, q := range quotes {
+		if !evidenceQuoteVerified(q, outputs) {
+			unverified = append(unverified, q)
+		}
+	}
+	return unverified
+}
+
+// appendEvidenceProvenance accumulates unverified evidence quotes into extra
+// across hops, mirroring appendFabricationRisk's accumulate pattern.
+func appendEvidenceProvenance(extra map[string]any, unverified []string) {
+	if len(unverified) == 0 {
+		return
+	}
+	existing, _ := extra["unverified_evidence"].([]string)
+	seen := map[string]bool{}
+	for _, q := range existing {
+		seen[q] = true
+	}
+	for _, q := range unverified {
+		if !seen[q] {
+			seen[q] = true
+			existing = append(existing, q)
+		}
+	}
+	extra["unverified_evidence"] = existing
+}
+
+// evidenceQuoteVerified reports whether quote traces back to real tool output —
+// either as a normalized substring of one of outputs, or, when that fails,
+// whether every numeric value named in quote appears among the numeric values
+// in some single output. The numeric fallback exists because real evidence
+// quotes in this codebase are frequently raw numeric tool output (byte counts,
+// timeouts, row counts) that can be legitimately reformatted for readability
+// (28633584 vs "28,633,584") without being fabricated — comma/separator
+// normalization only, no unit conversion (MB vs bytes) or tolerance windows,
+// since either of those would require a judgment call this check is
+// deliberately not in the business of making.
+func evidenceQuoteVerified(quote string, outputs []string) bool {
+	nq := normalizeEvidenceText(quote)
+	if nq == "" {
+		return true
+	}
+	for _, out := range outputs {
+		if strings.Contains(normalizeEvidenceText(out), nq) {
+			return true
+		}
+	}
+	quoteNums := extractNumbers(quote)
+	if len(quoteNums) == 0 {
+		return false
+	}
+	for _, out := range outputs {
+		if allNumbersPresent(quoteNums, extractNumbers(out)) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeEvidenceText lowercases and collapses whitespace runs to a single
+// space — deterministic, not fuzzy: closes formatting-only gaps (line breaks,
+// double spaces, casing) between a verbatim-instructed quote and the raw tool
+// output it came from, without tolerating any actual content difference.
+func normalizeEvidenceText(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// extractNumbers pulls every numeric token out of s, stripping thousands-separator
+// commas before parsing. Non-numeric text is just a separator here — this is not
+// a general-purpose parser, only a way to compare the numeric content of two
+// strings independent of surrounding prose or formatting.
+func extractNumbers(s string) []float64 {
+	var nums []float64
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() == 0 {
+			return
+		}
+		if v, err := strconv.ParseFloat(strings.ReplaceAll(cur.String(), ",", ""), 64); err == nil {
+			nums = append(nums, v)
+		}
+		cur.Reset()
+	}
+	for _, r := range s {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return nums
+}
+
+// allNumbersPresent reports whether every value in quoteNums appears
+// (exact match) somewhere in outNums. Empty quoteNums returns false — nothing
+// to verify against should not count as verified.
+func allNumbersPresent(quoteNums, outNums []float64) bool {
+	if len(quoteNums) == 0 {
+		return false
+	}
+	for _, qn := range quoteNums {
+		found := false
+		for _, on := range outNums {
+			if qn == on {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // targetMatches returns true when:

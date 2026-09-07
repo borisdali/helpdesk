@@ -1955,6 +1955,144 @@ func TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops(t *testing.T) {
 	}
 }
 
+// ── checkEvidenceProvenance / evidenceQuoteVerified ────────────────────────
+
+func TestCheckEvidenceProvenance_NoAuditURL(t *testing.T) {
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{Evidence: "lag_bytes=28633584"}}}
+	unverified := checkEvidenceProvenance("", "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if unverified != nil {
+		t.Errorf("expected nil with empty auditURL, got %v", unverified)
+	}
+}
+
+func TestCheckEvidenceProvenance_NilReport(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), nil)
+	if unverified != nil {
+		t.Errorf("expected nil with nil report, got %v", unverified)
+	}
+}
+
+func TestCheckEvidenceProvenance_NoHypotheses(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	report := &audit.DiagnosticReport{}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if unverified != nil {
+		t.Errorf("expected nil with no hypotheses, got %v", unverified)
+	}
+}
+
+func TestCheckEvidenceProvenance_QuoteVerified(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_replication_status", Result: "slot_name | replica_slot\nactive | f\nlag_bytes | 28633584"},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "lag_bytes | 28633584"},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if unverified != nil {
+		t.Errorf("expected nil (quote matches real output), got %v", unverified)
+	}
+}
+
+func TestCheckEvidenceProvenance_QuoteFabricated(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_replication_status", Result: "slot_name | replica_slot\nactive | t"},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "active | f, lag_bytes | 999999999"},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(unverified) != 1 || unverified[0] != "active | f, lag_bytes | 999999999" {
+		t.Errorf("expected the fabricated quote flagged, got %v", unverified)
+	}
+}
+
+// TestCheckEvidenceProvenance_ChecksEveryHypothesis proves a fabricated quote
+// on a REJECTED hypothesis is caught too, not just the primary — a fabricated
+// quote backing a rejected hypothesis is just as much a trust problem as one
+// backing the root cause.
+func TestCheckEvidenceProvenance_ChecksEveryHypothesis(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_replication_status", Result: "active | f"}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "active | f"},
+		{IsPrimary: false, Evidence: "totally invented text never in any output", RejectedReason: "doesn't fit"},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(unverified) != 1 || unverified[0] != "totally invented text never in any output" {
+		t.Errorf("expected only the rejected hypothesis's quote flagged, got %v", unverified)
+	}
+}
+
+// TestCheckEvidenceProvenance_NumericReformatting proves a legitimately-sourced
+// number quoted with different formatting (thousands separators) isn't
+// flagged as fabricated — the numeric-aware fallback this project chose over
+// fuzzy/similarity matching (see evidenceQuoteVerified's doc comment).
+func TestCheckEvidenceProvenance_NumericReformatting(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_replication_status", Result: "lag_bytes | 28633584"}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "the replication slot has retained 28,633,584 bytes of WAL"},
+	}}
+	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if unverified != nil {
+		t.Errorf("expected nil (reformatted number of a real value), got %v", unverified)
+	}
+}
+
+func TestEvidenceQuoteVerified_NumericMatchRequiresAllValues(t *testing.T) {
+	// Only one of two quoted numbers is real — must still fail; a partial
+	// numeric match is not verification.
+	got := evidenceQuoteVerified("28633584 and 12345", []string{"lag_bytes | 28633584"})
+	if got {
+		t.Error("expected false — second number (12345) never appears in output")
+	}
+}
+
+func TestEvidenceQuoteVerified_EmptyQuote(t *testing.T) {
+	if !evidenceQuoteVerified("", []string{"anything"}) {
+		t.Error("empty quote should be vacuously verified — nothing to check")
+	}
+}
+
+func TestEvidenceQuoteVerified_WhitespaceAndCaseNormalized(t *testing.T) {
+	got := evidenceQuoteVerified("Active   |  F", []string{"slot_name | replica_slot\nactive | f\n"})
+	if !got {
+		t.Error("expected true — differs only in case and whitespace collapsing")
+	}
+}
+
+func TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendEvidenceProvenance(extra, []string{"quote a"})
+	appendEvidenceProvenance(extra, nil)
+	appendEvidenceProvenance(extra, []string{"quote a", "quote b"})
+
+	got, _ := extra["unverified_evidence"].([]string)
+	want := []string{"quote a", "quote b"}
+	if len(got) != len(want) {
+		t.Fatalf("unverified_evidence = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("unverified_evidence[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // ---- buildServerTypeHint tests ----
 
 func TestBuildServerTypeHint_DockerServer(t *testing.T) {

@@ -316,6 +316,19 @@ type DelegationVerification struct {
 	// recorded on its own event, separate from the event this hop's
 	// write/destructive/narration verification produced.
 	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+	// UnverifiedEvidence lists hypothesis EVIDENCE quotes (see DiagnosticHypothesis.Evidence)
+	// that could not be matched against any real tool_execution output recorded for
+	// this hop — content-provenance (fabrication-detection Layer 3, v0.28.0), the
+	// sibling of Mismatch/NarratedNotConfirmed above: those verify a claimed
+	// *action* really happened; this verifies a claimed *fact* really came from
+	// somewhere real. Computed by checkEvidenceProvenance (cmd/gateway/playbooks.go),
+	// independent of Mismatch/TargetDrift/ProtocolViolation. Deliberately does NOT
+	// verify that the conclusion drawn from a verified-real quote is correct —
+	// that's a different, harder problem (see OBJECTIVE_EVIDENCE.md's narrower,
+	// registered-signal-specific confirmation checks for the closest thing this
+	// project has to that). May be recorded on its own event, separate from the
+	// event this hop's write/destructive/narration verification produced.
+	UnverifiedEvidence []string `json:"unverified_evidence,omitempty"`
 }
 
 // TargetDriftDetail attributes a single instance of target-scope drift to the
