@@ -327,6 +327,18 @@ unconfirmed evidence inline per chapter (`⚠`/`✓`) and a `--repeat N` certifi
 aggregate confirmed-vs-unconfirmed split is queryable via `vault accuracy`'s `Confirmed:`
 line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 
+**At a glance — the four layers compared:**
+
+| | Layer 1 — Intra-agent post-mutation | Layer 2 — Inter-agent delegation | Layer 3 — Content-provenance | Layer 4 — Objective-evidence content |
+|---|---|---|---|---|
+| **Question it answers** | Did the mutation I just performed actually take effect? | Did the tool call the model claims to have executed really happen? | Does the model's quoted `EVIDENCE` fact actually trace back to real tool output? | Does the model's stated conclusion correctly account for a specific, known-important real value? |
+| **Mechanism** | The mutation tool itself re-reads its own target state after the write | Orchestrator/gateway independently queries the audit trail (`tool_execution` events) for the trace, cross-checks against the claimed action class | Fetches the hop's real `tool_execution` output and checks the `EVIDENCE` quote against it — normalized substring, then numeric-reformatting fallback | A type-safe probe reads one specific field directly off a tool's *typed* result; only if it fires does the gateway check whether the model's own `EVIDENCE` quote engaged with it |
+| **What "fabrication" means here** | A write silently failed but the tool reported success | A claimed action never executed at all | A cited fact never existed in any real tool output | A real, known-important fact existed and the model's conclusion never accounted for it |
+| **Scope** | Narrow — mutation tools only, inside the acting agent | Broad — universal, any tool in the action-class map | Broad — universal, any hypothesis with an `Evidence` field, no per-tool registration | Narrow by design — agent-and-tool-scoped; today 6 signals on the K8s agent, 3 on the database agent |
+| **Blind spot** | Unreachable if the Orchestrator fabricates without ever calling the sub-agent | Checks *that* a tool ran, not what its output actually said | Checks a quote is *real*, not that the *conclusion* drawn from it is correct — a genuine, verbatim quote can still fail to support its hypothesis | Only covers instrumented tools/fields; everything else remains unchecked by this layer specifically |
+| **Enforcement** | Bounded retry + escalation at execution time — not an audit-verification gate | Warn-only — narrated to the user as unverifiable, journey outcome elevated, never blocks the run | Warn-only by design — a broad, general-purpose text check, deliberately not a hard gate | **Hard gate** — forces a human-reviewed `pending_gate`, but only on a genuine, checkable contradiction; evidence the model correctly cited is corroboration, not a red flag |
+| **STABLE/CLEAN cert signal(s)** | None — a runtime safety mechanism, not an audit-trail verification signal faulttest tracks | `Mismatch` (+ sibling `TargetDrift`, same delegation-verification event) | `UnverifiedEvidence` — primary/root-cause hypothesis only, CLEAN-blocking. `UnverifiedEvidenceSecondary` — non-primary hypotheses, tracked and surfaced but **not** CLEAN-blocking (v0.28.0 split; see above) | `EvidenceWarnings`/`ObjectiveEvidenceGate` (the production force-gate itself) **and**, for faulttest catalog runs specifically, `EvidenceCoverageGap`/`EvidenceRequiredButUnconfirmed` (v0.28.0 split of "signal never fired" vs. "fired but unconfirmed") |
+
 **Coverage:**
 
 | Session path | Layer 1 | Layer 2 | Layer 3 | Layer 4 |
