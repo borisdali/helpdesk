@@ -1750,6 +1750,33 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 			t.Errorf("triage.has_unverified_evidence = %v (%T), want bool", v, v)
 		}
 	}
+	// unverified_evidence/unverified_evidence_secondary (added 2026-09-07,
+	// primary/secondary split) carry the actual flagged quotes alongside the
+	// bool above — same non-deterministic-value, shape-only treatment: assert
+	// each decodes as a JSON array (of strings) when present, not that it's
+	// empty or populated.
+	if v, ok := triage["unverified_evidence"]; ok {
+		if arr, ok := v.([]any); !ok {
+			t.Errorf("triage.unverified_evidence = %v (%T), want []string", v, v)
+		} else {
+			for _, e := range arr {
+				if _, ok := e.(string); !ok {
+					t.Errorf("triage.unverified_evidence element = %v (%T), want string", e, e)
+				}
+			}
+		}
+	}
+	if v, ok := triage["unverified_evidence_secondary"]; ok {
+		if arr, ok := v.([]any); !ok {
+			t.Errorf("triage.unverified_evidence_secondary = %v (%T), want []string", v, v)
+		} else {
+			for _, e := range arr {
+				if _, ok := e.(string); !ok {
+					t.Errorf("triage.unverified_evidence_secondary element = %v (%T), want string", e, e)
+				}
+			}
+		}
+	}
 
 	// ── gate chapter ──────────────────────────────────────────────────────
 	gate, _ := narrative["gate"].(map[string]any)

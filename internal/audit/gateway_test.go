@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,70 @@ func TestGatewayAuditor_NilStore(t *testing.T) {
 	if err := auditor.RecordRequest(context.Background(), req); err != nil {
 		t.Errorf("unexpected error with nil store: %v", err)
 	}
+}
+
+// TestGatewayAuditor_RecordRequest_ToolResultTruncation covers RecordRequest's
+// own truncation call site (gateway.go:64, `truncateString(req.Response,
+// toolResultMaxLen)`) — a second, independent write path into the same
+// tool_execution.Result field RecordToolCall (tool_audit.go) populates,
+// sharing the same toolResultMaxLen constant. TestRecordToolCall_ResultTruncation
+// (tool_audit_test.go) only covers the other path; this one had zero coverage
+// before or after the 500->8192 raise (the pre-existing TestGatewayAuditor_
+// RecordRequest above never sets ToolName, so toolExec — and thus this
+// truncation — was never even built, let alone exercised).
+func TestGatewayAuditor_RecordRequest_ToolResultTruncation(t *testing.T) {
+	t.Run("at limit is stored verbatim", func(t *testing.T) {
+		store := newToolAuditTestStore(t)
+		auditor := NewGatewayAuditor(store)
+
+		long := strings.Repeat("x", toolResultMaxLen)
+		req := &GatewayRequest{
+			RequestID: "test-trunc-1", Endpoint: "/api/v1/db/get_host_logs", Method: "POST",
+			Agent: "sysadmin_agent", ToolName: "get_host_logs", Response: long,
+			StartTime: time.Now(), Status: "success",
+		}
+		if err := auditor.RecordRequest(context.Background(), req); err != nil {
+			t.Fatalf("record request: %v", err)
+		}
+
+		events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeGatewayRequest})
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		if len(events) != 1 || events[0].Tool == nil {
+			t.Fatalf("expected 1 event with Tool populated, got %d events", len(events))
+		}
+		if got := events[0].Tool.Result; got != long {
+			t.Errorf("Result was altered at exactly toolResultMaxLen (%d) chars: len(got)=%d, want unchanged and untruncated", toolResultMaxLen, len(got))
+		}
+	})
+
+	t.Run("over limit is truncated with ellipsis", func(t *testing.T) {
+		store := newToolAuditTestStore(t)
+		auditor := NewGatewayAuditor(store)
+
+		over := strings.Repeat("x", toolResultMaxLen) + "extra-that-must-be-cut"
+		req := &GatewayRequest{
+			RequestID: "test-trunc-2", Endpoint: "/api/v1/db/get_host_logs", Method: "POST",
+			Agent: "sysadmin_agent", ToolName: "get_host_logs", Response: over,
+			StartTime: time.Now(), Status: "success",
+		}
+		if err := auditor.RecordRequest(context.Background(), req); err != nil {
+			t.Fatalf("record request: %v", err)
+		}
+
+		events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeGatewayRequest})
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		if len(events) != 1 || events[0].Tool == nil {
+			t.Fatalf("expected 1 event with Tool populated, got %d events", len(events))
+		}
+		got := events[0].Tool.Result
+		if !strings.HasSuffix(got, "...") || len(got) != toolResultMaxLen+len("...") {
+			t.Errorf("over-limit Result not truncated as expected: len=%d, want %d ending in ...", len(got), toolResultMaxLen+len("..."))
+		}
+	})
 }
 
 func TestCategorizeAgent(t *testing.T) {

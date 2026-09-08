@@ -488,6 +488,26 @@ func TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcr
 			"mismatch":     true,
 		},
 	})
+	// Same shape, same window, for hopUnverifiedEvidence's own primary/
+	// secondary split (added 2026-09-07) — this test predates that split and
+	// only ever proved mismatch doesn't leak; extending it here rather than
+	// adding a separate test keeps the coverage in the one place that
+	// actually exercises the real cross-process shared-trace shape
+	// (chainEscalation's real production scenario), not a second copy of the
+	// same setup.
+	post(t, auditdAddr, "/v1/events", map[string]any{
+		"event_id":   fmt.Sprintf("gv-leak-uve-%d", time.Now().UnixNano()),
+		"timestamp":  mismatchAt.Format(time.RFC3339Nano),
+		"event_type": "delegation_verification",
+		"trace_id":   sharedTrace,
+		"session":    map[string]any{"id": "leak-session-" + suffix},
+		"delegation_verification": map[string]any{
+			"agent":                         "sysadmin_agent",
+			"action_class":                  "write",
+			"unverified_evidence":           []string{"restart plan — invented log line"},
+			"unverified_evidence_secondary": []string{"rejected theory — fabricated detail"},
+		},
+	})
 
 	narrative := getIncidentFromGateway(t, triageRunID)
 
@@ -502,6 +522,15 @@ func TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcr
 	if hasMismatch, _ := hop["has_mismatch"].(bool); hasMismatch {
 		t.Errorf("escalations[0].has_mismatch = %v, want false — the mismatch event belongs to the later remediation hop sharing this trace_id, not this one", hop["has_mismatch"])
 	}
+	if hasUnverified, _ := hop["has_unverified_evidence"].(bool); hasUnverified {
+		t.Errorf("escalations[0].has_unverified_evidence = %v, want false — the unverified_evidence event belongs to the later remediation hop, not this one", hop["has_unverified_evidence"])
+	}
+	if uve, _ := hop["unverified_evidence"].([]any); len(uve) != 0 {
+		t.Errorf("escalations[0].unverified_evidence = %v, want empty — must not leak backward from the remediation hop", uve)
+	}
+	if uveSec, _ := hop["unverified_evidence_secondary"].([]any); len(uveSec) != 0 {
+		t.Errorf("escalations[0].unverified_evidence_secondary = %v, want empty — must not leak backward from the remediation hop", uveSec)
+	}
 
 	remediation, _ := narrative["remediation"].(map[string]any)
 	if remediation == nil {
@@ -513,6 +542,12 @@ func TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcr
 	if hasMismatch, _ := remediation["has_mismatch"].(bool); !hasMismatch {
 		t.Errorf("remediation.has_mismatch = %v, want true — its own hop genuinely mismatched", remediation["has_mismatch"])
 	}
+	if uve, _ := remediation["unverified_evidence"].([]any); len(uve) != 1 || uve[0] != "restart plan — invented log line" {
+		t.Errorf("remediation.unverified_evidence = %v, want [\"restart plan — invented log line\"] — its own hop's real signal", uve)
+	}
+	if uveSec, _ := remediation["unverified_evidence_secondary"].([]any); len(uveSec) != 1 || uveSec[0] != "rejected theory — fabricated detail" {
+		t.Errorf("remediation.unverified_evidence_secondary = %v, want [\"rejected theory — fabricated detail\"]", uveSec)
+	}
 
-	t.Logf("shared-trace hops correctly did not leak: escalation.has_mismatch=false, remediation.has_mismatch=true")
+	t.Logf("shared-trace hops correctly did not leak: escalation.has_mismatch=false, remediation.has_mismatch=true, unverified_evidence/secondary correctly scoped to remediation only")
 }
