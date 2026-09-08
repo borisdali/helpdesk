@@ -2347,6 +2347,34 @@ func TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes(t *testing.T) {
 	}
 }
 
+// TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication reproduces
+// a third live false positive found 2026-09-08 on db-replica-disconnected
+// (plr_79968de5), after both the compound-quote and trailing-commentary
+// fixes: a model citing two separately-sourced real facts named *where* each
+// came from — `"(0 rows)" in pg_stat_replication output and "active = f"
+// with "lag_bytes | 392481784" in pg_replication_slots` — where
+// "in pg_stat_replication output and"/"with"/"in pg_replication_slots" sit
+// between and after real quotes, never claimed as quotes themselves. Unlike
+// the earlier trailing-only case, this narration appears *between* quotes
+// too, so isEvidenceGlueOnly's word list (not a position-based rule) is what
+// has to absorb it.
+func TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "-[ RECORD 1 ]-----------\nslot_name | replica_slot\nactive    | f\nlag_bytes | 392481784\n\n(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `(0 rows)" in pg_stat_replication output and "active = f" with "lag_bytes | 392481784" in pg_replication_slots`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real facts plus source-attribution narration, nothing fabricated), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
 // TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication
 // proves a compound quote joined with connector phrases beyond "and"/","
 // (found live 2026-09-08: one response used "followed later by", "and
@@ -2517,6 +2545,12 @@ func TestIsEvidenceGlueOnly(t *testing.T) {
 		{"real fact — not glue", "lag_bytes | 28610712", false},
 		{"real fact that happens to contain a glue word", "replica and primary disconnected", false},
 		{"case-insensitive", "AND THEN", true},
+		{"live: source-attribution phrase with a pg_ system view name", "in pg_stat_replication output and", true},
+		{"live: single preposition", "with", true},
+		{"live: another pg_ system view name alone", "in pg_replication_slots", true},
+		{"pg_-prefixed identifier alone counts as glue", "pg_stat_activity", true},
+		{"a real fact using a pg_ prefix plus a number is still not glue", "pg_stat_replication reply_lag_seconds 999999999", false},
+		{"trailing punctuation on a glue word doesn't break the match", "output, and", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2604,6 +2638,27 @@ func TestEvidenceQuoteVerified_WhitespaceAndCaseNormalized(t *testing.T) {
 	got := evidenceQuoteVerified("Active   |  F", []string{"slot_name | replica_slot\nactive | f\n"})
 	if !got {
 		t.Error("expected true — differs only in case and whitespace collapsing")
+	}
+}
+
+// TestEvidenceQuoteVerified_SeparatorPunctuationNormalized reproduces the
+// live 2026-09-08 db-replica-disconnected case (plr_79968de5): a real,
+// correctly-valued fact ("active = f") failed verification purely because
+// the model wrote "=" where psql's own \x-format output used "|" — same
+// field, same value, different separator punctuation. Also checks that a
+// genuinely wrong value ("active = t" when the real row says "f") still
+// fails after separator normalization — the fix touches punctuation only,
+// never a value token.
+func TestEvidenceQuoteVerified_SeparatorPunctuationNormalized(t *testing.T) {
+	outputs := []string{"slot_name | replica_slot\nactive    | f\nlag_bytes | 392481784\n"}
+	if !evidenceQuoteVerified("active = f", outputs) {
+		t.Error(`evidenceQuoteVerified("active = f", ...) = false, want true — "=" and "|" are the same field/value pair`)
+	}
+	if !evidenceQuoteVerified("active: f", outputs) {
+		t.Error(`evidenceQuoteVerified("active: f", ...) = false, want true — ":" and "|" are the same field/value pair`)
+	}
+	if evidenceQuoteVerified("active = t", outputs) {
+		t.Error(`evidenceQuoteVerified("active = t", ...) = true, want false — wrong value must still fail regardless of separator`)
 	}
 }
 

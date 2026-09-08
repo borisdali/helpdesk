@@ -3782,11 +3782,34 @@ func evidenceQuoteVerified(quote string, outputs []string) bool {
 	return false
 }
 
-// normalizeEvidenceText lowercases and collapses whitespace runs to a single
-// space — deterministic, not fuzzy: closes formatting-only gaps (line breaks,
-// double spaces, casing) between a verbatim-instructed quote and the raw tool
-// output it came from, without tolerating any actual content difference.
+// evidenceSeparatorReplacer canonicalizes the punctuation a model can use
+// between a field name and its value — psql's own `\x` output uses `|`
+// ("active    | f"), but a model paraphrasing that into prose sometimes
+// switches to `=` or `:` ("active = f", "active: f") without changing the
+// field name or value at all. Found live (2026-09-08, db-replica-disconnected,
+// plr_79968de5): a real, correctly-valued fact failed verification purely
+// because of this separator swap. Same reasoning and same narrowness as the
+// existing numeric-reformatting fallback in evidenceQuoteVerified (comma
+// thousands-separators): only punctuation is normalized, never a value
+// token, so a genuinely wrong value ("active = t" when the real row says
+// "f") still fails to match after this replacement — nothing here can turn
+// a fabricated claim into a verified one.
+// Padded with spaces on both sides (not a bare "|" swap): a model can write
+// the separator with no surrounding space ("active:f"), and normalizeEvidenceText's
+// later whitespace-collapse only merges runs of existing spaces — it can't
+// invent a space that was never there — so without padding here, "active:f"
+// would canonicalize to the single token "active|f" and never match real
+// output's separately-spaced "active | f".
+var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|", " | ")
+
+// normalizeEvidenceText lowercases, canonicalizes field/value separator
+// punctuation (see evidenceSeparatorReplacer), and collapses whitespace runs
+// to a single space — deterministic, not fuzzy: closes formatting-only gaps
+// (line breaks, double spaces, casing, separator choice) between a
+// verbatim-instructed quote and the raw tool output it came from, without
+// tolerating any actual content difference.
 func normalizeEvidenceText(s string) string {
+	s = evidenceSeparatorReplacer.Replace(s)
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
@@ -3810,21 +3833,60 @@ func normalizeEvidenceText(s string) string {
 // known-incomplete: a connector missing from this list just means an
 // occasional harmless extra fragment gets reported, never that real content
 // goes unchecked.
+//
+// Also includes a second category, added 2026-09-08: words a model uses to
+// name *where* an adjacent quoted fact came from, not to assert a new fact —
+// e.g. `"active | f" and "lag_bytes | 129029872" and "(0 rows)" for
+// pg_stat_replication`, where the segment `in pg_stat_replication output`
+// sits between/after real quotes describing their Postgres source view.
+// Found live (2026-09-08, db-replica-disconnected, plr_79968de5): this
+// wasn't a connector-word gap, it was a *source-attribution* one — the
+// connector list already caught "and". "in"/"from"/"on"/"of"/"the"/"output"/
+// etc. are ordinary prepositions/nouns used only in that role in this
+// codebase's evidence quotes, same closed-vocabulary reasoning as the
+// connector list above.
 var evidenceQuoteGlueWords = map[string]bool{
 	"and": true, "then": true, "with": true, "or": true, "but": true,
 	"followed": true, "later": true, "by": true, "next": true,
 	"after": true, "before": true, "also": true, "plus": true,
+	"in": true, "from": true, "on": true, "of": true, "the": true,
+	"output": true, "section": true, "table": true, "view": true,
+	"row": true, "rows": true, "shown": true, "showing": true,
+	"return": true, "returned": true, "result": true, "results": true,
 }
 
-// isEvidenceGlueOnly reports whether s, split on whitespace, is made up
-// entirely of evidenceQuoteGlueWords — narrative glue, not a fact in its own
-// right. An empty/whitespace-only s counts as glue-only too (nothing to
-// verify), matching evidenceQuoteVerified's existing empty-quote handling.
+// evidencePgIdentifierRe matches a Postgres system-catalog object name —
+// pg_stat_replication, pg_replication_slots, pg_stat_activity, and friends —
+// referenced by a model to say *where* an adjacent quoted fact came from
+// (see evidenceQuoteGlueWords' second doc paragraph). Deliberately a prefix
+// pattern rather than an enumerated list of specific view names: "pg_" is a
+// reserved namespace Postgres itself uses only for system catalog/view
+// objects, so matching on the prefix stays closed and precise without
+// needing to name every view this project's playbooks might ever reference.
+var evidencePgIdentifierRe = regexp.MustCompile(`(?i)^pg_[a-z0-9_]+$`)
+
+// isEvidenceGlueOnly reports whether s, split on whitespace (each word
+// further stripped of leading/trailing punctuation), is made up entirely of
+// evidenceQuoteGlueWords or evidencePgIdentifierRe matches — narrative glue
+// or a source-naming identifier, not a fact in its own right. An
+// empty/whitespace-only s counts as glue-only too (nothing to verify),
+// matching evidenceQuoteVerified's existing empty-quote handling. A fragment
+// containing any other word — in particular any digit-bearing token — is
+// never glue-only, so a fabricated number can't be smuggled through by
+// gluing it to words from this list.
 func isEvidenceGlueOnly(s string) bool {
 	for _, w := range strings.Fields(strings.ToLower(s)) {
-		if !evidenceQuoteGlueWords[w] {
-			return false
+		w = strings.Trim(w, ".,;:")
+		if w == "" {
+			continue
 		}
+		if evidenceQuoteGlueWords[w] {
+			continue
+		}
+		if evidencePgIdentifierRe.MatchString(w) {
+			continue
+		}
+		return false
 	}
 	return true
 }

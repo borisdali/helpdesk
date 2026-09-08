@@ -1463,6 +1463,47 @@ for that — the hypothesis's own `Text` field, never verified by this or any
 other layer — so declining to verify a self-admittedly-unquoted tail here
 doesn't meaningfully narrow what this check catches.
 
+**Source-attribution narration between quotes (added 2026-09-08).** The
+trailing-commentary fix above only discards narration *after* the last
+quote. A third live case on the same fault showed the same problem occurring
+*between* quotes: `"(0 rows)" in pg_stat_replication output and "active =
+f" with "lag_bytes | 392481784" in pg_replication_slots` — the model names
+which Postgres system view each adjacent quoted fact came from, but that
+naming text sits outside any quote span, same as a trailing tail, just not
+at the very end. Position-based stripping doesn't generalize here (a
+separate live test, `TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes`,
+depends on `splitEvidenceQuoteParts` verifying a segment appearing *before*
+the first interior quote — see that function's own doc comment for why quote
+position alone can't reliably distinguish "narration" from "real content
+that happens to precede a quote"). Instead, `evidenceQuoteGlueWords` and
+`isEvidenceGlueOnly` were extended with a second, closed category:
+ordinary prepositions/nouns used only in this source-naming role ("in",
+"from", "on", "of", "the", "output", "table", "view", ...), plus
+`evidencePgIdentifierRe`, a `pg_`-prefix pattern (not an enumerated list of
+view names) that recognizes any Postgres system-catalog object name — `pg_`
+is a namespace Postgres itself reserves for system objects, so matching the
+prefix stays closed and precise without naming every view a playbook might
+ever reference. A fragment made *entirely* of these words/identifiers is
+vacuously verified, same treatment as a pure connector fragment; a fragment
+containing any other word — in particular any digit-bearing token — is
+never glue-only, so a fabricated number still can't be smuggled through by
+gluing it to words from this list.
+
+**Field/value separator punctuation is also normalized (added 2026-09-08).**
+The same live response's `"active = f"` failed verification even though it
+was a completely real, correctly-valued fact — `get_replication_status`'s
+psql `\x` output uses `active    | f` (pipe-separated), and the model
+paraphrased the separator from `|` to `=` without changing the field name or
+value. `normalizeEvidenceText` now runs both sides through
+`evidenceSeparatorReplacer` (`=` and `:` canonicalized to a padded `|`)
+before the existing lowercase/whitespace-collapse step — the same
+formatting-only-differences precedent as the numeric thousands-separator
+fallback above, extended from digit punctuation to field/value punctuation.
+Deliberately narrow: only the separator character changes, never a value
+token, so a genuinely wrong value (`"active = t"` when the real row says
+`f`) still fails to match after normalization — this can't turn a
+fabricated claim into a verified one.
+
 ```go
 if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
     appendEvidenceProvenance(extra, primary, secondary)
@@ -1536,15 +1577,21 @@ happened.
 (added 2026-09-08 alongside the split-on-every-quote-boundary redesign),
 `TestSplitEvidenceQuoteParts` (7 cases: the original connector shapes plus an
 unusual-phrase case and a backslash-escaped-quotes case),
-`TestIsEvidenceGlueOnly` (8 cases, including a real fact that happens to
-contain a glue word — must not be treated as glue-only),
+`TestIsEvidenceGlueOnly` (14 cases: the original 8 plus 6 covering the
+2026-09-08 source-attribution/`pg_`-identifier extension, including a real
+fact using a `pg_` prefix plus a number, which must still not be glue-only),
 `TestTrimEvidenceTrailingCommentary` (6 cases, including both live
 `db-replica-disconnected`/`db-replica-container-stopped` strings verbatim),
 `TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped` (both protocol
 shapes — standalone look-ahead and inline pipe-delimited — against the same
 two live strings, end-to-end through `parseDiagnosticReport`),
+`TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication`
+(end-to-end reproduction of the live db-replica-disconnected case with
+narration between quotes),
 `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
-`_EmptyQuote`, `_WhitespaceAndCaseNormalized`, `_GlueFragmentVacuouslyVerified`,
+`_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
+`_SeparatorPunctuationNormalized` (added 2026-09-08: `=`/`:` vs. `|`, plus a
+wrong-value case that must still fail), `_GlueFragmentVacuouslyVerified`,
 `TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
 `TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end
 through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`,
