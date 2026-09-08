@@ -1496,21 +1496,42 @@ primary/secondary separated, per hop, same time-window cross-hop-leak
 protection), plus `TestHandleGetIncident_VerificationFlags_SurfaceOnChapter`
 extended to assert the actual quote content, not just the bool.
 `internal/audit/store_test.go` — `TestQueryJourneys_HasUnverifiedEvidence`
-(real SQLite store, full `store.Record`+`store.QueryJourneys` round trip),
-`TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied` extended to
-four signals.
+(real SQLite store, full `store.Record`+`store.QueryJourneys` round trip; a
+third case, "Journey C," added in a follow-up coverage pass proves a
+*secondary-only* event does not elevate the Journey `outcome` or set
+`HasUnverifiedEvidence` — the foundational layer beneath every chapter-level
+test below), `TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied`
+extended to four signals.
 `internal/audit/delegate_tool_test.go` — `TestFetchEventsByType_RetryBehavior`/
 `_RetryOnFailure` extended to assert `FetchObjectiveEvidenceEvents` now
 retries. `internal/audit/tool_audit_test.go` — `TestRecordToolCall_ResultTruncation`
 (exactly-at-limit stored verbatim, over-limit truncated with ellipsis).
-`testing/integration/governance/gateway_incident_test.go` —
-`TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters` extended
-with a real cross-hop-attribution case (real spawned auditd + gateway
-binaries) — the same test that exists because a prior cross-hop leak bug was
-found live, now also proving `unverified_evidence` on one hop doesn't leak
-onto another sharing the same trace_id.
+`internal/audit/gateway_test.go` — `TestGatewayAuditor_RecordRequest_ToolResultTruncation`,
+added in the same follow-up pass after finding `GatewayAuditor.RecordRequest`
+has a *second*, independent write path into the same `tool_execution.Result`
+field (sharing `toolResultMaxLen`) that had zero coverage before or after the
+500→8192 raise — the pre-existing `TestGatewayAuditor_RecordRequest` never
+sets `ToolName`, so this path was never even exercised.
+`cmd/gateway/incident_narrative_test.go` (continued) —
+`TestHandleGetIncident_UnverifiedEvidence_SurfaceOnEscalationAndRemediation`,
+added in the follow-up pass: `TestHandleGetIncident_VerificationFlags_
+SurfaceOnChapter` only proved the actual quote-content wiring for the Triage
+chapter; this proves the identical Escalation/Remediation call sites through
+the real handler too, not just `TestHopUnverifiedEvidence` in isolation.
+`testing/integration/governance/gateway_incident_test.go` — two distinct
+tests extended, not one: `TestIntegration_GatewayIncident_
+VerificationFlagsSurfaceOnChapters` (distinct trace_ids) now posts an
+`unverified_evidence` event on the escalation hop; separately, and more
+importantly, `TestIntegration_GatewayIncident_VerificationFlags_
+SharedTraceDoesNotLeakAcrossHops` — the actual *shared-trace* cross-hop-leak
+test, real spawned auditd+gateway binaries, the one that exists because of
+the real v0.26 bug #8 — only ever covered `mismatch` until the same
+follow-up pass added a paired `unverified_evidence`/`unverified_evidence_secondary`
+event and asserted neither leaks backward onto the escalation hop.
 `testing/e2e/playbooks_test.go` — the live-LLM shape-only check extended
-with a 4th field.
+with `has_unverified_evidence`, then further extended (follow-up pass) to
+also assert `unverified_evidence`/`unverified_evidence_secondary` decode as
+string arrays when present.
 `testing/faultlib/runner_test.go` — `TestRunViaPlaybook_UnverifiedEvidencePopulated`/
 `_UnverifiedEvidenceSecondaryPopulated` (decode-wiring, same class of gap
 `TestRunViaPlaybook_MismatchPopulated` exists to catch).
@@ -1522,6 +1543,15 @@ cases, plus `TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean`
 `testing/cmd/faulttest/vault_test.go` — `TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary`
 (`vault incidents`'s own display, previously boolean-only, now printing the
 actual labeled quote text for both buckets).
+Checked and confirmed NOT gaps in the same follow-up pass: `testing/faulttest`
+(the build-tag-gated package `make faulttest`/`faulttest-gateway` actually
+run) still deliberately tracks only Layer 4 objective-evidence signals, never
+Mismatch/TargetDrift/UnverifiedEvidence — a pre-existing scope boundary from
+the original Layer 3 rollout, unaffected by the primary/secondary split;
+`testing/e2e/governance_test.go`'s raw auditd round-trip test doesn't need an
+`UnverifiedEvidenceSecondary` mirror, since `store.Record` marshals the whole
+event as one JSON blob with no per-field extraction — a new struct field
+already rides the same, already-proven mechanism every other field uses.
 
 ---
 
