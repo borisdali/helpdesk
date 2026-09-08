@@ -2874,6 +2874,37 @@ func findingsRecommendMonitor(findings string) bool {
 	return val == "monitor" || val == "no_changes_needed"
 }
 
+// normalizeProtocolLine strips markdown a model can wrap around a structured
+// protocol line without changing its meaning: a leading list-bullet ("- " or
+// "* ") and any "**" bold-marker pairs, wherever they fall in the line — not
+// just at the very edges. The previous edge-only `strings.Trim(s, "*")` only
+// removes leading/trailing asterisks, which is enough for a model bolding an
+// entire line (`**HYPOTHESIS_1: text**`) but not one bolding only a label
+// mid-line and leaving the rest plain (found live 2026-09-08 on
+// db-replica-stalled: `- **HYPOTHESIS_1 (primary):** <text>` and
+// `  - **Confidence:** 0.95`) — the label's closing "**" sits mid-string,
+// immediately followed by real content an edge-trim can't reach.
+func normalizeProtocolLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "- ")
+	trimmed = strings.TrimPrefix(trimmed, "* ")
+	trimmed = strings.ReplaceAll(trimmed, "**", "")
+	return strings.TrimSpace(trimmed)
+}
+
+// cutPrefixFold reports whether s has the given prefix, case-insensitively,
+// and if so returns the remainder using s's own original casing — same
+// signature/semantics as strings.CutPrefix, but tolerant of a model writing
+// "Confidence:"/"Evidence:" instead of the requested all-caps "CONFIDENCE:"/
+// "EVIDENCE:" (found live 2026-09-08, same response as normalizeProtocolLine's
+// example above).
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return "", false
+	}
+	return s[len(prefix):], true
+}
+
 // parseDiagnosticReport scans the agent response for HYPOTHESIS_N: lines and
 // parses them into a DiagnosticReport. Returns nil when no hypothesis lines are
 // found (backward compat — caller falls through to parseAgentEscalation).
@@ -2890,11 +2921,13 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Strip markdown bold markers so **HYPOTHESIS_N:** is handled identically
-		// to plain HYPOTHESIS_N:. Trim both leading and trailing * to handle
-		// **HYPOTHESIS_1: text** (closing bold marker on the same line).
-		trimmed = strings.Trim(trimmed, "*")
+		// normalizeProtocolLine strips a leading list-bullet and any "**"
+		// bold markers wherever they fall — not just at the line's edges —
+		// so "- **HYPOTHESIS_1 (primary):** <text>" (found live 2026-09-08 on
+		// db-replica-stalled) is handled identically to plain "HYPOTHESIS_1:
+		// <text>". See its own doc comment for why an edge-only trim can't
+		// reach this shape.
+		trimmed := normalizeProtocolLine(line)
 
 		// HYPOTHESIS_N: ...
 		if hypMatch := matchHypothesisLine(trimmed); hypMatch != nil {
@@ -2904,23 +2937,26 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 			// hypothesis header instead of pipe-delimited on the same line.
 			last := &hypotheses[len(hypotheses)-1]
 			for j := i + 1; j < len(lines) && j <= i+5; j++ {
-				next := strings.TrimSpace(strings.Trim(lines[j], "*"))
+				next := normalizeProtocolLine(lines[j])
 				if next == "" {
 					continue
 				}
-				if after, ok := strings.CutPrefix(next, "CONFIDENCE:"); ok {
+				// cutPrefixFold: case-insensitive, since the same live
+				// response used "Confidence:"/"Evidence:" instead of the
+				// requested all-caps "CONFIDENCE:"/"EVIDENCE:".
+				if after, ok := cutPrefixFold(next, "CONFIDENCE:"); ok {
 					if last.Confidence == 0 {
 						if c, err := strconv.ParseFloat(strings.TrimSpace(after), 64); err == nil {
 							last.Confidence = c
 						}
 					}
-				} else if after, ok := strings.CutPrefix(next, "EVIDENCE:"); ok {
+				} else if after, ok := cutPrefixFold(next, "EVIDENCE:"); ok {
 					if last.Evidence == "" {
 						ev := strings.TrimSpace(after)
 						ev = strings.Trim(ev, "\"")
 						last.Evidence = ev
 					}
-				} else if after, ok := strings.CutPrefix(next, "REJECTED:"); ok {
+				} else if after, ok := cutPrefixFold(next, "REJECTED:"); ok {
 					if last.RejectedReason == "" {
 						last.RejectedReason = strings.TrimSpace(after)
 					}
@@ -3003,8 +3039,20 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 	if colonIdx < 0 {
 		return nil
 	}
-	rankStr := line[len("HYPOTHESIS_"):colonIdx]
-	rank, err := strconv.Atoi(rankStr)
+	rankStr := strings.TrimSpace(line[len("HYPOTHESIS_"):colonIdx])
+	// Take only the leading digit run, ignoring any trailing annotation a
+	// model inserts before the colon — e.g. "HYPOTHESIS_1 (primary):"
+	// instead of "HYPOTHESIS_1:" (found live 2026-09-08, same response as
+	// normalizeProtocolLine's example). strconv.Atoi on the full rankStr
+	// would reject "1 (primary)" outright.
+	digitEnd := 0
+	for digitEnd < len(rankStr) && rankStr[digitEnd] >= '0' && rankStr[digitEnd] <= '9' {
+		digitEnd++
+	}
+	if digitEnd == 0 {
+		return nil
+	}
+	rank, err := strconv.Atoi(rankStr[:digitEnd])
 	if err != nil {
 		return nil
 	}

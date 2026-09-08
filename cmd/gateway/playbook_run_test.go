@@ -1263,6 +1263,103 @@ ESCALATE_TO: none`
 	}
 }
 
+// TestParseDiagnosticReport_MarkdownBulletHypothesis reproduces a live parse
+// failure found 2026-09-08 on db-replica-stalled: the model wrote a bulleted,
+// label-only-bolded, standalone-field, mixed-case variant —
+// `- **HYPOTHESIS_1 (primary):** <text>` followed by `  - **Confidence:**
+// 0.95` and `  - **Evidence:** "..."` on separate lines — three deviations
+// from the pipe-delimited, all-caps protocol at once: a leading list bullet,
+// a "(primary)" annotation before the colon, and lowercase field labels.
+// Before the fix, parseDiagnosticReport returned nil entirely (confirmed
+// directly against the real persisted transcript via the incidents API),
+// which meant the objective-evidence force-gate had no Evidence to check
+// against and reported a false "fired but not confirmed" — not a real
+// confirmation failure, a parse failure.
+func TestParseDiagnosticReport_MarkdownBulletHypothesis(t *testing.T) {
+	text := `**Hypothesis formation:**
+
+- **HYPOTHESIS_1 (primary):** Replica process is frozen, CPU-starved, or experiencing a network hang that has not yet torn down the TCP connection; reply_lag_seconds=49 indicates no feedback received for nearly a minute, while the connection remains open in streaming state.
+  - **Confidence:** 0.95
+  - **Evidence:** "reply_lag_seconds | 49" and "state | streaming"
+
+- **HYPOTHESIS_2 (alternative):** The replica intentionally paused WAL replay (pg_wal_replay_pause()) to perform maintenance, causing it to stop applying writes without disconnecting.
+  - **Confidence:** 0.05
+  - **Rejected:** High reply_lag with no WAL lag indicates the replica is not just paused in replay — it has stopped communicating feedback itself, which points to a process hang rather than an intentional pause.
+
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Replica at 172.18.0.4 is present but stalled.`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("parseDiagnosticReport returned nil, want a populated report")
+	}
+	if len(report.Hypotheses) != 2 {
+		t.Fatalf("len(Hypotheses) = %d, want 2", len(report.Hypotheses))
+	}
+	h1 := report.Hypotheses[0]
+	if h1.Rank != 1 {
+		t.Errorf("Hypotheses[0].Rank = %d, want 1", h1.Rank)
+	}
+	if !h1.IsPrimary {
+		t.Error("Hypotheses[0].IsPrimary = false, want true (ROOT_CAUSE: HYPOTHESIS_1)")
+	}
+	if h1.Confidence != 0.95 {
+		t.Errorf("Hypotheses[0].Confidence = %v, want 0.95", h1.Confidence)
+	}
+	wantEvidence := `reply_lag_seconds | 49" and "state | streaming`
+	if h1.Evidence != wantEvidence {
+		t.Errorf("Hypotheses[0].Evidence = %q, want %q", h1.Evidence, wantEvidence)
+	}
+	if !strings.HasPrefix(h1.Text, "Replica process is frozen") {
+		t.Errorf("Hypotheses[0].Text = %q, want it to start with the hypothesis prose, not leftover markdown", h1.Text)
+	}
+	h2 := report.Hypotheses[1]
+	if h2.Confidence != 0.05 {
+		t.Errorf("Hypotheses[1].Confidence = %v, want 0.05", h2.Confidence)
+	}
+	if h2.RejectedReason == "" {
+		t.Error("Hypotheses[1].RejectedReason is empty, want the rejected-reason text")
+	}
+}
+
+func TestCutPrefixFold(t *testing.T) {
+	tests := []struct {
+		name, s, prefix, wantRest string
+		wantOK                    bool
+	}{
+		{"exact match", "CONFIDENCE: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"different case", "Confidence: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"lowercase", "confidence: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"no match", "REJECTED: reason", "CONFIDENCE:", "", false},
+		{"too short", "CONF", "CONFIDENCE:", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRest, gotOK := cutPrefixFold(tt.s, tt.prefix)
+			if gotOK != tt.wantOK || gotRest != tt.wantRest {
+				t.Errorf("cutPrefixFold(%q, %q) = (%q, %v), want (%q, %v)", tt.s, tt.prefix, gotRest, gotOK, tt.wantRest, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestNormalizeProtocolLine(t *testing.T) {
+	tests := []struct{ name, line, want string }{
+		{"plain", "HYPOTHESIS_1: text", "HYPOTHESIS_1: text"},
+		{"whole-line bold", "**HYPOTHESIS_1: text**", "HYPOTHESIS_1: text"},
+		{"bulleted, label-only bold", "- **HYPOTHESIS_1 (primary):** text", "HYPOTHESIS_1 (primary): text"},
+		{"indented bullet, label-only bold", "  - **Confidence:** 0.95", "Confidence: 0.95"},
+		{"asterisk bullet", "* HYPOTHESIS_1: text", "HYPOTHESIS_1: text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeProtocolLine(tt.line); got != tt.want {
+				t.Errorf("normalizeProtocolLine(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---- checkContextConsistency tests ----
 
 func makeContextTestInfra() *infra.Config {
