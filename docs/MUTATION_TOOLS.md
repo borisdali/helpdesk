@@ -1431,6 +1431,38 @@ this never suppresses real content. A single-span quote (the common case, no
 interior quote present) is checked exactly as before — this changes nothing
 for the vast majority of quotes.
 
+**Trailing unquoted commentary is stripped before verification (added
+2026-09-08).** Even after the split-on-quote-boundary redesign above, two
+live faults (`db-replica-disconnected`, `db-replica-container-stopped`) kept
+firing: the model correctly quoted real tool output, then appended its own
+unquoted explanatory tail directly after the *last* quote character with no
+delimiter of its own — e.g. `"active | f" and "lag_bytes | 129029872" for
+pg_stat_replication`, where `for pg_stat_replication` was never claimed as a
+verbatim quote at all. Confirmed live, directly against the audit trail, that
+this tail genuinely does not appear in any tool output for either trace — a
+true positive on the letter of "is this string a real substring," but not a
+fabrication in the sense this check exists to catch, since the model itself
+never asserted it was quoting anything there.
+
+`trimEvidenceTrailingCommentary` (`cmd/gateway/playbooks.go`) closes this at
+parse time, before `checkEvidenceProvenance` ever runs: on the *raw*,
+pre-outer-quote-strip `EVIDENCE` value, find the position of the last literal
+`"`. If non-whitespace content follows it, that content is provably outside
+every quote span the model wrote — discard it and keep only the
+quote-terminated prefix; if nothing follows (or the value has no quote at
+all), the value is left untouched. Applied at both `parseDiagnosticReport`
+call sites that read an `EVIDENCE` field — the standalone-field look-ahead
+loop and `matchHypothesisLine`'s inline pipe-delimited parsing — immediately
+before the existing `strings.Trim(ev, "\"")` outer-strip.
+
+This is a narrow carve-out, not a general leniency relaxation: it only
+discards content the model itself never wrapped in quotes, on a field whose
+entire contract is "a short verbatim quote." A model bent on fabricating a
+false conclusion already has a strictly easier, entirely-unchecked channel
+for that — the hypothesis's own `Text` field, never verified by this or any
+other layer — so declining to verify a self-admittedly-unquoted tail here
+doesn't meaningfully narrow what this check catches.
+
 ```go
 if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
     appendEvidenceProvenance(extra, primary, secondary)
@@ -1506,6 +1538,11 @@ happened.
 unusual-phrase case and a backslash-escaped-quotes case),
 `TestIsEvidenceGlueOnly` (8 cases, including a real fact that happens to
 contain a glue word — must not be treated as glue-only),
+`TestTrimEvidenceTrailingCommentary` (6 cases, including both live
+`db-replica-disconnected`/`db-replica-container-stopped` strings verbatim),
+`TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped` (both protocol
+shapes — standalone look-ahead and inline pipe-delimited — against the same
+two live strings, end-to-end through `parseDiagnosticReport`),
 `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
 `_EmptyQuote`, `_WhitespaceAndCaseNormalized`, `_GlueFragmentVacuouslyVerified`,
 `TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,

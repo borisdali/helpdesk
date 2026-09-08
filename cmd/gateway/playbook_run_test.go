@@ -1322,6 +1322,55 @@ FINDINGS: Replica at 172.18.0.4 is present but stalled.`
 	}
 }
 
+// TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped reproduces the
+// two live 2026-09-08 firings (db-replica-disconnected, plr_7e3f42f6;
+// db-replica-container-stopped, plr_b325b1f5) that survived the
+// primary/secondary split and quote-boundary-splitting fixes: the model
+// quoted real tool output correctly, then appended its own unquoted
+// explanatory tail after the last real quote. Confirmed live against the
+// actual audit trail that this tail never appears in any tool_execution
+// output for either trace — it's the model's own commentary, not a
+// fabricated fact, and must be stripped by parseDiagnosticReport before
+// checkEvidenceProvenance ever sees it, in both the standalone-field
+// (look-ahead) and inline pipe-delimited protocol shapes.
+func TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped(t *testing.T) {
+	t.Run("standalone EVIDENCE line (look-ahead)", func(t *testing.T) {
+		text := `HYPOTHESIS_1: Replica lost its replication slot
+CONFIDENCE: 0.9
+EVIDENCE: "active    | f" and "lag_bytes | 129029872" and "(0 rows)" for pg_stat_replication
+ROOT_CAUSE: HYPOTHESIS_1`
+
+		report := parseDiagnosticReport(text)
+		if report == nil {
+			t.Fatal("expected non-nil DiagnosticReport")
+		}
+		want := `active    | f" and "lag_bytes | 129029872" and "(0 rows)`
+		if report.Hypotheses[0].Evidence != want {
+			t.Errorf("Evidence = %q, want %q (trailing unquoted commentary must be stripped)", report.Hypotheses[0].Evidence, want)
+		}
+		if strings.Contains(report.Hypotheses[0].Evidence, "pg_stat_replication") {
+			t.Error("Evidence retained the unquoted trailing commentary 'for pg_stat_replication'")
+		}
+	})
+
+	t.Run("inline pipe-delimited EVIDENCE field", func(t *testing.T) {
+		text := `HYPOTHESIS_1: Replica lost its replication slot | CONFIDENCE: 0.9 | EVIDENCE: "active | f" and "lag_bytes | 162584072" showing the slot is inactive with significant retained WAL
+ROOT_CAUSE: HYPOTHESIS_1`
+
+		report := parseDiagnosticReport(text)
+		if report == nil {
+			t.Fatal("expected non-nil DiagnosticReport")
+		}
+		want := `active | f" and "lag_bytes | 162584072`
+		if report.Hypotheses[0].Evidence != want {
+			t.Errorf("Evidence = %q, want %q (trailing unquoted commentary must be stripped)", report.Hypotheses[0].Evidence, want)
+		}
+		if strings.Contains(report.Hypotheses[0].Evidence, "showing the slot") {
+			t.Error("Evidence retained the unquoted trailing commentary 'showing the slot is inactive...'")
+		}
+	})
+}
+
 func TestCutPrefixFold(t *testing.T) {
 	tests := []struct {
 		name, s, prefix, wantRest string
@@ -2404,6 +2453,44 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Errorf("part %d = %q, want %q", i, got[i], tt.want[i])
 				}
+			}
+		})
+	}
+}
+
+// TestTrimEvidenceTrailingCommentary covers the two live 2026-09-08
+// db-replica-disconnected/db-replica-container-stopped firings that remained
+// after the primary/secondary split and quote-boundary-splitting fixes: a
+// model correctly quoting real tool output, then appending its own unquoted
+// explanatory tail ("for pg_stat_replication", "showing the slot is
+// inactive with significant retained WAL") that was never claimed as a
+// verbatim quote in the first place, so it must not be sent through
+// evidence-provenance verification as if it were.
+func TestTrimEvidenceTrailingCommentary(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   string
+		want string
+	}{
+		{
+			"live: db-replica-disconnected trailing 'for <view>' commentary",
+			`"active    | f" and "lag_bytes | 129029872" and "(0 rows)" for pg_stat_replication`,
+			`"active    | f" and "lag_bytes | 129029872" and "(0 rows)"`,
+		},
+		{
+			"live: db-replica-container-stopped trailing 'showing...' commentary",
+			`"active | f" and "lag_bytes | 162584072" showing the slot is inactive with significant retained WAL`,
+			`"active | f" and "lag_bytes | 162584072"`,
+		},
+		{"properly terminated, no trailing commentary", `"lag_bytes | 28610712"`, `"lag_bytes | 28610712"`},
+		{"no quotes at all — untouched", "lag_bytes | 28610712", "lag_bytes | 28610712"},
+		{"trailing whitespace after closing quote is not commentary", `"lag_bytes | 28610712"   `, `"lag_bytes | 28610712"   `},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trimEvidenceTrailingCommentary(tt.ev); got != tt.want {
+				t.Errorf("trimEvidenceTrailingCommentary(%q) = %q, want %q", tt.ev, got, tt.want)
 			}
 		})
 	}

@@ -2892,6 +2892,43 @@ func normalizeProtocolLine(line string) string {
 	return strings.TrimSpace(trimmed)
 }
 
+// trimEvidenceTrailingCommentary strips unquoted commentary a model appends
+// after its own last verbatim quote on an EVIDENCE line — e.g.
+// `"active | f" and "lag_bytes | 129029872" for pg_stat_replication`, where
+// `for pg_stat_replication` sits entirely outside any quote the model wrote
+// (found live 2026-09-08, same fault family as the compound-quote and
+// backslash-escaping fixes: the model correctly quotes real facts, then adds
+// an unquoted explanatory tail — "for <view>", "showing <interpretation>" —
+// that fails verification not because it's fabricated, but because it was
+// never a quote in the first place).
+//
+// The raw, pre-trim EVIDENCE value objectively distinguishes "properly
+// quote-delimited" from "has a trailing unquoted tail": find the position of
+// the *last* literal `"` in the value. If nothing follows it (once trimmed),
+// the value already ends the way the protocol asks — unchanged. If
+// something does follow it, that tail is provably outside every quote span
+// the model wrote (it comes after the very last one), so it's discarded
+// before the existing outer-quote-strip runs, rather than being carried
+// forward to fail verification as if it claimed to be verbatim.
+//
+// This is deliberately narrower than exempting "the last split segment"
+// after splitEvidenceQuoteParts runs — that would be ambiguous (a
+// single-quote value's *only* segment IS the whole quote and must still be
+// checked in full). Operating on quote-character position in the raw string
+// has no such ambiguity: a value with zero interior quotes is untouched by
+// this function entirely, only a value where real trailing text follows a
+// real quote character is affected.
+func trimEvidenceTrailingCommentary(ev string) string {
+	lastQuote := strings.LastIndex(ev, "\"")
+	if lastQuote < 0 {
+		return ev
+	}
+	if tail := strings.TrimSpace(ev[lastQuote+1:]); tail != "" {
+		return ev[:lastQuote+1]
+	}
+	return ev
+}
+
 // cutPrefixFold reports whether s has the given prefix, case-insensitively,
 // and if so returns the remainder using s's own original casing — same
 // signature/semantics as strings.CutPrefix, but tolerant of a model writing
@@ -2953,6 +2990,7 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 				} else if after, ok := cutPrefixFold(next, "EVIDENCE:"); ok {
 					if last.Evidence == "" {
 						ev := strings.TrimSpace(after)
+						ev = trimEvidenceTrailingCommentary(ev)
 						ev = strings.Trim(ev, "\"")
 						last.Evidence = ev
 					}
@@ -3087,6 +3125,7 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 			}
 		} else if after, ok := strings.CutPrefix(part, "EVIDENCE:"); ok {
 			ev := strings.TrimSpace(after)
+			ev = trimEvidenceTrailingCommentary(ev)
 			ev = strings.Trim(ev, "\"")
 			h.Evidence = ev
 		} else if after, ok := strings.CutPrefix(part, "REJECTED:"); ok {
