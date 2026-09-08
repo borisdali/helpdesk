@@ -1504,6 +1504,61 @@ token, so a genuinely wrong value (`"active = t"` when the real row says
 `f`) still fails to match after normalization — this can't turn a
 fabricated claim into a verified one.
 
+**Dropped embedded quote marks (added 2026-09-08).** A fourth live case,
+confirmed by pulling the real trace directly from the auditd SQLite store
+(`/v1/events` was auth-gated in that session; the same data is readable from
+the store the server itself serves from): a real Postgres log line names a
+host/user in quotes — `pg_hba.conf rejects replication connection for host
+"172.18.0.4", user "postgres", no encryption` — and the model, citing it
+faithfully in every other respect, simply dropped the embedded quote marks
+instead of escaping them (the mirror image of `stripEscapedQuotes`'s case,
+where a model *adds* `\"`). `normalizeEvidenceText` now also strips every
+literal `"` from both the quote and the candidate output before comparing —
+applied symmetrically, so it can't turn a fabricated value into a verified
+one (a wrong IP address in the same sentence still fails to match).
+
+**This class of fix reached its practical ceiling.** Four live rounds on the
+same three replication faults each surfaced a *new* citation-style variant a
+model can produce without changing any actual content: compound quotes,
+backslash-escaped inner quotes, narration between/after quotes,
+separator-punctuation swaps, and dropped embedded quotes. Each was
+individually understood, confirmed against the real trace, and closed
+without weakening the check against genuine fabrication — but the pattern of
+new variants continuing to appear on live re-tests, even after four rounds
+of hardening, plus a fifth round's genuinely structural (not
+citation-related) truncation-direction bug below, meant the false-positive
+surface wasn't provably closed. As of 2026-09-08, `unverified_evidence`
+(primary) moved to warn-only — surfaced everywhere, no longer gating `CLEAN`
+— matching `unverified_evidence_secondary`'s existing treatment, so a
+v0.27-era CLEAN cert doesn't flip to DIRTY on an unproven new signal. See
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full
+decision and rationale.
+
+**A separate, structural false positive: truncation direction on
+chronological logs.** Also found in this same round, on
+`db-replica-container-stopped`: a hypothesis correctly quoted two real log
+lines (`LOG:  received fast shutdown request`, `LOG:  database system is
+shut down`) that never appeared in *that specific* `get_host_logs` call's
+*persisted* audit copy — even though a different, similarly-timed
+`get_host_logs` call in the same trace did retain them. Both calls' stored
+`Result` were truncated at exactly `toolResultMaxLen` (head-kept, ending in
+the literal `"..."` marker) — confirmed directly from the stored bytes. The
+model very likely saw the real, untruncated tool response (truncation only
+applies to what gets *persisted* for later verification, not necessarily to
+what the tool returns to the agent) and quoted it correctly; a chatty,
+highly repetitive retry-loop log pads out the *front* of the response with
+near-duplicate lines, pushing the actually-decisive content — the eventual
+shutdown — past the truncation boundary in the persisted copy purely by
+chance, depending on how much retry noise preceded it at that exact moment.
+This is not a citation-style quirk fixable by text normalization: it's an
+artifact of head-truncating naturally chronological, repetitive tool output,
+and it can recur for any tool with the same shape. Not fixed in this
+release — logged as a known gap (see the v0.28 backlog); candidates include
+tail-keep truncation for log-shaped tools specifically, or deduplicating
+repeated retry lines at the source (`get_host_logs` itself) rather than
+raising `toolResultMaxLen` again, which only delays the same failure mode at
+a larger size.
+
 ```go
 if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
     appendEvidenceProvenance(extra, primary, secondary)
@@ -1534,20 +1589,21 @@ narrow, type-safe field checks, this is a broad, general-purpose text check
 with a real (if bounded) false-positive surface that Layer 4's exact-value
 matching doesn't share.
 
-**Now feeds the CLEAN cert** (`hasCleanWarning`/`warningTypesFor` in
-faulttest), the eighth signal — a flat `unverified_evidence` bucket (not
-quote-keyed, same reasoning as `mismatch`'s flat bucket in §5.9: an arbitrary
-set of quote strings would produce an unbounded number of distinct
-`WarningDistribution` buckets). Tied at the same Journey-outcome priority (9,
-`unverified_evidence`) as `unverified_claim`/`target_drift_detected`/
-`protocol_violation` — a new, distinct outcome string, deliberately *not*
-folded into `unverified_claim`, which is already Mismatch-specific; reusing
-it would have blurred two different mechanisms behind one label. Only the
-`primary` list feeds this — `secondary` gets its own `unverified_evidence_secondary`
-bucket, visible in the same `WarningDistribution` for tracking, but
-deliberately excluded from `warning_count`/`is_clean` (see the
-primary-vs-secondary note above). See
-[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+**Surfaced everywhere, but warn-only for CLEAN as of 2026-09-08**
+(`hasCleanWarning`/`warningTypesFor` in faulttest) — both `primary` and
+`secondary` get their own flat `WarningDistribution` buckets
+(`unverified_evidence`/`unverified_evidence_secondary`, not quote-keyed, same
+reasoning as `mismatch`'s flat bucket in §5.9: an arbitrary set of quote
+strings would produce an unbounded number of distinct buckets), and both are
+tracked in the Journey outcome (priority 9, `unverified_evidence`) alongside
+`unverified_claim`/`target_drift_detected`/`protocol_violation`. `primary`
+originally fed `hasCleanWarning`/`isClean()` at ship (it's the stronger
+signal — it backs the acted-on conclusion, `secondary` never did) but moved
+to warn-only after four live-testing rounds each surfaced a new, genuine
+citation-formatting false-positive variant (see the sections above) plus a
+structural truncation bug unrelated to citation style — see
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full
+rationale and history of the decision.
 
 **Audit trail can itself be the bottleneck.** `checkEvidenceProvenance`
 verifies a quote against `tool_execution.Result` — the *stored* copy of a
@@ -1588,9 +1644,14 @@ two live strings, end-to-end through `parseDiagnosticReport`),
 `TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication`
 (end-to-end reproduction of the live db-replica-disconnected case with
 narration between quotes),
+`TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication` (end-to-end
+reproduction of the live db-replica-disconnected case with dropped inner
+quote marks),
 `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
 `_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
 `_SeparatorPunctuationNormalized` (added 2026-09-08: `=`/`:` vs. `|`, plus a
+wrong-value case that must still fail), `_DroppedEmbeddedQuotes` (added
+2026-09-08: real content with embedded quote marks omitted, plus a
 wrong-value case that must still fail), `_GlueFragmentVacuouslyVerified`,
 `TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
 `TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end

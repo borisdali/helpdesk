@@ -3803,13 +3803,28 @@ func evidenceQuoteVerified(quote string, outputs []string) bool {
 var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|", " | ")
 
 // normalizeEvidenceText lowercases, canonicalizes field/value separator
-// punctuation (see evidenceSeparatorReplacer), and collapses whitespace runs
-// to a single space — deterministic, not fuzzy: closes formatting-only gaps
-// (line breaks, double spaces, casing, separator choice) between a
+// punctuation (see evidenceSeparatorReplacer), strips literal double-quote
+// characters, and collapses whitespace runs to a single space —
+// deterministic, not fuzzy: closes formatting-only gaps (line breaks, double
+// spaces, casing, separator choice, embedded-quote punctuation) between a
 // verbatim-instructed quote and the raw tool output it came from, without
 // tolerating any actual content difference.
+//
+// Stripping `"` (added 2026-09-08) closes a third live false positive on the
+// same fault (db-replica-disconnected, plr_25737a2d): a real Postgres log
+// line names a host/user in quotes — `pg_hba.conf rejects replication
+// connection for host "172.18.0.4", user "postgres", no encryption` — and
+// the model, citing it faithfully in every other respect, simply dropped
+// the embedded quote marks rather than escaping them (the mirror-image of
+// stripEscapedQuotes' case, where a model ADDS `\"` around such values).
+// Removing every literal `"` from both sides before comparison makes the
+// two citation styles equivalent without touching any word or number token,
+// applied consistently on both the quote and the candidate output so it
+// can't turn a fabricated value into a verified one — same reasoning as
+// evidenceSeparatorReplacer above.
 func normalizeEvidenceText(s string) string {
 	s = evidenceSeparatorReplacer.Replace(s)
+	s = strings.ReplaceAll(s, `"`, "")
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 

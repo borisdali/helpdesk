@@ -268,11 +268,13 @@ check that feeds those, so it's kept off that path the same way `narrated_tool_n
 `unverified_evidence_secondary` (non-primary-hypothesis fabrication) does **not** elevate the
 journey outcome or set `has_unverified_evidence` — it gets its own, separately-tracked
 `unverified_evidence_secondary` array on the incident-narrative chapter, visible inline, but
-deliberately doesn't participate in outcome priority or the CLEAN-cert gate the way the primary
-field does. Found live: a correctly-attributed, STABLE diagnosis couldn't earn CLEAN because a
-*rejected* alternative hypothesis (not the one the model acted on) cited an invented log line —
-splitting primary from secondary closed that gap without weakening what `unverified_evidence`
-itself catches.
+deliberately doesn't participate in outcome priority the way the primary field does. Found live:
+a correctly-attributed, STABLE diagnosis couldn't earn CLEAN because a *rejected* alternative
+hypothesis (not the one the model acted on) cited an invented log line — splitting primary from
+secondary closed that gap without weakening what `unverified_evidence` itself catches. Note that
+neither field feeds the faulttest CLEAN-cert gate as of 2026-09-08 — see [ATTRIBUTION_CERTS.md
+§9](ATTRIBUTION_CERTS.md#9-the-clean-axis) — this journey-outcome/chapter-flag behavior described
+above is unchanged by that; only the CLEAN cert's own boolean gate moved.
 
 The orchestrator prompt instructs the LLM to report mismatches to the user and
 **not** claim success.

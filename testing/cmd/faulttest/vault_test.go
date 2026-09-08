@@ -2054,7 +2054,7 @@ func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T
 		printIncidentJourney(srv.URL, "", "plr_unvevid1")
 	})
 
-	if !strings.Contains(out, "⚠ unverified evidence — replica disconnected — totally invented log line") {
+	if !strings.Contains(out, "⚠ unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
 		t.Errorf("output missing the actual primary quote text, got:\n%s", out)
 	}
 	if !strings.Contains(out, "⚠ unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {

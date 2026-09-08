@@ -2375,6 +2375,28 @@ func TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication(t *testin
 	}
 }
 
+// TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication is the
+// end-to-end reproduction of the live db-replica-disconnected case
+// (plr_25737a2d), confirmed directly against the real audit trail: a real
+// FATAL log line names a host/user in quotes, and the model's citation
+// dropped those embedded quote marks without changing any other content.
+func TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  could not connect to the primary server: connection to server at "postgres" (172.18.0.2), port 5432 failed: FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `pg_hba.conf rejects replication connection for host 172.18.0.4, user postgres, no encryption`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real content, model just dropped embedded quote marks), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
 // TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication
 // proves a compound quote joined with connector phrases beyond "and"/","
 // (found live 2026-09-08: one response used "followed later by", "and
@@ -2659,6 +2681,27 @@ func TestEvidenceQuoteVerified_SeparatorPunctuationNormalized(t *testing.T) {
 	}
 	if evidenceQuoteVerified("active = t", outputs) {
 		t.Error(`evidenceQuoteVerified("active = t", ...) = true, want false — wrong value must still fail regardless of separator`)
+	}
+}
+
+// TestEvidenceQuoteVerified_DroppedEmbeddedQuotes reproduces a fourth live
+// false positive found 2026-09-08 on db-replica-disconnected (plr_25737a2d),
+// confirmed directly against the real audit trail: a Postgres log line names
+// a host/user in quotes — `pg_hba.conf rejects replication connection for
+// host "172.18.0.4", user "postgres", no encryption` — and the model, citing
+// it faithfully in every other respect, simply dropped the embedded quote
+// marks rather than escaping them (the mirror image of the earlier
+// backslash-escaping case, where a model ADDS `\"` instead). Also checks
+// that a genuinely wrong value still fails regardless of quote-stripping.
+func TestEvidenceQuoteVerified_DroppedEmbeddedQuotes(t *testing.T) {
+	output := `FATAL:  could not connect to the primary server: connection to server at "postgres" (172.18.0.2), port 5432 failed: FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`
+	quote := `pg_hba.conf rejects replication connection for host 172.18.0.4, user postgres, no encryption`
+	if !evidenceQuoteVerified(quote, []string{output}) {
+		t.Error("expected true — same content, model just dropped the embedded quote marks")
+	}
+	wrong := `pg_hba.conf rejects replication connection for host 172.18.0.9, user postgres, no encryption`
+	if evidenceQuoteVerified(wrong, []string{output}) {
+		t.Error("expected false — wrong IP address must still fail regardless of quote-stripping")
 	}
 }
 

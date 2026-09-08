@@ -219,7 +219,7 @@ Stability certs are stored with a composite primary key of `(fault_id, diagnosis
 
 ### CLEAN axis fields (v0.24.0)
 
-Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which eight signals count and which two are deliberately excluded.
+Three additional columns capture a fourth, independent axis — whether any run tripped a *verified*, code-derived warning signal (not the self-reported confidence the outcome/conclusion axes above are built from). See [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full treatment, including exactly which seven signals count and which four are deliberately excluded.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -640,7 +640,9 @@ rather than returning early — the consistency signal is available independentl
 
 When `Clean` is `no`, a `Signal types:` line appears directly underneath, breaking down
 `warning_distribution` by type — the aggregate count in `Clean` alone can't tell you which of
-the eight signals fired. As of v0.25.0, each entry is also annotated against the cert's total run
+the seven CLEAN-blocking signals fired (`unverified_evidence`/`unverified_evidence_secondary` can
+also appear in this same line when they fire, but neither one is what made `Clean` say `no` — see
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis)). As of v0.25.0, each entry is also annotated against the cert's total run
 count: `(predictable)` when the signal fired on *every* run (structurally baked into this
 fault/playbook/model combination — not fixable by prompting, chasing it with guidance changes is
 a dead end) vs. `(varies)` when it fired on some but not all otherwise-identical runs (the case

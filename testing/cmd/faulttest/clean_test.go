@@ -306,6 +306,45 @@ func TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean(t *testi
 	}
 }
 
+// TestBuildCleanReport_UnverifiedEvidencePrimary_DoesNotBlockClean reproduces
+// the live 2026-09-08 db-replica-disconnected/db-replica-container-stopped
+// pattern that drove this decision: after four live rounds each surfacing a
+// new, genuine citation-formatting variant (compound quotes, backslash
+// escaping, narration, separator punctuation, dropped embedded quotes) — all
+// real false positives, none a missed fabrication — plus a structural
+// truncation-direction bug unrelated to citation style, unverified_evidence
+// (primary) moved to warn-only for this release, matching
+// UnverifiedEvidenceSecondary's existing treatment: still tracked
+// (WarningDistribution), no longer CLEAN-blocking on its own. See
+// hasCleanWarning's doc comment for the full rationale.
+func TestBuildCleanReport_UnverifiedEvidencePrimary_DoesNotBlockClean(t *testing.T) {
+	f := Failure{ID: "db-replica-disconnected", Name: "Replica disconnected (walreceiver dropped)"}
+	results := []EvalResult{
+		{Passed: true, UnverifiedEvidence: true},
+		{Passed: true, UnverifiedEvidence: true},
+		{Passed: true, UnverifiedEvidence: true},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 0 {
+		t.Errorf("WarningCount: got %d, want 0 — unverified_evidence is warn-only as of 2026-09-08, must not count toward CLEAN", r.WarningCount)
+	}
+	if !r.isClean() {
+		t.Error("isClean() = false, want true — a fully-passing, correctly-attributed diagnosis should earn CLEAN even with unverified_evidence firing on every run")
+	}
+	if r.WarningDistribution["unverified_evidence"] != 3 {
+		t.Errorf("WarningDistribution[unverified_evidence]: got %d, want 3 — still tracked for visibility", r.WarningDistribution["unverified_evidence"])
+	}
+
+	out := captureStdout(func() { r.Print() })
+	if !strings.Contains(out, "unverified_evidence=3") {
+		t.Errorf("expected the unverified_evidence count surfaced in the printed report:\n%s", out)
+	}
+	if !strings.Contains(out, "Clean:        yes") {
+		t.Errorf("expected Clean: yes in the printed report:\n%s", out)
+	}
+}
+
 func TestWarningDistributionString(t *testing.T) {
 	cases := []struct {
 		name string
@@ -347,16 +386,23 @@ func TestHasCleanWarning(t *testing.T) {
 		{"mismatch", EvalResult{Mismatch: true}, true},
 		{"evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, true},
 		{"evidence required but unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, true},
-		{"unverified evidence (content-provenance)", EvalResult{UnverifiedEvidence: true}, true},
+		{
+			"unverified evidence (content-provenance) alone does NOT block Clean — warn-only as of 2026-09-08, see hasCleanWarning's doc comment",
+			EvalResult{UnverifiedEvidence: true}, false,
+		},
 		{
 			"unverified evidence secondary alone does NOT block Clean — backs a hypothesis the model itself rejected, not the acted-on conclusion",
 			EvalResult{UnverifiedEvidenceSecondary: true}, false,
 		},
 		{
-			"all eight", EvalResult{
+			"all seven blocking signals", EvalResult{
 				EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true,
-				Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true, UnverifiedEvidence: true,
+				Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true,
 			}, true,
+		},
+		{
+			"unverified evidence alongside real blocking signals still blocks (via the other signals, not itself)",
+			EvalResult{EvidenceCoverageGap: true, UnverifiedEvidence: true}, true,
 		},
 	}
 	for _, tc := range cases {

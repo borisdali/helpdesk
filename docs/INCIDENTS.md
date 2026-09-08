@@ -392,7 +392,11 @@ holds primary/root-cause-hypothesis quotes (the ones `has_unverified_evidence`
 reflects); `unverified_evidence_secondary` holds the same check for
 hypotheses the model itself rejected — still shown inline (labeled
 "(secondary, non-blocking)" in the CLI), but not counted toward
-`has_unverified_evidence` or a fault's `CLEAN` cert.
+`has_unverified_evidence`. `has_unverified_evidence` itself is unchanged by
+the note below — it still reflects `unverified_evidence` (primary) firing.
+What changed, as of 2026-09-08: a fault's `CLEAN` cert (`testing/cmd/faulttest`)
+no longer treats *either* array as blocking — both are warn-only for this
+release; see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
 
 The raw API carries the same fields on every chapter object
 (`trace_id`/`has_mismatch`/`has_target_drift`/`has_unverified_evidence` — see

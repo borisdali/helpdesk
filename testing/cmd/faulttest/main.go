@@ -599,14 +599,17 @@ func cmdRun(args []string) {
 				// 2026-09-07: a count alone meant tracking down what was actually
 				// fabricated required querying the raw audit trail by hand — each
 				// quote is already prefixed with its owning hypothesis's text, so
-				// no further lookup is needed here). Primary (backs the acted-on
-				// conclusion) is flagged as blocking; secondary (backs a hypothesis
-				// the model itself rejected) is still shown, but labeled non-blocking
-				// — see EvalResult.UnverifiedEvidenceSecondary's doc comment for why.
+				// no further lookup is needed here). Both primary and secondary
+				// are labeled non-blocking as of 2026-09-08 (see hasCleanWarning's
+				// doc comment: four live rounds each surfaced a new, genuine
+				// citation-formatting false-positive variant, warn-only for this
+				// release) — primary still reads as the stronger signal (it backs
+				// the acted-on conclusion, not a rejected hypothesis), so the two
+				// labels stay visually distinct even though neither gates CLEAN.
 				if len(resp.UnverifiedEvidence) > 0 {
 					evalResult.UnverifiedEvidence = true
 					evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
-					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE (primary): %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
 					for _, q := range resp.UnverifiedEvidence {
 						fmt.Printf("         %s\n", q)
 					}

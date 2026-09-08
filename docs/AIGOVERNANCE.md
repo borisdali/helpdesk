@@ -276,7 +276,10 @@ already fixed once, one layer over. Fabrication on a *secondary* hypothesis is s
 and still recorded — a model willing to invent a plausible detail for a discarded theory
 is a real reliability signal, and an operator reading the full transcript later shouldn't
 hit fabricated content anywhere in it — but only *primary* fabrication indicts the
-model's actual, acted-on conclusion, so only primary is CLEAN-blocking.
+model's actual, acted-on conclusion, so `secondary` was never CLEAN-blocking; `primary`
+was CLEAN-blocking from ship until 2026-09-08, when it too moved to warn-only after
+several live rounds each surfaced a new false-positive citation-formatting variant —
+see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full history.
 
 **Deliberately narrower than it might sound**: this verifies a quote is *real*, not
 that the *conclusion* drawn from it is correct. A 100%-genuine, verbatim quote can still
@@ -337,7 +340,7 @@ line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 | **Scope** | Narrow — mutation tools only, inside the acting agent | Broad — universal, any tool in the action-class map | Broad — universal, any hypothesis with an `Evidence` field, no per-tool registration | Narrow by design — agent-and-tool-scoped; today 6 signals on the K8s agent, 3 on the database agent |
 | **Blind spot** | Unreachable if the Orchestrator fabricates without ever calling the sub-agent | Checks *that* a tool ran, not what its output actually said | Checks a quote is *real*, not that the *conclusion* drawn from it is correct — a genuine, verbatim quote can still fail to support its hypothesis | Only covers instrumented tools/fields; everything else remains unchecked by this layer specifically |
 | **Enforcement** | Bounded retry + escalation at execution time — not an audit-verification gate | Warn-only — narrated to the user as unverifiable, journey outcome elevated, never blocks the run | Warn-only by design — a broad, general-purpose text check, deliberately not a hard gate | **Hard gate** — forces a human-reviewed `pending_gate`, but only on a genuine, checkable contradiction; evidence the model correctly cited is corroboration, not a red flag |
-| **STABLE/CLEAN cert signal(s)** | None — a runtime safety mechanism, not an audit-trail verification signal faulttest tracks | `Mismatch` (+ sibling `TargetDrift`, same delegation-verification event) | `UnverifiedEvidence` — primary/root-cause hypothesis only, CLEAN-blocking. `UnverifiedEvidenceSecondary` — non-primary hypotheses, tracked and surfaced but **not** CLEAN-blocking (v0.28.0 split; see above) | `EvidenceWarnings`/`ObjectiveEvidenceGate` (the production force-gate itself) **and**, for faulttest catalog runs specifically, `EvidenceCoverageGap`/`EvidenceRequiredButUnconfirmed` (v0.28.0 split of "signal never fired" vs. "fired but unconfirmed") |
+| **STABLE/CLEAN cert signal(s)** | None — a runtime safety mechanism, not an audit-trail verification signal faulttest tracks | `Mismatch` (+ sibling `TargetDrift`, same delegation-verification event) | `UnverifiedEvidence`/`UnverifiedEvidenceSecondary` — both tracked and surfaced (`WarningDistribution`, CLI, `vault`), **neither is CLEAN-blocking as of 2026-09-08** (primary was, from v0.28.0 ship until that date — see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for why it moved to warn-only) | `EvidenceWarnings`/`ObjectiveEvidenceGate` (the production force-gate itself) **and**, for faulttest catalog runs specifically, `EvidenceCoverageGap`/`EvidenceRequiredButUnconfirmed` (v0.28.0 split of "signal never fired" vs. "fired but unconfirmed") |
 
 **Coverage:**
 

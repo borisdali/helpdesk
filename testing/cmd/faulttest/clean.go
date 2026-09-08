@@ -79,7 +79,11 @@ func warningTypesFor(er EvalResult) []string {
 	if er.UnverifiedEvidence {
 		// Flat bucket, not quote-keyed, same reasoning as mismatch above: an
 		// arbitrary set of EVIDENCE quote strings would produce an unbounded
-		// number of distinct WarningDistribution buckets.
+		// number of distinct WarningDistribution buckets. Present here for
+		// visibility/tracking, but as of 2026-09-08 does NOT feed
+		// hasCleanWarning (warn-only for this release — see that function's
+		// doc comment for why): this bucket showing up does not by itself
+		// make a run DIRTY.
 		types = append(types, "unverified_evidence")
 	}
 	if er.UnverifiedEvidenceSecondary {

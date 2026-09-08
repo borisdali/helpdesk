@@ -4917,11 +4917,13 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// to see what was actually fabricated. Each quote is already prefixed with
 	// its owning hypothesis's own text by checkEvidenceProvenance, so no
 	// further lookup is needed. Primary/secondary mirror the CLEAN-cert split:
-	// primary backs the acted-on conclusion (blocking); secondary backs a
-	// hypothesis the model itself rejected (still shown, marked non-blocking).
+	// primary backs the acted-on conclusion, secondary backs a hypothesis the
+	// model itself rejected — both are non-blocking as of 2026-09-08 (warn-only
+	// for this release, see hasCleanWarning's doc comment), but primary stays
+	// visually distinct since it's still the stronger of the two signals.
 	printUnverifiedEvidence := func(primary, secondary []string) {
 		for _, q := range primary {
-			fmt.Printf("           ⚠ unverified evidence — %s\n", q)
+			fmt.Printf("           ⚠ unverified evidence (non-blocking) — %s\n", q)
 		}
 		for _, q := range secondary {
 			fmt.Printf("           ⚠ unverified evidence (secondary, non-blocking) — %s\n", q)

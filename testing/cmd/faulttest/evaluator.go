@@ -213,7 +213,7 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the eight
+// hasCleanWarning returns true when this run tripped any of the seven
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
 // saw but didn't act on, an outright protocol violation (omitted the
@@ -221,20 +221,38 @@ type HypothesisEntry struct {
 // (the agent queried a server other than the one it was asked about), a
 // fabrication mismatch (the agent narrated calling a tool that never
 // actually executed), a catalog-declared evidence signal that never fired at
-// all (EvidenceCoverageGap), one that fired but was never confirmed
-// (EvidenceRequiredButUnconfirmed), or an EVIDENCE quote on the PRIMARY
-// hypothesis that didn't match any real tool output (UnverifiedEvidence,
-// content-provenance, fabrication-detection Layer 3, v0.28.0). Used to
-// compute the CLEAN stability axis — deliberately excludes low_confidence/
-// confidence_warning, which are self-reported and already substantially
-// captured by the existing evaluation-stability axis (judge/confidence
-// variance). Also deliberately excludes UnverifiedEvidenceSecondary — a
-// fabricated quote backing a hypothesis the model itself rejected is real
-// and reported (see EvalResult's doc comment), but doesn't indict the
-// model's actual, acted-on conclusion, so it doesn't block CLEAN on its own.
+// all (EvidenceCoverageGap), or one that fired but was never confirmed
+// (EvidenceRequiredButUnconfirmed). Used to compute the CLEAN stability
+// axis — deliberately excludes low_confidence/confidence_warning, which are
+// self-reported and already substantially captured by the existing
+// evaluation-stability axis (judge/confidence variance).
+//
+// Also deliberately excludes UnverifiedEvidence and
+// UnverifiedEvidenceSecondary (content-provenance, fabrication-detection
+// Layer 3, v0.28.0) as of 2026-09-08 — warn-only for this release, not
+// CLEAN-blocking. UnverifiedEvidence started as CLEAN-blocking (it flags an
+// EVIDENCE quote on the PRIMARY hypothesis that didn't match any real tool
+// output — a stronger signal than the always-non-blocking Secondary case),
+// but four consecutive live rounds on the same three replication faults each
+// surfaced a *new*, genuine citation-formatting variant a model can produce
+// without changing any actual content (compound quotes, backslash-escaped
+// inner quotes, narration between/after quotes, separator-punctuation
+// swaps, dropped embedded quotes — see cmd/gateway/playbooks.go's
+// evidenceQuoteVerified/normalizeEvidenceText history) plus a genuinely
+// structural false positive unrelated to citation style (truncation
+// direction on chronological/repetitive tool output — see
+// docs/MUTATION_TOOLS.md §5.11). Every one of those was a false positive,
+// not a missed real fabrication, but the *pattern* of new variants still
+// appearing after four hardening rounds means the false-positive surface
+// isn't provably closed, and letting an unproven signal flip a v0.27-era
+// CLEAN cert to DIRTY reads as a regression to customers who never touched
+// this feature. UnverifiedEvidence is still computed and surfaced
+// everywhere (CLI, vault, WarningDistribution) — this only removes it from
+// the boolean gate. Revisit once it's proven stable across a broader corpus
+// of fault families and runs, not just these three.
 func hasCleanWarning(er EvalResult) bool {
 	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch ||
-		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed || er.UnverifiedEvidence
+		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed
 }
 
 // Tool-evidence text matching uses faultlib.ToolPatterns directly (item 7
