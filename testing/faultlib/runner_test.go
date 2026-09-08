@@ -384,6 +384,36 @@ func TestRunViaPlaybook_UnverifiedEvidencePopulated(t *testing.T) {
 	}
 }
 
+// TestRunViaPlaybook_UnverifiedEvidenceSecondaryPopulated mirrors
+// TestRunViaPlaybook_UnverifiedEvidencePopulated for the sibling field added
+// 2026-09-07 (primary/secondary split — see DelegationVerification.
+// UnverifiedEvidenceSecondary's doc comment).
+func TestRunViaPlaybook_UnverifiedEvidenceSecondaryPopulated(t *testing.T) {
+	srv := playbookServer(t, "pbs_db_restart_triage", "pb_abc", map[string]any{
+		"text":                          "result",
+		"run_id":                        "run_unvevidsec01",
+		"unverified_evidence_secondary": []string{"rejected theory — invented detail"},
+	})
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-connection-refused", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_db_restart_triage",
+	}
+
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if len(resp.UnverifiedEvidenceSecondary) != 1 || resp.UnverifiedEvidenceSecondary[0] != "rejected theory — invented detail" {
+		t.Errorf("UnverifiedEvidenceSecondary = %v, want [\"rejected theory — invented detail\"]", resp.UnverifiedEvidenceSecondary)
+	}
+	if len(resp.UnverifiedEvidence) != 0 {
+		t.Errorf("UnverifiedEvidence = %v, want empty — this response only set the secondary field", resp.UnverifiedEvidence)
+	}
+}
+
 // TestRunViaPlaybook_SendsSkipTrustGate is a regression guard for a real
 // bootstrapping requirement: faulttest traffic must always set
 // skip_trust_gate=true, unconditionally, on every playbook-run request — not

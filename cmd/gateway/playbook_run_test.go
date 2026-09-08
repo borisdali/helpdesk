@@ -2046,9 +2046,12 @@ ESCALATE_TO: none`
 	if evidenceEvent.DelegationVerification.Mismatch {
 		t.Error("Mismatch = true, want false: this event records an unverified quote, not a fabricated tool call")
 	}
-	want := []string{`lag_bytes | 999999999`}
+	want := []string{`Replica disconnected due to primary rejection — lag_bytes | 999999999`}
 	if len(evidenceEvent.DelegationVerification.UnverifiedEvidence) != 1 || evidenceEvent.DelegationVerification.UnverifiedEvidence[0] != want[0] {
 		t.Errorf("UnverifiedEvidence = %v, want %v", evidenceEvent.DelegationVerification.UnverifiedEvidence, want)
+	}
+	if len(evidenceEvent.DelegationVerification.UnverifiedEvidenceSecondary) != 0 {
+		t.Errorf("UnverifiedEvidenceSecondary = %v, want empty (this is the primary hypothesis)", evidenceEvent.DelegationVerification.UnverifiedEvidenceSecondary)
 	}
 
 	var resp map[string]any
@@ -2068,26 +2071,26 @@ ESCALATE_TO: none`
 
 func TestCheckEvidenceProvenance_NoAuditURL(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{Evidence: "lag_bytes=28633584"}}}
-	unverified := checkEvidenceProvenance("", "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if unverified != nil {
-		t.Errorf("expected nil with empty auditURL, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance("", "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with empty auditURL, got %v, %v", primary, secondary)
 	}
 }
 
 func TestCheckEvidenceProvenance_NilReport(t *testing.T) {
 	srv := serveFakeToolEvents(t, nil)
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), nil)
-	if unverified != nil {
-		t.Errorf("expected nil with nil report, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), nil)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with nil report, got %v, %v", primary, secondary)
 	}
 }
 
 func TestCheckEvidenceProvenance_NoHypotheses(t *testing.T) {
 	srv := serveFakeToolEvents(t, nil)
 	report := &audit.DiagnosticReport{}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if unverified != nil {
-		t.Errorf("expected nil with no hypotheses, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with no hypotheses, got %v, %v", primary, secondary)
 	}
 }
 
@@ -2102,9 +2105,9 @@ func TestCheckEvidenceProvenance_QuoteVerified(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
 		{IsPrimary: true, Evidence: "lag_bytes | 28633584"},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if unverified != nil {
-		t.Errorf("expected nil (quote matches real output), got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil (quote matches real output), got %v, %v", primary, secondary)
 	}
 }
 
@@ -2119,9 +2122,57 @@ func TestCheckEvidenceProvenance_QuoteFabricated(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
 		{IsPrimary: true, Evidence: "active | f, lag_bytes | 999999999"},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if len(unverified) != 1 || unverified[0] != "active | f, lag_bytes | 999999999" {
-		t.Errorf("expected the fabricated quote flagged, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "active | f, lag_bytes | 999999999" {
+		t.Errorf("expected the fabricated quote flagged as primary, got primary=%v secondary=%v", primary, secondary)
+	}
+	if secondary != nil {
+		t.Errorf("expected no secondary flags, got %v", secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_SecondaryHypothesisFabrication proves a
+// fabricated quote on a REJECTED (non-primary) hypothesis is reported
+// separately from primary — found live 2026-09-07: a STABLE, correctly-
+// attributed diagnosis couldn't earn CLEAN because a rejected alternative
+// theory cited an invented log line ("due to timeout" vs the real "due to
+// administrator command"). Still caught and reported, just in its own
+// bucket that doesn't gate CLEAN — see checkEvidenceProvenance's doc comment.
+func TestCheckEvidenceProvenance_SecondaryHypothesisFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: "FATAL:  terminating walreceiver process due to administrator command",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Text: "replica disconnected", Evidence: "terminating walreceiver process due to administrator command"},
+		{IsPrimary: false, Text: "walreceiver timeout", Evidence: "terminating walreceiver due to timeout", RejectedReason: "logs show a clean shutdown, not a timeout"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil {
+		t.Errorf("expected no primary flags (its quote is real), got %v", primary)
+	}
+	want := "walreceiver timeout — terminating walreceiver due to timeout"
+	if len(secondary) != 1 || secondary[0] != want {
+		t.Errorf("secondary = %v, want [%q]", secondary, want)
+	}
+}
+
+// TestCheckEvidenceProvenance_PrimaryQuoteLabeledWithHypothesisText proves a
+// flagged PRIMARY quote is also prefixed with its owning hypothesis's text —
+// not just secondary — so a caller never has to separately look up which
+// claim an unverified quote was backing.
+func TestCheckEvidenceProvenance_PrimaryQuoteLabeledWithHypothesisText(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Text: "replica has crashed", Evidence: "totally invented log line"},
+	}}
+	primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	want := "replica has crashed — totally invented log line"
+	if len(primary) != 1 || primary[0] != want {
+		t.Errorf("primary = %v, want [%q]", primary, want)
 	}
 }
 
@@ -2147,9 +2198,9 @@ func TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
 		{IsPrimary: true, Evidence: `slot_name | replica_slot` + "\n" + `lag_bytes | 28610712" and "(0 rows)`},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if len(unverified) != 0 {
-		t.Errorf("expected no unverified quotes (both halves trace to real output), got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (both halves trace to real output), got primary=%v secondary=%v", primary, secondary)
 	}
 }
 
@@ -2172,9 +2223,9 @@ func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
 		{IsPrimary: true, Evidence: `lag_bytes | 28610712" and "No active connections found.`},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if len(unverified) != 1 || unverified[0] != "No active connections found." {
-		t.Errorf("expected only the paraphrased half flagged, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "No active connections found." {
+		t.Errorf("expected only the paraphrased half flagged as primary, got primary=%v secondary=%v", primary, secondary)
 	}
 }
 
@@ -2211,7 +2262,8 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 // TestCheckEvidenceProvenance_ChecksEveryHypothesis proves a fabricated quote
 // on a REJECTED hypothesis is caught too, not just the primary — a fabricated
 // quote backing a rejected hypothesis is just as much a trust problem as one
-// backing the root cause.
+// backing the root cause. It's reported in the secondary bucket, not primary
+// (see TestCheckEvidenceProvenance_SecondaryHypothesisFabrication for why).
 func TestCheckEvidenceProvenance_ChecksEveryHypothesis(t *testing.T) {
 	events := []audit.Event{
 		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_replication_status", Result: "active | f"}},
@@ -2221,9 +2273,12 @@ func TestCheckEvidenceProvenance_ChecksEveryHypothesis(t *testing.T) {
 		{IsPrimary: true, Evidence: "active | f"},
 		{IsPrimary: false, Evidence: "totally invented text never in any output", RejectedReason: "doesn't fit"},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if len(unverified) != 1 || unverified[0] != "totally invented text never in any output" {
-		t.Errorf("expected only the rejected hypothesis's quote flagged, got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil {
+		t.Errorf("expected no primary flags (its quote is real), got %v", primary)
+	}
+	if len(secondary) != 1 || secondary[0] != "totally invented text never in any output" {
+		t.Errorf("expected only the rejected hypothesis's quote flagged as secondary, got %v", secondary)
 	}
 }
 
@@ -2239,9 +2294,9 @@ func TestCheckEvidenceProvenance_NumericReformatting(t *testing.T) {
 	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
 		{IsPrimary: true, Evidence: "the replication slot has retained 28,633,584 bytes of WAL"},
 	}}
-	unverified := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
-	if unverified != nil {
-		t.Errorf("expected nil (reformatted number of a real value), got %v", unverified)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil (reformatted number of a real value), got %v, %v", primary, secondary)
 	}
 }
 
@@ -2269,9 +2324,9 @@ func TestEvidenceQuoteVerified_WhitespaceAndCaseNormalized(t *testing.T) {
 
 func TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops(t *testing.T) {
 	extra := map[string]any{}
-	appendEvidenceProvenance(extra, []string{"quote a"})
-	appendEvidenceProvenance(extra, nil)
-	appendEvidenceProvenance(extra, []string{"quote a", "quote b"})
+	appendEvidenceProvenance(extra, []string{"quote a"}, []string{"sec a"})
+	appendEvidenceProvenance(extra, nil, nil)
+	appendEvidenceProvenance(extra, []string{"quote a", "quote b"}, []string{"sec a", "sec b"})
 
 	got, _ := extra["unverified_evidence"].([]string)
 	want := []string{"quote a", "quote b"}
@@ -2281,6 +2336,17 @@ func TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("unverified_evidence[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	gotSec, _ := extra["unverified_evidence_secondary"].([]string)
+	wantSec := []string{"sec a", "sec b"}
+	if len(gotSec) != len(wantSec) {
+		t.Fatalf("unverified_evidence_secondary = %v, want %v", gotSec, wantSec)
+	}
+	for i := range wantSec {
+		if gotSec[i] != wantSec[i] {
+			t.Errorf("unverified_evidence_secondary[%d] = %q, want %q", i, gotSec[i], wantSec[i])
 		}
 	}
 }

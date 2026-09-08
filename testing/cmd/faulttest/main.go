@@ -595,9 +595,29 @@ func cmdRun(args []string) {
 				}
 				// Content-provenance: an EVIDENCE quote didn't match any real tool
 				// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
+				// Prints the actual flagged quote(s), not just a count (found live
+				// 2026-09-07: a count alone meant tracking down what was actually
+				// fabricated required querying the raw audit trail by hand — each
+				// quote is already prefixed with its owning hypothesis's text, so
+				// no further lookup is needed here). Primary (backs the acted-on
+				// conclusion) is flagged as blocking; secondary (backs a hypothesis
+				// the model itself rejected) is still shown, but labeled non-blocking
+				// — see EvalResult.UnverifiedEvidenceSecondary's doc comment for why.
 				if len(resp.UnverifiedEvidence) > 0 {
 					evalResult.UnverifiedEvidence = true
-					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE: %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+					evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
+					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE (primary): %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+					for _, q := range resp.UnverifiedEvidence {
+						fmt.Printf("         %s\n", q)
+					}
+				}
+				if len(resp.UnverifiedEvidenceSecondary) > 0 {
+					evalResult.UnverifiedEvidenceSecondary = true
+					evalResult.UnverifiedEvidenceSecondaryQuotes = resp.UnverifiedEvidenceSecondary
+					fmt.Printf("  ⚠  unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", len(resp.UnverifiedEvidenceSecondary))
+					for _, q := range resp.UnverifiedEvidenceSecondary {
+						fmt.Printf("         %s\n", q)
+					}
 				}
 
 				// Push judge reasoning to the audit store so it appears alongside

@@ -128,16 +128,41 @@ type EvalResult struct {
 	// as TargetDrift's "target_drift_detected" and ProtocolViolation's own
 	// outcome — all three mean "don't trust this output as-is."
 	Mismatch bool `json:"mismatch,omitempty"`
-	// UnverifiedEvidence is true when resp.UnverifiedEvidence is non-empty — a
-	// hypothesis EVIDENCE quote couldn't be matched against any real
-	// tool_execution output recorded for this run (content-provenance,
-	// fabrication-detection Layer 3, v0.28.0). See checkEvidenceProvenance
-	// (cmd/gateway/playbooks.go). The content-level sibling of Mismatch above:
-	// that verifies a claimed action really happened, this verifies a claimed
+	// UnverifiedEvidence is true when resp.UnverifiedEvidence (PRIMARY-
+	// hypothesis quotes only, as of 2026-09-07) is non-empty — a hypothesis
+	// EVIDENCE quote couldn't be matched against any real tool_execution
+	// output recorded for this run (content-provenance, fabrication-detection
+	// Layer 3, v0.28.0). See checkEvidenceProvenance (cmd/gateway/
+	// playbooks.go). The content-level sibling of Mismatch above: that
+	// verifies a claimed action really happened, this verifies a claimed
 	// fact really came from somewhere real. Tied at the same Journey-outcome
 	// priority as Mismatch/TargetDrift/ProtocolViolation — "don't trust this
-	// output as-is."
+	// output as-is." Scoped to the primary/root-cause hypothesis specifically
+	// (see UnverifiedEvidenceSecondary below for why): this is the hypothesis
+	// an operator would actually act on, so fabrication here is a trust
+	// problem in the acted-on conclusion itself and contributes to
+	// hasCleanWarning below.
 	UnverifiedEvidence bool `json:"unverified_evidence,omitempty"`
+	// UnverifiedEvidenceQuotes carries the actual flagged primary quotes
+	// (each already prefixed with its owning hypothesis's text by
+	// checkEvidenceProvenance, e.g. "replica disconnected — FATAL: ...") —
+	// added 2026-09-07 alongside the bool above so a caller (the CLI's
+	// inline warning print, in particular) doesn't have to separately query
+	// the audit trail to see which claim was flagged and what it said.
+	UnverifiedEvidenceQuotes []string `json:"unverified_evidence_quotes,omitempty"`
+	// UnverifiedEvidenceSecondary is UnverifiedEvidence's sibling for
+	// non-primary (rejected) hypotheses — added 2026-09-07 after a live
+	// false cost: a STABLE, correctly-attributed diagnosis could never earn
+	// CLEAN because a rejected alternative hypothesis cited an invented
+	// detail (the same "right conclusion, gated like a wrong one" mistake
+	// ObjectiveEvidenceGate's own redesign already fixed for a sibling
+	// signal, one layer over: primary vs. non-primary hypothesis instead of
+	// confirmed vs. merely-present). Still real and worth tracking — a model
+	// willing to invent a plausible detail for a discarded theory is a real
+	// reliability signal — but does NOT contribute to hasCleanWarning below,
+	// since the model's actual, acted-on conclusion was not built on it.
+	UnverifiedEvidenceSecondary       bool     `json:"unverified_evidence_secondary,omitempty"`
+	UnverifiedEvidenceSecondaryQuotes []string `json:"unverified_evidence_secondary_quotes,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -197,12 +222,16 @@ type HypothesisEntry struct {
 // fabrication mismatch (the agent narrated calling a tool that never
 // actually executed), a catalog-declared evidence signal that never fired at
 // all (EvidenceCoverageGap), one that fired but was never confirmed
-// (EvidenceRequiredButUnconfirmed), or an EVIDENCE quote that didn't match any
-// real tool output (UnverifiedEvidence, content-provenance, fabrication-
-// detection Layer 3, v0.28.0). Used to compute the CLEAN stability axis —
-// deliberately excludes low_confidence/confidence_warning, which are
-// self-reported and already substantially captured by the existing
-// evaluation-stability axis (judge/confidence variance).
+// (EvidenceRequiredButUnconfirmed), or an EVIDENCE quote on the PRIMARY
+// hypothesis that didn't match any real tool output (UnverifiedEvidence,
+// content-provenance, fabrication-detection Layer 3, v0.28.0). Used to
+// compute the CLEAN stability axis — deliberately excludes low_confidence/
+// confidence_warning, which are self-reported and already substantially
+// captured by the existing evaluation-stability axis (judge/confidence
+// variance). Also deliberately excludes UnverifiedEvidenceSecondary — a
+// fabricated quote backing a hypothesis the model itself rejected is real
+// and reported (see EvalResult's doc comment), but doesn't indict the
+// model's actual, acted-on conclusion, so it doesn't block CLEAN on its own.
 func hasCleanWarning(er EvalResult) bool {
 	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch ||
 		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed || er.UnverifiedEvidence

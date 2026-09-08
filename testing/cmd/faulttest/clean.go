@@ -82,6 +82,13 @@ func warningTypesFor(er EvalResult) []string {
 		// number of distinct WarningDistribution buckets.
 		types = append(types, "unverified_evidence")
 	}
+	if er.UnverifiedEvidenceSecondary {
+		// Its own bucket, distinct from unverified_evidence above — present
+		// here for visibility/tracking (see EvalResult.UnverifiedEvidenceSecondary's
+		// doc comment), but does NOT feed hasCleanWarning: this bucket showing
+		// up does not by itself make a run DIRTY.
+		types = append(types, "unverified_evidence_secondary")
+	}
 	return types
 }
 

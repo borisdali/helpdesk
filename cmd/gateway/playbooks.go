@@ -719,10 +719,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	// Content-provenance check (fabrication-detection Layer 3, v0.28.0): does
 	// each hypothesis's EVIDENCE quote trace back to something real in this
 	// hop's own tool_execution output.
-	if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverified) > 0 {
-		appendEvidenceProvenance(extra, unverified)
+	if unverifiedPrimary, unverifiedSecondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverifiedPrimary) > 0 || len(unverifiedSecondary) > 0 {
+		appendEvidenceProvenance(extra, unverifiedPrimary, unverifiedSecondary)
 		slog.Warn("playbook run: unverified evidence quote detected",
-			"trace_id", primary.traceID, "count", len(unverified))
+			"trace_id", primary.traceID, "primary_count", len(unverifiedPrimary), "secondary_count", len(unverifiedSecondary))
 		// Persist as a durable, queryable audit event, same pattern as the target
 		// drift event above — independent of whatever delegation_verification
 		// event proxyToAgentWithTool already recorded for this hop.
@@ -736,9 +736,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 					ID: primary.traceID,
 				},
 				DelegationVerification: &audit.DelegationVerification{
-					Agent:              primary.agentName,
-					ActionClass:        audit.ActionRead,
-					UnverifiedEvidence: unverified,
+					Agent:                       primary.agentName,
+					ActionClass:                 audit.ActionRead,
+					UnverifiedEvidence:          unverifiedPrimary,
+					UnverifiedEvidenceSecondary: unverifiedSecondary,
 				},
 			}
 			if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
@@ -1008,10 +1009,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
 		chainedMismatch, chainedNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart)
 		appendFabricationRisk(extra, chainedMismatch, chainedNarrated)
-		if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart, chained.diagReport); len(unverified) > 0 {
-			appendEvidenceProvenance(extra, unverified)
+		if unverifiedPrimary, unverifiedSecondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart, chained.diagReport); len(unverifiedPrimary) > 0 || len(unverifiedSecondary) > 0 {
+			appendEvidenceProvenance(extra, unverifiedPrimary, unverifiedSecondary)
 			slog.Warn("playbook run: unverified evidence quote detected on chained hop",
-				"trace_id", chained.traceID, "count", len(unverified))
+				"trace_id", chained.traceID, "primary_count", len(unverifiedPrimary), "secondary_count", len(unverifiedSecondary))
 			if g.auditor != nil {
 				evidenceEvent := &audit.Event{
 					EventID:   "gv_" + uuid.New().String()[:8],
@@ -1022,9 +1023,10 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 						ID: chained.traceID,
 					},
 					DelegationVerification: &audit.DelegationVerification{
-						Agent:              chained.agentName,
-						ActionClass:        audit.ActionRead,
-						UnverifiedEvidence: unverified,
+						Agent:                       chained.agentName,
+						ActionClass:                 audit.ActionRead,
+						UnverifiedEvidence:          unverifiedPrimary,
+						UnverifiedEvidenceSecondary: unverifiedSecondary,
 					},
 				}
 				if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
@@ -3514,18 +3516,44 @@ func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfi
 // quote is correct — only that the quote itself traces back to something real.
 // See OBJECTIVE_EVIDENCE.md §8 for why this project rejects fuzzy/LLM-judged
 // matching for governance-relevant checks; this one stays fully deterministic.
-func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, report *audit.DiagnosticReport) (unverified []string) {
+//
+// Returns primary and secondary separately (found live 2026-09-07: treating
+// both identically meant a textbook-correct, STABLE diagnosis could never
+// earn a CLEAN cert because a *rejected* alternative hypothesis cited an
+// invented detail — the same "right conclusion, gated like a wrong one"
+// mistake objectiveEvidenceSignals' own doc comment already names for a
+// sibling signal, one layer over: primary vs. non-primary hypothesis instead
+// of confirmed vs. merely-present). primary backs the report's ROOT_CAUSE and
+// is what an operator would actually act on if left unsupervised — unverified
+// evidence there is a real trust problem in the conclusion itself and stays a
+// CLEAN-blocking signal. secondary backs a hypothesis the model itself
+// rejected — still worth recording (a model willing to invent a plausible
+// detail for a discarded theory is a real reliability data point, and an
+// operator reading the full transcript later shouldn't hit fabricated
+// content anywhere in it), but doesn't block CLEAN on its own: the model's
+// actual, acted-on conclusion was not built on it. Each returned string is
+// prefixed with the owning hypothesis's own text ("<hypothesis> — <quote>")
+// so a caller doesn't have to separately query the audit trail to see which
+// claim the flagged quote was backing (found live 2026-09-07: reconstructing
+// that pairing by hand, across the raw tool_execution trace, was the exact
+// friction this prefix exists to remove).
+func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, report *audit.DiagnosticReport) (primary, secondary []string) {
 	if auditURL == "" || traceID == "" || report == nil {
-		return nil
+		return nil, nil
 	}
-	var quotes []string
+	type quoteSource struct {
+		quote     string
+		hypText   string
+		isPrimary bool
+	}
+	var quotes []quoteSource
 	for _, h := range report.Hypotheses {
 		if h.Evidence != "" {
-			quotes = append(quotes, h.Evidence)
+			quotes = append(quotes, quoteSource{quote: h.Evidence, hypText: h.Text, isPrimary: h.IsPrimary})
 		}
 	}
 	if len(quotes) == 0 {
-		return nil
+		return nil, nil
 	}
 	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
 	var outputs []string
@@ -3534,13 +3562,24 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 			outputs = append(outputs, ev.Tool.Result)
 		}
 	}
-	for _, q := range quotes {
-		parts := splitEvidenceQuoteParts(q)
+	flagQuote := func(qs quoteSource, flagged string) {
+		labeled := flagged
+		if qs.hypText != "" {
+			labeled = qs.hypText + " — " + flagged
+		}
+		if qs.isPrimary {
+			primary = append(primary, labeled)
+		} else {
+			secondary = append(secondary, labeled)
+		}
+	}
+	for _, qs := range quotes {
+		parts := splitEvidenceQuoteParts(qs.quote)
 		if len(parts) < 2 {
 			// Common case: one genuine verbatim span, checked as a whole
 			// (substring match, numeric-reformatting fallback).
-			if !evidenceQuoteVerified(q, outputs) {
-				unverified = append(unverified, q)
+			if !evidenceQuoteVerified(qs.quote, outputs) {
+				flagQuote(qs, qs.quote)
 			}
 			continue
 		}
@@ -3551,11 +3590,11 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 		// prose in another span glued next to it.
 		for _, p := range parts {
 			if p != "" && !evidenceQuoteVerified(p, outputs) {
-				unverified = append(unverified, p)
+				flagQuote(qs, p)
 			}
 		}
 	}
-	return unverified
+	return primary, secondary
 }
 
 // evidenceQuoteJoinerRe matches the literal `"..."` gap left inside an
@@ -3582,23 +3621,20 @@ func splitEvidenceQuoteParts(quote string) []string {
 }
 
 // appendEvidenceProvenance accumulates unverified evidence quotes into extra
-// across hops, mirroring appendFabricationRisk's accumulate pattern.
-func appendEvidenceProvenance(extra map[string]any, unverified []string) {
-	if len(unverified) == 0 {
-		return
+// across hops, mirroring appendFabricationRisk's accumulate pattern. primary
+// and secondary are kept in separate extra keys (see checkEvidenceProvenance's
+// doc comment for why the distinction exists) so a caller can tell "backs the
+// acted-on conclusion" apart from "backs a hypothesis the model itself
+// rejected" without re-deriving it. Reuses appendDedupedSignal's single-value
+// dedup-append (it's not signal-specific despite the name — same list-append-
+// skip-duplicates logic this needs for arbitrary strings).
+func appendEvidenceProvenance(extra map[string]any, primary, secondary []string) {
+	for _, q := range primary {
+		appendDedupedSignal(extra, "unverified_evidence", q)
 	}
-	existing, _ := extra["unverified_evidence"].([]string)
-	seen := map[string]bool{}
-	for _, q := range existing {
-		seen[q] = true
+	for _, q := range secondary {
+		appendDedupedSignal(extra, "unverified_evidence_secondary", q)
 	}
-	for _, q := range unverified {
-		if !seen[q] {
-			seen[q] = true
-			existing = append(existing, q)
-		}
-	}
-	extra["unverified_evidence"] = existing
 }
 
 // evidenceQuoteVerified reports whether quote traces back to real tool output —

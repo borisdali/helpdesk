@@ -94,13 +94,21 @@ type AgentResponse struct {
 	// that never executed at all, TargetDrift needs a real call at the wrong
 	// target.
 	Mismatch bool
-	// UnverifiedEvidence lists hypothesis EVIDENCE quotes that couldn't be
-	// matched against any real tool_execution output recorded for this run —
-	// content-provenance (fabrication-detection Layer 3, v0.28.0), the
-	// sibling of Mismatch above: that checks a claimed *action* really
-	// happened, this checks a claimed *fact* really came from somewhere real.
-	// See checkEvidenceProvenance (cmd/gateway/playbooks.go).
+	// UnverifiedEvidence lists PRIMARY-hypothesis EVIDENCE quotes that
+	// couldn't be matched against any real tool_execution output recorded
+	// for this run — content-provenance (fabrication-detection Layer 3,
+	// v0.28.0), the sibling of Mismatch above: that checks a claimed
+	// *action* really happened, this checks a claimed *fact* really came
+	// from somewhere real. See checkEvidenceProvenance (cmd/gateway/
+	// playbooks.go). Scoped to the primary/root-cause hypothesis only as of
+	// 2026-09-07 (see UnverifiedEvidenceSecondary) — this is the hypothesis
+	// an operator would actually act on.
 	UnverifiedEvidence []string
+	// UnverifiedEvidenceSecondary is UnverifiedEvidence's sibling for
+	// non-primary (rejected) hypotheses — still real fabrication worth
+	// surfacing, but not a trust problem in the acted-on conclusion itself.
+	// See DelegationVerification.UnverifiedEvidenceSecondary's doc comment.
+	UnverifiedEvidenceSecondary []string
 }
 
 // ToolCallResult records one tool invocation observed in a structured A2A response.

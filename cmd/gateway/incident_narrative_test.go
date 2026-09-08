@@ -235,6 +235,12 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	if !n.Triage.HasUnverifiedEvidence {
 		t.Error("Triage.HasUnverifiedEvidence = false, want true — should surface inline without a separate Journey lookup")
 	}
+	if len(n.Triage.UnverifiedEvidence) != 1 || n.Triage.UnverifiedEvidence[0] != "lag_bytes | 999999999" {
+		t.Errorf("Triage.UnverifiedEvidence = %v, want [%q] — the actual quote, not just the bool", n.Triage.UnverifiedEvidence, "lag_bytes | 999999999")
+	}
+	if len(n.Triage.UnverifiedEvidenceSecondary) != 0 {
+		t.Errorf("Triage.UnverifiedEvidenceSecondary = %v, want empty", n.Triage.UnverifiedEvidenceSecondary)
+	}
 }
 
 // TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter verifies that real
@@ -1185,10 +1191,10 @@ func TestHopVerificationFlags(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                                                                         string
-		events                                                                       []audit.Event
-		start, end                                                                   time.Time
-		wantMismatch, wantTargetDrift, wantProtocolViolation, wantUnverifiedEvidence bool
+		name                                                 string
+		events                                               []audit.Event
+		start, end                                           time.Time
+		wantMismatch, wantTargetDrift, wantProtocolViolation bool
 	}{
 		{
 			name:   "empty events",
@@ -1231,16 +1237,9 @@ func TestHopVerificationFlags(t *testing.T) {
 				{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{Mismatch: true}},
 				{Timestamp: start.Add(2 * time.Second), DelegationVerification: &audit.DelegationVerification{TargetDrift: []string{"host=x"}}},
 				{Timestamp: start.Add(3 * time.Second), DelegationVerification: &audit.DelegationVerification{ProtocolViolation: true}},
-				{Timestamp: start.Add(4 * time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"lag_bytes=28633584"}}},
 			},
 			start: start, end: end,
-			wantMismatch: true, wantTargetDrift: true, wantProtocolViolation: true, wantUnverifiedEvidence: true,
-		},
-		{
-			name:   "unverified evidence signal sets HasUnverifiedEvidence independently of the other three",
-			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"fabricated quote"}}}},
-			start:  start, end: end,
-			wantUnverifiedEvidence: true,
+			wantMismatch: true, wantTargetDrift: true, wantProtocolViolation: true,
 		},
 		{
 			name:   "event with nil DelegationVerification is skipped, not a panic",
@@ -1258,10 +1257,83 @@ func TestHopVerificationFlags(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotMismatch, gotTargetDrift, gotProtocolViolation, gotUnverifiedEvidence := hopVerificationFlags(tc.events, tc.start, tc.end)
-			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation || gotUnverifiedEvidence != tc.wantUnverifiedEvidence {
-				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v, unverified_evidence=%v), want (mismatch=%v, drift=%v, violation=%v, unverified_evidence=%v)",
-					gotMismatch, gotTargetDrift, gotProtocolViolation, gotUnverifiedEvidence, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation, tc.wantUnverifiedEvidence)
+			gotMismatch, gotTargetDrift, gotProtocolViolation := hopVerificationFlags(tc.events, tc.start, tc.end)
+			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation {
+				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v), want (mismatch=%v, drift=%v, violation=%v)",
+					gotMismatch, gotTargetDrift, gotProtocolViolation, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation)
+			}
+		})
+	}
+}
+
+// TestHopUnverifiedEvidence covers hopUnverifiedEvidence's own time-window
+// scoping (split out from hopVerificationFlags 2026-09-07 since it now
+// returns the actual quotes, primary/secondary separated, not a bool) —
+// same inclusive-start/exclusive-end semantics, same cross-hop-leak concern.
+func TestHopUnverifiedEvidence(t *testing.T) {
+	base := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	start := base
+	end := base.Add(10 * time.Second)
+
+	tests := []struct {
+		name          string
+		events        []audit.Event
+		start, end    time.Time
+		wantPrimary   []string
+		wantSecondary []string
+	}{
+		{
+			name:   "empty events",
+			events: nil,
+			start:  start, end: end,
+		},
+		{
+			name: "primary and secondary both populated, independently",
+			events: []audit.Event{{
+				Timestamp: start.Add(time.Second),
+				DelegationVerification: &audit.DelegationVerification{
+					UnverifiedEvidence:          []string{"root cause — fabricated quote"},
+					UnverifiedEvidenceSecondary: []string{"rejected theory — invented detail"},
+				},
+			}},
+			start: start, end: end,
+			wantPrimary:   []string{"root cause — fabricated quote"},
+			wantSecondary: []string{"rejected theory — invented detail"},
+		},
+		{
+			name:   "event at end is excluded (exclusive upper bound)",
+			events: []audit.Event{{Timestamp: end, DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"q"}}}},
+			start:  start, end: end,
+		},
+		{
+			name:   "event before start is excluded",
+			events: []audit.Event{{Timestamp: start.Add(-time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"q"}}}},
+			start:  start, end: end,
+		},
+		{
+			name: "dedups repeated quotes across events in the same window",
+			events: []audit.Event{
+				{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"same quote"}}},
+				{Timestamp: start.Add(2 * time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"same quote"}}},
+			},
+			start: start, end: end,
+			wantPrimary: []string{"same quote"},
+		},
+		{
+			name:   "event with nil DelegationVerification is skipped, not a panic",
+			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: nil}},
+			start:  start, end: end,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPrimary, gotSecondary := hopUnverifiedEvidence(tc.events, tc.start, tc.end)
+			if !reflect.DeepEqual(gotPrimary, tc.wantPrimary) {
+				t.Errorf("primary = %v, want %v", gotPrimary, tc.wantPrimary)
+			}
+			if !reflect.DeepEqual(gotSecondary, tc.wantSecondary) {
+				t.Errorf("secondary = %v, want %v", gotSecondary, tc.wantSecondary)
 			}
 		})
 	}

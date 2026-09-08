@@ -316,9 +316,10 @@ type DelegationVerification struct {
 	// recorded on its own event, separate from the event this hop's
 	// write/destructive/narration verification produced.
 	ProtocolViolation bool `json:"protocol_violation,omitempty"`
-	// UnverifiedEvidence lists hypothesis EVIDENCE quotes (see DiagnosticHypothesis.Evidence)
-	// that could not be matched against any real tool_execution output recorded for
-	// this hop — content-provenance (fabrication-detection Layer 3, v0.28.0), the
+	// UnverifiedEvidence lists PRIMARY-hypothesis EVIDENCE quotes (see
+	// DiagnosticHypothesis.Evidence/IsPrimary) that could not be matched
+	// against any real tool_execution output recorded for this hop —
+	// content-provenance (fabrication-detection Layer 3, v0.28.0), the
 	// sibling of Mismatch/NarratedNotConfirmed above: those verify a claimed
 	// *action* really happened; this verifies a claimed *fact* really came from
 	// somewhere real. Computed by checkEvidenceProvenance (cmd/gateway/playbooks.go),
@@ -328,7 +329,29 @@ type DelegationVerification struct {
 	// registered-signal-specific confirmation checks for the closest thing this
 	// project has to that). May be recorded on its own event, separate from the
 	// event this hop's write/destructive/narration verification produced.
+	// Scoped to the primary/root-cause hypothesis only as of 2026-09-07 (see
+	// UnverifiedEvidenceSecondary) — this is the hypothesis an operator would
+	// actually act on, so fabrication here is a trust problem in the acted-on
+	// conclusion itself and stays a CLEAN-blocking signal. Each entry is
+	// prefixed with the owning hypothesis's own text ("<hypothesis text> —
+	// <quote>"), same as UnverifiedEvidenceSecondary below.
 	UnverifiedEvidence []string `json:"unverified_evidence,omitempty"`
+	// UnverifiedEvidenceSecondary is UnverifiedEvidence's sibling for
+	// *non-primary* hypotheses — a quote backing a theory the model itself
+	// rejected. Added 2026-09-07 after a live false-negative-shaped-as-a-
+	// false-cost: a STABLE, correctly-attributed diagnosis could never earn a
+	// CLEAN cert because a rejected alternative hypothesis cited an invented
+	// detail (the same "right conclusion, gated like a wrong one" mistake
+	// objectiveEvidenceSignals' own doc comment names for a sibling signal,
+	// one layer over). Still recorded and surfaced — a model willing to
+	// invent a plausible detail for a discarded theory is a real reliability
+	// signal, and an operator reading the full transcript later shouldn't hit
+	// fabricated content anywhere in it — but does not block CLEAN on its
+	// own, since the model's actual, acted-on conclusion was not built on it.
+	// Each entry is prefixed with the owning hypothesis's own text ("<hypothesis
+	// text> — <quote>") so a caller can see what claim it was backing without
+	// separately reconstructing that pairing from the raw tool_execution trace.
+	UnverifiedEvidenceSecondary []string `json:"unverified_evidence_secondary,omitempty"`
 }
 
 // TargetDriftDetail attributes a single instance of target-scope drift to the
