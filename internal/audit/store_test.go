@@ -2628,7 +2628,39 @@ func TestQueryJourneys_HasUnverifiedEvidence(t *testing.T) {
 		},
 	}
 
-	for _, e := range append(eventsA, eventsB...) {
+	// Journey C: only UnverifiedEvidenceSecondary populated (a fabricated quote
+	// on a hypothesis the model itself rejected) — the primary/secondary split
+	// added 2026-09-07. Must NOT elevate the outcome or set HasUnverifiedEvidence
+	// at the Journey level: this signal backs a hypothesis nobody acted on, so
+	// treating it identically to Journey A (a primary-hypothesis fabrication)
+	// would resurrect the exact "right conclusion, gated like a wrong one"
+	// mistake the split exists to fix, one layer lower than the incident-
+	// narrative chapter tests already cover.
+	eventsC := []*Event{
+		{
+			EventID:   "gwr_unvevid_c",
+			Timestamp: base.Add(5 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_secondary_c",
+			Session:   Session{ID: "tr_secondary_c"},
+			Input:     Input{UserQuery: "investigate replica disconnect"},
+		},
+		{
+			EventID:   "gv_unvevid_c",
+			Timestamp: base.Add(6 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_secondary_c",
+			Session:   Session{ID: "tr_secondary_c"},
+			DelegationVerification: &DelegationVerification{
+				Agent:                       "sysadmin_agent",
+				ActionClass:                 ActionRead,
+				Mismatch:                    false,
+				UnverifiedEvidenceSecondary: []string{"walreceiver timeout — invented detail"},
+			},
+		},
+	}
+
+	for _, e := range append(append(eventsA, eventsB...), eventsC...) {
 		if err := store.Record(ctx, e); err != nil {
 			t.Fatalf("Record: %v", err)
 		}
@@ -2657,6 +2689,14 @@ func TestQueryJourneys_HasUnverifiedEvidence(t *testing.T) {
 	cleanJourney := byTrace["tr_verified_b"]
 	if cleanJourney.HasUnverifiedEvidence {
 		t.Error("tr_verified_b: expected HasUnverifiedEvidence=false")
+	}
+
+	secondaryJourney := byTrace["tr_secondary_c"]
+	if secondaryJourney.HasUnverifiedEvidence {
+		t.Error("tr_secondary_c: expected HasUnverifiedEvidence=false — only UnverifiedEvidenceSecondary was set, which must not elevate this Journey-level flag")
+	}
+	if secondaryJourney.Outcome == "unverified_evidence" {
+		t.Errorf("tr_secondary_c: Outcome = %q, want anything but unverified_evidence — a secondary-only signal must not elevate the Journey outcome", secondaryJourney.Outcome)
 	}
 }
 
