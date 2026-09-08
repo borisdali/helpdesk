@@ -2176,6 +2176,54 @@ func TestCheckEvidenceProvenance_PrimaryQuoteLabeledWithHypothesisText(t *testin
 	}
 }
 
+// TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes reproduces a second
+// live false positive found 2026-09-08 on the same fault, after the 2026-09-07
+// compound-quote fix: a model citing a real log line that itself names a
+// quoted value (a Postgres pg_hba.conf rejection naming a host/user in
+// quotes) backslash-escapes the inner quotes as if constructing a JSON
+// string literal — `\"172.18.0.4\"` — even though the real tool output never
+// contains those backslashes. Every character of substance is real; only the
+// escaping differs.
+func TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `FATAL:  pg_hba.conf rejects replication connection for host \"172.18.0.4\", user \"postgres\", no encryption`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real content, only the escaping differs), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication
+// proves a compound quote joined with connector phrases beyond "and"/","
+// (found live 2026-09-08: one response used "followed later by", "and
+// then", and "with" in a single quote) still correctly flags a genuinely
+// fabricated fact spliced into the chain, while the real facts and the
+// connector phrases themselves are silently accepted.
+func TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", no encryption" and then "the replica disk was completely full at 99.9% capacity`},
+	}}
+	primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "the replica disk was completely full at 99.9% capacity" {
+		t.Errorf("expected only the fabricated fact flagged (real facts and connector phrases silently accepted), got %v", primary)
+	}
+}
+
 // TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal reproduces the live
 // false positive found 2026-09-07 on db-replica-disconnected: a model citing
 // two separately-sourced real facts as `"fact one" and "fact two"` leaves
@@ -2229,8 +2277,11 @@ func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
 	}
 }
 
-// TestSplitEvidenceQuoteParts covers the joiner patterns a compound EVIDENCE
-// quote can leave behind, and confirms a quote with no joiner (the common
+// TestSplitEvidenceQuoteParts covers the quote-boundary splitting a compound
+// EVIDENCE quote can leave behind — every literal quote character is a split
+// point, so connector words/phrases come back as their own segments too (see
+// evidenceQuoteVerified's isEvidenceGlueOnly for how those get filtered out
+// later, not here) — and confirms a quote with no interior quote (the common
 // case) is returned unchanged as a single element.
 func TestSplitEvidenceQuoteParts(t *testing.T) {
 	tests := []struct {
@@ -2239,10 +2290,12 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 		want  []string
 	}{
 		{"no joiner", "lag_bytes | 28610712", []string{"lag_bytes | 28610712"}},
-		{"and-joined", `fact one" and "fact two`, []string{"fact one", "fact two"}},
-		{"comma-joined", `fact one", "fact two`, []string{"fact one", "fact two"}},
-		{"three-way and-joined", `a" and "b" and "c`, []string{"a", "b", "c"}},
-		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "fact two"}},
+		{"and-joined", `fact one" and "fact two`, []string{"fact one", "and", "fact two"}},
+		{"comma-joined", `fact one", "fact two`, []string{"fact one", ",", "fact two"}},
+		{"three-way and-joined", `a" and "b" and "c`, []string{"a", "and", "b", "and", "c"}},
+		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "AND", "fact two"}},
+		{"unusual connector phrase", `fact one" followed later by "fact two`, []string{"fact one", "followed later by", "fact two"}},
+		{"backslash-escaped inner quotes are stripped before splitting", `host \"172.18.0.4\", user \"postgres\"`, []string{"host", "172.18.0.4", ", user", "postgres"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2256,6 +2309,54 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestIsEvidenceGlueOnly covers the small, bounded grammatical-connective
+// word list evidenceQuoteVerified uses to treat a pure-glue split fragment
+// (e.g. "and then", "followed later by") as vacuously verified, the same
+// treatment an empty quote already gets — without that, a raw structured log
+// (FATAL/LOG lines, not narrative prose) usually doesn't happen to contain
+// ordinary connective words anywhere, so they'd be reported as noise
+// alongside genuinely fabricated content (found live 2026-09-08).
+func TestIsEvidenceGlueOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"single connector", "and", true},
+		{"multi-word glue phrase", "followed later by", true},
+		{"and then", "and then", true},
+		{"empty string", "", true},
+		{"whitespace only", "   ", true},
+		{"real fact — not glue", "lag_bytes | 28610712", false},
+		{"real fact that happens to contain a glue word", "replica and primary disconnected", false},
+		{"case-insensitive", "AND THEN", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isEvidenceGlueOnly(tt.s); got != tt.want {
+				t.Errorf("isEvidenceGlueOnly(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEvidenceQuoteVerified_GlueFragmentVacuouslyVerified proves a pure
+// connector fragment verifies as true even when it doesn't literally appear
+// in any output — the exact live false-positive class this closes (a raw
+// Postgres log doesn't contain narrative words like "and then").
+func TestEvidenceQuoteVerified_GlueFragmentVacuouslyVerified(t *testing.T) {
+	outputs := []string{"FATAL: pg_hba.conf rejects replication connection"}
+	for _, glue := range []string{"and", "and then", "followed later by", "with"} {
+		if !evidenceQuoteVerified(glue, outputs) {
+			t.Errorf("evidenceQuoteVerified(%q, ...) = false, want true (pure connector glue, vacuously verified)", glue)
+		}
+	}
+	// A real fabricated fact must still fail, even though it's short.
+	if evidenceQuoteVerified("disk full", outputs) {
+		t.Error("evidenceQuoteVerified(\"disk full\", ...) = true, want false — not glue, a real (fabricated) claim")
 	}
 }
 

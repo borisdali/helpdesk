@@ -1395,23 +1395,41 @@ project rejects for governance-relevant checks (see
 for the fuller argument, made originally against fuzzy-matching a different
 check).
 
-**Compound quotes are split before verification (added 2026-09-07).** A model
-citing two separately-sourced facts as `"fact one" and "fact two"` leaves
-exactly that shape in `Evidence` — `parseDiagnosticReport` only strips the
-*outermost* quote pair off the raw `EVIDENCE: "..."` line, so the inner
-`" and "`/`", "` gap survives intact. Checking that whole joined string as one
-indivisible blob would always fail even when every fact in it is genuinely
-real (found live: `db-replica-disconnected`'s own slot data, correctly
-quoted, got flagged alongside an unrelated paraphrase it happened to share an
-`Evidence` field with). `splitEvidenceQuoteParts` (regex `(?i)"\s*(?:and|,)\s*"`
-— case-insensitive since a live case used `" AND "`) splits a quote into its
-individually-quoted spans first, and each span is verified independently —
-never falling back to checking the whole joined string, which turned out to
-be unsafe, not just less precise: the numeric-reformatting fallback compares
-values only, so a real number in one span would otherwise silently wave
-through arbitrary fabricated prose glued next to it in another span. A
-single-span quote (the common case, no joiner present) is checked exactly as
-before.
+**Compound quotes are split before verification (added 2026-09-07, redesigned
+2026-09-08).** A model citing two or more separately-sourced facts as
+`"fact one" and "fact two"` leaves exactly that shape in `Evidence` —
+`parseDiagnosticReport` only strips the *outermost* quote pair off the raw
+`EVIDENCE: "..."` line, so the inner `"` characters marking each fact's
+boundary survive intact. Checking that whole joined string as one indivisible
+blob would always fail even when every fact in it is genuinely real (found
+live: `db-replica-disconnected`'s own slot data, correctly quoted, got
+flagged alongside an unrelated paraphrase it happened to share an `Evidence`
+field with).
+
+`splitEvidenceQuoteParts` first strips a second live-found artifact —
+`stripEscapedQuotes` removes literal backslash-escaping some models add
+around an inner quoted value (`\"172.18.0.4\"`, as if constructing a JSON
+string literal) that real tool output never contains; the underlying prose
+never needed escaping in the first place. It then splits the quote on *every*
+remaining literal `"` character, not a specific connector-word regex — the
+original design matched only `(?i)"\s*(?:and|,)\s*"`, but a single live
+response used three different connectors in one quote ("followed later by",
+"and then", "with"), none of which that regex recognized, and enumerating
+every possible English connector phrase is a losing, ever-growing battle.
+Splitting on raw quote-character positions sidesteps the problem: every
+resulting non-empty segment is verified independently — including connector
+fragments like "and then" — which can't manufacture a false positive on real
+content (every fragment of a real string is still a real substring of it),
+but would misreport pure narrative glue as "unverified" purely because a raw
+structured log (FATAL/LOG lines) doesn't happen to contain ordinary English
+connective words anywhere. `evidenceQuoteVerified` closes that with
+`isEvidenceGlueOnly` — a short, bounded, purely-grammatical word list (`and`,
+`then`, `with`, `by`, ...) that treats a fragment made up *entirely* of these
+words as vacuously verified, the same treatment an empty quote already gets;
+a genuine fact, however short, is never composed entirely of connectives, so
+this never suppresses real content. A single-span quote (the common case, no
+interior quote present) is checked exactly as before — this changes nothing
+for the vast majority of quotes.
 
 ```go
 if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
@@ -1481,9 +1499,15 @@ happened.
 `_QuoteVerified`, `_QuoteFabricated`, `_ChecksEveryHypothesis`,
 `_NumericReformatting`, `_CompoundQuoteBothPartsReal`,
 `_CompoundQuoteOnePartFabricated`, `_SecondaryHypothesisFabrication`,
-`_PrimaryQuoteLabeledWithHypothesisText`, `TestSplitEvidenceQuoteParts` (5
-cases including uppercase `AND`), `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
-`_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
+`_PrimaryQuoteLabeledWithHypothesisText`,
+`_BackslashEscapedInnerQuotes`/`_UnusualConnectorPhrasesStillCaughtOnFabrication`
+(added 2026-09-08 alongside the split-on-every-quote-boundary redesign),
+`TestSplitEvidenceQuoteParts` (7 cases: the original connector shapes plus an
+unusual-phrase case and a backslash-escaped-quotes case),
+`TestIsEvidenceGlueOnly` (8 cases, including a real fact that happens to
+contain a glue word — must not be treated as glue-only),
+`TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
+`_EmptyQuote`, `_WhitespaceAndCaseNormalized`, `_GlueFragmentVacuouslyVerified`,
 `TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
 `TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end
 through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`,

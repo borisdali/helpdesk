@@ -3675,7 +3675,7 @@ func appendEvidenceProvenance(extra map[string]any, primary, secondary []string)
 // deliberately not in the business of making.
 func evidenceQuoteVerified(quote string, outputs []string) bool {
 	nq := normalizeEvidenceText(quote)
-	if nq == "" {
+	if nq == "" || isEvidenceGlueOnly(quote) {
 		return true
 	}
 	for _, out := range outputs {
@@ -3701,6 +3701,45 @@ func evidenceQuoteVerified(quote string, outputs []string) bool {
 // output it came from, without tolerating any actual content difference.
 func normalizeEvidenceText(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// evidenceQuoteGlueWords are grammatical connectives a model can use to join
+// two separately-quoted facts inside one EVIDENCE value (see
+// splitEvidenceQuoteParts) — e.g. `"fact one" followed later by "fact two"
+// and then "fact three"`. Splitting on every literal quote boundary
+// deliberately doesn't try to distinguish these from real content
+// syntactically (enumerating every possible connector *phrase* for that
+// purpose is the losing battle splitEvidenceQuoteParts' own doc comment
+// describes), which means a pure-glue fragment like "and then" or "followed
+// later by" is checked like any other span — and a raw structured log
+// (Postgres FATAL/LOG lines, not narrative prose) usually doesn't happen to
+// contain ordinary connective words like these anywhere, so they'd fail
+// verification and get reported as noise alongside genuinely fabricated
+// content. This short, bounded, purely-grammatical list — used only to treat
+// such a fragment as vacuously verified, the same treatment evidenceQuoteVerified
+// already gives an empty quote — closes that noise without weakening the
+// check against anything with real content: a genuine fact, however short,
+// is never composed entirely of these connectives. Deliberately narrow and
+// known-incomplete: a connector missing from this list just means an
+// occasional harmless extra fragment gets reported, never that real content
+// goes unchecked.
+var evidenceQuoteGlueWords = map[string]bool{
+	"and": true, "then": true, "with": true, "or": true, "but": true,
+	"followed": true, "later": true, "by": true, "next": true,
+	"after": true, "before": true, "also": true, "plus": true,
+}
+
+// isEvidenceGlueOnly reports whether s, split on whitespace, is made up
+// entirely of evidenceQuoteGlueWords — narrative glue, not a fact in its own
+// right. An empty/whitespace-only s counts as glue-only too (nothing to
+// verify), matching evidenceQuoteVerified's existing empty-quote handling.
+func isEvidenceGlueOnly(s string) bool {
+	for _, w := range strings.Fields(strings.ToLower(s)) {
+		if !evidenceQuoteGlueWords[w] {
+			return false
+		}
+	}
+	return true
 }
 
 // extractNumbers pulls every numeric token out of s, stripping thousands-separator
