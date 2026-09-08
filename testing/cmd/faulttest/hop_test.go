@@ -178,6 +178,8 @@ func TestExtractHopSignatures_RemediationChapter(t *testing.T) {
 			HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
 			HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
 			HasUnverifiedEvidence        bool            `json:"has_unverified_evidence,omitempty"`
+			UnverifiedEvidence           []string        `json:"unverified_evidence,omitempty"`
+			UnverifiedEvidenceSecondary  []string        `json:"unverified_evidence_secondary,omitempty"`
 			SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
 			ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
 			ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`
@@ -221,6 +223,8 @@ func TestExtractHopSignatures_RemediationDedupedAgainstEscalations(t *testing.T)
 			HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
 			HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
 			HasUnverifiedEvidence        bool            `json:"has_unverified_evidence,omitempty"`
+			UnverifiedEvidence           []string        `json:"unverified_evidence,omitempty"`
+			UnverifiedEvidenceSecondary  []string        `json:"unverified_evidence_secondary,omitempty"`
 			SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
 			ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
 			ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`

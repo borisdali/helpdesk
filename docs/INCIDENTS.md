@@ -358,8 +358,9 @@ execution — see [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verific
 different `connection_string` than the run was invoked with — see
 [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope)),
 `has_protocol_violation`, and `has_unverified_evidence` (a hypothesis
-`EVIDENCE` quote that didn't match any real tool output for that hop —
-content-provenance, v0.28.0 — see
+`EVIDENCE` quote on the report's **primary/root-cause hypothesis** that
+didn't match any real tool output for that hop — content-provenance, v0.28.0
+— see
 [MUTATION_TOOLS.md §5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance))
 are computed **per chapter, not per-Journey** —
 each chapter is scoped to the delegation_verification events recorded during
@@ -379,7 +380,19 @@ chapter's Findings:
 Playbook:  pbs_db_restart_triage
 Findings:  Connection refused; no infra entry for this target
            ⚠ unverified — no matching tool execution in the audit trail
+           ⚠ unverified evidence — replica disconnected — totally invented log line
 ```
+
+`unverified_evidence`/`unverified_evidence_secondary` (arrays, alongside the
+`has_unverified_evidence` bool) carry the actual flagged quote(s), each
+already prefixed with its owning hypothesis's own text — added 2026-09-07 so
+a reader never has to separately query the raw audit trail to see what was
+actually fabricated and which claim it was backing. `unverified_evidence`
+holds primary/root-cause-hypothesis quotes (the ones `has_unverified_evidence`
+reflects); `unverified_evidence_secondary` holds the same check for
+hypotheses the model itself rejected — still shown inline (labeled
+"(secondary, non-blocking)" in the CLI), but not counted toward
+`has_unverified_evidence` or a fault's `CLEAN` cert.
 
 The raw API carries the same fields on every chapter object
 (`trace_id`/`has_mismatch`/`has_target_drift`/`has_unverified_evidence` — see

@@ -1347,12 +1347,36 @@ primitive §5.6's `checkTargetScope` uses, no new fetch mechanism needed —
 and checks whether the quote traces back to something real in their recorded
 `Result` output.
 
-Checks *every* hypothesis with an Evidence field, not just the primary — a
-fabricated quote backing a rejected hypothesis is just as much a trust
-problem as one backing the root cause. Matches against any `tool_execution`
-event in the hop's window, not a specifically-named one: the diagnosis
-protocol doesn't have hypotheses name which tool a quote came from and
-requiring that would be a separate, larger protocol change, not done here.
+Checks *every* hypothesis with an Evidence field, not just the primary —
+fabrication on a rejected hypothesis is still real fabrication and still
+worth knowing about. Matches against any `tool_execution` event in the hop's
+window, not a specifically-named one: the diagnosis protocol doesn't have
+hypotheses name which tool a quote came from and requiring that would be a
+separate, larger protocol change, not done here.
+
+**Primary vs. secondary (added 2026-09-07)**: `checkEvidenceProvenance`
+returns two lists, `(primary, secondary []string)`, keyed off
+`DiagnosticHypothesis.IsPrimary`. Found live: `db-replica-container-stopped`
+was STABLE and correctly attributed, yet could never earn `CLEAN` — its only
+warning, every run, was a fabricated quote on a *rejected, non-primary*
+hypothesis (the model claimed a real log said `"terminating walreceiver due
+to timeout"`; the log actually said `"terminating walreceiver process due to
+administrator command"`). Gating an otherwise-sound diagnosis identically to
+a genuinely wrong one is the same mistake
+[Layer 4's own history](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+already fixed once, one layer over: primary-vs-non-primary hypothesis instead
+of confirmed-vs-merely-present. `primary` backs the report's `ROOT_CAUSE` —
+the hypothesis an operator would actually act on — and stays CLEAN-blocking.
+`secondary` backs a hypothesis the model itself rejected — still recorded and
+surfaced (a model willing to invent a plausible detail for a discarded theory
+is a real reliability signal, and an operator reading the full transcript
+later shouldn't hit fabricated content anywhere in it), but does not
+contribute to `hasCleanWarning`, since the model's actual, acted-on
+conclusion was not built on it. Every returned string — both primary and
+secondary — is prefixed with its owning hypothesis's own text
+(`"<hypothesis text> — <quote>"`) so a caller never has to separately query
+the audit trail to see which claim a flagged quote was backing (the exact
+archaeology a live investigation of this bug required before this existed).
 
 **Matching is deterministic, same discipline as every other check in this
 document — no fuzzy or LLM-judged provenance.** `evidenceQuoteVerified`
@@ -1371,9 +1395,27 @@ project rejects for governance-relevant checks (see
 for the fuller argument, made originally against fuzzy-matching a different
 check).
 
+**Compound quotes are split before verification (added 2026-09-07).** A model
+citing two separately-sourced facts as `"fact one" and "fact two"` leaves
+exactly that shape in `Evidence` — `parseDiagnosticReport` only strips the
+*outermost* quote pair off the raw `EVIDENCE: "..."` line, so the inner
+`" and "`/`", "` gap survives intact. Checking that whole joined string as one
+indivisible blob would always fail even when every fact in it is genuinely
+real (found live: `db-replica-disconnected`'s own slot data, correctly
+quoted, got flagged alongside an unrelated paraphrase it happened to share an
+`Evidence` field with). `splitEvidenceQuoteParts` (regex `(?i)"\s*(?:and|,)\s*"`
+— case-insensitive since a live case used `" AND "`) splits a quote into its
+individually-quoted spans first, and each span is verified independently —
+never falling back to checking the whole joined string, which turned out to
+be unsafe, not just less precise: the numeric-reformatting fallback compares
+values only, so a real number in one span would otherwise silently wave
+through arbitrary fabricated prose glued next to it in another span. A
+single-span quote (the common case, no joiner present) is checked exactly as
+before.
+
 ```go
-if unverified := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverified) > 0 {
-    appendEvidenceProvenance(extra, unverified)
+if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
+    appendEvidenceProvenance(extra, primary, secondary)
     // ... persist as a delegation_verification event, same pattern as §5.6's drift event
 }
 ```
@@ -1386,7 +1428,8 @@ which already covers every hop, so it follows that scope instead.
 
 ```json
 {
-  "unverified_evidence": ["lag_bytes | 999999999"]
+  "unverified_evidence": ["Replica disconnected due to primary rejection — lag_bytes | 999999999"],
+  "unverified_evidence_secondary": ["walreceiver timeout — terminating walreceiver due to timeout"]
 }
 ```
 
@@ -1408,24 +1451,58 @@ set of quote strings would produce an unbounded number of distinct
 `unverified_evidence`) as `unverified_claim`/`target_drift_detected`/
 `protocol_violation` — a new, distinct outcome string, deliberately *not*
 folded into `unverified_claim`, which is already Mismatch-specific; reusing
-it would have blurred two different mechanisms behind one label. See
+it would have blurred two different mechanisms behind one label. Only the
+`primary` list feeds this — `secondary` gets its own `unverified_evidence_secondary`
+bucket, visible in the same `WarningDistribution` for tracking, but
+deliberately excluded from `warning_count`/`is_clean` (see the
+primary-vs-secondary note above). See
 [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+
+**Audit trail can itself be the bottleneck.** `checkEvidenceProvenance`
+verifies a quote against `tool_execution.Result` — the *stored* copy of a
+tool's output, not what the agent actually saw. Two real gaps found live,
+both since fixed: (1) `Result` was truncated to 500 characters since the
+audit system's very first commit, unrelated to fabrication detection, which
+didn't exist yet — a real, honestly-quoted log line from `get_host_logs`
+(default 100 lines, easily several KB) was silently cut off before the part
+it quoted, flagging 100%-honest evidence as unverified; raised to a shared
+`toolResultMaxLen = 8192` (`internal/audit/gateway.go`) — still not an
+absolute fix (`read_pg_log`'s own upstream cap is 128KB), just no longer the
+common case. (2) `FetchObjectiveEvidenceEvents` (a related, adjacent
+mechanism — Layer 4's own force-gate, not this check) had no retry despite
+sharing the exact same async-write race `fetchToolExecutionEvents` already
+retries for — its own doc comment wrongly claimed otherwise. Both root-caused
+by pulling the real trace directly from auditd (`/v1/events?event_type=...&
+trace_id=...`) rather than assuming from the raw tool data what *should* have
+happened.
 
 **Test coverage**: `cmd/gateway/playbook_run_test.go` —
 `TestCheckEvidenceProvenance_NoAuditURL`, `_NilReport`, `_NoHypotheses`,
 `_QuoteVerified`, `_QuoteFabricated`, `_ChecksEveryHypothesis`,
-`_NumericReformatting`, `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
+`_NumericReformatting`, `_CompoundQuoteBothPartsReal`,
+`_CompoundQuoteOnePartFabricated`, `_SecondaryHypothesisFabrication`,
+`_PrimaryQuoteLabeledWithHypothesisText`, `TestSplitEvidenceQuoteParts` (5
+cases including uppercase `AND`), `TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
 `_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
 `TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
 `TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end
-through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`).
-`cmd/gateway/incident_narrative_test.go` — `hopVerificationFlags`'s new 4th
-return value covered by two new cases, plus
-`TestHandleGetIncident_VerificationFlags_SurfaceOnChapter` extended.
+through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`,
+now also asserting `UnverifiedEvidenceSecondary` is empty for a primary-only case).
+`cmd/gateway/incident_narrative_test.go` — `hopVerificationFlags` reduced back
+to 3 signals (Mismatch/TargetDrift/ProtocolViolation); new
+`hopUnverifiedEvidence`/`TestHopUnverifiedEvidence` (mirrors
+`hopObjectiveEvidence`'s existing rich-return-value shape: actual quotes,
+primary/secondary separated, per hop, same time-window cross-hop-leak
+protection), plus `TestHandleGetIncident_VerificationFlags_SurfaceOnChapter`
+extended to assert the actual quote content, not just the bool.
 `internal/audit/store_test.go` — `TestQueryJourneys_HasUnverifiedEvidence`
 (real SQLite store, full `store.Record`+`store.QueryJourneys` round trip),
 `TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied` extended to
 four signals.
+`internal/audit/delegate_tool_test.go` — `TestFetchEventsByType_RetryBehavior`/
+`_RetryOnFailure` extended to assert `FetchObjectiveEvidenceEvents` now
+retries. `internal/audit/tool_audit_test.go` — `TestRecordToolCall_ResultTruncation`
+(exactly-at-limit stored verbatim, over-limit truncated with ellipsis).
 `testing/integration/governance/gateway_incident_test.go` —
 `TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters` extended
 with a real cross-hop-attribution case (real spawned auditd + gateway
@@ -1434,11 +1511,17 @@ found live, now also proving `unverified_evidence` on one hop doesn't leak
 onto another sharing the same trace_id.
 `testing/e2e/playbooks_test.go` — the live-LLM shape-only check extended
 with a 4th field.
-`testing/faultlib/runner_test.go` — `TestRunViaPlaybook_UnverifiedEvidencePopulated`
-(decode-wiring, same class of gap `TestRunViaPlaybook_MismatchPopulated`
-exists to catch).
+`testing/faultlib/runner_test.go` — `TestRunViaPlaybook_UnverifiedEvidencePopulated`/
+`_UnverifiedEvidenceSecondaryPopulated` (decode-wiring, same class of gap
+`TestRunViaPlaybook_MismatchPopulated` exists to catch).
 `testing/cmd/faulttest/clean_test.go` — `TestWarningTypesFor`,
-`TestHasCleanWarning` extended with an `UnverifiedEvidence` case.
+`TestHasCleanWarning` extended with `UnverifiedEvidence`/`UnverifiedEvidenceSecondary`
+cases, plus `TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean`
+(reproduces the exact live scenario — 3/3 secondary-only runs, asserts
+`isClean()` stays true).
+`testing/cmd/faulttest/vault_test.go` — `TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary`
+(`vault incidents`'s own display, previously boolean-only, now printing the
+actual labeled quote text for both buckets).
 
 ---
 

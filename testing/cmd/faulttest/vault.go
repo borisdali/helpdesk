@@ -4790,6 +4790,8 @@ type narrativeEscalationHop struct {
 	HasTargetDrift               bool                 `json:"has_target_drift,omitempty"`
 	HasProtocolViolation         bool                 `json:"has_protocol_violation,omitempty"`
 	HasUnverifiedEvidence        bool                 `json:"has_unverified_evidence,omitempty"`
+	UnverifiedEvidence           []string             `json:"unverified_evidence,omitempty"`
+	UnverifiedEvidenceSecondary  []string             `json:"unverified_evidence_secondary,omitempty"`
 	SawSignalLine                bool                 `json:"saw_signal_line,omitempty"`
 	ObjectiveEvidenceConfirmed   []string             `json:"objective_evidence_confirmed,omitempty"`
 	ObjectiveEvidenceUnconfirmed []string             `json:"objective_evidence_unconfirmed,omitempty"`
@@ -4813,6 +4815,8 @@ type incidentNarrative struct {
 		HasTargetDrift               bool                 `json:"has_target_drift,omitempty"`
 		HasProtocolViolation         bool                 `json:"has_protocol_violation,omitempty"`
 		HasUnverifiedEvidence        bool                 `json:"has_unverified_evidence,omitempty"`
+		UnverifiedEvidence           []string             `json:"unverified_evidence,omitempty"`
+		UnverifiedEvidenceSecondary  []string             `json:"unverified_evidence_secondary,omitempty"`
 		SawSignalLine                bool                 `json:"saw_signal_line,omitempty"`
 		ObjectiveEvidenceConfirmed   []string             `json:"objective_evidence_confirmed,omitempty"`
 		ObjectiveEvidenceUnconfirmed []string             `json:"objective_evidence_unconfirmed,omitempty"`
@@ -4838,6 +4842,8 @@ type incidentNarrative struct {
 		HasTargetDrift               bool            `json:"has_target_drift,omitempty"`
 		HasProtocolViolation         bool            `json:"has_protocol_violation,omitempty"`
 		HasUnverifiedEvidence        bool            `json:"has_unverified_evidence,omitempty"`
+		UnverifiedEvidence           []string        `json:"unverified_evidence,omitempty"`
+		UnverifiedEvidenceSecondary  []string        `json:"unverified_evidence_secondary,omitempty"`
 		SawSignalLine                bool            `json:"saw_signal_line,omitempty"`
 		ObjectiveEvidenceConfirmed   []string        `json:"objective_evidence_confirmed,omitempty"`
 		ObjectiveEvidenceUnconfirmed []string        `json:"objective_evidence_unconfirmed,omitempty"`
@@ -4894,7 +4900,7 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// clean" or "no Journey data exists for this trace" (fail-open by design,
 	// same ambiguity already present at the Journey layer) — not a positive
 	// attestation either way.
-	printFlags := func(hasMismatch, hasTargetDrift, hasProtocolViolation, hasUnverifiedEvidence bool) {
+	printFlags := func(hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
 		if hasMismatch {
 			fmt.Println("           ⚠ unverified — no matching tool execution in the audit trail")
 		}
@@ -4904,8 +4910,21 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if hasProtocolViolation {
 			fmt.Println("           ⚠ protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted")
 		}
-		if hasUnverifiedEvidence {
-			fmt.Println("           ⚠ unverified evidence — an EVIDENCE quote didn't match any real tool output")
+	}
+	// printUnverifiedEvidence surfaces the actual flagged quote(s), not just a
+	// bool — found live 2026-09-07: a plain "⚠ unverified evidence" line with
+	// no content meant a reader had to separately query the raw audit trail
+	// to see what was actually fabricated. Each quote is already prefixed with
+	// its owning hypothesis's own text by checkEvidenceProvenance, so no
+	// further lookup is needed. Primary/secondary mirror the CLEAN-cert split:
+	// primary backs the acted-on conclusion (blocking); secondary backs a
+	// hypothesis the model itself rejected (still shown, marked non-blocking).
+	printUnverifiedEvidence := func(primary, secondary []string) {
+		for _, q := range primary {
+			fmt.Printf("           ⚠ unverified evidence — %s\n", q)
+		}
+		for _, q := range secondary {
+			fmt.Printf("           ⚠ unverified evidence (secondary, non-blocking) — %s\n", q)
 		}
 	}
 	// printObjectiveEvidence surfaces Layer 4 (docs/AIGOVERNANCE.md §1.1) inline,
@@ -4944,7 +4963,8 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	if n.Triage.Findings != "" {
 		fmt.Printf("Findings:  %s\n", wordWrap(n.Triage.Findings, 70, "           "))
 	}
-	printFlags(n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation, n.Triage.HasUnverifiedEvidence)
+	printFlags(n.Triage.HasMismatch, n.Triage.HasTargetDrift, n.Triage.HasProtocolViolation)
+	printUnverifiedEvidence(n.Triage.UnverifiedEvidence, n.Triage.UnverifiedEvidenceSecondary)
 	printObjectiveEvidence(n.Triage.ObjectiveEvidenceConfirmed, n.Triage.ObjectiveEvidenceUnconfirmed)
 	if n.Triage.DiagnosticReport != nil && len(n.Triage.DiagnosticReport.Hypotheses) > 0 {
 		fmt.Println("\nHypotheses:")
@@ -5012,7 +5032,8 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if hop.Findings != "" {
 			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
 		}
-		printFlags(hop.HasMismatch, hop.HasTargetDrift, hop.HasProtocolViolation, hop.HasUnverifiedEvidence)
+		printFlags(hop.HasMismatch, hop.HasTargetDrift, hop.HasProtocolViolation)
+		printUnverifiedEvidence(hop.UnverifiedEvidence, hop.UnverifiedEvidenceSecondary)
 		printObjectiveEvidence(hop.ObjectiveEvidenceConfirmed, hop.ObjectiveEvidenceUnconfirmed)
 		if hop.DiagnosticReport != nil && len(hop.DiagnosticReport.Hypotheses) > 0 {
 			fmt.Println("\nHypotheses:")
@@ -5044,7 +5065,8 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		if n.Remediation.Findings != "" {
 			fmt.Printf("Plan:      %s\n", wordWrap(n.Remediation.Findings, 70, "           "))
 		}
-		printFlags(n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation, n.Remediation.HasUnverifiedEvidence)
+		printFlags(n.Remediation.HasMismatch, n.Remediation.HasTargetDrift, n.Remediation.HasProtocolViolation)
+		printUnverifiedEvidence(n.Remediation.UnverifiedEvidence, n.Remediation.UnverifiedEvidenceSecondary)
 		printObjectiveEvidence(n.Remediation.ObjectiveEvidenceConfirmed, n.Remediation.ObjectiveEvidenceUnconfirmed)
 		if len(n.Remediation.Steps) > 0 {
 			stepNames := make([]string, 0, len(n.Remediation.Steps))

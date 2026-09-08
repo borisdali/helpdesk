@@ -319,7 +319,18 @@ content-provenance) means a hypothesis's `EVIDENCE` quote didn't match any real 
 that hop — a genuinely different check from `has_mismatch`: the tool call itself can be real and
 correctly confirmed, and the quote can still be fabricated. All three default to `false` when
 absent, which can mean either "verified clean" or "no delegation_verification events fall in this
-chapter's own window" (fail-open by design). See
+chapter's own window" (fail-open by design).
+
+`has_unverified_evidence` is scoped to the report's **primary/root-cause hypothesis** only (as of
+the same v0.28.0 pass, following a live case where a rejected alternative hypothesis's own
+fabricated detail was blocking a correct diagnosis's trust status identically to a real one — see
+[AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)).
+`unverified_evidence` (an array, alongside the bool) carries the actual flagged quote(s), each
+already prefixed with its owning hypothesis's own text (`"<hypothesis text> — <quote>"`) so a
+caller doesn't have to separately look up which claim was flagged. Its sibling
+`unverified_evidence_secondary` is the same content-provenance check for *non-primary* (rejected)
+hypotheses — still real fabrication worth tracking, but not folded into `has_unverified_evidence`
+since it doesn't indict the model's actual, acted-on conclusion. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome),
 [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope), and
 [§5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance) for what

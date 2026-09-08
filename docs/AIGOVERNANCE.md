@@ -259,10 +259,24 @@ every governance-relevant check; see [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDE
 for the fuller argument against fuzzy matching in this role).
 
 Checks *every* hypothesis with an Evidence field, not just the primary — a fabricated
-quote backing a rejected hypothesis is just as much a trust problem as one backing the
-root cause. Matches against any tool_execution event in the hop's window, not a
+quote backing a rejected hypothesis is still real fabrication and still worth knowing
+about. Matches against any tool_execution event in the hop's window, not a
 specifically-named one, since the diagnosis protocol doesn't have hypotheses name which
 tool a quote came from.
+
+**Primary vs. secondary (v0.28.0)**: a flagged quote is reported separately depending on
+whether it backs the report's `ROOT_CAUSE` hypothesis (primary — the one an operator
+would actually act on) or a hypothesis the model itself rejected (secondary). Found live:
+a STABLE, correctly-attributed diagnosis could never earn a CLEAN cert because a
+*rejected* alternative theory cited an invented detail (a model claimed a real log said
+"terminating walreceiver due to timeout" when it actually said "due to administrator
+command") — the same "right conclusion, gated identically to a wrong one" mistake
+[Layer 4's own history](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+already fixed once, one layer over. Fabrication on a *secondary* hypothesis is still real
+and still recorded — a model willing to invent a plausible detail for a discarded theory
+is a real reliability signal, and an operator reading the full transcript later shouldn't
+hit fabricated content anywhere in it — but only *primary* fabrication indicts the
+model's actual, acted-on conclusion, so only primary is CLEAN-blocking.
 
 **Deliberately narrower than it might sound**: this verifies a quote is *real*, not
 that the *conclusion* drawn from it is correct. A 100%-genuine, verbatim quote can still
@@ -276,7 +290,12 @@ fallback doesn't happen to catch.
 Surfaced as `has_unverified_evidence`/`outcome: unverified_evidence` everywhere
 `has_mismatch`/`unverified_claim` do above, including inline on the incident narrative
 (`⚠ unverified evidence`) — same event type (`delegation_verification`), a new field
-(`UnverifiedEvidence`) alongside `Mismatch`/`TargetDrift`/`ProtocolViolation`.
+(`UnverifiedEvidence`, primary-hypothesis quotes only) alongside `Mismatch`/`TargetDrift`/
+`ProtocolViolation`, plus a sibling `UnverifiedEvidenceSecondary` field for non-primary
+quotes (tracked and surfaced the same way, but excluded from the CLEAN-cert gate — see
+the primary-vs-secondary note above). Each surfaced quote is prefixed with its owning
+hypothesis's own text (`"<hypothesis text> — <quote>"`) so a reader never has to
+separately look up which claim a flagged quote was backing.
 
 ### Layer 4 — Objective-evidence content verification
 
