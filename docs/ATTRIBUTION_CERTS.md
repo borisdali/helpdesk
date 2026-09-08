@@ -296,6 +296,41 @@ Two more signals are excluded for a different reason — both are `unverified_ev
 
 `isClean()` is zero-tolerance (`WarningCount == 0`), not a percentage threshold like the outcome axis's 80% pass rate / 30pp confidence range. There's no natural noise floor to justify a threshold here — these are verified signals, not fuzzy self-reports, so any run that trips one is worth surfacing rather than averaging away. Revisit if real-world data shows this is too strict.
 
+**When you see `unverified_evidence` on an otherwise-`Clean: yes` cert, what should you actually do?**
+It means at least one run's `⚠  UNVERIFIED EVIDENCE (primary, non-blocking)` line printed a quote that
+didn't match any real tool output for that hop — shown with the full quote text (not just a count) so
+you *can* look, not so you're expected to on every occurrence. The signal isn't mature enough to gate
+CLEAN yet (see above), so treat it the same way you'd treat any other warn-only telemetry:
+
+- **`(varies)`** — fired on some runs but not others (the common case). This is the expected steady
+  state for now: mostly citation-formatting differences a model can introduce without changing any
+  actual content (a paraphrased separator, a dropped quote mark, a label wrapped mid-sentence — see
+  [MUTATION_TOOLS.md §5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance)
+  for the specific patterns already found and fixed). Not worth per-occurrence triage.
+- **`(predictable)`** — fired on *every* run. Worth a look, the same way any other `(predictable)`
+  signal is (§ above, [CONSISTENCY.md §7.2](CONSISTENCY.md#72-vault-accuracy--full-cert-detail)): a
+  consistent pattern is more informative than one-off noise, whether it turns out to be a structural
+  false positive (e.g. a fault whose diagnosis always depends on a long, repetitive log — see the
+  truncation-direction gap noted in MUTATION_TOOLS.md §5.11) or the model reliably paraphrasing on
+  that specific fault.
+- **Alongside other red flags** — `UNSTABLE`, low confidence, attribution inconsistent — treat as
+  corroborating evidence rather than a standalone alarm; a diagnosis that's shaky on multiple axes at
+  once deserves more scrutiny than the sum of its parts would suggest individually.
+- **Certifying a brand-new playbook** not yet baselined — worth spot-checking a few flagged quotes as
+  ordinary due diligence before trusting it, same as you'd sanity-check anything else on a first pass.
+
+Live example (2026-09-08, five flagged quotes pulled from one real `--repeat 3` run, root-caused
+directly against the audit trail rather than assumed): four were exactly the kind of benign artifact
+above — a model wrapping a JSON field name (`details=`) or a short parenthetical (`(slot ...)`) around
+a real quote mid-sentence produces a meaningless orphan fragment once split, and the substantive
+content right next to it verified fine; two of the five were the same known truncation gap recurring.
+But the fifth was a genuine, correct catch: the model quoted `"No active connections found."` as
+verbatim EVIDENCE, while the real `get_active_connections` tool output for that exact run was
+literally `(0 rows)` — the model had paraphrased the raw result into prose and cited its own paraphrase
+as if it were the tool's own text. That's precisely the behavior this layer exists to catch. The
+takeaway: most firings you'll see are noise, but not all of them — which is the whole argument for
+surfacing the signal at all, even warn-only.
+
 **`warning_distribution`** — a sixth cert column, mirroring `attribution_distribution`'s exact shape and purpose (§3): a per-type run count, e.g. `{"objective_evidence:pod_restarted": 1, "protocol_violation": 2, "target_drift": 1, "mismatch": 1, "evidence_coverage_gap": 1, "evidence_unconfirmed": 1, "unverified_evidence": 1}`. `WarningCount` alone can't tell an operator *which* of the seven signals above fired; this can. `unverified_evidence` and `unverified_evidence_secondary` both appear in this same distribution when they fire (visibility into real, tracked signals), but — unlike every other bucket here — neither's presence counts toward `WarningCount`/`isClean()`; see the exclusion note above for why. The `objective_evidence` bucket is signal-keyed (`objective_evidence:<signal>`, e.g. `objective_evidence:oom_killed`) when the response carries the structured `objective_evidence_signals` field (see [`PLAYBOOKS.md`'s Objective-evidence gate](PLAYBOOKS.md#objective-evidence-gate)); it falls back to the flat `objective_evidence` bucket for responses recorded before that field existed, so older data doesn't silently vanish from the distribution. `mismatch` stays a flat bucket (not tool-keyed) deliberately — unlike `objective_evidence`'s small fixed vocabulary, the underlying `narrated_not_confirmed` list is arbitrary tool names, so keying by tool would produce an unbounded number of distinct buckets. Displayed via `vault accuracy <fault-id>`'s `Signal types:` line, directly under `Clean:`. Not shown in `vault list` — that view is already dense (label + runs + clean + attribution + age share one column), so the breakdown lives only in the detail view. As of v0.25.0, each entry is also annotated `(predictable)` when `count == n_runs` (fires every run — structural, not fixable by prompting) or `(varies)` when `0 < count < n_runs` (inconsistent — worth investigating), derived from the existing `warning_distribution`/`n_runs` fields with no new storage. See [CONSISTENCY.md §7.2](CONSISTENCY.md#72-vault-accuracy--full-cert-detail) for worked examples of both.
 
 **`confirmed_distribution`** (v0.27.0) — a seventh cert column, `warning_distribution`'s positive counterpart: a per-signal run count of objective evidence that fired *and* was demonstrably accounted for by the response (see [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry) for how a signal earns confirmed vs. unconfirmed status). Not a warning signal, not counted toward `WarningCount`/`IsClean` — it's proof the model saw and cited the real data. Without this field, a cert with `warning_count == 0` gives no way to tell "objective evidence never fired on this fault" apart from "it fired every time and was always correctly confirmed" — both look identical (empty `warning_distribution`) even though the second is a materially stronger trust signal. Displayed via `vault accuracy <fault-id>`'s `Confirmed:` line, directly under `Signal types:` (present independently — a cert can show one, the other, both, or neither).

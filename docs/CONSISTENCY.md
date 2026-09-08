@@ -661,6 +661,21 @@ re-running or prompt tuning will change it:
   Signal types  : target_drift=5(predictable)
 ```
 
+`unverified_evidence`/`unverified_evidence_secondary` are the one exception to "`Signal types:` only
+appears when `Clean` is `no`" — as of 2026-09-08 neither is CLEAN-blocking (see
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis)), so they can appear in this line
+*alongside* `Clean: yes`:
+
+```
+  Clean         : yes
+  Signal types  : objective_evidence:replica_disconnected=3(predictable), unverified_evidence=2(varies)
+```
+
+Read this the same way as any other `(predictable)`/`(varies)` entry — `(varies)` here is ordinary
+background noise worth ignoring on a per-occurrence basis; `(predictable)` is worth a look. See
+ATTRIBUTION_CERTS.md §9's own worked example (a live 5-quote spot-check: four benign, one a genuine
+paraphrase-cited-as-verbatim catch) for what "worth a look" actually turns up in practice.
+
 A `Confirmed:` line (v0.27.0) can appear alongside — or instead of — `Signal types:`,
 independent of whether the cert is `Clean`. It's `warning_distribution`'s positive counterpart:
 objective evidence that fired *and* was demonstrably accounted for by the response, not a
