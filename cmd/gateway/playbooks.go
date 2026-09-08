@@ -3574,22 +3574,17 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 		}
 	}
 	for _, qs := range quotes {
-		parts := splitEvidenceQuoteParts(qs.quote)
-		if len(parts) < 2 {
-			// Common case: one genuine verbatim span, checked as a whole
-			// (substring match, numeric-reformatting fallback).
-			if !evidenceQuoteVerified(qs.quote, outputs) {
-				flagQuote(qs, qs.quote)
-			}
-			continue
-		}
-		// Compound quote: verify each span on its own. Deliberately does NOT
-		// also try the whole joined string first — the numeric fallback
-		// compares values only, ignoring surrounding prose, so a real number
-		// in one span would otherwise wave through arbitrary fabricated
-		// prose in another span glued next to it.
-		for _, p := range parts {
-			if p != "" && !evidenceQuoteVerified(p, outputs) {
+		// Always split, then verify every resulting span independently —
+		// a single-span quote (the common case) splits into exactly one
+		// element unchanged, so this is not a special case. See
+		// splitEvidenceQuoteParts' doc comment for why splitting on every
+		// literal quote boundary, rather than matching specific connector
+		// words, is the robust choice: the numeric fallback inside
+		// evidenceQuoteVerified compares values only, so a real number in
+		// one span would otherwise wave through arbitrary fabricated prose
+		// glued next to it if the whole joined string were checked as one.
+		for _, p := range splitEvidenceQuoteParts(qs.quote) {
+			if !evidenceQuoteVerified(p, outputs) {
 				flagQuote(qs, p)
 			}
 		}
@@ -3597,25 +3592,56 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 	return primary, secondary
 }
 
-// evidenceQuoteJoinerRe matches the literal `"..."` gap left inside an
-// EVIDENCE value when a model glues two separately-quoted facts together
-// with "and" or "," instead of citing one single verbatim span, e.g.
-// `"...lag_bytes | 28610712" and "No active connections found."` —
-// parseDiagnosticReport only strips the outermost quote pair off the raw
-// EVIDENCE: "..." line, so this inner `" and "` / `", "` gap survives intact
-// into DiagnosticHypothesis.Evidence and is the only reliable, syntactic (not
-// fuzzy) signal that a quote is actually a compound of two or more
-// separately-sourced spans.
-var evidenceQuoteJoinerRe = regexp.MustCompile(`(?i)"\s*(?:and|,)\s*"`)
+// stripEscapedQuotes removes literal backslash-escaping some models add
+// around inner double-quotes when citing text that itself contains quoted
+// values — e.g. a Postgres log line naming a host in quotes, cited as
+// `\"172.18.0.4\"` as if constructing a JSON string literal, which the
+// underlying prose never actually needs. Real tool output never contains
+// these backslashes (found live 2026-09-08: a byte-for-byte-real
+// pg_hba.conf rejection message failed to verify purely because of this
+// artifact) — stripping them before splitting/comparison closes that false
+// positive without weakening the check against anything genuinely
+// fabricated, since a fabricated value wouldn't match after stripping
+// either.
+func stripEscapedQuotes(s string) string {
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
 
 // splitEvidenceQuoteParts splits a possibly-compound EVIDENCE quote into its
-// individually-quoted spans (see evidenceQuoteJoinerRe), trimming whitespace
-// off each. Returns a single-element slice unchanged when no joiner is
-// present — the common case of one genuine verbatim span.
+// individually-quoted spans. parseDiagnosticReport only strips the outermost
+// quote pair off the raw EVIDENCE: "..." line, so a model citing two or more
+// separately-sourced facts leaves the inner `"` characters marking each
+// fact's boundary intact in DiagnosticHypothesis.Evidence, regardless of what
+// English connector phrase sits between them. Splits on every remaining
+// quote character (after stripEscapedQuotes) rather than matching specific
+// connector words like "and"/",": enumerating every possible connector is a
+// losing, ever-growing battle — found live 2026-09-08, a single response
+// used three different connectors ("followed later by", "and then", "with")
+// in one quote, none of which an earlier "and"/"," -only regex recognized.
+// Every non-empty trimmed segment is verified independently, including
+// connector-phrase fragments — deliberately not trying to distinguish "a
+// separately-cited fact" from "an embedded identifier within one citation"
+// (e.g. `host "172.18.0.4"`) syntactically, since that distinction isn't
+// reliably recoverable from quote positions alone. This can't manufacture a
+// false positive on genuinely real content: every fragment of a real string
+// is still a real substring of it, confirmed directly during the original
+// design (see the git history for this function). A connector fragment that
+// doesn't happen to appear in any real output is at worst reported noise,
+// not a missed fabrication — real facts remain independently checked
+// regardless of what glues them together. Returns a single-element slice
+// unchanged when no interior quote remains — the common case of one genuine
+// verbatim span.
 func splitEvidenceQuoteParts(quote string) []string {
-	parts := evidenceQuoteJoinerRe.Split(quote, -1)
-	for i, p := range parts {
-		parts[i] = strings.TrimSpace(p)
+	quote = stripEscapedQuotes(quote)
+	raw := strings.Split(quote, `"`)
+	parts := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if t := strings.TrimSpace(p); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	if len(parts) == 0 {
+		return []string{strings.TrimSpace(quote)}
 	}
 	return parts
 }
