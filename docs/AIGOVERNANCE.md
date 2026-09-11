@@ -330,7 +330,7 @@ unconfirmed evidence inline per chapter (`⚠`/`✓`) and a `--repeat N` certifi
 aggregate confirmed-vs-unconfirmed split is queryable via `vault accuracy`'s `Confirmed:`
 line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 
-**At a glance — the four layers compared:**
+### At a glance: the four layers compared
 
 | | Layer 1 — Intra-agent post-mutation | Layer 2 — Inter-agent delegation | Layer 3 — Content-provenance | Layer 4 — Objective-evidence content |
 |---|---|---|---|---|
@@ -342,7 +342,7 @@ line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 | **Enforcement** | Bounded retry + escalation at execution time — not an audit-verification gate | Warn-only — narrated to the user as unverifiable, journey outcome elevated, never blocks the run | Warn-only by design — a broad, general-purpose text check, deliberately not a hard gate | **Hard gate** — forces a human-reviewed `pending_gate`, but only on a genuine, checkable contradiction; evidence the model correctly cited is corroboration, not a red flag |
 | **STABLE/CLEAN cert signal(s)** | None — a runtime safety mechanism, not an audit-trail verification signal faulttest tracks | `Mismatch` (+ sibling `TargetDrift`, same delegation-verification event) | `UnverifiedEvidence`/`UnverifiedEvidenceSecondary` — both tracked and surfaced (`WarningDistribution`, CLI, `vault`), **neither is CLEAN-blocking as of 2026-09-08** (primary was, from v0.28.0 ship until that date — see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for why it moved to warn-only) | `EvidenceWarnings`/`ObjectiveEvidenceGate` (the production force-gate itself) **and**, for faulttest catalog runs specifically, `EvidenceCoverageGap`/`EvidenceRequiredButUnconfirmed` (v0.28.0 split of "signal never fired" vs. "fired but unconfirmed") |
 
-**Coverage:**
+### Coverage
 
 | Session path | Layer 1 | Layer 2 | Layer 3 | Layer 4 |
 |---|---|---|---|---|
