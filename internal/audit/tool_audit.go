@@ -101,7 +101,7 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 			Name:       call.Name,
 			Parameters: call.Parameters,
 			RawCommand: call.RawCommand,
-			Result:     truncateString(result.Output, 500),
+			Result:     truncateString(result.Output, toolResultMaxLen),
 			Error:      result.Error,
 			Duration:   duration,
 			Agent:      ta.agentName, // Track which agent executed this tool

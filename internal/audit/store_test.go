@@ -2544,8 +2544,9 @@ func TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied(t *testing.T
 	a := outcomePriority("unverified_claim")
 	b := outcomePriority("target_drift_detected")
 	c := outcomePriority("protocol_violation")
-	if a != b || b != c {
-		t.Errorf("outcomePriority(unverified_claim)=%d, outcomePriority(target_drift_detected)=%d, outcomePriority(protocol_violation)=%d — want all three tied", a, b, c)
+	d := outcomePriority("unverified_evidence")
+	if a != b || b != c || c != d {
+		t.Errorf("outcomePriority(unverified_claim)=%d, outcomePriority(target_drift_detected)=%d, outcomePriority(protocol_violation)=%d, outcomePriority(unverified_evidence)=%d — want all four tied", a, b, c, d)
 	}
 	if a != 9 {
 		t.Errorf("outcomePriority(unverified_claim) = %d, want 9", a)
@@ -2553,6 +2554,149 @@ func TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied(t *testing.T
 	// Adding the new tier-9 entry must not disturb the ordering below it.
 	if got := outcomePriority("error"); got != 8 {
 		t.Errorf("outcomePriority(error) = %d, want 8 (unchanged by the new tier-9 entry)", got)
+	}
+}
+
+// TestQueryJourneys_HasUnverifiedEvidence mirrors TestQueryJourneys_HasTargetDrift
+// exactly, for the new content-provenance signal (v0.28.0, fabrication-detection
+// Layer 3) — verifies the real outcome-elevation and HasUnverifiedEvidence wiring
+// against a real store, not just the in-memory outcomePriority/switch logic.
+func TestQueryJourneys_HasUnverifiedEvidence(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "audit_unverified_evidence_test")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(tmpDir, "audit.db")})
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	// Journey A: a delegation_verification event with UnverifiedEvidence populated —
+	// a real tool call happened (Mismatch stays false), the quote just doesn't
+	// match any of its real output.
+	eventsA := []*Event{
+		{
+			EventID:   "gwr_unvevid_a",
+			Timestamp: base,
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_unvevid_a",
+			Session:   Session{ID: "tr_unvevid_a"},
+			Input:     Input{UserQuery: "investigate replication lag"},
+		},
+		{
+			EventID:   "gv_unvevid_a",
+			Timestamp: base.Add(time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_unvevid_a",
+			Session:   Session{ID: "tr_unvevid_a"},
+			DelegationVerification: &DelegationVerification{
+				Agent:              "postgres_database_agent",
+				ActionClass:        ActionRead,
+				Mismatch:           false,
+				UnverifiedEvidence: []string{"lag_bytes | 999999999"},
+			},
+		},
+	}
+
+	// Journey B: clean verification, no unverified evidence.
+	eventsB := []*Event{
+		{
+			EventID:   "gwr_unvevid_b",
+			Timestamp: base.Add(3 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_verified_b",
+			Session:   Session{ID: "tr_verified_b"},
+			Input:     Input{UserQuery: "show active connections"},
+		},
+		{
+			EventID:   "gv_unvevid_b",
+			Timestamp: base.Add(4 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_verified_b",
+			Session:   Session{ID: "tr_verified_b"},
+			DelegationVerification: &DelegationVerification{
+				Agent:       "postgres_database_agent",
+				ActionClass: ActionRead,
+				Mismatch:    false,
+			},
+		},
+	}
+
+	// Journey C: only UnverifiedEvidenceSecondary populated (a fabricated quote
+	// on a hypothesis the model itself rejected) — the primary/secondary split
+	// added 2026-09-07. Must NOT elevate the outcome or set HasUnverifiedEvidence
+	// at the Journey level: this signal backs a hypothesis nobody acted on, so
+	// treating it identically to Journey A (a primary-hypothesis fabrication)
+	// would resurrect the exact "right conclusion, gated like a wrong one"
+	// mistake the split exists to fix, one layer lower than the incident-
+	// narrative chapter tests already cover.
+	eventsC := []*Event{
+		{
+			EventID:   "gwr_unvevid_c",
+			Timestamp: base.Add(5 * time.Second),
+			EventType: EventTypeGatewayRequest,
+			TraceID:   "tr_secondary_c",
+			Session:   Session{ID: "tr_secondary_c"},
+			Input:     Input{UserQuery: "investigate replica disconnect"},
+		},
+		{
+			EventID:   "gv_unvevid_c",
+			Timestamp: base.Add(6 * time.Second),
+			EventType: EventTypeDelegationVerification,
+			TraceID:   "tr_secondary_c",
+			Session:   Session{ID: "tr_secondary_c"},
+			DelegationVerification: &DelegationVerification{
+				Agent:                       "sysadmin_agent",
+				ActionClass:                 ActionRead,
+				Mismatch:                    false,
+				UnverifiedEvidenceSecondary: []string{"walreceiver timeout — invented detail"},
+			},
+		},
+	}
+
+	for _, e := range append(append(eventsA, eventsB...), eventsC...) {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+
+	journeys, err := store.QueryJourneys(ctx, JourneyOptions{})
+	if err != nil {
+		t.Fatalf("QueryJourneys: %v", err)
+	}
+	byTrace := make(map[string]JourneySummary, len(journeys))
+	for _, j := range journeys {
+		byTrace[j.TraceID] = j
+	}
+
+	unverifiedJourney := byTrace["tr_unvevid_a"]
+	if !unverifiedJourney.HasUnverifiedEvidence {
+		t.Error("tr_unvevid_a: expected HasUnverifiedEvidence=true")
+	}
+	if unverifiedJourney.Outcome != "unverified_evidence" {
+		t.Errorf("tr_unvevid_a: Outcome = %q, want %q", unverifiedJourney.Outcome, "unverified_evidence")
+	}
+	if unverifiedJourney.HasMismatch {
+		t.Error("tr_unvevid_a: expected HasMismatch=false — a real tool call happened, only the quote is unverified")
+	}
+
+	cleanJourney := byTrace["tr_verified_b"]
+	if cleanJourney.HasUnverifiedEvidence {
+		t.Error("tr_verified_b: expected HasUnverifiedEvidence=false")
+	}
+
+	secondaryJourney := byTrace["tr_secondary_c"]
+	if secondaryJourney.HasUnverifiedEvidence {
+		t.Error("tr_secondary_c: expected HasUnverifiedEvidence=false — only UnverifiedEvidenceSecondary was set, which must not elevate this Journey-level flag")
+	}
+	if secondaryJourney.Outcome == "unverified_evidence" {
+		t.Errorf("tr_secondary_c: Outcome = %q, want anything but unverified_evidence — a secondary-only signal must not elevate the Journey outcome", secondaryJourney.Outcome)
 	}
 }
 

@@ -5,12 +5,14 @@ model's own claim actually match what a tool really returned? Not another model 
 another opinion — a plain comparison between a typed value read directly off a tool's
 result and the value the model quoted back in its own required evidence line.
 
-This is Layer 3 of aiHelpDesk's LLM fabrication detection — see
+This is Layer 4 of aiHelpDesk's LLM fabrication detection — see
 [AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#11-llm-fabrication-detection) for how it relates to
-Layer 1 (intra-agent post-mutation verification) and Layer 2 (inter-agent audit-based
-delegation verification) and closes that section's own previously-open "read-only tool
-output content — fabrication not detected" gap, for the specific tools and signals it
-covers.
+Layer 1 (intra-agent post-mutation verification), Layer 2 (inter-agent audit-based
+delegation verification), and Layer 3 (content-provenance verification — checks that an
+EVIDENCE quote is real for *any* tool with no registration needed, but not that it's the
+*correct* value for a known signal, which is this layer's own, narrower job) — and closes
+that section's own previously-open "read-only tool output content — fabrication not
+detected" gap, for the specific tools and signals it covers.
 
 ---
 
@@ -301,13 +303,14 @@ of silently making a fault fail every live run thereafter.
   structured evidence (a Pod's real restart count, a replication slot's real state).
   Extending coverage is a case-by-case decision per tool, not a mechanical rollout — see
   the design note in `cmd/gateway/playbooks.go`'s `objectiveEvidenceSignals`.
-- **A broader, unscoped version of this idea is still backlogged.** Cross-checking any
-  `EVIDENCE:` quote against the real `tool_execution` audit output — regardless of
-  whether a declarative rule exists for that specific tool/signal — would generalize this
-  mechanism's confirmation half beyond the nine rules above. Not started; distinct from
-  the action-provenance delegation verification in
-  [AIGOVERNANCE.md §1.1 Layer 2](AIGOVERNANCE.md#11-llm-fabrication-detection), which
-  this would complement rather than replace.
+- **The broader, unscoped version of this idea shipped separately, as its own layer
+  (v0.28.0).** Cross-checking any `EVIDENCE:` quote against the real `tool_execution`
+  audit output — regardless of whether a declarative rule exists for that specific
+  tool/signal — is now [AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)
+  (content-provenance verification), not a fold-in of this mechanism's own confirmation
+  half. Complements this layer rather than replacing it: Layer 3 checks a quote is *real*
+  for any tool with no registration; this layer (now Layer 4) checks it's the *correct*
+  value for a known, registered signal.
 
 ## 10. See also
 

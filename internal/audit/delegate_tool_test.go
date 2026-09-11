@@ -215,15 +215,18 @@ func TestHasActionClassDenial(t *testing.T) {
 }
 
 // TestFetchEventsByType_RetryBehavior guards the intentional latency-avoiding
-// design decision: fetchToolExecutionEvents retries once after 200ms (async
-// write propagation from RemoteStore is a real concern for tool_execution
-// events specifically), while fetchAgentReasoningEvents and
+// design decision: fetchToolExecutionEvents and FetchObjectiveEvidenceEvents
+// retry once after 200ms (both are written via ToolAuditor.Record — the same
+// async-propagation-prone path, evidence.Evaluate's RecordObjectiveEvidence
+// included — see FetchObjectiveEvidenceEvents' doc comment for the live
+// false-positive this fixed, 2026-09-07), while fetchAgentReasoningEvents and
 // fetchPolicyDecisionEvents make a single attempt only — reasoning/policy
 // events are written earlier in the request lifecycle, so retrying them too
 // would silently double the worst-case latency added to every delegation for
-// no real benefit. A regression here (e.g. someone "fixing" all three to
-// retry uniformly) would not be caught by any behavioral test, only by
-// counting requests directly, which is what this test does.
+// no real benefit. A regression here (e.g. someone "fixing" all four to
+// retry uniformly, or reverting objective_evidence back to no-retry) would
+// not be caught by any behavioral test, only by counting requests directly,
+// which is what this test does.
 func TestFetchEventsByType_RetryBehavior(t *testing.T) {
 	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -240,6 +243,12 @@ func TestFetchEventsByType_RetryBehavior(t *testing.T) {
 	}
 
 	callCount = 0
+	FetchObjectiveEvidenceEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 1 {
+		t.Errorf("FetchObjectiveEvidenceEvents on empty (non-error) response made %d calls, want 1 (retry only triggers on error/decode-failure, not empty results)", callCount)
+	}
+
+	callCount = 0
 	fetchAgentReasoningEvents(srv.URL, "", "tr_test", time.Now())
 	if callCount != 1 {
 		t.Errorf("fetchAgentReasoningEvents made %d calls, want exactly 1 (no retry by design)", callCount)
@@ -252,9 +261,10 @@ func TestFetchEventsByType_RetryBehavior(t *testing.T) {
 	}
 }
 
-// TestFetchEventsByType_RetryOnFailure confirms fetchToolExecutionEvents
-// actually does retry up to twice on failure (distinct from the no-retry
-// fetches above) — a server that always errors should be hit twice.
+// TestFetchEventsByType_RetryOnFailure confirms fetchToolExecutionEvents and
+// FetchObjectiveEvidenceEvents actually do retry up to twice on failure
+// (distinct from the no-retry fetches above) — a server that always errors
+// should be hit twice.
 func TestFetchEventsByType_RetryOnFailure(t *testing.T) {
 	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +277,12 @@ func TestFetchEventsByType_RetryOnFailure(t *testing.T) {
 	fetchToolExecutionEvents(srv.URL, "", "tr_test", time.Now())
 	if callCount != 2 {
 		t.Errorf("fetchToolExecutionEvents on persistent decode failure made %d calls, want 2 (1 initial + 1 retry)", callCount)
+	}
+
+	callCount = 0
+	FetchObjectiveEvidenceEvents(srv.URL, "", "tr_test", time.Now())
+	if callCount != 2 {
+		t.Errorf("FetchObjectiveEvidenceEvents on persistent decode failure made %d calls, want 2 (1 initial + 1 retry)", callCount)
 	}
 
 	callCount = 0

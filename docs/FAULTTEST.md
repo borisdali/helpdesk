@@ -108,22 +108,30 @@ into `score` itself:
    true when none are declared).
 3. **`ordering_pass`** — `expected_tool_order` constraints hold (e.g. `get_session_info`
    evidence must precede `terminate_connection` evidence).
-4. **Evidence-content gate** (`evidence_required_but_unconfirmed`) — when a fault declares
-   `expected_diagnosis.objective_evidence_signal` (see [§10](#10-extending-the-built-in-catalog))
-   *and* the run went `--via-gateway`, that signal must also appear in the run's
-   `objective_evidence_confirmed` list. Not just have fired, but have been demonstrably
-   cited in the model's own hypothesis text (see
-   [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)).
+4. **Evidence-content gate** — when a fault declares `expected_diagnosis.objective_evidence_signal`
+   (see [§10](#10-extending-the-built-in-catalog)) *and* the run went `--via-gateway`, that signal
+   must have both *fired* and been *confirmed* — demonstrably cited in the model's own hypothesis
+   text (see [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)),
+   not just declared as an expectation. This splits into two distinct sub-cases (v0.28.0), each its
+   own boolean field in the report, because they call for different fixes:
 
-   If declared and unconfirmed, aiHelpDesk force-sets the `passed` to `false`... **regardless of `score`**.
+   - **`evidence_coverage_gap`** — the signal never fired at all: absent from
+     `objective_evidence_signals` entirely. The agent's tool calls never reached the code path
+     that would produce this evidence — a tooling or prompt-coverage problem.
+   - **`evidence_required_but_unconfirmed`** — the signal *did* fire but is still absent from
+     `objective_evidence_confirmed`. The agent had the real data and didn't demonstrably engage
+     with it — a confirmation/quoting problem.
 
-   That is, a fault can score 100% on `keywords`/`category`/`tools` and still fail here. This is
-   deliberately an unweighted veto, not a fifth weighted dimension: a confirmed vs.
-   unconfirmed diagnosis is a different *kind* of trust claim, not a "somewhat worse" one,
-   so a partial score contribution that a strong keyword/tool score could outweigh would
-   defeat the point. 
+   Either one force-sets `passed` to `false` — **regardless of `score`**. A fault can score 100% on
+   `keywords`/`category`/`tools` and still fail here. This is deliberately an unweighted veto, not
+   a fifth weighted dimension: a confirmed vs. unconfirmed diagnosis is a different *kind* of trust
+   claim, not a "somewhat worse" one, so a partial score contribution that a strong keyword/tool
+   score could outweigh would defeat the point. The two are kept as separate fields rather than one
+   flat flag specifically so a red run's report says which team/fix it needs, without anyone having
+   to cross-reference the raw `objective_evidence_signals`/`objective_evidence_confirmed` lists by
+   hand to work it out.
 
-   Note: This is not enforced on the non-gateway runs (`faulttest-fast`, the plain
+   Note: none of this is enforced on non-gateway runs (`faulttest-fast`, the plain
    `faultlib.Evaluate` path). Only Gateway playbook responses carry confirmed-evidence
    data at all. See [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
    for why this gate exists.
@@ -1239,7 +1247,8 @@ The JSON report contains one entry per fault:
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
 | `score` | Weighted combination — see the weights table in [§1.1](#11-scoring-formula) |
 | `passed` | Four independent gates, all required — see [§1.1](#11-scoring-formula): `score >= 0.6`, `keyword_pass`, `ordering_pass`, and (when the fault declares `objective_evidence_signal` on a `--via-gateway` run) the evidence-content gate |
-| `evidence_required_but_unconfirmed` | `true` when the fault declared `objective_evidence_signal` but it wasn't confirmed — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. |
+| `evidence_coverage_gap` | `true` when the fault declared `objective_evidence_signal` but it never fired at all — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. See §1.1. |
+| `evidence_required_but_unconfirmed` | `true` when the fault declared `objective_evidence_signal`, it fired, but wasn't confirmed — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. See §1.1. |
 | `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
 | `judge_model` | Model that produced the judge score (omitted when skipped) |
 | `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |

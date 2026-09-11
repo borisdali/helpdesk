@@ -142,6 +142,20 @@ func TestWarningTypesFor(t *testing.T) {
 		{"gate fired but signals empty — falls back to flat bucket", EvalResult{ObjectiveEvidenceGate: true}, []string{"objective_evidence"}},
 		{"mismatch", EvalResult{Mismatch: true}, []string{"mismatch"}},
 		{"all five types on one run", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, TargetDrift: true, Mismatch: true}, []string{"objective_evidence", "protocol_violation", "target_drift", "mismatch"}},
+		{"catalog evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, []string{"evidence_coverage_gap"}},
+		{"catalog evidence unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, []string{"evidence_unconfirmed"}},
+		{"unverified evidence (content-provenance)", EvalResult{UnverifiedEvidence: true}, []string{"unverified_evidence"}},
+		{"unverified evidence secondary (non-primary hypothesis)", EvalResult{UnverifiedEvidenceSecondary: true}, []string{"unverified_evidence_secondary"}},
+		{
+			"primary and secondary are distinct buckets, not the same one",
+			EvalResult{UnverifiedEvidence: true, UnverifiedEvidenceSecondary: true},
+			[]string{"unverified_evidence", "unverified_evidence_secondary"},
+		},
+		{
+			"coverage gap and unconfirmed are distinct buckets, not the same one",
+			EvalResult{EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true},
+			[]string{"evidence_coverage_gap", "evidence_unconfirmed"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -220,6 +234,117 @@ func TestBuildCleanReport_ConfirmedAndUnconfirmed_Independent(t *testing.T) {
 	}
 }
 
+// TestBuildCleanReport_CoverageGapVsUnconfirmed_SideBySide verifies the two
+// evidence-veto failure buckets James asked to see separated — "did the
+// signal never fire at all" vs. "it fired but was never confirmed" — show up
+// as distinct, independently-counted lines in the printed --repeat N report,
+// not collapsed into one flat "evidence" bucket a reader would have to go
+// dig through raw JSON to tell apart.
+func TestBuildCleanReport_CoverageGapVsUnconfirmed_SideBySide(t *testing.T) {
+	f := Failure{ID: "db-replica-disconnected", Name: "Replica disconnected"}
+	results := []EvalResult{
+		{Passed: false, EvidenceCoverageGap: true},
+		{Passed: false, EvidenceCoverageGap: true},
+		{Passed: false, EvidenceRequiredButUnconfirmed: true},
+		{Passed: true},
+		{Passed: true},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 3 {
+		t.Errorf("WarningCount: got %d, want 3 (2 coverage gaps + 1 unconfirmed)", r.WarningCount)
+	}
+	if r.WarningDistribution["evidence_coverage_gap"] != 2 {
+		t.Errorf("WarningDistribution[evidence_coverage_gap]: got %d, want 2", r.WarningDistribution["evidence_coverage_gap"])
+	}
+	if r.WarningDistribution["evidence_unconfirmed"] != 1 {
+		t.Errorf("WarningDistribution[evidence_unconfirmed]: got %d, want 1", r.WarningDistribution["evidence_unconfirmed"])
+	}
+
+	out := captureStdout(func() { r.Print() })
+	if !strings.Contains(out, "evidence_coverage_gap=2(varies)") {
+		t.Errorf("expected the coverage-gap count as its own line:\n%s", out)
+	}
+	if !strings.Contains(out, "evidence_unconfirmed=1(varies)") {
+		t.Errorf("expected the unconfirmed count as its own, separate line:\n%s", out)
+	}
+}
+
+// TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean
+// reproduces the exact live scenario from 2026-09-07: a STABLE, fully-passing,
+// correctly-attributed diagnosis where every run's only warning is a
+// fabricated quote on a REJECTED hypothesis (db-replica-container-stopped's
+// "due to timeout" vs the real "due to administrator command"). Before the
+// primary/secondary split, this made the fault permanently DIRTY despite the
+// acted-on conclusion being entirely sound. Confirms: secondary is still
+// tracked (WarningDistribution/Signal types) but Clean is "yes".
+func TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean(t *testing.T) {
+	f := Failure{ID: "db-replica-container-stopped", Name: "Replica container stopped"}
+	results := []EvalResult{
+		{Passed: true, UnverifiedEvidenceSecondary: true},
+		{Passed: true, UnverifiedEvidenceSecondary: true},
+		{Passed: true, UnverifiedEvidenceSecondary: true},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 0 {
+		t.Errorf("WarningCount: got %d, want 0 — secondary-only warnings must not count toward the zero-tolerance CLEAN gate", r.WarningCount)
+	}
+	if !r.isClean() {
+		t.Error("isClean() = false, want true — a correctly-attributed, fully-passing diagnosis should earn CLEAN even when a rejected hypothesis cited an invented detail")
+	}
+	if r.WarningDistribution["unverified_evidence_secondary"] != 3 {
+		t.Errorf("WarningDistribution[unverified_evidence_secondary]: got %d, want 3 — still tracked for visibility", r.WarningDistribution["unverified_evidence_secondary"])
+	}
+
+	out := captureStdout(func() { r.Print() })
+	if !strings.Contains(out, "unverified_evidence_secondary=3") {
+		t.Errorf("expected the secondary count surfaced in the printed report:\n%s", out)
+	}
+	if !strings.Contains(out, "Clean:        yes") {
+		t.Errorf("expected Clean: yes in the printed report:\n%s", out)
+	}
+}
+
+// TestBuildCleanReport_UnverifiedEvidencePrimary_DoesNotBlockClean reproduces
+// the live 2026-09-08 db-replica-disconnected/db-replica-container-stopped
+// pattern that drove this decision: after four live rounds each surfacing a
+// new, genuine citation-formatting variant (compound quotes, backslash
+// escaping, narration, separator punctuation, dropped embedded quotes) — all
+// real false positives, none a missed fabrication — plus a structural
+// truncation-direction bug unrelated to citation style, unverified_evidence
+// (primary) moved to warn-only for this release, matching
+// UnverifiedEvidenceSecondary's existing treatment: still tracked
+// (WarningDistribution), no longer CLEAN-blocking on its own. See
+// hasCleanWarning's doc comment for the full rationale.
+func TestBuildCleanReport_UnverifiedEvidencePrimary_DoesNotBlockClean(t *testing.T) {
+	f := Failure{ID: "db-replica-disconnected", Name: "Replica disconnected (walreceiver dropped)"}
+	results := []EvalResult{
+		{Passed: true, UnverifiedEvidence: true},
+		{Passed: true, UnverifiedEvidence: true},
+		{Passed: true, UnverifiedEvidence: true},
+	}
+	r := buildCleanReport(f, results)
+
+	if r.WarningCount != 0 {
+		t.Errorf("WarningCount: got %d, want 0 — unverified_evidence is warn-only as of 2026-09-08, must not count toward CLEAN", r.WarningCount)
+	}
+	if !r.isClean() {
+		t.Error("isClean() = false, want true — a fully-passing, correctly-attributed diagnosis should earn CLEAN even with unverified_evidence firing on every run")
+	}
+	if r.WarningDistribution["unverified_evidence"] != 3 {
+		t.Errorf("WarningDistribution[unverified_evidence]: got %d, want 3 — still tracked for visibility", r.WarningDistribution["unverified_evidence"])
+	}
+
+	out := captureStdout(func() { r.Print() })
+	if !strings.Contains(out, "unverified_evidence=3") {
+		t.Errorf("expected the unverified_evidence count surfaced in the printed report:\n%s", out)
+	}
+	if !strings.Contains(out, "Clean:        yes") {
+		t.Errorf("expected Clean: yes in the printed report:\n%s", out)
+	}
+}
+
 func TestWarningDistributionString(t *testing.T) {
 	cases := []struct {
 		name string
@@ -259,7 +384,26 @@ func TestHasCleanWarning(t *testing.T) {
 		{"objective evidence gate", EvalResult{ObjectiveEvidenceGate: true}, true},
 		{"target drift", EvalResult{TargetDrift: true}, true},
 		{"mismatch", EvalResult{Mismatch: true}, true},
-		{"all five", EvalResult{EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true, Mismatch: true}, true},
+		{"evidence coverage gap", EvalResult{EvidenceCoverageGap: true}, true},
+		{"evidence required but unconfirmed", EvalResult{EvidenceRequiredButUnconfirmed: true}, true},
+		{
+			"unverified evidence (content-provenance) alone does NOT block Clean — warn-only as of 2026-09-08, see hasCleanWarning's doc comment",
+			EvalResult{UnverifiedEvidence: true}, false,
+		},
+		{
+			"unverified evidence secondary alone does NOT block Clean — backs a hypothesis the model itself rejected, not the acted-on conclusion",
+			EvalResult{UnverifiedEvidenceSecondary: true}, false,
+		},
+		{
+			"all seven blocking signals", EvalResult{
+				EvidenceWarnings: []string{"x"}, ProtocolViolation: true, ObjectiveEvidenceGate: true, TargetDrift: true,
+				Mismatch: true, EvidenceCoverageGap: true, EvidenceRequiredButUnconfirmed: true,
+			}, true,
+		},
+		{
+			"unverified evidence alongside real blocking signals still blocks (via the other signals, not itself)",
+			EvalResult{EvidenceCoverageGap: true, UnverifiedEvidence: true}, true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

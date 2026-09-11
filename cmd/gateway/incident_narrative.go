@@ -54,9 +54,10 @@ type TriageChapter struct {
 	DiagnosticReport *audit.DiagnosticReport `json:"diagnostic_report,omitempty"`
 	Transcript       string                  `json:"transcript,omitempty"`
 	// TraceID identifies this chapter's Journey — the WHAT view behind this
-	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation below.
+	// chapter's WHY. Used to fetch HasMismatch/HasTargetDrift/HasProtocolViolation/
+	// HasUnverifiedEvidence below.
 	TraceID string `json:"trace_id,omitempty"`
-	// HasMismatch/HasTargetDrift/HasProtocolViolation mirror the corresponding
+	// HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence mirror the corresponding
 	// Journey's flags (GET /v1/journeys?trace_id=X) — surfaced inline here so a
 	// reader doesn't have to separately look up the Journey to know this
 	// chapter's tool calls weren't fully verified. Absent (false) can mean
@@ -66,6 +67,25 @@ type TriageChapter struct {
 	HasMismatch          bool `json:"has_mismatch,omitempty"`
 	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
 	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// HasUnverifiedEvidence is true iff UnverifiedEvidence is non-empty —
+	// kept as a plain bool for backward compatibility alongside the three
+	// flags above; UnverifiedEvidence/UnverifiedEvidenceSecondary below carry
+	// the actual content.
+	HasUnverifiedEvidence bool `json:"has_unverified_evidence,omitempty"`
+	// UnverifiedEvidence lists the actual PRIMARY-hypothesis quotes flagged
+	// by content-provenance (fabrication-detection Layer 3) for this chapter,
+	// each already prefixed with its owning hypothesis's own text by
+	// checkEvidenceProvenance (playbooks.go) — e.g. "replica disconnected —
+	// FATAL: terminating walreceiver due to timeout". Added 2026-09-07: a
+	// plain bool told a reader fabrication happened somewhere in this
+	// chapter but not what, or which claim it backed — reconstructing that
+	// required querying the raw tool_execution audit trail by hand.
+	// UnverifiedEvidenceSecondary is the same for non-primary (rejected)
+	// hypotheses — see DelegationVerification.UnverifiedEvidenceSecondary's
+	// doc comment for why fabrication there is tracked but doesn't
+	// contribute to HasUnverifiedEvidence/CLEAN-cert gating.
+	UnverifiedEvidence          []string `json:"unverified_evidence,omitempty"`
+	UnverifiedEvidenceSecondary []string `json:"unverified_evidence_secondary,omitempty"`
 	// SawSignalLine is read directly off the persisted PlaybookRun (not a
 	// Journey lookup like the three flags above) — true iff the agent's raw
 	// response had a TRANSITION_TO:/ESCALATE_TO: line at all, regardless of
@@ -74,7 +94,7 @@ type TriageChapter struct {
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed mirror the response-level
 	// objective_evidence_confirmed/unconfirmed fields (see
-	// objectiveEvidenceSignals, playbooks.go) — Layer 3 of
+	// objectiveEvidenceSignals, playbooks.go) — Layer 4 of
 	// docs/AIGOVERNANCE.md's fabrication detection, computed fresh from the
 	// persisted objective_evidence audit events and this chapter's own
 	// transcript rather than stored at run time, same as the three flags
@@ -103,11 +123,15 @@ type RemediationChapter struct {
 	Steps      []*audit.PlaybookRunStep `json:"steps,omitempty"`
 	Findings   string                   `json:"findings,omitempty"`
 	Transcript string                   `json:"transcript,omitempty"`
-	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
-	TraceID              string `json:"trace_id,omitempty"`
-	HasMismatch          bool   `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool   `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool   `json:"has_protocol_violation,omitempty"`
+	// TraceID/HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence/
+	// UnverifiedEvidence/UnverifiedEvidenceSecondary — see TriageChapter's doc comment.
+	TraceID                     string   `json:"trace_id,omitempty"`
+	HasMismatch                 bool     `json:"has_mismatch,omitempty"`
+	HasTargetDrift              bool     `json:"has_target_drift,omitempty"`
+	HasProtocolViolation        bool     `json:"has_protocol_violation,omitempty"`
+	HasUnverifiedEvidence       bool     `json:"has_unverified_evidence,omitempty"`
+	UnverifiedEvidence          []string `json:"unverified_evidence,omitempty"`
+	UnverifiedEvidenceSecondary []string `json:"unverified_evidence_secondary,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
@@ -132,10 +156,14 @@ type EscalationHop struct {
 	TraceID          string                   `json:"trace_id,omitempty"`
 	StartedAt        time.Time                `json:"started_at"`
 	CompletedAt      *time.Time               `json:"completed_at,omitempty"`
-	// HasMismatch/HasTargetDrift/HasProtocolViolation — see TriageChapter's doc comment.
-	HasMismatch          bool `json:"has_mismatch,omitempty"`
-	HasTargetDrift       bool `json:"has_target_drift,omitempty"`
-	HasProtocolViolation bool `json:"has_protocol_violation,omitempty"`
+	// HasMismatch/HasTargetDrift/HasProtocolViolation/HasUnverifiedEvidence/
+	// UnverifiedEvidence/UnverifiedEvidenceSecondary — see TriageChapter's doc comment.
+	HasMismatch                 bool     `json:"has_mismatch,omitempty"`
+	HasTargetDrift              bool     `json:"has_target_drift,omitempty"`
+	HasProtocolViolation        bool     `json:"has_protocol_violation,omitempty"`
+	HasUnverifiedEvidence       bool     `json:"has_unverified_evidence,omitempty"`
+	UnverifiedEvidence          []string `json:"unverified_evidence,omitempty"`
+	UnverifiedEvidenceSecondary []string `json:"unverified_evidence_secondary,omitempty"`
 	// SawSignalLine — see TriageChapter's doc comment.
 	SawSignalLine bool `json:"saw_signal_line,omitempty"`
 	// ObjectiveEvidenceConfirmed/Unconfirmed — see TriageChapter's doc comment.
@@ -246,6 +274,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	narrative.Triage.HasMismatch, narrative.Triage.HasTargetDrift, narrative.Triage.HasProtocolViolation =
 		hopVerificationFlags(lookupTraceEvents(run.TraceID), run.StartedAt, triageWindowEnd)
+	narrative.Triage.UnverifiedEvidence, narrative.Triage.UnverifiedEvidenceSecondary =
+		hopUnverifiedEvidence(lookupTraceEvents(run.TraceID), run.StartedAt, triageWindowEnd)
+	narrative.Triage.HasUnverifiedEvidence = len(narrative.Triage.UnverifiedEvidence) > 0
 	narrative.Triage.ObjectiveEvidenceConfirmed, narrative.Triage.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 		lookupOEVEvents(run.TraceID), run.StartedAt, triageWindowEnd,
 		evidence.HopOutcome{Report: run.DiagnosticReport, RawText: run.AgentTranscript, SawSignalLine: run.SawSignalLine})
@@ -322,6 +353,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			}
 			rem.HasMismatch, rem.HasTargetDrift, rem.HasProtocolViolation =
 				hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+			rem.UnverifiedEvidence, rem.UnverifiedEvidenceSecondary =
+				hopUnverifiedEvidence(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+			rem.HasUnverifiedEvidence = len(rem.UnverifiedEvidence) > 0
 			rem.ObjectiveEvidenceConfirmed, rem.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 				lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
 				evidence.HopOutcome{Report: hop.DiagnosticReport, RawText: hop.AgentTranscript, SawSignalLine: hop.SawSignalLine})
@@ -349,6 +383,9 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		}
 		eh.HasMismatch, eh.HasTargetDrift, eh.HasProtocolViolation =
 			hopVerificationFlags(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+		eh.UnverifiedEvidence, eh.UnverifiedEvidenceSecondary =
+			hopUnverifiedEvidence(lookupTraceEvents(hop.TraceID), hop.StartedAt, hopWindowEnd)
+		eh.HasUnverifiedEvidence = len(eh.UnverifiedEvidence) > 0
 		eh.ObjectiveEvidenceConfirmed, eh.ObjectiveEvidenceUnconfirmed = hopObjectiveEvidence(
 			lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
 			evidence.HopOutcome{Report: hop.DiagnosticReport, RawText: hop.AgentTranscript, SawSignalLine: hop.SawSignalLine})
@@ -408,14 +445,17 @@ func (g *Gateway) fetchGateAcknowledgedEvent(ctx context.Context, runID string) 
 	return &events[0]
 }
 
-// hopVerificationFlags computes HasMismatch/HasTargetDrift/HasProtocolViolation for
-// one hop by filtering the trace's delegation_verification events to those recorded
-// within this hop's own [start, end) window — end exclusive when non-zero, unbounded
-// when zero (still-open/most-recent hop). Needed because force-mode auto-chaining
-// can put multiple hops under one shared trace_id (chainEscalation) when the caller
-// supplies its own X-Trace-ID — a whole-trace aggregate can't distinguish between
-// them; found live via the real 3-hop DB→sysadmin→K8s chain, where a later hop's
-// genuine mismatch was leaking backward onto an earlier, actually-clean hop.
+// hopVerificationFlags computes HasMismatch/HasTargetDrift/HasProtocolViolation
+// for one hop by filtering the trace's delegation_verification events to those
+// recorded within this hop's own [start, end) window — end exclusive when
+// non-zero, unbounded when zero (still-open/most-recent hop). Needed because
+// force-mode auto-chaining can put multiple hops under one shared trace_id
+// (chainEscalation) when the caller supplies its own X-Trace-ID — a whole-trace
+// aggregate can't distinguish between them; found live via the real 3-hop
+// DB→sysadmin→K8s chain, where a later hop's genuine mismatch was leaking backward
+// onto an earlier, actually-clean hop. UnverifiedEvidence's own hop-scoped
+// computation lives in hopUnverifiedEvidence below (it returns the actual
+// quotes, not just a bool — see that function's doc comment for why).
 func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
 	for _, ev := range events {
 		dv := ev.DelegationVerification
@@ -430,6 +470,42 @@ func hopVerificationFlags(events []audit.Event, start, end time.Time) (hasMismat
 		hasProtocolViolation = hasProtocolViolation || dv.ProtocolViolation
 	}
 	return
+}
+
+// hopUnverifiedEvidence computes UnverifiedEvidence/UnverifiedEvidenceSecondary
+// for one hop, time-windowed the same way hopVerificationFlags is (same
+// cross-hop-leak reasoning). Returns the actual flagged quotes rather than a
+// bool — found live 2026-09-07: reconstructing which hypothesis a flagged
+// quote belonged to, and what it actually said, required querying the raw
+// audit trail by hand; a plain HasUnverifiedEvidence bool doesn't tell a
+// reader anything actionable. Each quote is already prefixed with its owning
+// hypothesis's text by checkEvidenceProvenance (playbooks.go), so no further
+// lookup is needed here — this just accumulates and dedupes across events in
+// the window, mirroring hopObjectiveEvidence's shape.
+func hopUnverifiedEvidence(events []audit.Event, start, end time.Time) (primary, secondary []string) {
+	seenPrimary, seenSecondary := map[string]bool{}, map[string]bool{}
+	for _, ev := range events {
+		dv := ev.DelegationVerification
+		if dv == nil || ev.Timestamp.Before(start) {
+			continue
+		}
+		if !end.IsZero() && !ev.Timestamp.Before(end) {
+			continue
+		}
+		for _, q := range dv.UnverifiedEvidence {
+			if !seenPrimary[q] {
+				seenPrimary[q] = true
+				primary = append(primary, q)
+			}
+		}
+		for _, q := range dv.UnverifiedEvidenceSecondary {
+			if !seenSecondary[q] {
+				seenSecondary[q] = true
+				secondary = append(secondary, q)
+			}
+		}
+	}
+	return primary, secondary
 }
 
 // hopObjectiveEvidence computes ObjectiveEvidenceConfirmed/Unconfirmed for one

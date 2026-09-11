@@ -525,21 +525,25 @@ Findings:  Connection refused; no infra entry for this target
 Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
 Findings:  check_host runtime=kubectl — target is Kubernetes-managed
            ⚠ target drift — a tool call used a different connection string
+           ⚠ unverified evidence — an EVIDENCE quote didn't match any real tool output
 ```
 
-Absence of either line can mean either "verified clean" or "no delegation_verification events
+Absence of any line can mean either "verified clean" or "no delegation_verification events
 fall in this chapter's own execution window" (fail-open by design) — not a positive attestation
 either way. Computed per chapter, not per-Journey/whole-trace, so a mismatch on one hop of a
 force-mode auto-chain doesn't flag every chapter sharing that trace_id. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
 and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
+The `⚠ unverified evidence` line is [AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)
+(content-provenance verification, v0.28.0) — same underlying event type as the two lines
+above it, a new field (`UnverifiedEvidence`) alongside `Mismatch`/`TargetDrift`.
 
 **Objective-evidence lines appear inline too (v0.27.0)**, same placement, right under a
 chapter's `Findings` — the incident-narrative counterpart to
-[AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#11-llm-fabrication-detection). `⚠` marks a
-signal the chapter's own response never demonstrably engaged with (real, code-derived tool
-evidence — worth investigating); `✓` marks one the response correctly cited — corroboration,
-not a concern:
+[AIGOVERNANCE.md §1.1's Layer 4](AIGOVERNANCE.md#layer-4--objective-evidence-content-verification).
+`⚠` marks a signal the chapter's own response never demonstrably engaged with (real,
+code-derived tool evidence — worth investigating); `✓` marks one the response correctly
+cited — corroboration, not a concern:
 
 ```
 ── TRIAGE ──────────────────────────────────────────────────

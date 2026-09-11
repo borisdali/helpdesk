@@ -716,6 +716,38 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Content-provenance check (fabrication-detection Layer 3, v0.28.0): does
+	// each hypothesis's EVIDENCE quote trace back to something real in this
+	// hop's own tool_execution output.
+	if unverifiedPrimary, unverifiedSecondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(unverifiedPrimary) > 0 || len(unverifiedSecondary) > 0 {
+		appendEvidenceProvenance(extra, unverifiedPrimary, unverifiedSecondary)
+		slog.Warn("playbook run: unverified evidence quote detected",
+			"trace_id", primary.traceID, "primary_count", len(unverifiedPrimary), "secondary_count", len(unverifiedSecondary))
+		// Persist as a durable, queryable audit event, same pattern as the target
+		// drift event above — independent of whatever delegation_verification
+		// event proxyToAgentWithTool already recorded for this hop.
+		if g.auditor != nil {
+			evidenceEvent := &audit.Event{
+				EventID:   "gv_" + uuid.New().String()[:8],
+				Timestamp: time.Now().UTC(),
+				EventType: audit.EventTypeDelegationVerification,
+				TraceID:   primary.traceID,
+				Session: audit.Session{
+					ID: primary.traceID,
+				},
+				DelegationVerification: &audit.DelegationVerification{
+					Agent:                       primary.agentName,
+					ActionClass:                 audit.ActionRead,
+					UnverifiedEvidence:          unverifiedPrimary,
+					UnverifiedEvidenceSecondary: unverifiedSecondary,
+				},
+			}
+			if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
+				slog.Warn("playbook run: failed to record unverified evidence event", "trace_id", primary.traceID, "err", err)
+			}
+		}
+	}
+
 	// Oracle mode: skip chaining and structured output; inject warning then return.
 	if g.crystalBall {
 		extra["crystal_ball"] = true
@@ -977,6 +1009,31 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 		appendPolicyDenials(extra, checkPolicyDenials(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart))
 		chainedMismatch, chainedNarrated := checkFabricationRisk(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart)
 		appendFabricationRisk(extra, chainedMismatch, chainedNarrated)
+		if unverifiedPrimary, unverifiedSecondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, chained.traceID, chained.runStart, chained.diagReport); len(unverifiedPrimary) > 0 || len(unverifiedSecondary) > 0 {
+			appendEvidenceProvenance(extra, unverifiedPrimary, unverifiedSecondary)
+			slog.Warn("playbook run: unverified evidence quote detected on chained hop",
+				"trace_id", chained.traceID, "primary_count", len(unverifiedPrimary), "secondary_count", len(unverifiedSecondary))
+			if g.auditor != nil {
+				evidenceEvent := &audit.Event{
+					EventID:   "gv_" + uuid.New().String()[:8],
+					Timestamp: time.Now().UTC(),
+					EventType: audit.EventTypeDelegationVerification,
+					TraceID:   chained.traceID,
+					Session: audit.Session{
+						ID: chained.traceID,
+					},
+					DelegationVerification: &audit.DelegationVerification{
+						Agent:                       chained.agentName,
+						ActionClass:                 audit.ActionRead,
+						UnverifiedEvidence:          unverifiedPrimary,
+						UnverifiedEvidenceSecondary: unverifiedSecondary,
+					},
+				}
+				if err := g.auditor.RecordEvent(r.Context(), evidenceEvent); err != nil {
+					slog.Warn("playbook run: failed to record unverified evidence event", "trace_id", chained.traceID, "err", err)
+				}
+			}
+		}
 		chain = append(chain, chainEntry{
 			Step:             len(chain) + 1,
 			PlaybookSeriesID: chained.playbookSeriesID,
@@ -2154,7 +2211,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	b.WriteString("TRANSITION_TO: <series_id>   — use this when the Expert Guidance 'Final step' specifies TRANSITION_TO (same-domain handoff to the expected remediation playbook)\n")
 	b.WriteString("ESCALATE_TO: <series_id or \"none\">   — use this for true out-of-scope escalations to a different domain; use \"none\" if no escalation is needed\n")
 	b.WriteString("Emit exactly one of TRANSITION_TO or ESCALATE_TO (not both). Follow the 'Final step' in Expert Guidance to determine which signal and which series_id.\n\n")
-	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a short verbatim quote from a tool output; every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
+	b.WriteString("Rules: list hypotheses in descending confidence order; EVIDENCE must be a single short verbatim quote copied exactly from one tool's output — never join two facts with \"and\"/\",\" into one quote, never paraphrase or summarize what a tool returned, and never combine output from more than one tool call into a single quote (if two facts matter, put the second in a REJECTED reason or FINDINGS instead); every non-primary hypothesis must have REJECTED with a reason; CONFIDENCE is 0.0–1.0.\n\n")
 
 	fmt.Fprintf(&b, "## Playbook: %s\n\n", pb.Name)
 
@@ -2817,6 +2874,74 @@ func findingsRecommendMonitor(findings string) bool {
 	return val == "monitor" || val == "no_changes_needed"
 }
 
+// normalizeProtocolLine strips markdown a model can wrap around a structured
+// protocol line without changing its meaning: a leading list-bullet ("- " or
+// "* ") and any "**" bold-marker pairs, wherever they fall in the line — not
+// just at the very edges. The previous edge-only `strings.Trim(s, "*")` only
+// removes leading/trailing asterisks, which is enough for a model bolding an
+// entire line (`**HYPOTHESIS_1: text**`) but not one bolding only a label
+// mid-line and leaving the rest plain (found live 2026-09-08 on
+// db-replica-stalled: `- **HYPOTHESIS_1 (primary):** <text>` and
+// `  - **Confidence:** 0.95`) — the label's closing "**" sits mid-string,
+// immediately followed by real content an edge-trim can't reach.
+func normalizeProtocolLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "- ")
+	trimmed = strings.TrimPrefix(trimmed, "* ")
+	trimmed = strings.ReplaceAll(trimmed, "**", "")
+	return strings.TrimSpace(trimmed)
+}
+
+// trimEvidenceTrailingCommentary strips unquoted commentary a model appends
+// after its own last verbatim quote on an EVIDENCE line — e.g.
+// `"active | f" and "lag_bytes | 129029872" for pg_stat_replication`, where
+// `for pg_stat_replication` sits entirely outside any quote the model wrote
+// (found live 2026-09-08, same fault family as the compound-quote and
+// backslash-escaping fixes: the model correctly quotes real facts, then adds
+// an unquoted explanatory tail — "for <view>", "showing <interpretation>" —
+// that fails verification not because it's fabricated, but because it was
+// never a quote in the first place).
+//
+// The raw, pre-trim EVIDENCE value objectively distinguishes "properly
+// quote-delimited" from "has a trailing unquoted tail": find the position of
+// the *last* literal `"` in the value. If nothing follows it (once trimmed),
+// the value already ends the way the protocol asks — unchanged. If
+// something does follow it, that tail is provably outside every quote span
+// the model wrote (it comes after the very last one), so it's discarded
+// before the existing outer-quote-strip runs, rather than being carried
+// forward to fail verification as if it claimed to be verbatim.
+//
+// This is deliberately narrower than exempting "the last split segment"
+// after splitEvidenceQuoteParts runs — that would be ambiguous (a
+// single-quote value's *only* segment IS the whole quote and must still be
+// checked in full). Operating on quote-character position in the raw string
+// has no such ambiguity: a value with zero interior quotes is untouched by
+// this function entirely, only a value where real trailing text follows a
+// real quote character is affected.
+func trimEvidenceTrailingCommentary(ev string) string {
+	lastQuote := strings.LastIndex(ev, "\"")
+	if lastQuote < 0 {
+		return ev
+	}
+	if tail := strings.TrimSpace(ev[lastQuote+1:]); tail != "" {
+		return ev[:lastQuote+1]
+	}
+	return ev
+}
+
+// cutPrefixFold reports whether s has the given prefix, case-insensitively,
+// and if so returns the remainder using s's own original casing — same
+// signature/semantics as strings.CutPrefix, but tolerant of a model writing
+// "Confidence:"/"Evidence:" instead of the requested all-caps "CONFIDENCE:"/
+// "EVIDENCE:" (found live 2026-09-08, same response as normalizeProtocolLine's
+// example above).
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return "", false
+	}
+	return s[len(prefix):], true
+}
+
 // parseDiagnosticReport scans the agent response for HYPOTHESIS_N: lines and
 // parses them into a DiagnosticReport. Returns nil when no hypothesis lines are
 // found (backward compat — caller falls through to parseAgentEscalation).
@@ -2833,11 +2958,13 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Strip markdown bold markers so **HYPOTHESIS_N:** is handled identically
-		// to plain HYPOTHESIS_N:. Trim both leading and trailing * to handle
-		// **HYPOTHESIS_1: text** (closing bold marker on the same line).
-		trimmed = strings.Trim(trimmed, "*")
+		// normalizeProtocolLine strips a leading list-bullet and any "**"
+		// bold markers wherever they fall — not just at the line's edges —
+		// so "- **HYPOTHESIS_1 (primary):** <text>" (found live 2026-09-08 on
+		// db-replica-stalled) is handled identically to plain "HYPOTHESIS_1:
+		// <text>". See its own doc comment for why an edge-only trim can't
+		// reach this shape.
+		trimmed := normalizeProtocolLine(line)
 
 		// HYPOTHESIS_N: ...
 		if hypMatch := matchHypothesisLine(trimmed); hypMatch != nil {
@@ -2847,23 +2974,27 @@ func parseDiagnosticReport(text string) *audit.DiagnosticReport {
 			// hypothesis header instead of pipe-delimited on the same line.
 			last := &hypotheses[len(hypotheses)-1]
 			for j := i + 1; j < len(lines) && j <= i+5; j++ {
-				next := strings.TrimSpace(strings.Trim(lines[j], "*"))
+				next := normalizeProtocolLine(lines[j])
 				if next == "" {
 					continue
 				}
-				if after, ok := strings.CutPrefix(next, "CONFIDENCE:"); ok {
+				// cutPrefixFold: case-insensitive, since the same live
+				// response used "Confidence:"/"Evidence:" instead of the
+				// requested all-caps "CONFIDENCE:"/"EVIDENCE:".
+				if after, ok := cutPrefixFold(next, "CONFIDENCE:"); ok {
 					if last.Confidence == 0 {
 						if c, err := strconv.ParseFloat(strings.TrimSpace(after), 64); err == nil {
 							last.Confidence = c
 						}
 					}
-				} else if after, ok := strings.CutPrefix(next, "EVIDENCE:"); ok {
+				} else if after, ok := cutPrefixFold(next, "EVIDENCE:"); ok {
 					if last.Evidence == "" {
 						ev := strings.TrimSpace(after)
+						ev = trimEvidenceTrailingCommentary(ev)
 						ev = strings.Trim(ev, "\"")
 						last.Evidence = ev
 					}
-				} else if after, ok := strings.CutPrefix(next, "REJECTED:"); ok {
+				} else if after, ok := cutPrefixFold(next, "REJECTED:"); ok {
 					if last.RejectedReason == "" {
 						last.RejectedReason = strings.TrimSpace(after)
 					}
@@ -2946,8 +3077,20 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 	if colonIdx < 0 {
 		return nil
 	}
-	rankStr := line[len("HYPOTHESIS_"):colonIdx]
-	rank, err := strconv.Atoi(rankStr)
+	rankStr := strings.TrimSpace(line[len("HYPOTHESIS_"):colonIdx])
+	// Take only the leading digit run, ignoring any trailing annotation a
+	// model inserts before the colon — e.g. "HYPOTHESIS_1 (primary):"
+	// instead of "HYPOTHESIS_1:" (found live 2026-09-08, same response as
+	// normalizeProtocolLine's example). strconv.Atoi on the full rankStr
+	// would reject "1 (primary)" outright.
+	digitEnd := 0
+	for digitEnd < len(rankStr) && rankStr[digitEnd] >= '0' && rankStr[digitEnd] <= '9' {
+		digitEnd++
+	}
+	if digitEnd == 0 {
+		return nil
+	}
+	rank, err := strconv.Atoi(rankStr[:digitEnd])
 	if err != nil {
 		return nil
 	}
@@ -2982,6 +3125,7 @@ func matchHypothesisLine(line string) *audit.DiagnosticHypothesis {
 			}
 		} else if after, ok := strings.CutPrefix(part, "EVIDENCE:"); ok {
 			ev := strings.TrimSpace(after)
+			ev = trimEvidenceTrailingCommentary(ev)
 			ev = strings.Trim(ev, "\"")
 			h.Evidence = ev
 		} else if after, ok := strings.CutPrefix(part, "REJECTED:"); ok {
@@ -3424,6 +3568,391 @@ func appendFabricationRisk(extra map[string]any, mismatch bool, narratedNotConfi
 		}
 	}
 	extra["narrated_not_confirmed"] = existing
+}
+
+// checkEvidenceProvenance verifies each hypothesis's EVIDENCE quote against the
+// hop's real tool_execution output — content-provenance (fabrication-detection
+// Layer 3, v0.28.0), the sibling of checkFabricationRisk's action-provenance
+// check above: that one verifies a claimed tool call really happened; this
+// verifies a claimed fact really came from somewhere real. Checks every
+// hypothesis with a non-empty Evidence field, not just the primary — a
+// fabricated quote backing a rejected hypothesis is just as much a trust
+// problem as one backing the root cause. Matches against any tool_execution
+// event in the hop's window, not a specifically-named one — the diagnosis
+// protocol doesn't have hypotheses name which tool a quote came from, and
+// requiring that would be a separate, bigger protocol change.
+//
+// A quote is first split into its individually-quoted spans
+// (splitEvidenceQuoteParts); a compound one — a model citing two separate
+// facts as `"fact one" and "fact two"` produces exactly one Evidence string
+// containing both — has each span verified on its own, never as one joined
+// whole. Checking the whole joined string first (tried and reverted) turns
+// out to be unsafe, not just less precise: the numeric-reformatting fallback
+// in evidenceQuoteVerified compares values only, so a real number in one
+// span would silently wave through arbitrary fabricated prose glued next to
+// it in another span. Splitting first, and reporting exactly which span
+// didn't verify, closes that gap and avoids indicting a real span just
+// because it happened to share an Evidence field with a fabricated one
+// (found live 2026-09-07: db-replica-disconnected's own slot data, correctly
+// quoted, got flagged alongside an unrelated paraphrase). Still fully
+// deterministic, no fuzzy matching: splitting only recognizes the literal
+// `"..." and/,"..."` shape a compound citation actually has after
+// parseDiagnosticReport strips just the outermost quote pair.
+//
+// Deliberately does NOT verify that the conclusion drawn from a verified-real
+// quote is correct — only that the quote itself traces back to something real.
+// See OBJECTIVE_EVIDENCE.md §8 for why this project rejects fuzzy/LLM-judged
+// matching for governance-relevant checks; this one stays fully deterministic.
+//
+// Returns primary and secondary separately (found live 2026-09-07: treating
+// both identically meant a textbook-correct, STABLE diagnosis could never
+// earn a CLEAN cert because a *rejected* alternative hypothesis cited an
+// invented detail — the same "right conclusion, gated like a wrong one"
+// mistake objectiveEvidenceSignals' own doc comment already names for a
+// sibling signal, one layer over: primary vs. non-primary hypothesis instead
+// of confirmed vs. merely-present). primary backs the report's ROOT_CAUSE and
+// is what an operator would actually act on if left unsupervised — unverified
+// evidence there is a real trust problem in the conclusion itself and stays a
+// CLEAN-blocking signal. secondary backs a hypothesis the model itself
+// rejected — still worth recording (a model willing to invent a plausible
+// detail for a discarded theory is a real reliability data point, and an
+// operator reading the full transcript later shouldn't hit fabricated
+// content anywhere in it), but doesn't block CLEAN on its own: the model's
+// actual, acted-on conclusion was not built on it. Each returned string is
+// prefixed with the owning hypothesis's own text ("<hypothesis> — <quote>")
+// so a caller doesn't have to separately query the audit trail to see which
+// claim the flagged quote was backing (found live 2026-09-07: reconstructing
+// that pairing by hand, across the raw tool_execution trace, was the exact
+// friction this prefix exists to remove).
+func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, report *audit.DiagnosticReport) (primary, secondary []string) {
+	if auditURL == "" || traceID == "" || report == nil {
+		return nil, nil
+	}
+	type quoteSource struct {
+		quote     string
+		hypText   string
+		isPrimary bool
+	}
+	var quotes []quoteSource
+	for _, h := range report.Hypotheses {
+		if h.Evidence != "" {
+			quotes = append(quotes, quoteSource{quote: h.Evidence, hypText: h.Text, isPrimary: h.IsPrimary})
+		}
+	}
+	if len(quotes) == 0 {
+		return nil, nil
+	}
+	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
+	var outputs []string
+	for _, ev := range events {
+		if ev.Tool != nil && ev.Tool.Result != "" {
+			outputs = append(outputs, ev.Tool.Result)
+		}
+	}
+	flagQuote := func(qs quoteSource, flagged string) {
+		labeled := flagged
+		if qs.hypText != "" {
+			labeled = qs.hypText + " — " + flagged
+		}
+		if qs.isPrimary {
+			primary = append(primary, labeled)
+		} else {
+			secondary = append(secondary, labeled)
+		}
+	}
+	for _, qs := range quotes {
+		// Always split, then verify every resulting span independently —
+		// a single-span quote (the common case) splits into exactly one
+		// element unchanged, so this is not a special case. See
+		// splitEvidenceQuoteParts' doc comment for why splitting on every
+		// literal quote boundary, rather than matching specific connector
+		// words, is the robust choice: the numeric fallback inside
+		// evidenceQuoteVerified compares values only, so a real number in
+		// one span would otherwise wave through arbitrary fabricated prose
+		// glued next to it if the whole joined string were checked as one.
+		for _, p := range splitEvidenceQuoteParts(qs.quote) {
+			if !evidenceQuoteVerified(p, outputs) {
+				flagQuote(qs, p)
+			}
+		}
+	}
+	return primary, secondary
+}
+
+// stripEscapedQuotes removes literal backslash-escaping some models add
+// around inner double-quotes when citing text that itself contains quoted
+// values — e.g. a Postgres log line naming a host in quotes, cited as
+// `\"172.18.0.4\"` as if constructing a JSON string literal, which the
+// underlying prose never actually needs. Real tool output never contains
+// these backslashes (found live 2026-09-08: a byte-for-byte-real
+// pg_hba.conf rejection message failed to verify purely because of this
+// artifact) — stripping them before splitting/comparison closes that false
+// positive without weakening the check against anything genuinely
+// fabricated, since a fabricated value wouldn't match after stripping
+// either.
+func stripEscapedQuotes(s string) string {
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
+// splitEvidenceQuoteParts splits a possibly-compound EVIDENCE quote into its
+// individually-quoted spans. parseDiagnosticReport only strips the outermost
+// quote pair off the raw EVIDENCE: "..." line, so a model citing two or more
+// separately-sourced facts leaves the inner `"` characters marking each
+// fact's boundary intact in DiagnosticHypothesis.Evidence, regardless of what
+// English connector phrase sits between them. Splits on every remaining
+// quote character (after stripEscapedQuotes) rather than matching specific
+// connector words like "and"/",": enumerating every possible connector is a
+// losing, ever-growing battle — found live 2026-09-08, a single response
+// used three different connectors ("followed later by", "and then", "with")
+// in one quote, none of which an earlier "and"/"," -only regex recognized.
+// Every non-empty trimmed segment is verified independently, including
+// connector-phrase fragments — deliberately not trying to distinguish "a
+// separately-cited fact" from "an embedded identifier within one citation"
+// (e.g. `host "172.18.0.4"`) syntactically, since that distinction isn't
+// reliably recoverable from quote positions alone. This can't manufacture a
+// false positive on genuinely real content: every fragment of a real string
+// is still a real substring of it, confirmed directly during the original
+// design (see the git history for this function). A connector fragment that
+// doesn't happen to appear in any real output is at worst reported noise,
+// not a missed fabrication — real facts remain independently checked
+// regardless of what glues them together. Returns a single-element slice
+// unchanged when no interior quote remains — the common case of one genuine
+// verbatim span.
+func splitEvidenceQuoteParts(quote string) []string {
+	quote = stripEscapedQuotes(quote)
+	raw := strings.Split(quote, `"`)
+	parts := make([]string, 0, len(raw))
+	for _, p := range raw {
+		if t := strings.TrimSpace(p); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	if len(parts) == 0 {
+		return []string{strings.TrimSpace(quote)}
+	}
+	return parts
+}
+
+// appendEvidenceProvenance accumulates unverified evidence quotes into extra
+// across hops, mirroring appendFabricationRisk's accumulate pattern. primary
+// and secondary are kept in separate extra keys (see checkEvidenceProvenance's
+// doc comment for why the distinction exists) so a caller can tell "backs the
+// acted-on conclusion" apart from "backs a hypothesis the model itself
+// rejected" without re-deriving it. Reuses appendDedupedSignal's single-value
+// dedup-append (it's not signal-specific despite the name — same list-append-
+// skip-duplicates logic this needs for arbitrary strings).
+func appendEvidenceProvenance(extra map[string]any, primary, secondary []string) {
+	for _, q := range primary {
+		appendDedupedSignal(extra, "unverified_evidence", q)
+	}
+	for _, q := range secondary {
+		appendDedupedSignal(extra, "unverified_evidence_secondary", q)
+	}
+}
+
+// evidenceQuoteVerified reports whether quote traces back to real tool output —
+// either as a normalized substring of one of outputs, or, when that fails,
+// whether every numeric value named in quote appears among the numeric values
+// in some single output. The numeric fallback exists because real evidence
+// quotes in this codebase are frequently raw numeric tool output (byte counts,
+// timeouts, row counts) that can be legitimately reformatted for readability
+// (28633584 vs "28,633,584") without being fabricated — comma/separator
+// normalization only, no unit conversion (MB vs bytes) or tolerance windows,
+// since either of those would require a judgment call this check is
+// deliberately not in the business of making.
+func evidenceQuoteVerified(quote string, outputs []string) bool {
+	nq := normalizeEvidenceText(quote)
+	if nq == "" || isEvidenceGlueOnly(quote) {
+		return true
+	}
+	for _, out := range outputs {
+		if strings.Contains(normalizeEvidenceText(out), nq) {
+			return true
+		}
+	}
+	quoteNums := extractNumbers(quote)
+	if len(quoteNums) == 0 {
+		return false
+	}
+	for _, out := range outputs {
+		if allNumbersPresent(quoteNums, extractNumbers(out)) {
+			return true
+		}
+	}
+	return false
+}
+
+// evidenceSeparatorReplacer canonicalizes the punctuation a model can use
+// between a field name and its value — psql's own `\x` output uses `|`
+// ("active    | f"), but a model paraphrasing that into prose sometimes
+// switches to `=` or `:` ("active = f", "active: f") without changing the
+// field name or value at all. Found live (2026-09-08, db-replica-disconnected,
+// plr_79968de5): a real, correctly-valued fact failed verification purely
+// because of this separator swap. Same reasoning and same narrowness as the
+// existing numeric-reformatting fallback in evidenceQuoteVerified (comma
+// thousands-separators): only punctuation is normalized, never a value
+// token, so a genuinely wrong value ("active = t" when the real row says
+// "f") still fails to match after this replacement — nothing here can turn
+// a fabricated claim into a verified one.
+// Padded with spaces on both sides (not a bare "|" swap): a model can write
+// the separator with no surrounding space ("active:f"), and normalizeEvidenceText's
+// later whitespace-collapse only merges runs of existing spaces — it can't
+// invent a space that was never there — so without padding here, "active:f"
+// would canonicalize to the single token "active|f" and never match real
+// output's separately-spaced "active | f".
+var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|", " | ")
+
+// normalizeEvidenceText lowercases, canonicalizes field/value separator
+// punctuation (see evidenceSeparatorReplacer), strips literal double-quote
+// characters, and collapses whitespace runs to a single space —
+// deterministic, not fuzzy: closes formatting-only gaps (line breaks, double
+// spaces, casing, separator choice, embedded-quote punctuation) between a
+// verbatim-instructed quote and the raw tool output it came from, without
+// tolerating any actual content difference.
+//
+// Stripping `"` (added 2026-09-08) closes a third live false positive on the
+// same fault (db-replica-disconnected, plr_25737a2d): a real Postgres log
+// line names a host/user in quotes — `pg_hba.conf rejects replication
+// connection for host "172.18.0.4", user "postgres", no encryption` — and
+// the model, citing it faithfully in every other respect, simply dropped
+// the embedded quote marks rather than escaping them (the mirror-image of
+// stripEscapedQuotes' case, where a model ADDS `\"` around such values).
+// Removing every literal `"` from both sides before comparison makes the
+// two citation styles equivalent without touching any word or number token,
+// applied consistently on both the quote and the candidate output so it
+// can't turn a fabricated value into a verified one — same reasoning as
+// evidenceSeparatorReplacer above.
+func normalizeEvidenceText(s string) string {
+	s = evidenceSeparatorReplacer.Replace(s)
+	s = strings.ReplaceAll(s, `"`, "")
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// evidenceQuoteGlueWords are grammatical connectives a model can use to join
+// two separately-quoted facts inside one EVIDENCE value (see
+// splitEvidenceQuoteParts) — e.g. `"fact one" followed later by "fact two"
+// and then "fact three"`. Splitting on every literal quote boundary
+// deliberately doesn't try to distinguish these from real content
+// syntactically (enumerating every possible connector *phrase* for that
+// purpose is the losing battle splitEvidenceQuoteParts' own doc comment
+// describes), which means a pure-glue fragment like "and then" or "followed
+// later by" is checked like any other span — and a raw structured log
+// (Postgres FATAL/LOG lines, not narrative prose) usually doesn't happen to
+// contain ordinary connective words like these anywhere, so they'd fail
+// verification and get reported as noise alongside genuinely fabricated
+// content. This short, bounded, purely-grammatical list — used only to treat
+// such a fragment as vacuously verified, the same treatment evidenceQuoteVerified
+// already gives an empty quote — closes that noise without weakening the
+// check against anything with real content: a genuine fact, however short,
+// is never composed entirely of these connectives. Deliberately narrow and
+// known-incomplete: a connector missing from this list just means an
+// occasional harmless extra fragment gets reported, never that real content
+// goes unchecked.
+//
+// Also includes a second category, added 2026-09-08: words a model uses to
+// name *where* an adjacent quoted fact came from, not to assert a new fact —
+// e.g. `"active | f" and "lag_bytes | 129029872" and "(0 rows)" for
+// pg_stat_replication`, where the segment `in pg_stat_replication output`
+// sits between/after real quotes describing their Postgres source view.
+// Found live (2026-09-08, db-replica-disconnected, plr_79968de5): this
+// wasn't a connector-word gap, it was a *source-attribution* one — the
+// connector list already caught "and". "in"/"from"/"on"/"of"/"the"/"output"/
+// etc. are ordinary prepositions/nouns used only in that role in this
+// codebase's evidence quotes, same closed-vocabulary reasoning as the
+// connector list above.
+var evidenceQuoteGlueWords = map[string]bool{
+	"and": true, "then": true, "with": true, "or": true, "but": true,
+	"followed": true, "later": true, "by": true, "next": true,
+	"after": true, "before": true, "also": true, "plus": true,
+	"in": true, "from": true, "on": true, "of": true, "the": true,
+	"output": true, "section": true, "table": true, "view": true,
+	"row": true, "rows": true, "shown": true, "showing": true,
+	"return": true, "returned": true, "result": true, "results": true,
+}
+
+// evidencePgIdentifierRe matches a Postgres system-catalog object name —
+// pg_stat_replication, pg_replication_slots, pg_stat_activity, and friends —
+// referenced by a model to say *where* an adjacent quoted fact came from
+// (see evidenceQuoteGlueWords' second doc paragraph). Deliberately a prefix
+// pattern rather than an enumerated list of specific view names: "pg_" is a
+// reserved namespace Postgres itself uses only for system catalog/view
+// objects, so matching on the prefix stays closed and precise without
+// needing to name every view this project's playbooks might ever reference.
+var evidencePgIdentifierRe = regexp.MustCompile(`(?i)^pg_[a-z0-9_]+$`)
+
+// isEvidenceGlueOnly reports whether s, split on whitespace (each word
+// further stripped of leading/trailing punctuation), is made up entirely of
+// evidenceQuoteGlueWords or evidencePgIdentifierRe matches — narrative glue
+// or a source-naming identifier, not a fact in its own right. An
+// empty/whitespace-only s counts as glue-only too (nothing to verify),
+// matching evidenceQuoteVerified's existing empty-quote handling. A fragment
+// containing any other word — in particular any digit-bearing token — is
+// never glue-only, so a fabricated number can't be smuggled through by
+// gluing it to words from this list.
+func isEvidenceGlueOnly(s string) bool {
+	for _, w := range strings.Fields(strings.ToLower(s)) {
+		w = strings.Trim(w, ".,;:")
+		if w == "" {
+			continue
+		}
+		if evidenceQuoteGlueWords[w] {
+			continue
+		}
+		if evidencePgIdentifierRe.MatchString(w) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// extractNumbers pulls every numeric token out of s, stripping thousands-separator
+// commas before parsing. Non-numeric text is just a separator here — this is not
+// a general-purpose parser, only a way to compare the numeric content of two
+// strings independent of surrounding prose or formatting.
+func extractNumbers(s string) []float64 {
+	var nums []float64
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() == 0 {
+			return
+		}
+		if v, err := strconv.ParseFloat(strings.ReplaceAll(cur.String(), ",", ""), 64); err == nil {
+			nums = append(nums, v)
+		}
+		cur.Reset()
+	}
+	for _, r := range s {
+		if (r >= '0' && r <= '9') || r == '.' || r == ',' {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return nums
+}
+
+// allNumbersPresent reports whether every value in quoteNums appears
+// (exact match) somewhere in outNums. Empty quoteNums returns false — nothing
+// to verify against should not count as verified.
+func allNumbersPresent(quoteNums, outNums []float64) bool {
+	if len(quoteNums) == 0 {
+		return false
+	}
+	for _, qn := range quoteNums {
+		found := false
+		for _, on := range outNums {
+			if qn == on {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // targetMatches returns true when:

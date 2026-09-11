@@ -75,6 +75,43 @@ func TestEvidenceSignalConfirmed(t *testing.T) {
 	}
 }
 
+// TestClassifyEvidenceGate covers the branching evidenceSignalConfirmed's own
+// table-driven test doesn't reach: which bucket (if any) a declared signal
+// falls into once both its fired-ness and its confirmed-ness are known
+// together. Coverage-gap must take priority when a signal never fired at all
+// (it can't simultaneously be "fired but unconfirmed"), and a signal that's
+// both fired and confirmed must trip neither bucket.
+func TestClassifyEvidenceGate(t *testing.T) {
+	cases := []struct {
+		name          string
+		sig           string
+		signals       []string
+		confirmed     []string
+		wantCoverage  bool
+		wantUnconfirm bool
+	}{
+		{"no signal declared — nothing to check", "", nil, nil, false, false},
+		{"never fired at all — coverage gap", "replica_disconnected", nil, nil, true, false},
+		{"fired but for a different signal — still coverage gap for this one", "replica_disconnected", []string{"idle_in_transaction_stuck"}, nil, true, false},
+		{"fired, not confirmed — unconfirmed", "replica_disconnected", []string{"replica_disconnected"}, nil, false, true},
+		{"fired and confirmed — neither bucket, clean pass", "replica_disconnected", []string{"replica_disconnected"}, []string{"replica_disconnected"}, false, false},
+		{"fired among others, confirmed among others — clean pass", "replica_disconnected", []string{"idle_in_transaction_stuck", "replica_disconnected"}, []string{"replica_disconnected"}, false, false},
+		{
+			"confirmed list somehow contains sig despite absent signals list — coverage gap still wins (can't confirm what never fired)",
+			"replica_disconnected", nil, []string{"replica_disconnected"}, true, false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCoverage, gotUnconfirm := classifyEvidenceGate(tc.sig, tc.signals, tc.confirmed)
+			if gotCoverage != tc.wantCoverage || gotUnconfirm != tc.wantUnconfirm {
+				t.Errorf("classifyEvidenceGate(%q, %v, %v) = (%v, %v), want (%v, %v)",
+					tc.sig, tc.signals, tc.confirmed, gotCoverage, gotUnconfirm, tc.wantCoverage, tc.wantUnconfirm)
+			}
+		})
+	}
+}
+
 func TestEvaluate_KeywordFail(t *testing.T) {
 	f := Failure{
 		ID:       "test-2",

@@ -42,6 +42,7 @@ databases or your infra.
    - [Structured Policy-Denial Visibility (5.8)](#58-structured-policy-denial-visibility-checkpolicydenials)
    - [Fabrication-Risk Visibility (5.9)](#59-fabrication-risk-visibility-checkfabricationrisk)
    - [Corroborated Decline (5.10)](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
+   - [Content-Provenance Verification (5.11)](#511-content-provenance-verification-checkevidenceprovenance)
 6. [Test coverage](#6-test-coverage)
 7. [Fault scenarios](#7-fault-scenarios)
 8. [Run all mutation-tool tests locally](#8-run-all-mutation-tool-tests-locally)
@@ -791,7 +792,7 @@ After every `delegate_to_agent` call returns, the orchestrator:
    - `destructive_confirmed` — which of those were destructive
    - `mismatch` — `true` when the delegation was write-or-destructive but no
      tool of that class or stronger is in the trail (destructive satisfies write) —
-     unless the agent's response, or the audit trail itself, corroborates a
+     unless the agent's response or the audit trail itself, corroborates a
      genuine decline; see
      [§5.10](#510-corroborated-decline-declinedactionsignal-hasactionclassdenial)
 4. **Appends an `[AUDIT VERIFICATION]` block** to the response fed back to the
@@ -1181,7 +1182,7 @@ case.
 §5.2's write/destructive-absence check is unconditional: no confirmed tool of
 that class or stronger means `Mismatch=true`, full stop. That's correct for a
 silent failure, but it has no way to recognize a *legitimate* decline — the
-agent investigated, found nothing that warranted a write, and correctly
+agent investigated, found nothing that warranted a write and correctly
 escalated or transitioned instead of acting. This was found live, not
 hypothetically: running `host-container-stopped` through the real 3-hop
 DB→sysadmin→K8s chain, the sysadmin agent's own diagnosis was sound (container
@@ -1197,14 +1198,14 @@ model's self-report alone — an `ACTION_TAKEN: none` line (matched
 case-insensitively, markdown-bold tolerant) *and* a well-formed
 `ESCALATE_TO:`/`TRANSITION_TO:` line with a non-`none` target, in the same
 response text. Either alone is not sufficient: `ACTION_TAKEN: none` with no
-handoff line, or a handoff line with no `ACTION_TAKEN: none`, both still
+handoff line or a handoff line with no `ACTION_TAKEN: none`, both still
 mismatch. Requiring both together is a materially stronger bar than either
 alone — a genuinely broken or silently-failing call is unlikely to also emit a
 clean, well-formed handoff line — while still being cheaper than corroborating
 against independent tool-execution evidence (an earlier, rejected design:
 "any confirmed tool call of any class, with no unconfirmed narration" was
 replayed against the existing negative-case test,
-`TestBuildDelegationVerification_WriteAction_Mismatch`, and found to silently
+`TestBuildDelegationVerification_WriteAction_Mismatch` and found to silently
 defeat the check's own purpose — that fixture is exactly "called a read tool,
 never wrote").
 
@@ -1215,7 +1216,7 @@ both `ActionWrite` and `ActionDestructive`:
 ```go
 if verif.Mismatch && declinedActionSignal(responseText) {
     verif.Mismatch = false
-    verif.MismatchReason = "no write/destructive tool executed, and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
+    verif.MismatchReason = "no write/destructive tool executed and the agent's own ACTION_TAKEN/handoff lines are consistent with a genuine decline (escalated/transitioned instead of writing), not a silent failure"
 }
 ```
 
@@ -1239,7 +1240,7 @@ cleanly" — but it can't cover a *terminal* hop whose only write attempt is
 denied by policy, since a terminal hop has nowhere to hand off to and so can
 never emit the `ESCALATE_TO:`/`TRANSITION_TO:` line the check requires. Found
 live on the same 3-hop chain: `pbs_db_restart_action`'s `restart_container`
-call is denied by a `diagnostic`-purpose policy on every faulttest run, and
+call is denied by a `diagnostic`-purpose policy on every faulttest run and
 that playbook's guidance explicitly forbids emitting any further
 escalation/transition signal after reporting the denial — so
 `declinedActionSignal` correctly, but unhelpfully, never fires for it.
@@ -1270,7 +1271,7 @@ missing write. `hasActionClassDenial` requires the specific denied `Action` to
 match.
 
 **Both corroboration paths share one policy-events fetch.** `buildDelegationVerification`
-fetches `policy_decision` events lazily, on first need, and reuses the result
+fetches `policy_decision` events lazily, on first need and reuses the result
 for both this check and §5.7's suppression — at most one HTTP round trip per
 call regardless of how many of the two checks end up needing it.
 
@@ -1282,7 +1283,7 @@ former necessarily satisfies the latter too. This isn't a gap: it means a
 policy-denied write always correctly explains an unconfirmed narration in the
 same hop as well. `declinedActionSignal`'s downgrade has no such overlap — it
 never touches `policyEvents` at all — so it *can* fire independently of
-narration-mismatch, and does: found while adding test coverage for this
+narration-mismatch and does: found while adding test coverage for this
 section that an *unrelated* narrated-but-unconfirmed tool call left
 `MismatchReason` stale (still describing the now-irrelevant corroborated
 decline) after the narration check correctly re-set `Mismatch=true` for its
@@ -1316,6 +1317,410 @@ process via the exact `event_type=policy_decision&trace_id=X` shape
 `hasActionClassDenial` depends on — the only existing coverage for
 `policy_decision` events against a real backend validated single-event-by-ID
 lookup, never this query shape).
+
+---
+
+### 5.11 Content-Provenance Verification (`checkEvidenceProvenance`)
+
+Every check above verifies that a claimed *action* really happened — a
+mutation took effect (§4), a delegated tool call actually appears in the
+audit trail (§5.2–§5.10). None of them says anything about a claim of a
+different shape: a diagnosis's `EVIDENCE` quote (the verbatim short quote the
+protocol requires each `HYPOTHESIS_N:` line to cite) could be entirely
+invented — referencing a value no tool in that hop ever actually returned —
+while the tool call itself is perfectly real and correctly confirmed by
+§5.2's own check. A hop can pass every check in this document and still have
+fabricated the one thing an operator is most likely to actually read.
+
+This shipped as fabrication-detection **Layer 3** (v0.28.0) — see
+[AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#layer-3--content-provenance-verification)
+for where it sits relative to the other three layers. The closest sibling
+here is §5.9's fabrication-risk check: both verify a self-report against the
+real audit trail rather than trusting the model's own account, just applied
+to a claimed *action* (§5.9) versus a quoted *fact* (this section).
+
+**The check**: `checkEvidenceProvenance` (`cmd/gateway/playbooks.go`) takes
+the hop's parsed `DiagnosticReport` and, for every hypothesis with a
+non-empty `Evidence` field, fetches this hop's real `tool_execution` events
+via the already-existing `audit.FetchToolExecutionEvents` — the same
+primitive §5.6's `checkTargetScope` uses, no new fetch mechanism needed —
+and checks whether the quote traces back to something real in their recorded
+`Result` output.
+
+Checks *every* hypothesis with an Evidence field, not just the primary —
+fabrication on a rejected hypothesis is still real fabrication and still
+worth knowing about. Matches against any `tool_execution` event in the hop's
+window, not a specifically-named one: the diagnosis protocol doesn't have
+hypotheses name which tool a quote came from and requiring that would be a
+separate, larger protocol change, not done here.
+
+**Primary vs. secondary (added 2026-09-07)**: `checkEvidenceProvenance`
+returns two lists, `(primary, secondary []string)`, keyed off
+`DiagnosticHypothesis.IsPrimary`. Found live: `db-replica-container-stopped`
+was STABLE and correctly attributed, yet could never earn `CLEAN` — its only
+warning, every run, was a fabricated quote on a *rejected, non-primary*
+hypothesis (the model claimed a real log said `"terminating walreceiver due
+to timeout"`; the log actually said `"terminating walreceiver process due to
+administrator command"`). Gating an otherwise-sound diagnosis identically to
+a genuinely wrong one is the same mistake
+[Layer 4's own history](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+already fixed once, one layer over: primary-vs-non-primary hypothesis instead
+of confirmed-vs-merely-present. `primary` backs the report's `ROOT_CAUSE` —
+the hypothesis an operator would actually act on — and stays CLEAN-blocking.
+`secondary` backs a hypothesis the model itself rejected — still recorded and
+surfaced (a model willing to invent a plausible detail for a discarded theory
+is a real reliability signal, and an operator reading the full transcript
+later shouldn't hit fabricated content anywhere in it), but does not
+contribute to `hasCleanWarning`, since the model's actual, acted-on
+conclusion was not built on it. Every returned string — both primary and
+secondary — is prefixed with its owning hypothesis's own text
+(`"<hypothesis text> — <quote>"`) so a caller never has to separately query
+the audit trail to see which claim a flagged quote was backing (the exact
+archaeology a live investigation of this bug required before this existed).
+
+**Matching is deterministic, same discipline as every other check in this
+document — no fuzzy or LLM-judged provenance.** `evidenceQuoteVerified`
+tries, in order: (1) a normalized substring match (lowercased, whitespace
+collapsed) against any tool output; (2) failing that, a numeric-aware
+fallback — extract every numeric token from both the quote and a candidate
+output, strip thousands-separator commas and require *all* of the quote's
+numbers to appear among that output's numbers. The fallback exists because
+real evidence quotes in this codebase are frequently raw numeric tool output
+(byte counts, timeouts, row counts) that a model can legitimately reformat
+for readability (`28633584` quoted as `"28,633,584"`) without fabricating
+anything — deliberately no unit conversion (MB vs. bytes) and no tolerance
+window, since either would introduce exactly the kind of judgment call this
+project rejects for governance-relevant checks (see
+[OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
+for the fuller argument, made originally against fuzzy-matching a different
+check).
+
+**Compound quotes are split before verification (added 2026-09-07, redesigned
+2026-09-08).** A model citing two or more separately-sourced facts as
+`"fact one" and "fact two"` leaves exactly that shape in `Evidence` —
+`parseDiagnosticReport` only strips the *outermost* quote pair off the raw
+`EVIDENCE: "..."` line, so the inner `"` characters marking each fact's
+boundary survive intact. Checking that whole joined string as one indivisible
+blob would always fail even when every fact in it is genuinely real (found
+live: `db-replica-disconnected`'s own slot data, correctly quoted, got
+flagged alongside an unrelated paraphrase it happened to share an `Evidence`
+field with).
+
+`splitEvidenceQuoteParts` first strips a second live-found artifact —
+`stripEscapedQuotes` removes literal backslash-escaping some models add
+around an inner quoted value (`\"172.18.0.4\"`, as if constructing a JSON
+string literal) that real tool output never contains; the underlying prose
+never needed escaping in the first place. It then splits the quote on *every*
+remaining literal `"` character, not a specific connector-word regex — the
+original design matched only `(?i)"\s*(?:and|,)\s*"`, but a single live
+response used three different connectors in one quote ("followed later by",
+"and then", "with"), none of which that regex recognized, and enumerating
+every possible English connector phrase is a losing, ever-growing battle.
+Splitting on raw quote-character positions sidesteps the problem: every
+resulting non-empty segment is verified independently — including connector
+fragments like "and then" — which can't manufacture a false positive on real
+content (every fragment of a real string is still a real substring of it),
+but would misreport pure narrative glue as "unverified" purely because a raw
+structured log (FATAL/LOG lines) doesn't happen to contain ordinary English
+connective words anywhere. `evidenceQuoteVerified` closes that with
+`isEvidenceGlueOnly` — a short, bounded, purely-grammatical word list (`and`,
+`then`, `with`, `by`, ...) that treats a fragment made up *entirely* of these
+words as vacuously verified, the same treatment an empty quote already gets;
+a genuine fact, however short, is never composed entirely of connectives, so
+this never suppresses real content. A single-span quote (the common case, no
+interior quote present) is checked exactly as before — this changes nothing
+for the vast majority of quotes.
+
+**Trailing unquoted commentary is stripped before verification (added
+2026-09-08).** Even after the split-on-quote-boundary redesign above, two
+live faults (`db-replica-disconnected`, `db-replica-container-stopped`) kept
+firing: the model correctly quoted real tool output, then appended its own
+unquoted explanatory tail directly after the *last* quote character with no
+delimiter of its own — e.g. `"active | f" and "lag_bytes | 129029872" for
+pg_stat_replication`, where `for pg_stat_replication` was never claimed as a
+verbatim quote at all. Confirmed live, directly against the audit trail, that
+this tail genuinely does not appear in any tool output for either trace — a
+true positive on the letter of "is this string a real substring," but not a
+fabrication in the sense this check exists to catch, since the model itself
+never asserted it was quoting anything there.
+
+`trimEvidenceTrailingCommentary` (`cmd/gateway/playbooks.go`) closes this at
+parse time, before `checkEvidenceProvenance` ever runs: on the *raw*,
+pre-outer-quote-strip `EVIDENCE` value, find the position of the last literal
+`"`. If non-whitespace content follows it, that content is provably outside
+every quote span the model wrote — discard it and keep only the
+quote-terminated prefix; if nothing follows (or the value has no quote at
+all), the value is left untouched. Applied at both `parseDiagnosticReport`
+call sites that read an `EVIDENCE` field — the standalone-field look-ahead
+loop and `matchHypothesisLine`'s inline pipe-delimited parsing — immediately
+before the existing `strings.Trim(ev, "\"")` outer-strip.
+
+This is a narrow carve-out, not a general leniency relaxation: it only
+discards content the model itself never wrapped in quotes, on a field whose
+entire contract is "a short verbatim quote." A model bent on fabricating a
+false conclusion already has a strictly easier, entirely-unchecked channel
+for that — the hypothesis's own `Text` field, never verified by this or any
+other layer — so declining to verify a self-admittedly-unquoted tail here
+doesn't meaningfully narrow what this check catches.
+
+**Source-attribution narration between quotes (added 2026-09-08).** The
+trailing-commentary fix above only discards narration *after* the last
+quote. A third live case on the same fault showed the same problem occurring
+*between* quotes: `"(0 rows)" in pg_stat_replication output and "active =
+f" with "lag_bytes | 392481784" in pg_replication_slots` — the model names
+which Postgres system view each adjacent quoted fact came from, but that
+naming text sits outside any quote span, same as a trailing tail, just not
+at the very end. Position-based stripping doesn't generalize here (a
+separate live test, `TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes`,
+depends on `splitEvidenceQuoteParts` verifying a segment appearing *before*
+the first interior quote — see that function's own doc comment for why quote
+position alone can't reliably distinguish "narration" from "real content
+that happens to precede a quote"). Instead, `evidenceQuoteGlueWords` and
+`isEvidenceGlueOnly` were extended with a second, closed category:
+ordinary prepositions/nouns used only in this source-naming role ("in",
+"from", "on", "of", "the", "output", "table", "view", ...), plus
+`evidencePgIdentifierRe`, a `pg_`-prefix pattern (not an enumerated list of
+view names) that recognizes any Postgres system-catalog object name — `pg_`
+is a namespace Postgres itself reserves for system objects, so matching the
+prefix stays closed and precise without naming every view a playbook might
+ever reference. A fragment made *entirely* of these words/identifiers is
+vacuously verified, same treatment as a pure connector fragment; a fragment
+containing any other word — in particular any digit-bearing token — is
+never glue-only, so a fabricated number still can't be smuggled through by
+gluing it to words from this list.
+
+**Field/value separator punctuation is also normalized (added 2026-09-08).**
+The same live response's `"active = f"` failed verification even though it
+was a completely real, correctly-valued fact — `get_replication_status`'s
+psql `\x` output uses `active    | f` (pipe-separated), and the model
+paraphrased the separator from `|` to `=` without changing the field name or
+value. `normalizeEvidenceText` now runs both sides through
+`evidenceSeparatorReplacer` (`=` and `:` canonicalized to a padded `|`)
+before the existing lowercase/whitespace-collapse step — the same
+formatting-only-differences precedent as the numeric thousands-separator
+fallback above, extended from digit punctuation to field/value punctuation.
+Deliberately narrow: only the separator character changes, never a value
+token, so a genuinely wrong value (`"active = t"` when the real row says
+`f`) still fails to match after normalization — this can't turn a
+fabricated claim into a verified one.
+
+**Dropped embedded quote marks (added 2026-09-08).** A fourth live case,
+confirmed by pulling the real trace directly from the auditd SQLite store
+(`/v1/events` was auth-gated in that session; the same data is readable from
+the store the server itself serves from): a real Postgres log line names a
+host/user in quotes — `pg_hba.conf rejects replication connection for host
+"172.18.0.4", user "postgres", no encryption` — and the model, citing it
+faithfully in every other respect, simply dropped the embedded quote marks
+instead of escaping them (the mirror image of `stripEscapedQuotes`'s case,
+where a model *adds* `\"`). `normalizeEvidenceText` now also strips every
+literal `"` from both the quote and the candidate output before comparing —
+applied symmetrically, so it can't turn a fabricated value into a verified
+one (a wrong IP address in the same sentence still fails to match).
+
+**This class of fix reached its practical ceiling.** Four live rounds on the
+same three replication faults each surfaced a *new* citation-style variant a
+model can produce without changing any actual content: compound quotes,
+backslash-escaped inner quotes, narration between/after quotes,
+separator-punctuation swaps, and dropped embedded quotes. Each was
+individually understood, confirmed against the real trace, and closed
+without weakening the check against genuine fabrication — but the pattern of
+new variants continuing to appear on live re-tests, even after four rounds
+of hardening, plus a fifth round's genuinely structural (not
+citation-related) truncation-direction bug below, meant the false-positive
+surface wasn't provably closed. As of 2026-09-08, `unverified_evidence`
+(primary) moved to warn-only — surfaced everywhere, no longer gating `CLEAN`
+— matching `unverified_evidence_secondary`'s existing treatment, so a
+v0.27-era CLEAN cert doesn't flip to DIRTY on an unproven new signal. See
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full
+decision and rationale.
+
+**A separate, structural false positive: truncation direction on
+chronological logs.** Also found in this same round, on
+`db-replica-container-stopped`: a hypothesis correctly quoted two real log
+lines (`LOG:  received fast shutdown request`, `LOG:  database system is
+shut down`) that never appeared in *that specific* `get_host_logs` call's
+*persisted* audit copy — even though a different, similarly-timed
+`get_host_logs` call in the same trace did retain them. Both calls' stored
+`Result` were truncated at exactly `toolResultMaxLen` (head-kept, ending in
+the literal `"..."` marker) — confirmed directly from the stored bytes. The
+model very likely saw the real, untruncated tool response (truncation only
+applies to what gets *persisted* for later verification, not necessarily to
+what the tool returns to the agent) and quoted it correctly; a chatty,
+highly repetitive retry-loop log pads out the *front* of the response with
+near-duplicate lines, pushing the actually-decisive content — the eventual
+shutdown — past the truncation boundary in the persisted copy purely by
+chance, depending on how much retry noise preceded it at that exact moment.
+This is not a citation-style quirk fixable by text normalization: it's an
+artifact of head-truncating naturally chronological, repetitive tool output,
+and it can recur for any tool with the same shape. Not fixed in this
+release — logged as a known gap (see the v0.28 backlog); candidates include
+tail-keep truncation for log-shaped tools specifically, or deduplicating
+repeated retry lines at the source (`get_host_logs` itself) rather than
+raising `toolResultMaxLen` again, which only delays the same failure mode at
+a larger size.
+
+```go
+if primary, secondary := checkEvidenceProvenance(g.auditURL, g.auditAPIKey, primary.traceID, primary.runStart, primary.diagReport); len(primary) > 0 || len(secondary) > 0 {
+    appendEvidenceProvenance(extra, primary, secondary)
+    // ... persist as a delegation_verification event, same pattern as §5.6's drift event
+}
+```
+
+Called for both the primary hop and every auto-chained hop — deliberately
+broader than §5.6's `checkTargetScope`, which only ever runs on the primary
+hop (a separate, narrower, pre-existing scope decision, not touched here).
+Content-provenance is architecturally closer to §5.9's fabrication check,
+which already covers every hop, so it follows that scope instead.
+
+```json
+{
+  "unverified_evidence": ["Replica disconnected due to primary rejection — lag_bytes | 999999999"],
+  "unverified_evidence_secondary": ["walreceiver timeout — terminating walreceiver due to timeout"]
+}
+```
+
+**Deliberately narrower than it might sound.** This verifies a quote is
+*real*, not that the *conclusion* drawn from it is correct — a 100%-genuine,
+verbatim quote can still fail to support the hypothesis built on it, which
+is a reasoning-validity question and explicitly out of scope, same boundary
+[Layer 4](AIGOVERNANCE.md#layer-4--objective-evidence-content-verification)
+states for itself. **Warn-only by design, not a hard gate**: unlike Layer 4's
+narrow, type-safe field checks, this is a broad, general-purpose text check
+with a real (if bounded) false-positive surface that Layer 4's exact-value
+matching doesn't share.
+
+**Surfaced everywhere, but warn-only for CLEAN as of 2026-09-08**
+(`hasCleanWarning`/`warningTypesFor` in faulttest) — both `primary` and
+`secondary` get their own flat `WarningDistribution` buckets
+(`unverified_evidence`/`unverified_evidence_secondary`, not quote-keyed, same
+reasoning as `mismatch`'s flat bucket in §5.9: an arbitrary set of quote
+strings would produce an unbounded number of distinct buckets), and both are
+tracked in the Journey outcome (priority 9, `unverified_evidence`) alongside
+`unverified_claim`/`target_drift_detected`/`protocol_violation`. `primary`
+originally fed `hasCleanWarning`/`isClean()` at ship (it's the stronger
+signal — it backs the acted-on conclusion, `secondary` never did) but moved
+to warn-only after four live-testing rounds each surfaced a new, genuine
+citation-formatting false-positive variant (see the sections above) plus a
+structural truncation bug unrelated to citation style — see
+[ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the full
+rationale and history of the decision.
+
+**Audit trail can itself be the bottleneck.** `checkEvidenceProvenance`
+verifies a quote against `tool_execution.Result` — the *stored* copy of a
+tool's output, not what the agent actually saw. Two real gaps found live,
+both since fixed: (1) `Result` was truncated to 500 characters since the
+audit system's very first commit, unrelated to fabrication detection, which
+didn't exist yet — a real, honestly-quoted log line from `get_host_logs`
+(default 100 lines, easily several KB) was silently cut off before the part
+it quoted, flagging 100%-honest evidence as unverified; raised to a shared
+`toolResultMaxLen = 8192` (`internal/audit/gateway.go`) — still not an
+absolute fix (`read_pg_log`'s own upstream cap is 128KB), just no longer the
+common case. (2) `FetchObjectiveEvidenceEvents` (a related, adjacent
+mechanism — Layer 4's own force-gate, not this check) had no retry despite
+sharing the exact same async-write race `fetchToolExecutionEvents` already
+retries for — its own doc comment wrongly claimed otherwise. Both root-caused
+by pulling the real trace directly from auditd (`/v1/events?event_type=...&
+trace_id=...`) rather than assuming from the raw tool data what *should* have
+happened.
+
+**Test coverage**: `cmd/gateway/playbook_run_test.go` —
+`TestCheckEvidenceProvenance_NoAuditURL`, `_NilReport`, `_NoHypotheses`,
+`_QuoteVerified`, `_QuoteFabricated`, `_ChecksEveryHypothesis`,
+`_NumericReformatting`, `_CompoundQuoteBothPartsReal`,
+`_CompoundQuoteOnePartFabricated`, `_SecondaryHypothesisFabrication`,
+`_PrimaryQuoteLabeledWithHypothesisText`,
+`_BackslashEscapedInnerQuotes`/`_UnusualConnectorPhrasesStillCaughtOnFabrication`
+(added 2026-09-08 alongside the split-on-every-quote-boundary redesign),
+`TestSplitEvidenceQuoteParts` (7 cases: the original connector shapes plus an
+unusual-phrase case and a backslash-escaped-quotes case),
+`TestIsEvidenceGlueOnly` (14 cases: the original 8 plus 6 covering the
+2026-09-08 source-attribution/`pg_`-identifier extension, including a real
+fact using a `pg_` prefix plus a number, which must still not be glue-only),
+`TestTrimEvidenceTrailingCommentary` (6 cases, including both live
+`db-replica-disconnected`/`db-replica-container-stopped` strings verbatim),
+`TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped` (both protocol
+shapes — standalone look-ahead and inline pipe-delimited — against the same
+two live strings, end-to-end through `parseDiagnosticReport`),
+`TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication`
+(end-to-end reproduction of the live db-replica-disconnected case with
+narration between quotes),
+`TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication` (end-to-end
+reproduction of the live db-replica-disconnected case with dropped inner
+quote marks),
+`TestEvidenceQuoteVerified_NumericMatchRequiresAllValues`,
+`_EmptyQuote`, `_WhitespaceAndCaseNormalized`,
+`_SeparatorPunctuationNormalized` (added 2026-09-08: `=`/`:` vs. `|`, plus a
+wrong-value case that must still fail), `_DroppedEmbeddedQuotes` (added
+2026-09-08: real content with embedded quote marks omitted, plus a
+wrong-value case that must still fail), `_GlueFragmentVacuouslyVerified`,
+`TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops`,
+`TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted` (end-to-end
+through the real HTTP path, mirroring §5.6's own `_TargetDrift_EventPersisted`,
+now also asserting `UnverifiedEvidenceSecondary` is empty for a primary-only case).
+`cmd/gateway/incident_narrative_test.go` — `hopVerificationFlags` reduced back
+to 3 signals (Mismatch/TargetDrift/ProtocolViolation); new
+`hopUnverifiedEvidence`/`TestHopUnverifiedEvidence` (mirrors
+`hopObjectiveEvidence`'s existing rich-return-value shape: actual quotes,
+primary/secondary separated, per hop, same time-window cross-hop-leak
+protection), plus `TestHandleGetIncident_VerificationFlags_SurfaceOnChapter`
+extended to assert the actual quote content, not just the bool.
+`internal/audit/store_test.go` — `TestQueryJourneys_HasUnverifiedEvidence`
+(real SQLite store, full `store.Record`+`store.QueryJourneys` round trip; a
+third case, "Journey C," added in a follow-up coverage pass proves a
+*secondary-only* event does not elevate the Journey `outcome` or set
+`HasUnverifiedEvidence` — the foundational layer beneath every chapter-level
+test below), `TestOutcomePriority_UnverifiedClaimAndTargetDriftDetected_Tied`
+extended to four signals.
+`internal/audit/delegate_tool_test.go` — `TestFetchEventsByType_RetryBehavior`/
+`_RetryOnFailure` extended to assert `FetchObjectiveEvidenceEvents` now
+retries. `internal/audit/tool_audit_test.go` — `TestRecordToolCall_ResultTruncation`
+(exactly-at-limit stored verbatim, over-limit truncated with ellipsis).
+`internal/audit/gateway_test.go` — `TestGatewayAuditor_RecordRequest_ToolResultTruncation`,
+added in the same follow-up pass after finding `GatewayAuditor.RecordRequest`
+has a *second*, independent write path into the same `tool_execution.Result`
+field (sharing `toolResultMaxLen`) that had zero coverage before or after the
+500→8192 raise — the pre-existing `TestGatewayAuditor_RecordRequest` never
+sets `ToolName`, so this path was never even exercised.
+`cmd/gateway/incident_narrative_test.go` (continued) —
+`TestHandleGetIncident_UnverifiedEvidence_SurfaceOnEscalationAndRemediation`,
+added in the follow-up pass: `TestHandleGetIncident_VerificationFlags_
+SurfaceOnChapter` only proved the actual quote-content wiring for the Triage
+chapter; this proves the identical Escalation/Remediation call sites through
+the real handler too, not just `TestHopUnverifiedEvidence` in isolation.
+`testing/integration/governance/gateway_incident_test.go` — two distinct
+tests extended, not one: `TestIntegration_GatewayIncident_
+VerificationFlagsSurfaceOnChapters` (distinct trace_ids) now posts an
+`unverified_evidence` event on the escalation hop; separately, and more
+importantly, `TestIntegration_GatewayIncident_VerificationFlags_
+SharedTraceDoesNotLeakAcrossHops` — the actual *shared-trace* cross-hop-leak
+test, real spawned auditd+gateway binaries, the one that exists because of
+the real v0.26 bug #8 — only ever covered `mismatch` until the same
+follow-up pass added a paired `unverified_evidence`/`unverified_evidence_secondary`
+event and asserted neither leaks backward onto the escalation hop.
+`testing/e2e/playbooks_test.go` — the live-LLM shape-only check extended
+with `has_unverified_evidence`, then further extended (follow-up pass) to
+also assert `unverified_evidence`/`unverified_evidence_secondary` decode as
+string arrays when present.
+`testing/faultlib/runner_test.go` — `TestRunViaPlaybook_UnverifiedEvidencePopulated`/
+`_UnverifiedEvidenceSecondaryPopulated` (decode-wiring, same class of gap
+`TestRunViaPlaybook_MismatchPopulated` exists to catch).
+`testing/cmd/faulttest/clean_test.go` — `TestWarningTypesFor`,
+`TestHasCleanWarning` extended with `UnverifiedEvidence`/`UnverifiedEvidenceSecondary`
+cases, plus `TestBuildCleanReport_UnverifiedEvidenceSecondary_DoesNotBlockClean`
+(reproduces the exact live scenario — 3/3 secondary-only runs, asserts
+`isClean()` stays true).
+`testing/cmd/faulttest/vault_test.go` — `TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary`
+(`vault incidents`'s own display, previously boolean-only, now printing the
+actual labeled quote text for both buckets).
+Checked and confirmed NOT gaps in the same follow-up pass: `testing/faulttest`
+(the build-tag-gated package `make faulttest`/`faulttest-gateway` actually
+run) still deliberately tracks only Layer 4 objective-evidence signals, never
+Mismatch/TargetDrift/UnverifiedEvidence — a pre-existing scope boundary from
+the original Layer 3 rollout, unaffected by the primary/secondary split;
+`testing/e2e/governance_test.go`'s raw auditd round-trip test doesn't need an
+`UnverifiedEvidenceSecondary` mirror, since `store.Record` marshals the whole
+event as one JSON blob with no per-field extraction — a new struct field
+already rides the same, already-proven mechanism every other field uses.
 
 ---
 

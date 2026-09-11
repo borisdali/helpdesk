@@ -275,18 +275,22 @@ curl -s http://localhost:8080/api/v1/incidents/plr_h1 \
 {
   "triage": {"run_id": "plr_h1", "playbook": "pbs_db_restart_triage",
              "findings": "Connection refused; no infra entry for this target",
-             "trace_id": "tr_h1", "has_mismatch": false, "has_target_drift": false},
+             "trace_id": "tr_h1", "has_mismatch": false, "has_target_drift": false,
+             "has_unverified_evidence": false},
   "escalations": [
     {"run_id": "plr_h2", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "escalated",
      "escalated_to": "pbs_k8s_pod_crash_triage",
      "findings": "check_host runtime=kubectl — target is Kubernetes-managed, not Docker/Podman",
-     "trace_id": "tr_h2", "has_mismatch": false, "has_target_drift": true},
+     "trace_id": "tr_h2", "has_mismatch": false, "has_target_drift": true,
+     "has_unverified_evidence": false},
     {"run_id": "plr_h3", "playbook": "pbs_k8s_pod_crash_triage", "outcome": "transitioned",
      "findings": "exitcode=0, reason=Completed — on-disk log shows PANIC + controlled shutdown (WAL disk full)",
-     "trace_id": "tr_h3", "has_mismatch": false, "has_target_drift": false}
+     "trace_id": "tr_h3", "has_mismatch": false, "has_target_drift": false,
+     "has_unverified_evidence": false}
   ],
   "remediation": {"run_id": "plr_h4", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved",
-                  "trace_id": "tr_h4", "has_mismatch": false, "has_target_drift": false},
+                  "trace_id": "tr_h4", "has_mismatch": false, "has_target_drift": false,
+                  "has_unverified_evidence": false},
   "journeys": [
     {"phase": "triage",       "trace_id": "tr_h1"},
     {"phase": "escalation:1", "trace_id": "tr_h2"},
@@ -303,17 +307,34 @@ chain of any length maps cleanly to its audit trail — see
 `TestHandleGetIncident_FourHopTwoEscalations` (`cmd/gateway/incident_narrative_test.go`) for the
 full behavior this example is drawn from.
 
-`trace_id`/`has_mismatch`/`has_target_drift` on every chapter (triage, each escalation hop,
-remediation) surface that chapter's own verification signals inline — computed per chapter, scoped
-to the delegation_verification events recorded during that specific hop's own execution window, not
-per-Journey/whole-trace (a force-mode auto-chain can put multiple hops under one shared trace_id, so
-a whole-trace lookup can't tell them apart). `has_mismatch` means the agent narrated or claimed a
-tool call with no matching `tool_execution` audit event; `has_target_drift` means a tool call
-genuinely executed, but against a different `connection_string` than the run was invoked with. Both
-default to `false` when absent, which can mean either "verified clean" or "no delegation_verification
-events fall in this chapter's own window" (fail-open by design). See
-[MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome) and
-[§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each flag.
+`trace_id`/`has_mismatch`/`has_target_drift`/`has_unverified_evidence` on every chapter (triage,
+each escalation hop, remediation) surface that chapter's own verification signals inline —
+computed per chapter, scoped to the delegation_verification events recorded during that specific
+hop's own execution window, not per-Journey/whole-trace (a force-mode auto-chain can put multiple
+hops under one shared trace_id, so a whole-trace lookup can't tell them apart). `has_mismatch`
+means the agent narrated or claimed a tool call with no matching `tool_execution` audit event;
+`has_target_drift` means a tool call genuinely executed, but against a different
+`connection_string` than the run was invoked with; `has_unverified_evidence` (v0.28.0,
+content-provenance) means a hypothesis's `EVIDENCE` quote didn't match any real tool output for
+that hop — a genuinely different check from `has_mismatch`: the tool call itself can be real and
+correctly confirmed, and the quote can still be fabricated. All three default to `false` when
+absent, which can mean either "verified clean" or "no delegation_verification events fall in this
+chapter's own window" (fail-open by design).
+
+`has_unverified_evidence` is scoped to the report's **primary/root-cause hypothesis** only (as of
+the same v0.28.0 pass, following a live case where a rejected alternative hypothesis's own
+fabricated detail was blocking a correct diagnosis's trust status identically to a real one — see
+[AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)).
+`unverified_evidence` (an array, alongside the bool) carries the actual flagged quote(s), each
+already prefixed with its owning hypothesis's own text (`"<hypothesis text> — <quote>"`) so a
+caller doesn't have to separately look up which claim was flagged. Its sibling
+`unverified_evidence_secondary` is the same content-provenance check for *non-primary* (rejected)
+hypotheses — still real fabrication worth tracking, but not folded into `has_unverified_evidence`
+since it doesn't indict the model's actual, acted-on conclusion. See
+[MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome),
+[§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope), and
+[§5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance) for what
+sets each flag.
 
 Returns `404` if the run ID is not found.
 

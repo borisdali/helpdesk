@@ -245,3 +245,23 @@ func EvidenceSignalConfirmed(sig string, confirmed []string) bool {
 	}
 	return false
 }
+
+// ClassifyEvidenceGate decides which of the two evidence-veto failure buckets
+// (if either) applies for a declared expected signal, given this run's fired
+// and confirmed signal lists. Mirrors cmd/faulttest's own classifyEvidenceGate
+// (deliberately duplicated, same package-boundary reason as EvidenceSignalConfirmed
+// above). Coverage-gap takes priority over unconfirmed — a signal that never
+// fired can't also be "fired but unconfirmed" — and a confirmed signal trips
+// neither.
+func ClassifyEvidenceGate(sig string, signals, confirmed []string) (coverageGap, unconfirmed bool) {
+	if sig == "" {
+		return false, false
+	}
+	if !EvidenceSignalConfirmed(sig, signals) {
+		return true, false
+	}
+	if !EvidenceSignalConfirmed(sig, confirmed) {
+		return false, true
+	}
+	return false, false
+}

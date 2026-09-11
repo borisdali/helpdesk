@@ -58,9 +58,19 @@ func main() {
 	}
 
 	// Load objective_evidence rules if available. See loadDBEvidenceRules'
-	// own doc comment for the unset/malformed-file behavior.
+	// own doc comment for the malformed-file behavior (loud Error there) —
+	// this branch handles the other, previously-silent failure mode: the env
+	// var simply not being set at all. Found live 2026-09-07: a manually
+	// started agent with no HELPDESK_DB_EVIDENCE_RULES silently disabled the
+	// entire objective-evidence force-gate (EVIDENCE COVERAGE GAP fired on
+	// every run, indistinguishable from a real fabrication signal, with zero
+	// log evidence of why) — same "fails open, silently" class of bug this
+	// project otherwise warns loudly about (see HELPDESK_MODEL_NAME's
+	// trust-gate warning in cmd/gateway/main.go).
 	if rulesPath := os.Getenv("HELPDESK_DB_EVIDENCE_RULES"); rulesPath != "" {
 		activeConnectionEvidenceRules, replicationEvidenceRules = loadDBEvidenceRules(rulesPath)
+	} else {
+		slog.Warn("HELPDESK_DB_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_active_connections/get_replication_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
 
 	// Initialize audit store if enabled

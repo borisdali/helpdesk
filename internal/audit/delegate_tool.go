@@ -620,13 +620,18 @@ func FetchDelegationVerificationEvents(auditURL, apiKey, traceID string, since t
 // FetchObjectiveEvidenceEvents queries auditd for objective_evidence events in
 // the given trace — used by objectiveEvidenceForceGate (cmd/gateway/playbooks.go)
 // to force a human-reviewed gate based on deterministic, code-derived tool
-// evidence rather than the model's self-reported confidence. No retry, same
-// reasoning as fetchAgentReasoningEvents/fetchPolicyDecisionEvents — these are
-// recorded by the agent synchronously during its own tool call, not subject to
-// the async write-propagation lag that motivates the tool_execution retry.
+// evidence rather than the model's self-reported confidence. Retries once
+// after 200ms, same reasoning as fetchToolExecutionEvents: evidence.Evaluate
+// records these via RecordObjectiveEvidence -> ToolAuditor.Record, the exact
+// same write path RecordToolCall uses for tool_execution events, so they are
+// subject to the identical async propagation lag. An earlier "no retry, these
+// are synchronous" claim here was wrong and cost a real false-positive
+// EVIDENCE COVERAGE GAP live (2026-09-07, db-replica-disconnected): the
+// get_replication_status probe genuinely fired disconnected=true, but this
+// fetch raced the write and saw nothing.
 // Exported so the gateway can use it, mirroring FetchToolExecutionEvents above.
 func FetchObjectiveEvidenceEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
-	return fetchEventsByType(auditURL, apiKey, traceID, "objective_evidence", since, false)
+	return fetchEventsByType(auditURL, apiKey, traceID, "objective_evidence", since, true)
 }
 
 // fetchEventsByType queries auditd for events of a single type in the given trace

@@ -91,11 +91,26 @@ type EvalResult struct {
 	// gate_reason/evidence_warnings; confirmed ones are visibility-only.
 	ObjectiveEvidenceConfirmed   []string `json:"objective_evidence_confirmed,omitempty"`
 	ObjectiveEvidenceUnconfirmed []string `json:"objective_evidence_unconfirmed,omitempty"`
+	// EvidenceCoverageGap is true when the fault's catalog entry declares an
+	// expected_diagnosis.objective_evidence_signal but that signal is absent
+	// from ObjectiveEvidenceSignals entirely — the agent's tool calls never
+	// reached the code path that would produce this evidence at all. Distinct
+	// from EvidenceRequiredButUnconfirmed below: this is a coverage problem
+	// (the tool never fired, or the playbook never told the agent to call it)
+	// rather than a confirmation problem (the tool fired and the agent still
+	// didn't engage with the real value). Separated on real feedback: both
+	// correctly fail Passed, but they call for different fixes — tooling/
+	// prompt coverage vs. confirmation/quoting logic — and collapsing them
+	// into one flag hid which team owns a given red run. Gates Passed to
+	// false when true, same as EvidenceRequiredButUnconfirmed.
+	EvidenceCoverageGap bool `json:"evidence_coverage_gap,omitempty"`
 	// EvidenceRequiredButUnconfirmed is true when the fault's catalog entry
-	// declares an expected_diagnosis.objective_evidence_signal but that signal
-	// is absent from ObjectiveEvidenceConfirmed for this run — i.e. the model's
-	// own hypothesis text never demonstrably cited the real tool data behind
-	// the diagnosis it's being scored on. Gates Passed to false when true,
+	// declares an expected_diagnosis.objective_evidence_signal, that signal
+	// DID fire (present in ObjectiveEvidenceSignals — see EvidenceCoverageGap
+	// above for the case where it never fired at all), but it's still absent
+	// from ObjectiveEvidenceConfirmed for this run — i.e. the model's own
+	// hypothesis text never demonstrably cited the real tool data behind the
+	// diagnosis it's being scored on. Gates Passed to false when true,
 	// alongside KeywordPass/OrderingPass — closes the gap where keyword and
 	// category text-matching alone could reward a vague hedge ("might be
 	// stalled") that never actually engaged with an empty or unexamined
@@ -113,6 +128,41 @@ type EvalResult struct {
 	// as TargetDrift's "target_drift_detected" and ProtocolViolation's own
 	// outcome — all three mean "don't trust this output as-is."
 	Mismatch bool `json:"mismatch,omitempty"`
+	// UnverifiedEvidence is true when resp.UnverifiedEvidence (PRIMARY-
+	// hypothesis quotes only, as of 2026-09-07) is non-empty — a hypothesis
+	// EVIDENCE quote couldn't be matched against any real tool_execution
+	// output recorded for this run (content-provenance, fabrication-detection
+	// Layer 3, v0.28.0). See checkEvidenceProvenance (cmd/gateway/
+	// playbooks.go). The content-level sibling of Mismatch above: that
+	// verifies a claimed action really happened, this verifies a claimed
+	// fact really came from somewhere real. Tied at the same Journey-outcome
+	// priority as Mismatch/TargetDrift/ProtocolViolation — "don't trust this
+	// output as-is." Scoped to the primary/root-cause hypothesis specifically
+	// (see UnverifiedEvidenceSecondary below for why): this is the hypothesis
+	// an operator would actually act on, so fabrication here is a trust
+	// problem in the acted-on conclusion itself and contributes to
+	// hasCleanWarning below.
+	UnverifiedEvidence bool `json:"unverified_evidence,omitempty"`
+	// UnverifiedEvidenceQuotes carries the actual flagged primary quotes
+	// (each already prefixed with its owning hypothesis's text by
+	// checkEvidenceProvenance, e.g. "replica disconnected — FATAL: ...") —
+	// added 2026-09-07 alongside the bool above so a caller (the CLI's
+	// inline warning print, in particular) doesn't have to separately query
+	// the audit trail to see which claim was flagged and what it said.
+	UnverifiedEvidenceQuotes []string `json:"unverified_evidence_quotes,omitempty"`
+	// UnverifiedEvidenceSecondary is UnverifiedEvidence's sibling for
+	// non-primary (rejected) hypotheses — added 2026-09-07 after a live
+	// false cost: a STABLE, correctly-attributed diagnosis could never earn
+	// CLEAN because a rejected alternative hypothesis cited an invented
+	// detail (the same "right conclusion, gated like a wrong one" mistake
+	// ObjectiveEvidenceGate's own redesign already fixed for a sibling
+	// signal, one layer over: primary vs. non-primary hypothesis instead of
+	// confirmed vs. merely-present). Still real and worth tracking — a model
+	// willing to invent a plausible detail for a discarded theory is a real
+	// reliability signal — but does NOT contribute to hasCleanWarning below,
+	// since the model's actual, acted-on conclusion was not built on it.
+	UnverifiedEvidenceSecondary       bool     `json:"unverified_evidence_secondary,omitempty"`
+	UnverifiedEvidenceSecondaryQuotes []string `json:"unverified_evidence_secondary_quotes,omitempty"`
 
 	// Remediation outcome (populated only when --remediate is set).
 	RemediationAttempted bool    `json:"remediation_attempted,omitempty"`
@@ -163,19 +213,46 @@ type HypothesisEntry struct {
 	RejectedReason string  `json:"rejected_reason,omitempty"`
 }
 
-// hasCleanWarning returns true when this run tripped any of the five
+// hasCleanWarning returns true when this run tripped any of the seven
 // verified (code-derived, not self-reported) warning signals: real objective
 // tool evidence the gateway had to force a gate over, real evidence the model
 // saw but didn't act on, an outright protocol violation (omitted the
 // required TRANSITION_TO/ESCALATE_TO signal entirely), target-scope drift
-// (the agent queried a server other than the one it was asked about), or a
+// (the agent queried a server other than the one it was asked about), a
 // fabrication mismatch (the agent narrated calling a tool that never
-// actually executed). Used to compute the CLEAN stability axis —
-// deliberately excludes low_confidence/confidence_warning, which are
+// actually executed), a catalog-declared evidence signal that never fired at
+// all (EvidenceCoverageGap), or one that fired but was never confirmed
+// (EvidenceRequiredButUnconfirmed). Used to compute the CLEAN stability
+// axis — deliberately excludes low_confidence/confidence_warning, which are
 // self-reported and already substantially captured by the existing
 // evaluation-stability axis (judge/confidence variance).
+//
+// Also deliberately excludes UnverifiedEvidence and
+// UnverifiedEvidenceSecondary (content-provenance, fabrication-detection
+// Layer 3, v0.28.0) as of 2026-09-08 — warn-only for this release, not
+// CLEAN-blocking. UnverifiedEvidence started as CLEAN-blocking (it flags an
+// EVIDENCE quote on the PRIMARY hypothesis that didn't match any real tool
+// output — a stronger signal than the always-non-blocking Secondary case),
+// but four consecutive live rounds on the same three replication faults each
+// surfaced a *new*, genuine citation-formatting variant a model can produce
+// without changing any actual content (compound quotes, backslash-escaped
+// inner quotes, narration between/after quotes, separator-punctuation
+// swaps, dropped embedded quotes — see cmd/gateway/playbooks.go's
+// evidenceQuoteVerified/normalizeEvidenceText history) plus a genuinely
+// structural false positive unrelated to citation style (truncation
+// direction on chronological/repetitive tool output — see
+// docs/MUTATION_TOOLS.md §5.11). Every one of those was a false positive,
+// not a missed real fabrication, but the *pattern* of new variants still
+// appearing after four hardening rounds means the false-positive surface
+// isn't provably closed, and letting an unproven signal flip a v0.27-era
+// CLEAN cert to DIRTY reads as a regression to customers who never touched
+// this feature. UnverifiedEvidence is still computed and surfaced
+// everywhere (CLI, vault, WarningDistribution) — this only removes it from
+// the boolean gate. Revisit once it's proven stable across a broader corpus
+// of fault families and runs, not just these three.
 func hasCleanWarning(er EvalResult) bool {
-	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch
+	return len(er.EvidenceWarnings) > 0 || er.ProtocolViolation || er.ObjectiveEvidenceGate || er.TargetDrift || er.Mismatch ||
+		er.EvidenceCoverageGap || er.EvidenceRequiredButUnconfirmed
 }
 
 // Tool-evidence text matching uses faultlib.ToolPatterns directly (item 7
@@ -573,4 +650,25 @@ func evidenceSignalConfirmed(sig string, confirmed []string) bool {
 		}
 	}
 	return false
+}
+
+// classifyEvidenceGate decides which of the two evidence-veto failure buckets
+// (if either) applies for a declared expected signal, given this run's fired
+// and confirmed signal lists. Extracted from the gate check in main.go's
+// per-run loop specifically so the branching itself — not just its two
+// building blocks (evidenceSignalConfirmed, warningTypesFor) — has direct
+// unit coverage: coverage-gap must take priority over unconfirmed (a signal
+// that never fired can't also be "fired but unconfirmed"), and a confirmed
+// signal must trip neither.
+func classifyEvidenceGate(sig string, signals, confirmed []string) (coverageGap, unconfirmed bool) {
+	if sig == "" {
+		return false, false
+	}
+	if !evidenceSignalConfirmed(sig, signals) {
+		return true, false
+	}
+	if !evidenceSignalConfirmed(sig, confirmed) {
+		return false, true
+	}
+	return false, false
 }

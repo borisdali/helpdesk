@@ -201,8 +201,9 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 			"tr_flag01": {{
 				Timestamp: run.StartedAt.Add(time.Second),
 				DelegationVerification: &audit.DelegationVerification{
-					Mismatch:          true,
-					ProtocolViolation: true,
+					Mismatch:           true,
+					ProtocolViolation:  true,
+					UnverifiedEvidence: []string{"lag_bytes | 999999999"},
 				},
 			}},
 		},
@@ -231,12 +232,113 @@ func TestHandleGetIncident_VerificationFlags_SurfaceOnChapter(t *testing.T) {
 	if !n.Triage.HasProtocolViolation {
 		t.Error("Triage.HasProtocolViolation = false, want true — should surface inline without a separate Journey lookup")
 	}
+	if !n.Triage.HasUnverifiedEvidence {
+		t.Error("Triage.HasUnverifiedEvidence = false, want true — should surface inline without a separate Journey lookup")
+	}
+	if len(n.Triage.UnverifiedEvidence) != 1 || n.Triage.UnverifiedEvidence[0] != "lag_bytes | 999999999" {
+		t.Errorf("Triage.UnverifiedEvidence = %v, want [%q] — the actual quote, not just the bool", n.Triage.UnverifiedEvidence, "lag_bytes | 999999999")
+	}
+	if len(n.Triage.UnverifiedEvidenceSecondary) != 0 {
+		t.Errorf("Triage.UnverifiedEvidenceSecondary = %v, want empty", n.Triage.UnverifiedEvidenceSecondary)
+	}
+}
+
+// TestHandleGetIncident_UnverifiedEvidence_SurfaceOnEscalationAndRemediation
+// closes a real coverage gap: TestHandleGetIncident_VerificationFlags_
+// SurfaceOnChapter above only proves the actual UnverifiedEvidence/
+// UnverifiedEvidenceSecondary content wiring for the Triage chapter — the
+// Escalation and Remediation call sites (added the same day, same pattern)
+// had no equivalent real-handler proof, only the pure-function
+// TestHopUnverifiedEvidence.
+func TestHandleGetIncident_UnverifiedEvidence_SurfaceOnEscalationAndRemediation(t *testing.T) {
+	triage := &audit.PlaybookRun{
+		RunID:       "plr_uve_t1",
+		SeriesID:    "pbs_db_restart_triage",
+		Outcome:     audit.OutcomeEscalated,
+		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
+		TraceID:     "tr_uve_triage",
+	}
+	escalation := &audit.PlaybookRun{
+		RunID:          "plr_uve_e1",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_db_restart_action",
+		PriorRunID:     "plr_uve_t1",
+		TraceID:        "tr_uve_escalation",
+		StartedAt:      time.Now().Add(-2 * time.Minute).UTC(),
+	}
+	remediation := &audit.PlaybookRun{
+		RunID:      "plr_uve_r1",
+		SeriesID:   "pbs_db_restart_action",
+		Outcome:    audit.OutcomeResolved,
+		PriorRunID: "plr_uve_e1",
+		TraceID:    "tr_uve_remediation",
+		StartedAt:  time.Now().Add(-1 * time.Minute).UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{
+			"plr_uve_t1": escalation,
+			"plr_uve_e1": remediation,
+		},
+		eventsByTraceID: map[string][]audit.Event{
+			"tr_uve_escalation": {{
+				Timestamp: escalation.StartedAt.Add(time.Second),
+				DelegationVerification: &audit.DelegationVerification{
+					UnverifiedEvidence:          []string{"container crashed — invented log line"},
+					UnverifiedEvidenceSecondary: []string{"network partition — fabricated detail"},
+				},
+			}},
+			"tr_uve_remediation": {{
+				Timestamp: remediation.StartedAt.Add(time.Second),
+				DelegationVerification: &audit.DelegationVerification{
+					UnverifiedEvidenceSecondary: []string{"rejected theory — another invented detail"},
+				},
+			}},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_uve_t1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if len(n.Escalations) != 1 {
+		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
+	}
+	esc := n.Escalations[0]
+	if !esc.HasUnverifiedEvidence || len(esc.UnverifiedEvidence) != 1 || esc.UnverifiedEvidence[0] != "container crashed — invented log line" {
+		t.Errorf("Escalation.UnverifiedEvidence = %v (has=%v), want [\"container crashed — invented log line\"] (has=true)", esc.UnverifiedEvidence, esc.HasUnverifiedEvidence)
+	}
+	if len(esc.UnverifiedEvidenceSecondary) != 1 || esc.UnverifiedEvidenceSecondary[0] != "network partition — fabricated detail" {
+		t.Errorf("Escalation.UnverifiedEvidenceSecondary = %v, want [\"network partition — fabricated detail\"]", esc.UnverifiedEvidenceSecondary)
+	}
+
+	if n.Remediation == nil {
+		t.Fatal("narrative missing remediation chapter")
+	}
+	if n.Remediation.HasUnverifiedEvidence {
+		t.Error("Remediation.HasUnverifiedEvidence = true, want false — only UnverifiedEvidenceSecondary was set on this hop")
+	}
+	if len(n.Remediation.UnverifiedEvidence) != 0 {
+		t.Errorf("Remediation.UnverifiedEvidence = %v, want empty", n.Remediation.UnverifiedEvidence)
+	}
+	if len(n.Remediation.UnverifiedEvidenceSecondary) != 1 || n.Remediation.UnverifiedEvidenceSecondary[0] != "rejected theory — another invented detail" {
+		t.Errorf("Remediation.UnverifiedEvidenceSecondary = %v, want [\"rejected theory — another invented detail\"]", n.Remediation.UnverifiedEvidenceSecondary)
+	}
 }
 
 // TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter verifies that real
 // objective_evidence events, cross-checked against the run's own stored
 // response, surface as ObjectiveEvidenceConfirmed/Unconfirmed inline on the
-// Triage chapter — the Layer 3 (docs/AIGOVERNANCE.md §1.1) counterpart to
+// Triage chapter — the Layer 4 (docs/AIGOVERNANCE.md §1.1) counterpart to
 // HasMismatch/HasTargetDrift above, proven through the real handler, not just
 // hopObjectiveEvidence in isolation.
 func TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter(t *testing.T) {
@@ -1251,6 +1353,79 @@ func TestHopVerificationFlags(t *testing.T) {
 			if gotMismatch != tc.wantMismatch || gotTargetDrift != tc.wantTargetDrift || gotProtocolViolation != tc.wantProtocolViolation {
 				t.Errorf("hopVerificationFlags() = (mismatch=%v, drift=%v, violation=%v), want (mismatch=%v, drift=%v, violation=%v)",
 					gotMismatch, gotTargetDrift, gotProtocolViolation, tc.wantMismatch, tc.wantTargetDrift, tc.wantProtocolViolation)
+			}
+		})
+	}
+}
+
+// TestHopUnverifiedEvidence covers hopUnverifiedEvidence's own time-window
+// scoping (split out from hopVerificationFlags 2026-09-07 since it now
+// returns the actual quotes, primary/secondary separated, not a bool) —
+// same inclusive-start/exclusive-end semantics, same cross-hop-leak concern.
+func TestHopUnverifiedEvidence(t *testing.T) {
+	base := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	start := base
+	end := base.Add(10 * time.Second)
+
+	tests := []struct {
+		name          string
+		events        []audit.Event
+		start, end    time.Time
+		wantPrimary   []string
+		wantSecondary []string
+	}{
+		{
+			name:   "empty events",
+			events: nil,
+			start:  start, end: end,
+		},
+		{
+			name: "primary and secondary both populated, independently",
+			events: []audit.Event{{
+				Timestamp: start.Add(time.Second),
+				DelegationVerification: &audit.DelegationVerification{
+					UnverifiedEvidence:          []string{"root cause — fabricated quote"},
+					UnverifiedEvidenceSecondary: []string{"rejected theory — invented detail"},
+				},
+			}},
+			start: start, end: end,
+			wantPrimary:   []string{"root cause — fabricated quote"},
+			wantSecondary: []string{"rejected theory — invented detail"},
+		},
+		{
+			name:   "event at end is excluded (exclusive upper bound)",
+			events: []audit.Event{{Timestamp: end, DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"q"}}}},
+			start:  start, end: end,
+		},
+		{
+			name:   "event before start is excluded",
+			events: []audit.Event{{Timestamp: start.Add(-time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"q"}}}},
+			start:  start, end: end,
+		},
+		{
+			name: "dedups repeated quotes across events in the same window",
+			events: []audit.Event{
+				{Timestamp: start.Add(time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"same quote"}}},
+				{Timestamp: start.Add(2 * time.Second), DelegationVerification: &audit.DelegationVerification{UnverifiedEvidence: []string{"same quote"}}},
+			},
+			start: start, end: end,
+			wantPrimary: []string{"same quote"},
+		},
+		{
+			name:   "event with nil DelegationVerification is skipped, not a panic",
+			events: []audit.Event{{Timestamp: start.Add(time.Second), DelegationVerification: nil}},
+			start:  start, end: end,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPrimary, gotSecondary := hopUnverifiedEvidence(tc.events, tc.start, tc.end)
+			if !reflect.DeepEqual(gotPrimary, tc.wantPrimary) {
+				t.Errorf("primary = %v, want %v", gotPrimary, tc.wantPrimary)
+			}
+			if !reflect.DeepEqual(gotSecondary, tc.wantSecondary) {
+				t.Errorf("secondary = %v, want %v", gotSecondary, tc.wantSecondary)
 			}
 		})
 	}

@@ -61,7 +61,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		toolExec = &ToolExecution{
 			Name:       req.ToolName,
 			Parameters: req.ToolParameters,
-			Result:     truncateString(req.Response, 500), // Summary of result
+			Result:     truncateString(req.Response, toolResultMaxLen), // Summary of result
 			Duration:   req.Duration,
 		}
 		if req.Status == "error" {
@@ -167,6 +167,21 @@ type GatewayRequest struct {
 	Error          string
 	HTTPCode       int
 }
+
+// toolResultMaxLen bounds how much of a tool's raw output gets persisted into
+// a tool_execution event's Result field (both here and in tool_audit.go's
+// RecordToolCall — the same field, two write paths). Originally 500 chars,
+// chosen with no relation to fabrication detection (tool_execution predates
+// it by years). Raised to 8KB 2026-09-07 after a live false positive:
+// checkEvidenceProvenance (Layer 3) verifies a hypothesis's EVIDENCE quote
+// against this exact stored Result, and a genuinely real, verbatim-quoted
+// Postgres log line from get_host_logs (whose own tool caps at 100 lines,
+// easily several KB) was silently cut off at 500 chars before the line it
+// quoted — flagging honest evidence as unverified. 8KB comfortably covers a
+// realistic log-tail; a pathological case (e.g. read_pg_log's own 128KB
+// upstream cap) can still truncate away a real quote — not eliminated, just
+// no longer the common case.
+const toolResultMaxLen = 8192
 
 // truncateString truncates a string to maxLen characters.
 func truncateString(s string, maxLen int) string {

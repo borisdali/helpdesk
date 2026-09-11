@@ -357,7 +357,12 @@ execution — see [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verific
 `has_target_drift` (a tool call that genuinely executed, just against a
 different `connection_string` than the run was invoked with — see
 [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope)),
-and `has_protocol_violation` are computed **per chapter, not per-Journey** —
+`has_protocol_violation`, and `has_unverified_evidence` (a hypothesis
+`EVIDENCE` quote on the report's **primary/root-cause hypothesis** that
+didn't match any real tool output for that hop — content-provenance, v0.28.0
+— see
+[MUTATION_TOOLS.md §5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance))
+are computed **per chapter, not per-Journey** —
 each chapter is scoped to the delegation_verification events recorded during
 that specific hop's own execution window (from its own `started_at` up to the
 next hop's `started_at`, or unbounded for the terminal hop), not to every
@@ -375,19 +380,35 @@ chapter's Findings:
 Playbook:  pbs_db_restart_triage
 Findings:  Connection refused; no infra entry for this target
            ⚠ unverified — no matching tool execution in the audit trail
+           ⚠ unverified evidence — replica disconnected — totally invented log line
 ```
 
+`unverified_evidence`/`unverified_evidence_secondary` (arrays, alongside the
+`has_unverified_evidence` bool) carry the actual flagged quote(s), each
+already prefixed with its owning hypothesis's own text — added 2026-09-07 so
+a reader never has to separately query the raw audit trail to see what was
+actually fabricated and which claim it was backing. `unverified_evidence`
+holds primary/root-cause-hypothesis quotes (the ones `has_unverified_evidence`
+reflects); `unverified_evidence_secondary` holds the same check for
+hypotheses the model itself rejected — still shown inline (labeled
+"(secondary, non-blocking)" in the CLI), but not counted toward
+`has_unverified_evidence`. `has_unverified_evidence` itself is unchanged by
+the note below — it still reflects `unverified_evidence` (primary) firing.
+What changed, as of 2026-09-08: a fault's `CLEAN` cert (`testing/cmd/faulttest`)
+no longer treats *either* array as blocking — both are warn-only for this
+release; see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+
 The raw API carries the same fields on every chapter object
-(`trace_id`/`has_mismatch`/`has_target_drift` — see
+(`trace_id`/`has_mismatch`/`has_target_drift`/`has_unverified_evidence` — see
 [API.md](API.md#get-apiv1incidentsrunid)):
 
 ```bash
 curl -s http://gateway:8080/api/v1/incidents/plr_264f28fc \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
-  | jq '{triage: {has_mismatch: .triage.has_mismatch, has_target_drift: .triage.has_target_drift}}'
+  | jq '{triage: {has_mismatch: .triage.has_mismatch, has_target_drift: .triage.has_target_drift, has_unverified_evidence: .triage.has_unverified_evidence}}'
 ```
 
-**Absence of a warning is not a positive attestation.** All three flags
+**Absence of a warning is not a positive attestation.** All four flags
 default to `false` when no `delegation_verification` events fall within a
 chapter's own window at all — fail-open by design, same as every other fetch
 helper on this endpoint. An unflagged chapter means "verified clean, or

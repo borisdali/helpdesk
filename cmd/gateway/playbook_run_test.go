@@ -1263,6 +1263,152 @@ ESCALATE_TO: none`
 	}
 }
 
+// TestParseDiagnosticReport_MarkdownBulletHypothesis reproduces a live parse
+// failure found 2026-09-08 on db-replica-stalled: the model wrote a bulleted,
+// label-only-bolded, standalone-field, mixed-case variant —
+// `- **HYPOTHESIS_1 (primary):** <text>` followed by `  - **Confidence:**
+// 0.95` and `  - **Evidence:** "..."` on separate lines — three deviations
+// from the pipe-delimited, all-caps protocol at once: a leading list bullet,
+// a "(primary)" annotation before the colon, and lowercase field labels.
+// Before the fix, parseDiagnosticReport returned nil entirely (confirmed
+// directly against the real persisted transcript via the incidents API),
+// which meant the objective-evidence force-gate had no Evidence to check
+// against and reported a false "fired but not confirmed" — not a real
+// confirmation failure, a parse failure.
+func TestParseDiagnosticReport_MarkdownBulletHypothesis(t *testing.T) {
+	text := `**Hypothesis formation:**
+
+- **HYPOTHESIS_1 (primary):** Replica process is frozen, CPU-starved, or experiencing a network hang that has not yet torn down the TCP connection; reply_lag_seconds=49 indicates no feedback received for nearly a minute, while the connection remains open in streaming state.
+  - **Confidence:** 0.95
+  - **Evidence:** "reply_lag_seconds | 49" and "state | streaming"
+
+- **HYPOTHESIS_2 (alternative):** The replica intentionally paused WAL replay (pg_wal_replay_pause()) to perform maintenance, causing it to stop applying writes without disconnecting.
+  - **Confidence:** 0.05
+  - **Rejected:** High reply_lag with no WAL lag indicates the replica is not just paused in replay — it has stopped communicating feedback itself, which points to a process hang rather than an intentional pause.
+
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Replica at 172.18.0.4 is present but stalled.`
+
+	report := parseDiagnosticReport(text)
+	if report == nil {
+		t.Fatal("parseDiagnosticReport returned nil, want a populated report")
+	}
+	if len(report.Hypotheses) != 2 {
+		t.Fatalf("len(Hypotheses) = %d, want 2", len(report.Hypotheses))
+	}
+	h1 := report.Hypotheses[0]
+	if h1.Rank != 1 {
+		t.Errorf("Hypotheses[0].Rank = %d, want 1", h1.Rank)
+	}
+	if !h1.IsPrimary {
+		t.Error("Hypotheses[0].IsPrimary = false, want true (ROOT_CAUSE: HYPOTHESIS_1)")
+	}
+	if h1.Confidence != 0.95 {
+		t.Errorf("Hypotheses[0].Confidence = %v, want 0.95", h1.Confidence)
+	}
+	wantEvidence := `reply_lag_seconds | 49" and "state | streaming`
+	if h1.Evidence != wantEvidence {
+		t.Errorf("Hypotheses[0].Evidence = %q, want %q", h1.Evidence, wantEvidence)
+	}
+	if !strings.HasPrefix(h1.Text, "Replica process is frozen") {
+		t.Errorf("Hypotheses[0].Text = %q, want it to start with the hypothesis prose, not leftover markdown", h1.Text)
+	}
+	h2 := report.Hypotheses[1]
+	if h2.Confidence != 0.05 {
+		t.Errorf("Hypotheses[1].Confidence = %v, want 0.05", h2.Confidence)
+	}
+	if h2.RejectedReason == "" {
+		t.Error("Hypotheses[1].RejectedReason is empty, want the rejected-reason text")
+	}
+}
+
+// TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped reproduces the
+// two live 2026-09-08 firings (db-replica-disconnected, plr_7e3f42f6;
+// db-replica-container-stopped, plr_b325b1f5) that survived the
+// primary/secondary split and quote-boundary-splitting fixes: the model
+// quoted real tool output correctly, then appended its own unquoted
+// explanatory tail after the last real quote. Confirmed live against the
+// actual audit trail that this tail never appears in any tool_execution
+// output for either trace — it's the model's own commentary, not a
+// fabricated fact, and must be stripped by parseDiagnosticReport before
+// checkEvidenceProvenance ever sees it, in both the standalone-field
+// (look-ahead) and inline pipe-delimited protocol shapes.
+func TestParseDiagnosticReport_EvidenceTrailingCommentaryStripped(t *testing.T) {
+	t.Run("standalone EVIDENCE line (look-ahead)", func(t *testing.T) {
+		text := `HYPOTHESIS_1: Replica lost its replication slot
+CONFIDENCE: 0.9
+EVIDENCE: "active    | f" and "lag_bytes | 129029872" and "(0 rows)" for pg_stat_replication
+ROOT_CAUSE: HYPOTHESIS_1`
+
+		report := parseDiagnosticReport(text)
+		if report == nil {
+			t.Fatal("expected non-nil DiagnosticReport")
+		}
+		want := `active    | f" and "lag_bytes | 129029872" and "(0 rows)`
+		if report.Hypotheses[0].Evidence != want {
+			t.Errorf("Evidence = %q, want %q (trailing unquoted commentary must be stripped)", report.Hypotheses[0].Evidence, want)
+		}
+		if strings.Contains(report.Hypotheses[0].Evidence, "pg_stat_replication") {
+			t.Error("Evidence retained the unquoted trailing commentary 'for pg_stat_replication'")
+		}
+	})
+
+	t.Run("inline pipe-delimited EVIDENCE field", func(t *testing.T) {
+		text := `HYPOTHESIS_1: Replica lost its replication slot | CONFIDENCE: 0.9 | EVIDENCE: "active | f" and "lag_bytes | 162584072" showing the slot is inactive with significant retained WAL
+ROOT_CAUSE: HYPOTHESIS_1`
+
+		report := parseDiagnosticReport(text)
+		if report == nil {
+			t.Fatal("expected non-nil DiagnosticReport")
+		}
+		want := `active | f" and "lag_bytes | 162584072`
+		if report.Hypotheses[0].Evidence != want {
+			t.Errorf("Evidence = %q, want %q (trailing unquoted commentary must be stripped)", report.Hypotheses[0].Evidence, want)
+		}
+		if strings.Contains(report.Hypotheses[0].Evidence, "showing the slot") {
+			t.Error("Evidence retained the unquoted trailing commentary 'showing the slot is inactive...'")
+		}
+	})
+}
+
+func TestCutPrefixFold(t *testing.T) {
+	tests := []struct {
+		name, s, prefix, wantRest string
+		wantOK                    bool
+	}{
+		{"exact match", "CONFIDENCE: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"different case", "Confidence: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"lowercase", "confidence: 0.9", "CONFIDENCE:", " 0.9", true},
+		{"no match", "REJECTED: reason", "CONFIDENCE:", "", false},
+		{"too short", "CONF", "CONFIDENCE:", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRest, gotOK := cutPrefixFold(tt.s, tt.prefix)
+			if gotOK != tt.wantOK || gotRest != tt.wantRest {
+				t.Errorf("cutPrefixFold(%q, %q) = (%q, %v), want (%q, %v)", tt.s, tt.prefix, gotRest, gotOK, tt.wantRest, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestNormalizeProtocolLine(t *testing.T) {
+	tests := []struct{ name, line, want string }{
+		{"plain", "HYPOTHESIS_1: text", "HYPOTHESIS_1: text"},
+		{"whole-line bold", "**HYPOTHESIS_1: text**", "HYPOTHESIS_1: text"},
+		{"bulleted, label-only bold", "- **HYPOTHESIS_1 (primary):** text", "HYPOTHESIS_1 (primary): text"},
+		{"indented bullet, label-only bold", "  - **Confidence:** 0.95", "Confidence: 0.95"},
+		{"asterisk bullet", "* HYPOTHESIS_1: text", "HYPOTHESIS_1: text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeProtocolLine(tt.line); got != tt.want {
+				t.Errorf("normalizeProtocolLine(%q) = %q, want %q", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---- checkContextConsistency tests ----
 
 func makeContextTestInfra() *infra.Config {
@@ -1951,6 +2097,639 @@ func TestAppendFabricationRisk_AccumulatesAndDedupsAcrossHops(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("narrated_not_confirmed[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted mirrors
+// TestHandlePlaybookRunAsAgent_TargetDrift_EventPersisted exactly, for the new
+// content-provenance signal (v0.28.0, fabrication-detection Layer 3) — proves
+// the actual call site in handlePlaybookRunAsAgent is wired correctly (right
+// arguments passed to checkEvidenceProvenance, the resulting event actually
+// persisted, the resulting extra field actually reaches the HTTP response),
+// not just that checkEvidenceProvenance itself behaves correctly in isolation.
+func TestHandlePlaybookRunAsAgent_UnverifiedEvidence_EventPersisted(t *testing.T) {
+	text := `HYPOTHESIS_1: Replica disconnected due to primary rejection | CONFIDENCE: 0.95 | EVIDENCE: "lag_bytes | 999999999"
+ROOT_CAUSE: HYPOTHESIS_1
+FINDINGS: Replica disconnected; primary rejecting reconnection attempts.
+ACTION_TAKEN: none — escalation recommended
+ESCALATE_TO: none`
+	agentSrv, card := mockA2AServerWithText(t, agentNameDB, text)
+	_ = agentSrv
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	// Auditd serves a real tool_execution event whose Result does NOT contain
+	// the quoted evidence value — the quote is fabricated, not sourced from
+	// this hop's real tool output.
+	auditdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("event_type") == "tool_execution" {
+			json.NewEncoder(w).Encode([]audit.Event{ //nolint:errcheck
+				{
+					EventType: audit.EventTypeToolExecution,
+					Tool: &audit.ToolExecution{
+						Name:   "get_replication_status",
+						Result: "slot_name | replica_slot\nactive | f\nlag_bytes | 28633584",
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]audit.Event{}) //nolint:errcheck
+	}))
+	t.Cleanup(auditdSrv.Close)
+
+	ta := &testAuditor{}
+	gw := &Gateway{
+		agents:   make(map[string]*discovery.Agent),
+		clients:  map[string]*a2aclient.Client{agentNameDB: client},
+		auditor:  audit.NewGatewayAuditor(ta),
+		auditURL: auditdSrv.URL,
+	}
+
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_unvevid01",
+		SeriesID:      "pbs_replication_lag",
+		Name:          "Replication Lag Triage",
+		Guidance:      "Step 1: run get_replication_status.",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+	req := PlaybookRunRequest{ConnectionString: "host=localhost port=15432 dbname=testdb", Context: "replica seems disconnected"}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/playbooks/pb_unvevid01/run", nil)
+	w := httptest.NewRecorder()
+
+	gw.handlePlaybookRunAsAgent(w, r, pb, req, "plr_unvevid01", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	ta.mu.Lock()
+	events := ta.events
+	ta.mu.Unlock()
+
+	var evidenceEvent *audit.Event
+	for _, e := range events {
+		if e.EventType == audit.EventTypeDelegationVerification &&
+			e.DelegationVerification != nil && len(e.DelegationVerification.UnverifiedEvidence) > 0 {
+			evidenceEvent = e
+			break
+		}
+	}
+	if evidenceEvent == nil {
+		t.Fatalf("no delegation_verification event with UnverifiedEvidence populated was recorded; got %d total events", len(events))
+	}
+	if evidenceEvent.TraceID == "" {
+		t.Error("TraceID is empty — event will not attach to the run's journey")
+	}
+	if !strings.HasPrefix(evidenceEvent.EventID, "gv_") {
+		t.Errorf("EventID = %q, want gv_ prefix", evidenceEvent.EventID)
+	}
+	if evidenceEvent.DelegationVerification.Mismatch {
+		t.Error("Mismatch = true, want false: this event records an unverified quote, not a fabricated tool call")
+	}
+	want := []string{`Replica disconnected due to primary rejection — lag_bytes | 999999999`}
+	if len(evidenceEvent.DelegationVerification.UnverifiedEvidence) != 1 || evidenceEvent.DelegationVerification.UnverifiedEvidence[0] != want[0] {
+		t.Errorf("UnverifiedEvidence = %v, want %v", evidenceEvent.DelegationVerification.UnverifiedEvidence, want)
+	}
+	if len(evidenceEvent.DelegationVerification.UnverifiedEvidenceSecondary) != 0 {
+		t.Errorf("UnverifiedEvidenceSecondary = %v, want empty (this is the primary hypothesis)", evidenceEvent.DelegationVerification.UnverifiedEvidenceSecondary)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, w.Body.String())
+	}
+	respEvidence, ok := resp["unverified_evidence"].([]any)
+	if !ok || len(respEvidence) != 1 {
+		t.Fatalf("response unverified_evidence = %v, want 1 entry", resp["unverified_evidence"])
+	}
+	if respEvidence[0] != want[0] {
+		t.Errorf("response unverified_evidence[0] = %v, want %q", respEvidence[0], want[0])
+	}
+}
+
+// ── checkEvidenceProvenance / evidenceQuoteVerified ────────────────────────
+
+func TestCheckEvidenceProvenance_NoAuditURL(t *testing.T) {
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{Evidence: "lag_bytes=28633584"}}}
+	primary, secondary := checkEvidenceProvenance("", "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with empty auditURL, got %v, %v", primary, secondary)
+	}
+}
+
+func TestCheckEvidenceProvenance_NilReport(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), nil)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with nil report, got %v, %v", primary, secondary)
+	}
+}
+
+func TestCheckEvidenceProvenance_NoHypotheses(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	report := &audit.DiagnosticReport{}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil with no hypotheses, got %v, %v", primary, secondary)
+	}
+}
+
+func TestCheckEvidenceProvenance_QuoteVerified(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_replication_status", Result: "slot_name | replica_slot\nactive | f\nlag_bytes | 28633584"},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "lag_bytes | 28633584"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil (quote matches real output), got %v, %v", primary, secondary)
+	}
+}
+
+func TestCheckEvidenceProvenance_QuoteFabricated(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool:      &audit.ToolExecution{Name: "get_replication_status", Result: "slot_name | replica_slot\nactive | t"},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "active | f, lag_bytes | 999999999"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "active | f, lag_bytes | 999999999" {
+		t.Errorf("expected the fabricated quote flagged as primary, got primary=%v secondary=%v", primary, secondary)
+	}
+	if secondary != nil {
+		t.Errorf("expected no secondary flags, got %v", secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_SecondaryHypothesisFabrication proves a
+// fabricated quote on a REJECTED (non-primary) hypothesis is reported
+// separately from primary — found live 2026-09-07: a STABLE, correctly-
+// attributed diagnosis couldn't earn CLEAN because a rejected alternative
+// theory cited an invented log line ("due to timeout" vs the real "due to
+// administrator command"). Still caught and reported, just in its own
+// bucket that doesn't gate CLEAN — see checkEvidenceProvenance's doc comment.
+func TestCheckEvidenceProvenance_SecondaryHypothesisFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: "FATAL:  terminating walreceiver process due to administrator command",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Text: "replica disconnected", Evidence: "terminating walreceiver process due to administrator command"},
+		{IsPrimary: false, Text: "walreceiver timeout", Evidence: "terminating walreceiver due to timeout", RejectedReason: "logs show a clean shutdown, not a timeout"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil {
+		t.Errorf("expected no primary flags (its quote is real), got %v", primary)
+	}
+	want := "walreceiver timeout — terminating walreceiver due to timeout"
+	if len(secondary) != 1 || secondary[0] != want {
+		t.Errorf("secondary = %v, want [%q]", secondary, want)
+	}
+}
+
+// TestCheckEvidenceProvenance_PrimaryQuoteLabeledWithHypothesisText proves a
+// flagged PRIMARY quote is also prefixed with its owning hypothesis's text —
+// not just secondary — so a caller never has to separately look up which
+// claim an unverified quote was backing.
+func TestCheckEvidenceProvenance_PrimaryQuoteLabeledWithHypothesisText(t *testing.T) {
+	srv := serveFakeToolEvents(t, nil)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Text: "replica has crashed", Evidence: "totally invented log line"},
+	}}
+	primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	want := "replica has crashed — totally invented log line"
+	if len(primary) != 1 || primary[0] != want {
+		t.Errorf("primary = %v, want [%q]", primary, want)
+	}
+}
+
+// TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes reproduces a second
+// live false positive found 2026-09-08 on the same fault, after the 2026-09-07
+// compound-quote fix: a model citing a real log line that itself names a
+// quoted value (a Postgres pg_hba.conf rejection naming a host/user in
+// quotes) backslash-escapes the inner quotes as if constructing a JSON
+// string literal — `\"172.18.0.4\"` — even though the real tool output never
+// contains those backslashes. Every character of substance is real; only the
+// escaping differs.
+func TestCheckEvidenceProvenance_BackslashEscapedInnerQuotes(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `FATAL:  pg_hba.conf rejects replication connection for host \"172.18.0.4\", user \"postgres\", no encryption`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real content, only the escaping differs), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication reproduces
+// a third live false positive found 2026-09-08 on db-replica-disconnected
+// (plr_79968de5), after both the compound-quote and trailing-commentary
+// fixes: a model citing two separately-sourced real facts named *where* each
+// came from — `"(0 rows)" in pg_stat_replication output and "active = f"
+// with "lag_bytes | 392481784" in pg_replication_slots` — where
+// "in pg_stat_replication output and"/"with"/"in pg_replication_slots" sit
+// between and after real quotes, never claimed as quotes themselves. Unlike
+// the earlier trailing-only case, this narration appears *between* quotes
+// too, so isEvidenceGlueOnly's word list (not a position-based rule) is what
+// has to absorb it.
+func TestCheckEvidenceProvenance_SourceAttributionPhraseNotFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "-[ RECORD 1 ]-----------\nslot_name | replica_slot\nactive    | f\nlag_bytes | 392481784\n\n(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `(0 rows)" in pg_stat_replication output and "active = f" with "lag_bytes | 392481784" in pg_replication_slots`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real facts plus source-attribution narration, nothing fabricated), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication is the
+// end-to-end reproduction of the live db-replica-disconnected case
+// (plr_25737a2d), confirmed directly against the real audit trail: a real
+// FATAL log line names a host/user in quotes, and the model's citation
+// dropped those embedded quote marks without changing any other content.
+func TestCheckEvidenceProvenance_DroppedEmbeddedQuotesNotFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  could not connect to the primary server: connection to server at "postgres" (172.18.0.2), port 5432 failed: FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `pg_hba.conf rejects replication connection for host 172.18.0.4, user postgres, no encryption`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (real content, model just dropped embedded quote marks), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication
+// proves a compound quote joined with connector phrases beyond "and"/","
+// (found live 2026-09-08: one response used "followed later by", "and
+// then", and "with" in a single quote) still correctly flags a genuinely
+// fabricated fact spliced into the chain, while the real facts and the
+// connector phrases themselves are silently accepted.
+func TestCheckEvidenceProvenance_UnusualConnectorPhrasesStillCaughtOnFabrication(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", no encryption`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", no encryption" and then "the replica disk was completely full at 99.9% capacity`},
+	}}
+	primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "the replica disk was completely full at 99.9% capacity" {
+		t.Errorf("expected only the fabricated fact flagged (real facts and connector phrases silently accepted), got %v", primary)
+	}
+}
+
+// TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal reproduces the live
+// false positive found 2026-09-07 on db-replica-disconnected: a model citing
+// two separately-sourced real facts as `"fact one" and "fact two"` leaves
+// exactly this shape in DiagnosticHypothesis.Evidence (parseDiagnosticReport
+// only strips the outermost quote pair). Neither fact alone appears in any
+// single tool output as the whole concatenated string, but each individually
+// does — the quote must verify once split, not get flagged as one blob.
+func TestCheckEvidenceProvenance_CompoundQuoteBothPartsReal(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "-[ RECORD 1 ]-----------\nslot_name | replica_slot\nslot_type | physical\nactive    | f\nlag_bytes | 28610712\n",
+		}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_active_connections",
+			Result: "(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `slot_name | replica_slot` + "\n" + `lag_bytes | 28610712" and "(0 rows)`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (both halves trace to real output), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated proves splitting
+// still catches a genuinely fabricated (or merely paraphrased, non-verbatim)
+// half — only that half is reported, not the whole compound quote, so the
+// operator sees exactly which claim didn't check out.
+func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_replication_status",
+			Result: "slot_name | replica_slot\nlag_bytes | 28610712\n",
+		}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_active_connections",
+			Result: "(0 rows)\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `lag_bytes | 28610712" and "No active connections found.`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "No active connections found." {
+		t.Errorf("expected only the paraphrased half flagged as primary, got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestSplitEvidenceQuoteParts covers the quote-boundary splitting a compound
+// EVIDENCE quote can leave behind — every literal quote character is a split
+// point, so connector words/phrases come back as their own segments too (see
+// evidenceQuoteVerified's isEvidenceGlueOnly for how those get filtered out
+// later, not here) — and confirms a quote with no interior quote (the common
+// case) is returned unchanged as a single element.
+func TestSplitEvidenceQuoteParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		quote string
+		want  []string
+	}{
+		{"no joiner", "lag_bytes | 28610712", []string{"lag_bytes | 28610712"}},
+		{"and-joined", `fact one" and "fact two`, []string{"fact one", "and", "fact two"}},
+		{"comma-joined", `fact one", "fact two`, []string{"fact one", ",", "fact two"}},
+		{"three-way and-joined", `a" and "b" and "c`, []string{"a", "and", "b", "and", "c"}},
+		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "AND", "fact two"}},
+		{"unusual connector phrase", `fact one" followed later by "fact two`, []string{"fact one", "followed later by", "fact two"}},
+		{"backslash-escaped inner quotes are stripped before splitting", `host \"172.18.0.4\", user \"postgres\"`, []string{"host", "172.18.0.4", ", user", "postgres"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitEvidenceQuoteParts(tt.quote)
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitEvidenceQuoteParts(%q) = %v, want %v", tt.quote, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("part %d = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestTrimEvidenceTrailingCommentary covers the two live 2026-09-08
+// db-replica-disconnected/db-replica-container-stopped firings that remained
+// after the primary/secondary split and quote-boundary-splitting fixes: a
+// model correctly quoting real tool output, then appending its own unquoted
+// explanatory tail ("for pg_stat_replication", "showing the slot is
+// inactive with significant retained WAL") that was never claimed as a
+// verbatim quote in the first place, so it must not be sent through
+// evidence-provenance verification as if it were.
+func TestTrimEvidenceTrailingCommentary(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   string
+		want string
+	}{
+		{
+			"live: db-replica-disconnected trailing 'for <view>' commentary",
+			`"active    | f" and "lag_bytes | 129029872" and "(0 rows)" for pg_stat_replication`,
+			`"active    | f" and "lag_bytes | 129029872" and "(0 rows)"`,
+		},
+		{
+			"live: db-replica-container-stopped trailing 'showing...' commentary",
+			`"active | f" and "lag_bytes | 162584072" showing the slot is inactive with significant retained WAL`,
+			`"active | f" and "lag_bytes | 162584072"`,
+		},
+		{"properly terminated, no trailing commentary", `"lag_bytes | 28610712"`, `"lag_bytes | 28610712"`},
+		{"no quotes at all — untouched", "lag_bytes | 28610712", "lag_bytes | 28610712"},
+		{"trailing whitespace after closing quote is not commentary", `"lag_bytes | 28610712"   `, `"lag_bytes | 28610712"   `},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trimEvidenceTrailingCommentary(tt.ev); got != tt.want {
+				t.Errorf("trimEvidenceTrailingCommentary(%q) = %q, want %q", tt.ev, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsEvidenceGlueOnly covers the small, bounded grammatical-connective
+// word list evidenceQuoteVerified uses to treat a pure-glue split fragment
+// (e.g. "and then", "followed later by") as vacuously verified, the same
+// treatment an empty quote already gets — without that, a raw structured log
+// (FATAL/LOG lines, not narrative prose) usually doesn't happen to contain
+// ordinary connective words anywhere, so they'd be reported as noise
+// alongside genuinely fabricated content (found live 2026-09-08).
+func TestIsEvidenceGlueOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"single connector", "and", true},
+		{"multi-word glue phrase", "followed later by", true},
+		{"and then", "and then", true},
+		{"empty string", "", true},
+		{"whitespace only", "   ", true},
+		{"real fact — not glue", "lag_bytes | 28610712", false},
+		{"real fact that happens to contain a glue word", "replica and primary disconnected", false},
+		{"case-insensitive", "AND THEN", true},
+		{"live: source-attribution phrase with a pg_ system view name", "in pg_stat_replication output and", true},
+		{"live: single preposition", "with", true},
+		{"live: another pg_ system view name alone", "in pg_replication_slots", true},
+		{"pg_-prefixed identifier alone counts as glue", "pg_stat_activity", true},
+		{"a real fact using a pg_ prefix plus a number is still not glue", "pg_stat_replication reply_lag_seconds 999999999", false},
+		{"trailing punctuation on a glue word doesn't break the match", "output, and", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isEvidenceGlueOnly(tt.s); got != tt.want {
+				t.Errorf("isEvidenceGlueOnly(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEvidenceQuoteVerified_GlueFragmentVacuouslyVerified proves a pure
+// connector fragment verifies as true even when it doesn't literally appear
+// in any output — the exact live false-positive class this closes (a raw
+// Postgres log doesn't contain narrative words like "and then").
+func TestEvidenceQuoteVerified_GlueFragmentVacuouslyVerified(t *testing.T) {
+	outputs := []string{"FATAL: pg_hba.conf rejects replication connection"}
+	for _, glue := range []string{"and", "and then", "followed later by", "with"} {
+		if !evidenceQuoteVerified(glue, outputs) {
+			t.Errorf("evidenceQuoteVerified(%q, ...) = false, want true (pure connector glue, vacuously verified)", glue)
+		}
+	}
+	// A real fabricated fact must still fail, even though it's short.
+	if evidenceQuoteVerified("disk full", outputs) {
+		t.Error("evidenceQuoteVerified(\"disk full\", ...) = true, want false — not glue, a real (fabricated) claim")
+	}
+}
+
+// TestCheckEvidenceProvenance_ChecksEveryHypothesis proves a fabricated quote
+// on a REJECTED hypothesis is caught too, not just the primary — a fabricated
+// quote backing a rejected hypothesis is just as much a trust problem as one
+// backing the root cause. It's reported in the secondary bucket, not primary
+// (see TestCheckEvidenceProvenance_SecondaryHypothesisFabrication for why).
+func TestCheckEvidenceProvenance_ChecksEveryHypothesis(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_replication_status", Result: "active | f"}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "active | f"},
+		{IsPrimary: false, Evidence: "totally invented text never in any output", RejectedReason: "doesn't fit"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil {
+		t.Errorf("expected no primary flags (its quote is real), got %v", primary)
+	}
+	if len(secondary) != 1 || secondary[0] != "totally invented text never in any output" {
+		t.Errorf("expected only the rejected hypothesis's quote flagged as secondary, got %v", secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_NumericReformatting proves a legitimately-sourced
+// number quoted with different formatting (thousands separators) isn't
+// flagged as fabricated — the numeric-aware fallback this project chose over
+// fuzzy/similarity matching (see evidenceQuoteVerified's doc comment).
+func TestCheckEvidenceProvenance_NumericReformatting(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_replication_status", Result: "lag_bytes | 28633584"}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "the replication slot has retained 28,633,584 bytes of WAL"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+	if primary != nil || secondary != nil {
+		t.Errorf("expected nil, nil (reformatted number of a real value), got %v, %v", primary, secondary)
+	}
+}
+
+func TestEvidenceQuoteVerified_NumericMatchRequiresAllValues(t *testing.T) {
+	// Only one of two quoted numbers is real — must still fail; a partial
+	// numeric match is not verification.
+	got := evidenceQuoteVerified("28633584 and 12345", []string{"lag_bytes | 28633584"})
+	if got {
+		t.Error("expected false — second number (12345) never appears in output")
+	}
+}
+
+func TestEvidenceQuoteVerified_EmptyQuote(t *testing.T) {
+	if !evidenceQuoteVerified("", []string{"anything"}) {
+		t.Error("empty quote should be vacuously verified — nothing to check")
+	}
+}
+
+func TestEvidenceQuoteVerified_WhitespaceAndCaseNormalized(t *testing.T) {
+	got := evidenceQuoteVerified("Active   |  F", []string{"slot_name | replica_slot\nactive | f\n"})
+	if !got {
+		t.Error("expected true — differs only in case and whitespace collapsing")
+	}
+}
+
+// TestEvidenceQuoteVerified_SeparatorPunctuationNormalized reproduces the
+// live 2026-09-08 db-replica-disconnected case (plr_79968de5): a real,
+// correctly-valued fact ("active = f") failed verification purely because
+// the model wrote "=" where psql's own \x-format output used "|" — same
+// field, same value, different separator punctuation. Also checks that a
+// genuinely wrong value ("active = t" when the real row says "f") still
+// fails after separator normalization — the fix touches punctuation only,
+// never a value token.
+func TestEvidenceQuoteVerified_SeparatorPunctuationNormalized(t *testing.T) {
+	outputs := []string{"slot_name | replica_slot\nactive    | f\nlag_bytes | 392481784\n"}
+	if !evidenceQuoteVerified("active = f", outputs) {
+		t.Error(`evidenceQuoteVerified("active = f", ...) = false, want true — "=" and "|" are the same field/value pair`)
+	}
+	if !evidenceQuoteVerified("active: f", outputs) {
+		t.Error(`evidenceQuoteVerified("active: f", ...) = false, want true — ":" and "|" are the same field/value pair`)
+	}
+	if evidenceQuoteVerified("active = t", outputs) {
+		t.Error(`evidenceQuoteVerified("active = t", ...) = true, want false — wrong value must still fail regardless of separator`)
+	}
+}
+
+// TestEvidenceQuoteVerified_DroppedEmbeddedQuotes reproduces a fourth live
+// false positive found 2026-09-08 on db-replica-disconnected (plr_25737a2d),
+// confirmed directly against the real audit trail: a Postgres log line names
+// a host/user in quotes — `pg_hba.conf rejects replication connection for
+// host "172.18.0.4", user "postgres", no encryption` — and the model, citing
+// it faithfully in every other respect, simply dropped the embedded quote
+// marks rather than escaping them (the mirror image of the earlier
+// backslash-escaping case, where a model ADDS `\"` instead). Also checks
+// that a genuinely wrong value still fails regardless of quote-stripping.
+func TestEvidenceQuoteVerified_DroppedEmbeddedQuotes(t *testing.T) {
+	output := `FATAL:  could not connect to the primary server: connection to server at "postgres" (172.18.0.2), port 5432 failed: FATAL:  pg_hba.conf rejects replication connection for host "172.18.0.4", user "postgres", no encryption`
+	quote := `pg_hba.conf rejects replication connection for host 172.18.0.4, user postgres, no encryption`
+	if !evidenceQuoteVerified(quote, []string{output}) {
+		t.Error("expected true — same content, model just dropped the embedded quote marks")
+	}
+	wrong := `pg_hba.conf rejects replication connection for host 172.18.0.9, user postgres, no encryption`
+	if evidenceQuoteVerified(wrong, []string{output}) {
+		t.Error("expected false — wrong IP address must still fail regardless of quote-stripping")
+	}
+}
+
+func TestAppendEvidenceProvenance_AccumulatesAndDedupsAcrossHops(t *testing.T) {
+	extra := map[string]any{}
+	appendEvidenceProvenance(extra, []string{"quote a"}, []string{"sec a"})
+	appendEvidenceProvenance(extra, nil, nil)
+	appendEvidenceProvenance(extra, []string{"quote a", "quote b"}, []string{"sec a", "sec b"})
+
+	got, _ := extra["unverified_evidence"].([]string)
+	want := []string{"quote a", "quote b"}
+	if len(got) != len(want) {
+		t.Fatalf("unverified_evidence = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("unverified_evidence[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	gotSec, _ := extra["unverified_evidence_secondary"].([]string)
+	wantSec := []string{"sec a", "sec b"}
+	if len(gotSec) != len(wantSec) {
+		t.Fatalf("unverified_evidence_secondary = %v, want %v", gotSec, wantSec)
+	}
+	for i := range wantSec {
+		if gotSec[i] != wantSec[i] {
+			t.Errorf("unverified_evidence_secondary[%d] = %q, want %q", i, gotSec[i], wantSec[i])
 		}
 	}
 }

@@ -1559,6 +1559,69 @@ func TestIntegration_FaultStabilityCert_CleanFields_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestIntegration_FaultStabilityCert_WarningDistribution_RoundTrip confirms
+// the warning_distribution/confirmed_distribution JSON-blob columns actually
+// round-trip through a real auditd, not just the scalar warning_count/is_clean
+// fields TestIntegration_FaultStabilityCert_CleanFields_RoundTrip above
+// covers. These are stored as TEXT columns (JSON-marshaled on write,
+// unmarshaled on read) added via the same idempotent ALTER TABLE migration
+// pattern as warning_count/is_clean — exactly the kind of thing a mocked
+// gateway-package test can't catch, and this specific field had never been
+// integration-tested at all (only its two scalar siblings were), despite
+// being in production use since v0.24.0. Includes the two v0.28.0
+// evidence-coverage-gap/evidence-unconfirmed keys specifically, since those
+// are the newest values ever written into this column.
+func TestIntegration_FaultStabilityCert_WarningDistribution_RoundTrip(t *testing.T) {
+	faultID := fmt.Sprintf("fs-dist-%d", time.Now().UnixNano())
+
+	cert := map[string]any{
+		"fault_id":           faultID,
+		"fault_name":         "Warning Distribution Round-Trip Test",
+		"playbook_series_id": "pbs_fs_dist_test_triage",
+		"diagnosis_model":    "claude-sonnet-4-6",
+		"n_runs":             5,
+		"pass_rate":          0.6,
+		"is_stable":          false,
+		"warning_count":      3,
+		"is_clean":           false,
+		"warning_distribution": map[string]any{
+			"protocol_violation":            1,
+			"evidence_coverage_gap":         1,
+			"evidence_unconfirmed":          1,
+			"objective_evidence:oom_killed": 1,
+		},
+		"confirmed_distribution": map[string]any{
+			"objective_evidence:replica_disconnected": 2,
+		},
+	}
+	post(t, auditdAddr, "/v1/fleet/fault-stability", cert)
+
+	got := get(t, auditdAddr, "/v1/fleet/fault-stability/"+faultID)
+
+	wd, ok := got["warning_distribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("warning_distribution missing or wrong type in response: %v (%T)", got["warning_distribution"], got["warning_distribution"])
+	}
+	for key, want := range map[string]float64{
+		"protocol_violation":            1,
+		"evidence_coverage_gap":         1,
+		"evidence_unconfirmed":          1,
+		"objective_evidence:oom_killed": 1,
+	} {
+		if got, _ := wd[key].(float64); got != want {
+			t.Errorf("warning_distribution[%q] = %v, want %v (full map: %v)", key, wd[key], want, wd)
+		}
+	}
+
+	cd, ok := got["confirmed_distribution"].(map[string]any)
+	if !ok {
+		t.Fatalf("confirmed_distribution missing or wrong type in response: %v (%T)", got["confirmed_distribution"], got["confirmed_distribution"])
+	}
+	if v, _ := cd["objective_evidence:replica_disconnected"].(float64); v != 2 {
+		t.Errorf("confirmed_distribution[objective_evidence:replica_disconnected] = %v, want 2 (full map: %v)", cd["objective_evidence:replica_disconnected"], cd)
+	}
+}
+
 // TestIntegration_FaultStabilityCert_HopCert_MultipleFaultsSameSeries_RoundTrip
 // is v0.26 item 6's one genuinely new real-stack risk: the underlying
 // "multiple fault_id rows share one playbook_series_id, GetBySeriesAndModel

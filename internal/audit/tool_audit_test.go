@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -529,6 +530,55 @@ func TestRecordToolCall_NoAutoApprovalOnRead(t *testing.T) {
 	if events[0].Approval != nil {
 		t.Errorf("read action should not have an Approval record, got %+v", events[0].Approval)
 	}
+}
+
+// TestRecordToolCall_ResultTruncation guards toolResultMaxLen (8192, raised
+// from 500 on 2026-09-07 — see gateway.go's doc comment): a log-reading
+// tool's real output up to that length must be persisted verbatim, since
+// checkEvidenceProvenance (Layer 3) verifies EVIDENCE quotes against exactly
+// this stored field, and a truncated-away real quote is a false positive on
+// honest evidence, not a caught fabrication. A regression back toward the
+// old 500-char cap would not be caught by any other test.
+func TestRecordToolCall_ResultTruncation(t *testing.T) {
+	t.Run("at limit is stored verbatim", func(t *testing.T) {
+		store := newToolAuditTestStore(t)
+		ta := NewToolAuditor(store, "db-agent", "sess-trunc-1", "trace-trunc-1")
+
+		long := strings.Repeat("x", toolResultMaxLen)
+		ta.RecordToolCall(context.Background(), ToolCall{Name: "get_host_logs"}, ToolResult{Output: long}, time.Millisecond)
+
+		events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolExecution})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected 1 tool_execution event, got %d", len(events))
+		}
+		got := events[0].Tool.Result
+		if got != long {
+			t.Errorf("Result was altered at exactly toolResultMaxLen (%d) chars: len(got)=%d, want unchanged and untruncated", toolResultMaxLen, len(got))
+		}
+	})
+
+	t.Run("over limit is truncated with ellipsis", func(t *testing.T) {
+		store := newToolAuditTestStore(t)
+		ta := NewToolAuditor(store, "db-agent", "sess-trunc-2", "trace-trunc-2")
+
+		over := strings.Repeat("x", toolResultMaxLen) + "extra-that-must-be-cut"
+		ta.RecordToolCall(context.Background(), ToolCall{Name: "get_host_logs"}, ToolResult{Output: over}, time.Millisecond)
+
+		events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolExecution})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected 1 tool_execution event, got %d", len(events))
+		}
+		got := events[0].Tool.Result
+		if !strings.HasSuffix(got, "...") || len(got) != toolResultMaxLen+len("...") {
+			t.Errorf("over-limit Result not truncated as expected: len=%d, want %d ending in ...", len(got), toolResultMaxLen+len("..."))
+		}
+	})
 }
 
 func TestRecordToolVerification_EscalationRequired(t *testing.T) {

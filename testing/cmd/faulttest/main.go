@@ -568,18 +568,59 @@ func cmdRun(args []string) {
 				// When the fault declares an expected deterministic signal, a pass
 				// requires it to be confirmed — not just keyword/category text
 				// matching, which a vague hedge can satisfy without the model ever
-				// demonstrably engaging with real tool data (see
-				// EvidenceRequiredButUnconfirmed's doc comment for the full story).
-				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !evidenceSignalConfirmed(sig, evalResult.ObjectiveEvidenceConfirmed) {
-					evalResult.EvidenceRequiredButUnconfirmed = true
-					evalResult.Passed = false
-					fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score\n", sig)
+				// demonstrably engaging with real tool data. Split into two distinct
+				// failure buckets (see EvidenceCoverageGap/EvidenceRequiredButUnconfirmed's
+				// doc comments for the full story) rather than one flat flag: whether
+				// the signal never fired at all (a coverage gap — tooling/prompt issue)
+				// or fired but was never confirmed (a confirmation/quoting issue) points
+				// at a different team/fix, and collapsing them hid which one applied.
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := classifyEvidenceGate(sig, evalResult.ObjectiveEvidenceSignals, evalResult.ObjectiveEvidenceConfirmed)
+					switch {
+					case coverageGap:
+						evalResult.EvidenceCoverageGap = true
+						evalResult.Passed = false
+						fmt.Printf("  ⚠  EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score\n", sig)
+					case unconfirmed:
+						evalResult.EvidenceRequiredButUnconfirmed = true
+						evalResult.Passed = false
+						fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score\n", sig)
+					}
 				}
 				// Fabrication risk: the agent narrated calling a tool that never
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
 				if resp.Mismatch {
 					evalResult.Mismatch = true
 					fmt.Printf("  ⚠  FABRICATION RISK: mismatch (narrated tool call not confirmed)\n")
+				}
+				// Content-provenance: an EVIDENCE quote didn't match any real tool
+				// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
+				// Prints the actual flagged quote(s), not just a count (found live
+				// 2026-09-07: a count alone meant tracking down what was actually
+				// fabricated required querying the raw audit trail by hand — each
+				// quote is already prefixed with its owning hypothesis's text, so
+				// no further lookup is needed here). Both primary and secondary
+				// are labeled non-blocking as of 2026-09-08 (see hasCleanWarning's
+				// doc comment: four live rounds each surfaced a new, genuine
+				// citation-formatting false-positive variant, warn-only for this
+				// release) — primary still reads as the stronger signal (it backs
+				// the acted-on conclusion, not a rejected hypothesis), so the two
+				// labels stay visually distinct even though neither gates CLEAN.
+				if len(resp.UnverifiedEvidence) > 0 {
+					evalResult.UnverifiedEvidence = true
+					evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
+					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+					for _, q := range resp.UnverifiedEvidence {
+						fmt.Printf("         %s\n", q)
+					}
+				}
+				if len(resp.UnverifiedEvidenceSecondary) > 0 {
+					evalResult.UnverifiedEvidenceSecondary = true
+					evalResult.UnverifiedEvidenceSecondaryQuotes = resp.UnverifiedEvidenceSecondary
+					fmt.Printf("  ⚠  unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", len(resp.UnverifiedEvidenceSecondary))
+					for _, q := range resp.UnverifiedEvidenceSecondary {
+						fmt.Printf("         %s\n", q)
+					}
 				}
 
 				// Push judge reasoning to the audit store so it appears alongside

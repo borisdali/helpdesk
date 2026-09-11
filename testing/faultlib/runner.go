@@ -228,6 +228,8 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		ObjectiveEvidenceConfirmed   []string       `json:"objective_evidence_confirmed,omitempty"`
 		ObjectiveEvidenceUnconfirmed []string       `json:"objective_evidence_unconfirmed,omitempty"`
 		Mismatch                     bool           `json:"mismatch,omitempty"`
+		UnverifiedEvidence           []string       `json:"unverified_evidence,omitempty"`
+		UnverifiedEvidenceSecondary  []string       `json:"unverified_evidence_secondary,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return testutil.AgentResponse{Duration: duration, Error: fmt.Errorf("decoding playbook response: %w", err)}
@@ -260,6 +262,8 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		ObjectiveEvidenceConfirmed:   result.ObjectiveEvidenceConfirmed,
 		ObjectiveEvidenceUnconfirmed: result.ObjectiveEvidenceUnconfirmed,
 		Mismatch:                     result.Mismatch,
+		UnverifiedEvidence:           result.UnverifiedEvidence,
+		UnverifiedEvidenceSecondary:  result.UnverifiedEvidenceSecondary,
 	}
 	if len(result.ToolCalls) > 0 {
 		lower := strings.ToLower(result.Text)

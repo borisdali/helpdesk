@@ -321,9 +321,16 @@ func TestFaultInjection(t *testing.T) {
 			// engaging with real tool data. See EvidenceSignalConfirmed's doc
 			// comment (testing/faultlib/evaluator.go) for the full story.
 			if cfg.ViaGateway {
-				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
-					result.Passed = false
-					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := faultlib.ClassifyEvidenceGate(sig, resp.ObjectiveEvidenceSignals, resp.ObjectiveEvidenceConfirmed)
+					switch {
+					case coverageGap:
+						result.Passed = false
+						t.Logf("EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score", sig)
+					case unconfirmed:
+						result.Passed = false
+						t.Logf("EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score", sig)
+					}
 				}
 			}
 
@@ -606,9 +613,16 @@ func TestExternalModeInjection(t *testing.T) {
 			// See the identical gate above (first Evaluate call site in this
 			// file) for the full explanation.
 			if cfg.ViaGateway {
-				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" && !faultlib.EvidenceSignalConfirmed(sig, resp.ObjectiveEvidenceConfirmed) {
-					result.Passed = false
-					t.Logf("EVIDENCE REQUIRED: expected signal %q was not confirmed — failing regardless of keyword/category score", sig)
+				if sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal; sig != "" {
+					coverageGap, unconfirmed := faultlib.ClassifyEvidenceGate(sig, resp.ObjectiveEvidenceSignals, resp.ObjectiveEvidenceConfirmed)
+					switch {
+					case coverageGap:
+						result.Passed = false
+						t.Logf("EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score", sig)
+					case unconfirmed:
+						result.Passed = false
+						t.Logf("EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score", sig)
+					}
 				}
 			}
 

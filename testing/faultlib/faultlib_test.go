@@ -102,6 +102,41 @@ func TestEvidenceSignalConfirmed(t *testing.T) {
 	}
 }
 
+// TestClassifyEvidenceGate mirrors cmd/faulttest's own TestClassifyEvidenceGate
+// — covers the branching EvidenceSignalConfirmed's table-driven test doesn't
+// reach: which bucket (if any) applies once both fired-ness and confirmed-ness
+// are known together. Coverage-gap must win when a signal never fired at all,
+// and a fired-and-confirmed signal must trip neither bucket.
+func TestClassifyEvidenceGate(t *testing.T) {
+	cases := []struct {
+		name          string
+		sig           string
+		signals       []string
+		confirmed     []string
+		wantCoverage  bool
+		wantUnconfirm bool
+	}{
+		{"no signal declared — nothing to check", "", nil, nil, false, false},
+		{"never fired at all — coverage gap", "replica_disconnected", nil, nil, true, false},
+		{"fired but for a different signal — still coverage gap for this one", "replica_disconnected", []string{"idle_in_transaction_stuck"}, nil, true, false},
+		{"fired, not confirmed — unconfirmed", "replica_disconnected", []string{"replica_disconnected"}, nil, false, true},
+		{"fired and confirmed — neither bucket, clean pass", "replica_disconnected", []string{"replica_disconnected"}, []string{"replica_disconnected"}, false, false},
+		{
+			"confirmed list somehow contains sig despite absent signals list — coverage gap still wins (can't confirm what never fired)",
+			"replica_disconnected", nil, []string{"replica_disconnected"}, true, false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCoverage, gotUnconfirm := ClassifyEvidenceGate(tc.sig, tc.signals, tc.confirmed)
+			if gotCoverage != tc.wantCoverage || gotUnconfirm != tc.wantUnconfirm {
+				t.Errorf("ClassifyEvidenceGate(%q, %v, %v) = (%v, %v), want (%v, %v)",
+					tc.sig, tc.signals, tc.confirmed, gotCoverage, gotUnconfirm, tc.wantCoverage, tc.wantUnconfirm)
+			}
+		})
+	}
+}
+
 func TestLoadCatalog_Valid(t *testing.T) {
 	// Find the catalog relative to this test file.
 	catalogPath := findCatalog()

@@ -2026,6 +2026,42 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary verifies
+// printUnverifiedEvidence prints the actual quote text (not just a count or a
+// generic line) and correctly labels primary vs. secondary — found live
+// 2026-09-07: a plain boolean-derived "⚠ unverified evidence" line with no
+// content meant tracking down what was actually fabricated required querying
+// the raw audit trail by hand.
+func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_unvevid1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":                        "plr_unvevid1",
+				"playbook":                      "pbs_replication_lag",
+				"findings":                      "replica disconnected",
+				"has_unverified_evidence":       true,
+				"unverified_evidence":           []string{"replica disconnected — totally invented log line"},
+				"unverified_evidence_secondary": []string{"walreceiver timeout — terminating walreceiver due to timeout"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_unvevid1")
+	})
+
+	if !strings.Contains(out, "⚠ unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
+		t.Errorf("output missing the actual primary quote text, got:\n%s", out)
+	}
+	if !strings.Contains(out, "⚠ unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {
+		t.Errorf("output missing the actual secondary quote text, labeled non-blocking, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_VerificationFlags_RemediationChapter verifies the
 // Remediation chapter's inline warning specifically — the third of three
 // printFlags call sites in printIncidentJourney, previously untested (the

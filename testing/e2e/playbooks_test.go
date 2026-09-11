@@ -1715,17 +1715,18 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if triage["playbook"] == "" {
 		t.Error("triage.playbook is empty")
 	}
-	// trace_id/has_mismatch/has_target_drift/has_protocol_violation surface a
-	// real agent run's Journey-level verification signals inline on the
-	// chapter. A real, successfully-run triage playbook always gets a real
-	// trace_id (assigned by proxyToAgentWithTool on every agent-mode call) —
-	// assert it's present and non-empty, confirming the wiring works with an
-	// organically-produced trace from a real LLM run, not just the hand-fed
-	// traces in unit/integration tests. The three Has* fields are omitempty
-	// booleans — their *value* isn't deterministic here (depends on whether
-	// this real run happened to trip any of them), so only assert they decode
-	// as bool when present, catching a malformed-value regression that
-	// map[string]any's permissive decode wouldn't otherwise fail on.
+	// trace_id/has_mismatch/has_target_drift/has_protocol_violation/
+	// has_unverified_evidence surface a real agent run's Journey-level
+	// verification signals inline on the chapter. A real, successfully-run
+	// triage playbook always gets a real trace_id (assigned by
+	// proxyToAgentWithTool on every agent-mode call) — assert it's present and
+	// non-empty, confirming the wiring works with an organically-produced
+	// trace from a real LLM run, not just the hand-fed traces in
+	// unit/integration tests. The four Has* fields are omitempty booleans —
+	// their *value* isn't deterministic here (depends on whether this real run
+	// happened to trip any of them), so only assert they decode as bool when
+	// present, catching a malformed-value regression that map[string]any's
+	// permissive decode wouldn't otherwise fail on.
 	if traceID, _ := triage["trace_id"].(string); traceID == "" {
 		t.Error("triage.trace_id is empty — should always be set for a real agent-mode run")
 	}
@@ -1742,6 +1743,38 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	if v, ok := triage["has_protocol_violation"]; ok {
 		if _, ok := v.(bool); !ok {
 			t.Errorf("triage.has_protocol_violation = %v (%T), want bool", v, v)
+		}
+	}
+	if v, ok := triage["has_unverified_evidence"]; ok {
+		if _, ok := v.(bool); !ok {
+			t.Errorf("triage.has_unverified_evidence = %v (%T), want bool", v, v)
+		}
+	}
+	// unverified_evidence/unverified_evidence_secondary (added 2026-09-07,
+	// primary/secondary split) carry the actual flagged quotes alongside the
+	// bool above — same non-deterministic-value, shape-only treatment: assert
+	// each decodes as a JSON array (of strings) when present, not that it's
+	// empty or populated.
+	if v, ok := triage["unverified_evidence"]; ok {
+		if arr, ok := v.([]any); !ok {
+			t.Errorf("triage.unverified_evidence = %v (%T), want []string", v, v)
+		} else {
+			for _, e := range arr {
+				if _, ok := e.(string); !ok {
+					t.Errorf("triage.unverified_evidence element = %v (%T), want string", e, e)
+				}
+			}
+		}
+	}
+	if v, ok := triage["unverified_evidence_secondary"]; ok {
+		if arr, ok := v.([]any); !ok {
+			t.Errorf("triage.unverified_evidence_secondary = %v (%T), want []string", v, v)
+		} else {
+			for _, e := range arr {
+				if _, ok := e.(string); !ok {
+					t.Errorf("triage.unverified_evidence_secondary element = %v (%T), want string", e, e)
+				}
+			}
 		}
 	}
 
