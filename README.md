@@ -27,8 +27,10 @@ Before a [playbook](docs/PLAYBOOKS.md) enters live rotation it is certified acro
 
 ---
 Cloud DBaaS vs. Self-Service: While the cloud vendor's SaaS / DBaaS systems are among the fastest-growing cloud sectors, many customers have legitimate reasons to avoid vendor lock-in and black-box management. 
-See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and the 13 specific customer expectations that the cloud DBaaS providers mostly fail to satisfy.
+See [here](https://medium.com/google-cloud/databases-on-k8s-really-part-1-d977510dba0a) for extensive treatment of this topic and the 13 specific customer expectations that the cloud DBaaS providers mostly fail to satisfy.  
+  
 With [avalanche-like](https://medium.com/google-cloud/your-sre-on-call-runbook-is-already-obsolete-heres-why-that-s-not-your-fault-0a82b3b0183c#5634) AI adoption, we expect the shift towards self-managing databases to only accelerate, pushing the products like aiHelpDesk into the mainstream.
+AI coding assistants are shipping apps faster than ever before. Many of these apps rely on databases, but most DBA teams and their review processes were not sized for this sudden sprawl, particularly because it brings new patterns with it, not just scale. New query patterns, new connection pool changes, etc. That, in turn, leads to more database incidents with less institutional context behind each one. That gap is exactly what aiHelpDesk exists to close.
 
 ## The Operational SRE/DBA Flywheel
 

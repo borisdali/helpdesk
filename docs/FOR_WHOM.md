@@ -193,7 +193,8 @@ _operations defensible_.**
 The value of aiHelpDesk compounds from the day you start. Here is why the adoption
 decision is time-sensitive, not evergreen.
 
-**The governance gap is opening now, not in the future.** AI agents are being deployed
+**The governance gap is opening now, not in the future.**   
+AI agents are being deployed
 for incident response across engineering organisations today. Not as a pilot, as standard
 practice. In most cases these deployments have no audit trail, no step approval gate, no
 blast-radius check before a destructive action and no cert proving the agent was right the
@@ -202,7 +203,8 @@ the AI decide, who approved it and how do we know it was right?" will find nothi
 The governance infrastructure that answers those questions needs to exist before the incident,
 not after.
 
-**The calibration data compounds.** A [stability 3D cert](ATTRIBUTION_CERTS.md) backed by 3
+**The calibration data compounds.**   
+A [stability 3D cert](ATTRIBUTION_CERTS.md) backed by 3
 runs means something. One backed by 30 means materially more. The
 [fault catalog](FAULTTEST.md), the evaluation data, the attribution history — these grow
 with every run through the [flywheel](VAULT.md#the-operational-sredba-flywheel). A team
@@ -212,13 +214,18 @@ different standard of proof and the difference is not something you can compress
 tests in a burst. Each run requires a real fault injection, a real agent diagnosis and a
 real judge evaluation. **You cannot backfill operational history**.
 
+**The incident volume itself is changing, not just the backlog of unrecorded ones.**  
+AI coding assistants are shipping apps faster than ever before. Many of these apps rely on databases, but most DBA teams and their review processes were not sized for this sudden sprawl, particularly because it brings new patterns with it,   not just scale. New query patterns, new connection pool changes, etc. That, in turn, leads to more database incidents with less institutional context behind each one. That gap is exactly what aiHelpDesk exists to close.
+That operational load compounds fastest into exactly the flywheel described above — and it's the load a team without a governed, auditable agent will feel first.
+
 **Incidents keep happening.** Every production incident between now and adoption is
 diagnostic data that goes unrecorded, operational knowledge that stays in Slack threads
 rather than playbooks and a MTTR that could have been minutes instead of 30–60 minutes.
 The cost is not dramatic. It accrues quietly. A team that has absorbed that cost for
 three years and then starts measuring it finds it was larger than expected.
 
-**Regulatory pressure has a deadline.** [AI Governance](AIGOVERNANCE.md) requirements under DORA, SOC 2
+**Regulatory pressure has a deadline.**   
+[AI Governance](AIGOVERNANCE.md) requirements under DORA, SOC 2
 controls on automated decision-making and financial services regulations on AI-assisted
 operations are arriving with specific implementation timelines, not open-ended horizons.
 Building the [compliance](COMPLIANCE.md) and [audit trail](AUDIT.md) after an external deadline is harder and more expensive than
