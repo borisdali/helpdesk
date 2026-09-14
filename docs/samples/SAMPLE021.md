@@ -27,6 +27,9 @@ See the blog post linked above for details of that story, but here are the SQL q
 
 
 ```
+[boris@ ~/helpdesk]$ ps aux | grep auditd
+boris            93659   0.0  0.0 411920576  12544 s016  S+    8:46PM   0:04.82 go run ./cmd/auditd/ --listen :1199 --db /tmp/helpdesk/audit.db --socket /tmp/helpdesk/audit.sock --log-level=debug
+
 [boris@ ~/helpdesk]$ ll /tmp/helpdesk/audit.db
 -rw-r--r--@ 1 boris  wheel  536576 Sep 10 20:46 /tmp/helpdesk/audit.db
 
