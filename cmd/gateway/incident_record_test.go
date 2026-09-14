@@ -22,6 +22,12 @@ type mockRunStartAuditd struct {
 	// incidentStatus lets a test force a non-201 response from /v1/incidents
 	// to prove createIncidentRecord's failure is best-effort.
 	incidentStatus int
+	// playbook/priorRun, when set, let this mock also serve the GET lookups
+	// handlePlaybookRun makes before recordPlaybookRunStart — needed to drive
+	// this mock through the real HTTP handler (postPlaybookRun) rather than
+	// calling recordPlaybookRunStart directly.
+	playbook *audit.Playbook
+	priorRun *audit.PlaybookRun
 }
 
 type capturedRequest struct {
@@ -41,6 +47,10 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && m.playbook != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			json.NewEncoder(w).Encode(m.playbook) //nolint:errcheck
+		case r.Method == http.MethodGet && m.priorRun != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbook-runs/"):
+			json.NewEncoder(w).Encode(m.priorRun) //nolint:errcheck
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/runs"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.PlaybookRun{RunID: "plr_entry01"}) //nolint:errcheck
@@ -53,6 +63,10 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 			if status == http.StatusCreated {
 				json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_test01"}) //nolint:errcheck
 			}
+		case r.Method == http.MethodPatch:
+			// recordPlaybookRunComplete's best-effort outcome patch — not under
+			// test here, just needs to not 404/connection-refuse noisily.
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -153,5 +167,83 @@ func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
 
 	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
 		t.Errorf("POST /v1/incidents calls = %d, want 0 when runID is empty", len(calls))
+	}
+}
+
+// --- Integration: through the real HTTP handler, not recordPlaybookRunStart directly ---
+//
+// The tests above call gw.recordPlaybookRunStart directly, which only proves
+// that function's own logic. Nothing proved that handlePlaybookRun's real
+// request-handling code — the actual POST /api/v1/fleet/playbooks/{id}/run
+// path a client hits — wires req.PriorRunID from a real JSON body into it
+// correctly. These two tests close that gap by driving the full mux via
+// postPlaybookRun (mirrors the reasoning in
+// TestHandlePlaybookRun_ProtocolViolation_RecordsAuditEvent above).
+
+func fleetPlannerLLM(t *testing.T) func(context.Context, string) (string, error) {
+	t.Helper()
+	return func(ctx context.Context, prompt string) (string, error) {
+		return `{
+			"name": "vacuum-check",
+			"change": {"steps": [{"tool": "check_connection", "args": {}}]},
+			"targets": ["prod-db-1"],
+			"strategy": {}
+		}`, nil
+	}
+}
+
+func TestHandlePlaybookRun_EntryPointRequest_CreatesIncident_ViaRealHTTPHandler(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_inc_entry01",
+		SeriesID:      "pbs_inc_entry01",
+		Name:          "Incident Wiring Entry-Point Test",
+		ExecutionMode: "fleet",
+		IsActive:      true,
+	}
+	mock := &mockRunStartAuditd{playbook: pb}
+	srv := mock.start(t)
+	gw := makePlaybookRunGateway(srv.URL, fleetPlannerLLM(t))
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID, `{}`) // no prior_run_id → genuine entry point
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("got 502; body: %s", rec.Body.String())
+	}
+
+	incidentCalls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(incidentCalls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1 — handlePlaybookRun's real code path "+
+			"(not just recordPlaybookRunStart called directly) must create an incident for a "+
+			"genuine entry-point request", len(incidentCalls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(incidentCalls[0].body), &body); err != nil {
+		t.Fatalf("decode incident body: %v", err)
+	}
+	if body.EntryRunID != "plr_entry01" {
+		t.Errorf("incident entry_run_id = %q, want plr_entry01 (the run_id handlePlaybookRun just recorded)", body.EntryRunID)
+	}
+}
+
+func TestHandlePlaybookRun_ContinuationRequest_NoIncidentCreated_ViaRealHTTPHandler(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_inc_cont01",
+		SeriesID:      "pbs_inc_cont01",
+		Name:          "Incident Wiring Continuation Test",
+		ExecutionMode: "fleet",
+		IsActive:      true,
+	}
+	priorRun := &audit.PlaybookRun{RunID: "plr_prior01", FindingsSummary: "prior findings"}
+	mock := &mockRunStartAuditd{playbook: pb, priorRun: priorRun}
+	srv := mock.start(t)
+	gw := makePlaybookRunGateway(srv.URL, fleetPlannerLLM(t))
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID, `{"prior_run_id":"plr_prior01"}`)
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("got 502; body: %s", rec.Body.String())
+	}
+
+	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
+		t.Errorf("POST /v1/incidents calls = %d, want 0 for a real HTTP request carrying prior_run_id "+
+			"(a continuation hop, not a genuine entry point)", len(calls))
 	}
 }
