@@ -8,7 +8,7 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /health": {AllowAnonymous: true},
 
 	// ── Authenticated reads: any verified user ────────────────────────────────
-	"GET /v1/events":                                         {AdminBypass: true},
+	"GET /v1/events":                                        {AdminBypass: true},
 	"GET /v1/events/{eventID}":                              {AdminBypass: true},
 	"GET /v1/verify":                                        {AdminBypass: true},
 	"GET /v1/journeys":                                      {AdminBypass: true},
@@ -49,10 +49,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"POST /v1/govbot/runs": {ServiceOnly: true, AdminBypass: true},
 
 	// Playbook writes
-	"POST /v1/fleet/playbooks":                         {AdminBypass: true},
-	"PUT /v1/fleet/playbooks/{playbookID}":             {AdminBypass: true},
-	"DELETE /v1/fleet/playbooks/{playbookID}":          {AdminBypass: true},
-	"POST /v1/fleet/playbooks/{playbookID}/activate":   {AdminBypass: true},
+	"POST /v1/fleet/playbooks":                       {AdminBypass: true},
+	"PUT /v1/fleet/playbooks/{playbookID}":           {AdminBypass: true},
+	"DELETE /v1/fleet/playbooks/{playbookID}":        {AdminBypass: true},
+	"POST /v1/fleet/playbooks/{playbookID}/activate": {AdminBypass: true},
 
 	// Playbook run tracking (recording called by gateway service account; reads open to any authenticated user)
 	"POST /v1/fleet/playbooks/{playbookID}/runs": {ServiceOnly: true, AdminBypass: true},
@@ -61,23 +61,33 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"PATCH /v1/fleet/playbook-runs/{runID}":      {AdminBypass: true},
 	"GET /v1/fleet/playbook-runs/{runID}":        {AdminBypass: true},
 
+	// Incidents (v0.29 incident-entity design — see docs/INCIDENTS.md). Created
+	// by the gateway's service account on a genuine entry-point playbook run;
+	// reads/updates open to any authenticated user, same convention as
+	// playbook-runs above.
+	"POST /v1/incidents":               {ServiceOnly: true, AdminBypass: true},
+	"PATCH /v1/incidents/{incidentID}": {AdminBypass: true},
+	"GET /v1/incidents/{incidentID}":   {AdminBypass: true},
+	"GET /v1/incidents/by-run/{runID}": {AdminBypass: true},
+	"GET /v1/incidents":                {AdminBypass: true},
+
 	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
-	"POST /v1/uploads":                     {AdminBypass: true},
-	"GET /v1/uploads/{uploadID}":           {AdminBypass: true},
-	"GET /v1/uploads/{uploadID}/content":   {AdminBypass: true},
+	"POST /v1/uploads":                   {AdminBypass: true},
+	"GET /v1/uploads/{uploadID}":         {AdminBypass: true},
+	"GET /v1/uploads/{uploadID}/content": {AdminBypass: true},
 
 	// Tool result endpoints
 	"POST /v1/tool-results": {ServiceOnly: true, AdminBypass: true},
 	"GET /v1/tool-results":  {AdminBypass: true},
 
 	// Fleet-runner lifecycle writes
-	"POST /v1/fleet/jobs":                                                   {ServiceOnly: true, AdminBypass: true},
-	"PATCH /v1/fleet/jobs/{jobID}/status":                                   {ServiceOnly: true, AdminBypass: true},
-	"POST /v1/fleet/jobs/{jobID}/servers":                                   {ServiceOnly: true, AdminBypass: true},
-	"PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}":                     {ServiceOnly: true, AdminBypass: true},
-	"POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps":                {ServiceOnly: true, AdminBypass: true},
-	"PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}":   {ServiceOnly: true, AdminBypass: true},
-	"POST /v1/fleet/jobs/{jobID}/approval":                                  {ServiceOnly: true, AdminBypass: true},
+	"POST /v1/fleet/jobs":                                                 {ServiceOnly: true, AdminBypass: true},
+	"PATCH /v1/fleet/jobs/{jobID}/status":                                 {ServiceOnly: true, AdminBypass: true},
+	"POST /v1/fleet/jobs/{jobID}/servers":                                 {ServiceOnly: true, AdminBypass: true},
+	"PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}":                   {ServiceOnly: true, AdminBypass: true},
+	"POST /v1/fleet/jobs/{jobID}/servers/{serverName}/steps":              {ServiceOnly: true, AdminBypass: true},
+	"PATCH /v1/fleet/jobs/{jobID}/servers/{serverName}/steps/{stepIndex}": {ServiceOnly: true, AdminBypass: true},
+	"POST /v1/fleet/jobs/{jobID}/approval":                                {ServiceOnly: true, AdminBypass: true},
 
 	// ── Role-required: human approval actions ─────────────────────────────────
 
@@ -99,10 +109,10 @@ var DefaultAuditdPermissions = map[string]Permission{
 	// ── Rollback & Undo ───────────────────────────────────────────────────────
 
 	// Read-only: any authenticated caller can query rollbacks and derive plans.
-	"GET /v1/rollbacks":                          {AdminBypass: true},
-	"GET /v1/rollbacks/{rollbackID}":             {AdminBypass: true},
-	"POST /v1/events/{eventID}/rollback-plan":    {AdminBypass: true},
-	"GET /v1/fleet/jobs/{jobID}/rollback":        {AdminBypass: true},
+	"GET /v1/rollbacks":                       {AdminBypass: true},
+	"GET /v1/rollbacks/{rollbackID}":          {AdminBypass: true},
+	"POST /v1/events/{eventID}/rollback-plan": {AdminBypass: true},
+	"GET /v1/fleet/jobs/{jobID}/rollback":     {AdminBypass: true},
 
 	// Mutation: requires operator or admin role.
 	"POST /v1/rollbacks": {

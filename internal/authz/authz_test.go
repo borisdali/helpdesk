@@ -207,6 +207,47 @@ func TestAuthorize_ServiceOnly_AdminHumanBypasses(t *testing.T) {
 	}
 }
 
+func TestAuthorize_Incidents_CreateIsServiceOnly(t *testing.T) {
+	a := NewAuthorizer(DefaultAuditdPermissions, true)
+
+	for _, p := range []identity.ResolvedPrincipal{
+		authedPrincipal("dba"),
+		authedPrincipal("sre"),
+		authedPrincipal(),
+	} {
+		err := a.Authorize("POST /v1/incidents", p)
+		if !errors.Is(err, ErrForbidden) {
+			t.Errorf("Authorize(POST /v1/incidents, human %v) = %v, want ErrForbidden", p.Roles, err)
+		}
+	}
+
+	if err := a.Authorize("POST /v1/incidents", servicePrincipal("gateway")); err != nil {
+		t.Errorf("Authorize(POST /v1/incidents, service) = %v, want nil", err)
+	}
+	if err := a.Authorize("POST /v1/incidents", adminPrincipal()); err != nil {
+		t.Errorf("Authorize(POST /v1/incidents, admin human) = %v, want nil (AdminBypass)", err)
+	}
+}
+
+func TestAuthorize_Incidents_ReadsAndUpdatesOpenToAnyAuthenticatedUser(t *testing.T) {
+	a := NewAuthorizer(DefaultAuditdPermissions, true)
+
+	routes := []string{
+		"PATCH /v1/incidents/{incidentID}",
+		"GET /v1/incidents/{incidentID}",
+		"GET /v1/incidents/by-run/{runID}",
+		"GET /v1/incidents",
+	}
+	for _, pattern := range routes {
+		if err := a.Authorize(pattern, authedPrincipal()); err != nil {
+			t.Errorf("Authorize(%q, authenticated no-role human) = %v, want nil", pattern, err)
+		}
+		if err := a.Authorize(pattern, anonPrincipal()); !errors.Is(err, ErrUnauthorized) {
+			t.Errorf("Authorize(%q, anonymous) = %v, want ErrUnauthorized", pattern, err)
+		}
+	}
+}
+
 func TestAuthorize_UnknownRoute_Anonymous(t *testing.T) {
 	a := NewAuthorizer(DefaultGatewayPermissions, true)
 	err := a.Authorize("GET /not-a-real-route", anonPrincipal())
@@ -553,6 +594,11 @@ var auditdRoutes = []string{
 	"GET /v1/fleet/playbooks/{playbookID}/stats",
 	"PATCH /v1/fleet/playbook-runs/{runID}",
 	"GET /v1/fleet/playbook-runs/{runID}",
+	"POST /v1/incidents",
+	"PATCH /v1/incidents/{incidentID}",
+	"GET /v1/incidents/{incidentID}",
+	"GET /v1/incidents/by-run/{runID}",
+	"GET /v1/incidents",
 	"POST /v1/uploads",
 	"GET /v1/uploads/{uploadID}",
 	"GET /v1/uploads/{uploadID}/content",

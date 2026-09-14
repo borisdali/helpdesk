@@ -249,3 +249,50 @@ func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 		t.Errorf("List[0] = %q, want the more recently detected incident %q first", got[0].IncidentID, newer.IncidentID)
 	}
 }
+
+func TestIncidentStore_List_LimitClamping(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if err := s.Create(ctx, &Incident{}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	// Explicit limit is honored.
+	got, err := s.List(ctx, IncidentListFilter{Limit: 2})
+	if err != nil {
+		t.Fatalf("List (limit=2): %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("List (limit=2) = %d, want 2", len(got))
+	}
+
+	// Zero/negative limit falls back to the default (50), not 0 rows.
+	got, err = s.List(ctx, IncidentListFilter{Limit: 0})
+	if err != nil {
+		t.Fatalf("List (limit=0): %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("List (limit=0) = %d, want all 5 (default fallback)", len(got))
+	}
+
+	got, err = s.List(ctx, IncidentListFilter{Limit: -1})
+	if err != nil {
+		t.Fatalf("List (limit=-1): %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("List (limit=-1) = %d, want all 5 (default fallback)", len(got))
+	}
+
+	// Over-cap limit (>200) also falls back to the default rather than being
+	// honored as-is or erroring.
+	got, err = s.List(ctx, IncidentListFilter{Limit: 500})
+	if err != nil {
+		t.Fatalf("List (limit=500): %v", err)
+	}
+	if len(got) != 5 {
+		t.Errorf("List (limit=500) = %d, want all 5 (under the clamped default)", len(got))
+	}
+}

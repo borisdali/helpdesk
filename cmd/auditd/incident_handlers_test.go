@@ -193,6 +193,51 @@ func TestIncidentHandlers_List_Filters(t *testing.T) {
 	}
 }
 
+func TestIncidentHandlers_List_LimitQueryParam(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader([]byte("{}")))
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/incidents?limit=2", nil)
+	rec := httptest.NewRecorder()
+	srv.handleList(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Incidents []audit.Incident `json:"incidents"`
+		Count     int              `json:"count"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Count != 2 {
+		t.Errorf("count = %d, want 2 (?limit=2 should be forwarded to the store)", result.Count)
+	}
+
+	// A non-numeric limit is ignored rather than rejected — falls back to the
+	// store's default rather than erroring.
+	reqBad := httptest.NewRequest(http.MethodGet, "/v1/incidents?limit=notanumber", nil)
+	recBad := httptest.NewRecorder()
+	srv.handleList(recBad, reqBad)
+	if recBad.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a non-numeric limit (should be ignored, not rejected)", recBad.Code)
+	}
+	var resultBad struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(recBad.Body).Decode(&resultBad); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resultBad.Count != 5 {
+		t.Errorf("count = %d, want all 5 when limit is unparseable", resultBad.Count)
+	}
+}
+
 func TestIncidentHandlers_GetByEntryRunID(t *testing.T) {
 	srv := newIncidentServer(t)
 
