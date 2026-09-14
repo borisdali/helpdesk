@@ -1,11 +1,8 @@
 # aiHelpDesk Sample#20 (from the source): veto split (`evidence_coverage_gap` / `evidence_required_but_unconfirmed`)
 
-The raw transcript of the sample commands and deliberations presented below complements these two blog posts:
+The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[AI-Based DB Replication Triage and Remediation. The Evaluation Story](https://itnext.io/ai-based-db-replication-triage-and-remediation-the-evaluation-story-140cef5f5677)**  
-  Dana had a rule for vendor demos: whoever built the product was not allowed to showcase it.  
-
-- **[How to evaluate and audit a vendor AI-powered product?](...)**  
+- **[How to evaluate and audit a vendor AI-powered product?](https://levelup.gitconnected.com/how-to-evaluate-and-audit-a-vendor-ai-powered-product-dfb06400334d)**  
   Sam did not read vendor documentation. Sam read vendor databases. How do you trust anything an agent says? Sam had a way to find out. He tested it.
 
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
