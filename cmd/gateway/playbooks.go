@@ -2528,7 +2528,59 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		slog.Error("recordPlaybookRunStart: failed to decode run response", "playbook_id", pb.PlaybookID, "err", err)
 		return ""
 	}
+	if priorRunID == "" {
+		// A genuine entry point (not a chained/remediation continuation) —
+		// this is where the incidents table's one row per user-facing
+		// incident gets created. See docs/INCIDENTS.md and the v0.29
+		// incident-entity design (Phase 1).
+		g.createIncidentRecord(ctx, created.RunID, traceID)
+	}
 	return created.RunID
+}
+
+// createIncidentRecord creates the incidents table row for a genuine
+// entry-point playbook run. Best-effort: a failure here must never block the
+// playbook run itself, so it only logs — recordPlaybookRunStart's caller
+// already has the run ID it needs regardless of whether this succeeds.
+func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID string) {
+	if g.auditURL == "" || runID == "" {
+		return
+	}
+	inc := audit.Incident{
+		TraceID:    traceID,
+		EntryRunID: runID,
+	}
+	body, err := json.Marshal(inc)
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("createIncidentRecord: request failed — incident not recorded", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("createIncidentRecord: incident not recorded",
+			"run_id", runID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
 }
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
