@@ -9,8 +9,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
+
+	"github.com/a2aproject/a2a-go/a2aclient"
 )
 
 // mockRunStartAuditd serves POST .../runs (recordPlaybookRunStart) and POST
@@ -486,5 +489,79 @@ func TestRecordPlaybookRunComplete_AbandonedOutcome_NoAttribution(t *testing.T) 
 
 	if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc"); len(calls) != 0 {
 		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 0 for an abandoned outcome (nothing to classify)", len(calls))
+	}
+}
+
+// TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_ClassifiesAttribution
+// closes the gap all the direct-call tests above can't: it drives a genuine
+// single-hop agent resolution through the real HTTP handler chain (a real A2A
+// agent response, real FINDINGS/outcome computation in handlePlaybookRunAsAgent,
+// real async recordPlaybookRunComplete) and proves the resulting PATCH carries
+// the classifier's real output — not a hand-constructed outcome/response-text
+// pair passed directly to recordPlaybookRunComplete, which only proves that
+// function's own parameter handling (already covered by the direct-call tests
+// above).
+func TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_ClassifiesAttribution(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_inc_attr01",
+		SeriesID:      "pbs_inc_attr01",
+		Name:          "Incident Attribution Wiring Test",
+		ExecutionMode: "agent",
+		AgentName:     "attr_test_agent",
+		IsActive:      true,
+	}
+	mock := &mockRunStartAuditd{
+		playbook:      pb,
+		incidentByRun: &audit.Incident{IncidentID: "inc_attr01", SeriesID: pb.SeriesID},
+		playbookBySeriesID: &audit.Playbook{
+			SeriesID:         pb.SeriesID,
+			RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"connection-pool-saturation"}},
+		},
+	}
+	srv := mock.start(t)
+
+	// No ESCALATE_TO/TRANSITION_TO → handlePlaybookRunAsAgent's own signal-line
+	// parsing sets outcome="resolved" (playbooks.go:636) — not something this
+	// test fabricates.
+	_, card := mockA2AServerWithText(t, "attr_test_agent",
+		"FINDINGS: pool is saturated, root cause confirmed.\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"attr_test_agent": client}
+	gw.plannerLLM = func(ctx context.Context, prompt string) (string, error) {
+		return "connection-pool-saturation", nil
+	}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"pool alert"}`)
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("got 502; body: %s", rec.Body.String())
+	}
+
+	// recordPlaybookRunComplete (and the classification it now triggers) fires
+	// via "go" (fire-and-forget) — poll briefly instead of racing it, same
+	// pattern used elsewhere in this file for the same reason.
+	var patchBody string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_attr01"); len(calls) > 0 {
+			patchBody = calls[0].body
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if patchBody == "" {
+		t.Fatal("PATCH /v1/incidents/inc_attr01 never arrived — a real HTTP-driven resolution did not trigger attribution classification")
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(patchBody), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["attribution"] != "connection-pool-saturation" {
+		t.Errorf("attribution = %q, want connection-pool-saturation", body["attribution"])
 	}
 }
