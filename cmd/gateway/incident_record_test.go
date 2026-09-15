@@ -28,6 +28,12 @@ type mockRunStartAuditd struct {
 	// calling recordPlaybookRunStart directly.
 	playbook *audit.Playbook
 	priorRun *audit.PlaybookRun
+	// incidentByRun/playbookBySeriesID/attributionPatchStatus support Phase 2's
+	// classifyIncidentAttribution tests: GET /v1/incidents/by-run/{runID},
+	// GET /v1/fleet/playbooks?series_id=, and forcing a non-204 PATCH response.
+	incidentByRun          *audit.Incident
+	playbookBySeriesID     *audit.Playbook
+	attributionPatchStatus int
 }
 
 type capturedRequest struct {
@@ -47,6 +53,10 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && m.playbookBySeriesID != nil && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{m.playbookBySeriesID}}) //nolint:errcheck
+		case r.Method == http.MethodGet && m.incidentByRun != nil && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			json.NewEncoder(w).Encode(m.incidentByRun) //nolint:errcheck
 		case r.Method == http.MethodGet && m.playbook != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
 			json.NewEncoder(w).Encode(m.playbook) //nolint:errcheck
 		case r.Method == http.MethodGet && m.priorRun != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbook-runs/"):
@@ -63,6 +73,12 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 			if status == http.StatusCreated {
 				json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_test01"}) //nolint:errcheck
 			}
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/v1/incidents/"):
+			status := m.attributionPatchStatus
+			if status == 0 {
+				status = http.StatusNoContent
+			}
+			w.WriteHeader(status)
 		case r.Method == http.MethodPatch:
 			// recordPlaybookRunComplete's best-effort outcome patch — not under
 			// test here, just needs to not 404/connection-refuse noisily.
@@ -155,7 +171,7 @@ func TestRecordPlaybookRunStart_IncidentCreateFails_RunStillReturned(t *testing.
 func TestCreateIncidentRecord_NoAuditURL_NoOp(t *testing.T) {
 	gw := &Gateway{}
 	// Should not panic and should simply return — no server configured.
-	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x")
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x")
 }
 
 func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
@@ -163,7 +179,7 @@ func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
 	srv := mock.start(t)
 	gw := &Gateway{auditURL: srv.URL}
 
-	gw.createIncidentRecord(context.Background(), "", "trace_x")
+	gw.createIncidentRecord(context.Background(), "", "trace_x", "pbs_x")
 
 	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
 		t.Errorf("POST /v1/incidents calls = %d, want 0 when runID is empty", len(calls))
@@ -245,5 +261,230 @@ func TestHandlePlaybookRun_ContinuationRequest_NoIncidentCreated_ViaRealHTTPHand
 	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
 		t.Errorf("POST /v1/incidents calls = %d, want 0 for a real HTTP request carrying prior_run_id "+
 			"(a continuation hop, not a genuine entry point)", len(calls))
+	}
+}
+
+// --- Phase 2: root-cause attribution classification for real incidents ---
+
+func TestCreateIncidentRecord_IncludesSeriesID(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "pbs_max_connections_triage"}
+	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
+		"trace_abc", "", "", "operator1")
+
+	incidentCalls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(incidentCalls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(incidentCalls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(incidentCalls[0].body), &body); err != nil {
+		t.Fatalf("decode incident body: %v", err)
+	}
+	if body.SeriesID != "pbs_max_connections_triage" {
+		t.Errorf("incident series_id = %q, want pbs_max_connections_triage", body.SeriesID)
+	}
+}
+
+func TestFetchIncidentByEntryRunID_Found(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"}}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	inc, err := gw.fetchIncidentByEntryRunID(context.Background(), "plr_x")
+	if err != nil {
+		t.Fatalf("fetchIncidentByEntryRunID: %v", err)
+	}
+	if inc == nil || inc.IncidentID != "inc_abc" {
+		t.Errorf("got %+v, want incident inc_abc", inc)
+	}
+}
+
+func TestFetchIncidentByEntryRunID_NotFound(t *testing.T) {
+	mock := &mockRunStartAuditd{} // incidentByRun unset → mock 404s
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	inc, err := gw.fetchIncidentByEntryRunID(context.Background(), "plr_x")
+	if err != nil {
+		t.Errorf("fetchIncidentByEntryRunID on 404 = %v, want nil error (not-found is not a failure)", err)
+	}
+	if inc != nil {
+		t.Errorf("got %+v, want nil", inc)
+	}
+}
+
+func TestPatchIncidentAttribution_SendsAttributionBody(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.patchIncidentAttribution(context.Background(), "inc_abc", "connection-pool-saturation")
+
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 1", len(calls))
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["attribution"] != "connection-pool-saturation" {
+		t.Errorf("attribution = %q, want connection-pool-saturation", body["attribution"])
+	}
+}
+
+func TestClassifyIncidentAttribution_NoIncidentFound_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{} // incidentByRun unset → 404
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: fleetPlannerLLM(t)}
+
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "some diagnostic text")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when no incident row exists for this run", len(calls))
+	}
+}
+
+func TestClassifyIncidentAttribution_IncidentHasNoSeriesID_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_abc"}} // SeriesID unset
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: fleetPlannerLLM(t)}
+
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "some diagnostic text")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when the incident has no series_id to classify against", len(calls))
+	}
+}
+
+func TestClassifyIncidentAttribution_NoPlannerLLM_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun:      &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+		playbookBySeriesID: &audit.Playbook{SeriesID: "pbs_x", RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"a", "b"}}},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL} // plannerLLM unset
+
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "some diagnostic text")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when no planner LLM is configured", len(calls))
+	}
+}
+
+func TestClassifyIncidentAttribution_PlaybookHasNoRootCauseClasses_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun:      &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+		playbookBySeriesID: &audit.Playbook{SeriesID: "pbs_x"}, // RootCauseClasses unset
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: fleetPlannerLLM(t)}
+
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "some diagnostic text")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when the entry playbook declares no root_cause_classes", len(calls))
+	}
+}
+
+func TestClassifyIncidentAttribution_HappyPath_PatchesAttribution(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+		playbookBySeriesID: &audit.Playbook{
+			SeriesID:         "pbs_x",
+			RootCauseClasses: &audit.RootCauseClassification{Version: "1.0.0", Classes: []string{"connection-pool-saturation", "connection-pool-leak"}},
+		},
+	}
+	srv := mock.start(t)
+	llmCalled := false
+	gw := &Gateway{
+		auditURL: srv.URL,
+		plannerLLM: func(ctx context.Context, prompt string) (string, error) {
+			llmCalled = true
+			return "connection-pool-saturation", nil
+		},
+	}
+
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "pool is saturated, root cause confirmed")
+
+	if !llmCalled {
+		t.Error("planner LLM was never invoked for classification")
+	}
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 1", len(calls))
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["attribution"] != "connection-pool-saturation" {
+		t.Errorf("attribution = %q, want connection-pool-saturation", body["attribution"])
+	}
+}
+
+func TestIsAttributableOutcome(t *testing.T) {
+	cases := map[string]bool{
+		audit.OutcomeResolved:          true,
+		audit.OutcomeEscalated:         true,
+		audit.OutcomeEscalatedResolved: true,
+		audit.OutcomeAbandoned:         false,
+		audit.OutcomeUnknown:           false,
+		"gate_pending":                 false,
+		"":                             false,
+	}
+	for outcome, want := range cases {
+		if got := isAttributableOutcome(outcome); got != want {
+			t.Errorf("isAttributableOutcome(%q) = %v, want %v", outcome, got, want)
+		}
+	}
+}
+
+func TestRecordPlaybookRunComplete_ResolvedOutcome_TriggersAttribution(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+		playbookBySeriesID: &audit.Playbook{
+			SeriesID:         "pbs_x",
+			RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"connection-pool-saturation"}},
+		},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{
+		auditURL: srv.URL,
+		plannerLLM: func(ctx context.Context, prompt string) (string, error) {
+			return "connection-pool-saturation", nil
+		},
+	}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_x", audit.OutcomeResolved,
+		"", "", "pool saturated", "pool is saturated, confirmed root cause", "", nil, false, "")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc"); len(calls) != 1 {
+		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 1 for a resolved outcome", len(calls))
+	}
+}
+
+func TestRecordPlaybookRunComplete_AbandonedOutcome_NoAttribution(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+		playbookBySeriesID: &audit.Playbook{
+			SeriesID:         "pbs_x",
+			RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"connection-pool-saturation"}},
+		},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{
+		auditURL:   srv.URL,
+		plannerLLM: fleetPlannerLLM(t),
+	}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_x", audit.OutcomeAbandoned,
+		"", "", "gate denied", "", "", nil, false, "operator denied")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 0 for an abandoned outcome (nothing to classify)", len(calls))
 	}
 }

@@ -32,6 +32,7 @@ type Incident struct {
 	IncidentID            string    `json:"incident_id"`
 	TraceID               string    `json:"trace_id,omitempty"`
 	EntryRunID            string    `json:"entry_run_id,omitempty"`
+	SeriesID              string    `json:"series_id,omitempty"`               // entry playbook's SeriesID, recorded at creation time
 	Origin                string    `json:"origin"`                            // "real" | "faulttest"
 	Severity              string    `json:"severity,omitempty"`                // operator-settable, optional
 	Status                string    `json:"status"`                            // open | resolved | escalated | abandoned
@@ -107,11 +108,27 @@ CREATE TABLE IF NOT EXISTS incidents (
 	return s.migrate()
 }
 
-// migrate applies additive schema changes to existing databases. Empty today —
-// the table is brand new — kept as a stub matching this package's standing
-// convention (see PlaybookRunStore.migrate) so future columns have an
-// established, idempotent place to land without a fresh CREATE TABLE.
+// migrate applies additive schema changes to existing databases, following
+// this package's standing convention (see PlaybookRunStore.migrate).
 func (s *IncidentStore) migrate() error {
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		// Phase 2 (v0.29): recorded at incident-creation time from the entry
+		// playbook's own SeriesID, so attribution classification at resolution
+		// time can re-fetch that series' current root_cause_classes without an
+		// extra playbook_runs round-trip just to relearn which series this was.
+		{"series_id", `ALTER TABLE incidents ADD COLUMN series_id TEXT NOT NULL DEFAULT ''`},
+	} {
+		if _, err := s.db.Exec(col.ddl); err != nil {
+			// SQLite says "duplicate column name: X"; Postgres says
+			// "column X of relation ... already exists". Accept both.
+			if !containsAny(err.Error(), "duplicate column", "already exists") {
+				return fmt.Errorf("migrate incidents.%s: %w", col.name, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -137,11 +154,11 @@ func (s *IncidentStore) Create(ctx context.Context, inc *Incident) error {
 
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		INSERT INTO incidents
-		    (incident_id, trace_id, entry_run_id, origin, severity, status,
+		    (incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		     attribution, external_correlation_id, bundle_path,
 		     detected_at, resolved_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		inc.IncidentID, inc.TraceID, inc.EntryRunID, inc.Origin, inc.Severity, inc.Status,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		inc.IncidentID, inc.TraceID, inc.EntryRunID, inc.SeriesID, inc.Origin, inc.Severity, inc.Status,
 		inc.Attribution, inc.ExternalCorrelationID, inc.BundlePath,
 		inc.DetectedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(inc.ResolvedAt),
@@ -214,7 +231,7 @@ func (s *IncidentStore) Update(ctx context.Context, incidentID string, u Inciden
 // if not found.
 func (s *IncidentStore) GetByID(ctx context.Context, incidentID string) (*Incident, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-		SELECT incident_id, trace_id, entry_run_id, origin, severity, status,
+		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
@@ -228,7 +245,7 @@ func (s *IncidentStore) GetByID(ctx context.Context, incidentID string) (*Incide
 // that predates this table) rather than an error.
 func (s *IncidentStore) GetByEntryRunID(ctx context.Context, runID string) (*Incident, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
-		SELECT incident_id, trace_id, entry_run_id, origin, severity, status,
+		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
@@ -252,7 +269,7 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 		limit = 50
 	}
 	query := `
-		SELECT incident_id, trace_id, entry_run_id, origin, severity, status,
+		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
@@ -297,7 +314,7 @@ func scanIncident(s incidentScanner) (*Incident, error) {
 	var inc Incident
 	var detectedStr, resolvedStr, createdStr, updatedStr string
 	if err := s.Scan(
-		&inc.IncidentID, &inc.TraceID, &inc.EntryRunID, &inc.Origin, &inc.Severity, &inc.Status,
+		&inc.IncidentID, &inc.TraceID, &inc.EntryRunID, &inc.SeriesID, &inc.Origin, &inc.Severity, &inc.Status,
 		&inc.Attribution, &inc.ExternalCorrelationID, &inc.BundlePath,
 		&detectedStr, &resolvedStr, &createdStr, &updatedStr,
 	); err != nil {

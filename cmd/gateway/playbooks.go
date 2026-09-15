@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/decisions"
@@ -2533,22 +2534,26 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		// this is where the incidents table's one row per user-facing
 		// incident gets created. See docs/INCIDENTS.md and the v0.29
 		// incident-entity design (Phase 1).
-		g.createIncidentRecord(ctx, created.RunID, traceID)
+		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID)
 	}
 	return created.RunID
 }
 
 // createIncidentRecord creates the incidents table row for a genuine
-// entry-point playbook run. Best-effort: a failure here must never block the
-// playbook run itself, so it only logs — recordPlaybookRunStart's caller
-// already has the run ID it needs regardless of whether this succeeds.
-func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID string) {
+// entry-point playbook run. seriesID is recorded so attribution
+// classification at resolution time (Phase 2) can re-fetch this series'
+// current root_cause_classes without a second playbook_runs round-trip.
+// Best-effort: a failure here must never block the playbook run itself, so it
+// only logs — recordPlaybookRunStart's caller already has the run ID it needs
+// regardless of whether this succeeds.
+func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID string) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
 	inc := audit.Incident{
 		TraceID:    traceID,
 		EntryRunID: runID,
+		SeriesID:   seriesID,
 	}
 	body, err := json.Marshal(inc)
 	if err != nil {
@@ -2581,6 +2586,115 @@ func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID strin
 			"auditd_error", strings.TrimSpace(string(respBody)),
 		)
 	}
+}
+
+// fetchIncidentByEntryRunID returns the incidents row whose entry_run_id
+// matches runID, if any. Returns (nil, nil) — not an error — when auditd
+// reports 404: most callers should treat "no incident for this run" (a
+// chained/remediation hop, or a run recorded before this table existed) as a
+// normal, expected case rather than a failure.
+func (g *Gateway) fetchIncidentByEntryRunID(ctx context.Context, runID string) (*audit.Incident, error) {
+	if g.auditURL == "" || runID == "" {
+		return nil, nil
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/by-run/" + runID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var inc audit.Incident
+	if err := json.NewDecoder(resp.Body).Decode(&inc); err != nil {
+		return nil, err
+	}
+	return &inc, nil
+}
+
+// patchIncidentAttribution writes a root-cause classification onto an
+// existing incidents row. Best-effort: failures are logged but never
+// propagated — a missed attribution write must not affect anything else.
+func (g *Gateway) patchIncidentAttribution(ctx context.Context, incidentID, attribution string) {
+	if g.auditURL == "" || incidentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"attribution": attribution})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("patchIncidentAttribution: request failed", "incident_id", incidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("patchIncidentAttribution: unexpected status",
+			"incident_id", incidentID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// classifyIncidentAttribution is Phase 2 of the v0.29 incident-entity design
+// (see docs/INCIDENTS.md): the same root-cause classifier faulttest already
+// runs at cert time (agentutil.ClassifyAttribution), now run against a real,
+// organically-resolved incident. No-ops quietly (not an error) whenever:
+//   - runID isn't a genuine entry point (no incidents row — e.g. a
+//     chainEscalation per-hop completion; the aggregate finalOutcome call for
+//     the whole chain is keyed by the entry run's own runID and does have a row),
+//   - the entry playbook has no series_id or no root_cause_classes defined
+//     (most playbooks don't declare a taxonomy — nothing to classify against),
+//   - no planner LLM is configured.
+func (g *Gateway) classifyIncidentAttribution(ctx context.Context, runID, responseText string) {
+	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	if err != nil {
+		slog.Warn("classifyIncidentAttribution: could not look up incident", "run_id", runID, "err", err)
+		return
+	}
+	if inc == nil || inc.SeriesID == "" {
+		return
+	}
+	if g.plannerLLM == nil {
+		return
+	}
+	pb, err := g.fetchPlaybookBySeriesID(ctx, inc.SeriesID)
+	if err != nil || pb.RootCauseClasses == nil || len(pb.RootCauseClasses.Classes) == 0 {
+		return
+	}
+	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, pb.RootCauseClasses.Classes)
+	g.patchIncidentAttribution(ctx, inc.IncidentID, label)
 }
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
@@ -2637,6 +2751,33 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"status", resp.StatusCode,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
+		return
+	}
+
+	// Phase 2 of the v0.29 incident-entity design (see docs/INCIDENTS.md):
+	// classify real-incident root cause the same way faulttest already does
+	// for injected ones, and attach it to the incidents row — if runID isn't
+	// a genuine entry point (chainEscalation's per-hop completion, e.g.),
+	// classifyIncidentAttribution's own incident lookup no-ops harmlessly.
+	if isAttributableOutcome(outcome) {
+		responseText := agentTranscript
+		if responseText == "" {
+			responseText = findingsSummary
+		}
+		g.classifyIncidentAttribution(ctx, runID, responseText)
+	}
+}
+
+// isAttributableOutcome reports whether outcome represents a genuine
+// diagnostic conclusion worth root-cause classification — as opposed to
+// "unknown" (nothing was concluded), "abandoned" (gate denied / step failed),
+// or "gate_pending" (not yet concluded).
+func isAttributableOutcome(outcome string) bool {
+	switch outcome {
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved:
+		return true
+	default:
+		return false
 	}
 }
 

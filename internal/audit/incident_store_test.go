@@ -61,6 +61,40 @@ func TestIncidentStore_CreateAndGetByID(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_SeriesID_RoundTrips(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	inc := &Incident{EntryRunID: "plr_seriestest", SeriesID: "pbs_db_max_connections_triage"}
+	if err := s.Create(ctx, inc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.GetByID(ctx, inc.IncidentID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.SeriesID != "pbs_db_max_connections_triage" {
+		t.Errorf("SeriesID = %q, want pbs_db_max_connections_triage", got.SeriesID)
+	}
+
+	byRun, err := s.GetByEntryRunID(ctx, "plr_seriestest")
+	if err != nil {
+		t.Fatalf("GetByEntryRunID: %v", err)
+	}
+	if byRun.SeriesID != "pbs_db_max_connections_triage" {
+		t.Errorf("GetByEntryRunID SeriesID = %q, want pbs_db_max_connections_triage", byRun.SeriesID)
+	}
+
+	listed, err := s.List(ctx, IncidentListFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listed) != 1 || listed[0].SeriesID != "pbs_db_max_connections_triage" {
+		t.Errorf("List SeriesID not carried through: %+v", listed)
+	}
+}
+
 func TestIncidentStore_Create_ExplicitOrigin(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()

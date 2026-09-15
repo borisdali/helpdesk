@@ -380,8 +380,8 @@ For engineers working on the authorization code:
 |---|---|---|
 | `Permission`, `Authorizer`, `Authorize`, `Require` | `internal/authz/authz.go` | Core authorization logic and context helpers |
 | `Middleware` | `internal/authz/middleware.go` | http.Handler wrapper (for tests; production uses per-route closures) |
-| Gateway permission table | `internal/authz/gateway_routes.go` | `DefaultGatewayPermissions` — 30 entries |
-| auditd permission table | `internal/authz/auditd_routes.go` | `DefaultAuditdPermissions` — 45 entries |
+| Gateway permission table | `internal/authz/gateway_routes.go` | `DefaultGatewayPermissions` — 73 entries |
+| auditd permission table | `internal/authz/auditd_routes.go` | `DefaultAuditdPermissions` — 62 entries |
 | Gateway route wiring | `cmd/gateway/gateway.go` `RegisterRoutes` | `auth(pattern, h)` closure applied to every route |
 | auditd route wiring | `cmd/auditd/main.go` | same `auth(pattern, h)` pattern |
 | Approval fine-grained check | `cmd/auditd/approval_handlers.go` | `authzr.Require(principal, required)` after middleware gate |
