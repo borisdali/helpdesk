@@ -46,26 +46,27 @@ const agentNameSysadmin = "sysadmin_agent"
 
 // Gateway translates REST requests into A2A calls to sub-agents.
 type Gateway struct {
-	agents           map[string]*discovery.Agent
-	clients          map[string]*a2aclient.Client
-	infra            *infra.Config
-	auditor          *audit.GatewayAuditor
-	auditURL         string                                                   // URL to auditd service for governance queries
-	auditAPIKey      string                                                   // Bearer token for authenticating proxy requests to auditd
-	baseURL          string                                                   // Gateway's own public base URL (for building absolute links in notifications)
-	identityProvider identity.Provider                                        // resolves caller identity on every request
-	authzr           *authz.Authorizer                                        // central per-route authorizer (nil = no authz)
-	operatingMode    string                                                   // "readonly" or "fix"
-	agentAPIKey      string                                                   // Bearer token sent to agent POST /tool/{name} endpoints
-	toolRegistry     *toolregistry.Registry                                   // catalog of discovered tools
-	plannerLLM       func(ctx context.Context, prompt string) (string, error) // injectable for tests
-	usersFile        string                                                   // path to users.yaml; empty = dev/no-auth mode
-	metrics          *GatewayMetrics                                          // Prometheus-compatible metrics endpoint
-	crystalBall      bool                                                     // when true, bypass playbook guidance/chaining — for demo/comparison only
-	decisionNotifier *decisions.DecisionNotifier                              // nil = notifications disabled
-	gitWebhookCfg    GitWebhookConfig
-	entryPointCache  entryPointPlaybookCache // cached list for query-time playbook auto-selection
-	diagnosisModel   string                  // HELPDESK_MODEL_NAME, used by trustNotYetEarnedForceGate's cert lookup; empty = check disabled, not "fail closed"
+	agents             map[string]*discovery.Agent
+	clients            map[string]*a2aclient.Client
+	infra              *infra.Config
+	auditor            *audit.GatewayAuditor
+	auditURL           string                                                   // URL to auditd service for governance queries
+	auditAPIKey        string                                                   // Bearer token for authenticating proxy requests to auditd
+	baseURL            string                                                   // Gateway's own public base URL (for building absolute links in notifications)
+	identityProvider   identity.Provider                                        // resolves caller identity on every request
+	authzr             *authz.Authorizer                                        // central per-route authorizer (nil = no authz)
+	operatingMode      string                                                   // "readonly" or "fix"
+	agentAPIKey        string                                                   // Bearer token sent to agent POST /tool/{name} endpoints
+	toolRegistry       *toolregistry.Registry                                   // catalog of discovered tools
+	plannerLLM         func(ctx context.Context, prompt string) (string, error) // injectable for tests
+	usersFile          string                                                   // path to users.yaml; empty = dev/no-auth mode
+	metrics            *GatewayMetrics                                          // Prometheus-compatible metrics endpoint
+	crystalBall        bool                                                     // when true, bypass playbook guidance/chaining — for demo/comparison only
+	decisionNotifier   *decisions.DecisionNotifier                              // nil = notifications disabled
+	gitWebhookCfg      GitWebhookConfig
+	entryPointCache    entryPointPlaybookCache // cached list for query-time playbook auto-selection
+	diagnosisModel     string                  // HELPDESK_MODEL_NAME, used by trustNotYetEarnedForceGate's cert lookup; empty = check disabled, not "fail closed"
+	autoIncidentBundle bool                    // when true, auto-trigger create_incident_bundle on a resolved/escalated entry-point run (v0.29 Phase 3); opt-in, default off
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -165,6 +166,15 @@ func (g *Gateway) SetMetrics(m *GatewayMetrics) {
 // Intended for demo and LLM benchmark comparisons only — not for production use.
 func (g *Gateway) SetCrystalBall(enabled bool) {
 	g.crystalBall = enabled
+}
+
+// SetAutoIncidentBundle enables the v0.29 incident-entity design's Phase 3
+// auto-trigger: on a resolved/escalated entry-point playbook run, the gateway
+// calls the incident agent's create_incident_bundle tool directly (bypassing
+// the LLM) and the resulting bundle_path is recorded on the incidents row.
+// Opt-in, default off — see docs/INCIDENTS.md.
+func (g *Gateway) SetAutoIncidentBundle(enabled bool) {
+	g.autoIncidentBundle = enabled
 }
 
 // SetDiagnosisModel records which LLM model the gateway's fleet of diagnosing

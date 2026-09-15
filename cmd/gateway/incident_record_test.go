@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/discovery"
 
 	"github.com/a2aproject/a2a-go/a2aclient"
 )
@@ -465,12 +466,37 @@ func TestRecordPlaybookRunComplete_ResolvedOutcome_TriggersAttribution(t *testin
 	gw.recordPlaybookRunComplete(context.Background(), "plr_x", audit.OutcomeResolved,
 		"", "", "pool saturated", "pool is saturated, confirmed root cause", "", nil, false, "")
 
-	if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc"); len(calls) != 1 {
-		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 1 for a resolved outcome", len(calls))
+	// Phase 3 (status/resolved_at) and Phase 2 (attribution) each PATCH the
+	// same incident row independently — two calls, not one.
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 2 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 2 (status+resolved_at, attribution) for a resolved outcome", len(calls))
+	}
+	var sawStatus, sawAttribution bool
+	for _, c := range calls {
+		var body map[string]any
+		if err := json.Unmarshal([]byte(c.body), &body); err != nil {
+			t.Fatalf("decode patch body: %v", err)
+		}
+		if body["status"] == audit.IncidentStatusResolved {
+			sawStatus = true
+			if body["resolved_at"] == nil || body["resolved_at"] == "" {
+				t.Error("status patch missing resolved_at")
+			}
+		}
+		if body["attribution"] == "connection-pool-saturation" {
+			sawAttribution = true
+		}
+	}
+	if !sawStatus {
+		t.Error("no PATCH call set status=resolved")
+	}
+	if !sawAttribution {
+		t.Error("no PATCH call set attribution=connection-pool-saturation")
 	}
 }
 
-func TestRecordPlaybookRunComplete_AbandonedOutcome_NoAttribution(t *testing.T) {
+func TestRecordPlaybookRunComplete_AbandonedOutcome_StatusOnlyNoAttribution(t *testing.T) {
 	mock := &mockRunStartAuditd{
 		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
 		playbookBySeriesID: &audit.Playbook{
@@ -487,8 +513,36 @@ func TestRecordPlaybookRunComplete_AbandonedOutcome_NoAttribution(t *testing.T) 
 	gw.recordPlaybookRunComplete(context.Background(), "plr_x", audit.OutcomeAbandoned,
 		"", "", "gate denied", "", "", nil, false, "operator denied")
 
+	// Abandoned is terminal (status patch fires — the investigation is over)
+	// but not attributable (nothing to classify).
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 1 (status only) for an abandoned outcome", len(calls))
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["status"] != audit.IncidentStatusAbandoned {
+		t.Errorf("status = %v, want abandoned", body["status"])
+	}
+	if _, hasAttribution := body["attribution"]; hasAttribution {
+		t.Error("abandoned outcome's status patch should not carry an attribution field")
+	}
+}
+
+func TestRecordPlaybookRunComplete_UnknownOutcome_NoIncidentPatchesAtAll(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x"},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: fleetPlannerLLM(t)}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_x", audit.OutcomeUnknown,
+		"", "", "", "", "", nil, false, "")
+
 	if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc"); len(calls) != 0 {
-		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 0 for an abandoned outcome (nothing to classify)", len(calls))
+		t.Errorf("PATCH /v1/incidents/inc_abc calls = %d, want 0 for outcome=unknown (not terminal, nothing concluded)", len(calls))
 	}
 }
 
@@ -542,26 +596,309 @@ func TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_ClassifiesAttribut
 		t.Fatalf("got 502; body: %s", rec.Body.String())
 	}
 
-	// recordPlaybookRunComplete (and the classification it now triggers) fires
-	// via "go" (fire-and-forget) — poll briefly instead of racing it, same
-	// pattern used elsewhere in this file for the same reason.
-	var patchBody string
+	// recordPlaybookRunComplete (and the classification/status-close it now
+	// triggers — Phase 2 and Phase 3 of the v0.29 incident-entity design each
+	// PATCH this row independently) fires via "go" (fire-and-forget) — poll
+	// briefly instead of racing it, same pattern used elsewhere in this file.
+	var sawAttribution bool
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_attr01"); len(calls) > 0 {
-			patchBody = calls[0].body
+		for _, c := range mock.calls(http.MethodPatch, "/v1/incidents/inc_attr01") {
+			var body map[string]string
+			if err := json.Unmarshal([]byte(c.body), &body); err == nil && body["attribution"] == "connection-pool-saturation" {
+				sawAttribution = true
+			}
+		}
+		if sawAttribution {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if patchBody == "" {
-		t.Fatal("PATCH /v1/incidents/inc_attr01 never arrived — a real HTTP-driven resolution did not trigger attribution classification")
+	if !sawAttribution {
+		t.Fatal("no PATCH /v1/incidents/inc_attr01 carried attribution=connection-pool-saturation — a real HTTP-driven resolution did not trigger attribution classification")
 	}
-	var body map[string]string
-	if err := json.Unmarshal([]byte(patchBody), &body); err != nil {
-		t.Fatalf("decode patch body: %v", err)
+}
+
+// --- Phase 3: status/resolved_at close-out + bundle auto-trigger ---
+
+func TestIsTerminalIncidentOutcome(t *testing.T) {
+	cases := map[string]bool{
+		audit.OutcomeResolved:          true,
+		audit.OutcomeEscalated:         true,
+		audit.OutcomeEscalatedResolved: true,
+		audit.OutcomeAbandoned:         true,
+		audit.OutcomeUnknown:           false,
+		"gate_pending":                 false,
+		"":                             false,
 	}
-	if body["attribution"] != "connection-pool-saturation" {
-		t.Errorf("attribution = %q, want connection-pool-saturation", body["attribution"])
+	for outcome, want := range cases {
+		if got := isTerminalIncidentOutcome(outcome); got != want {
+			t.Errorf("isTerminalIncidentOutcome(%q) = %v, want %v", outcome, got, want)
+		}
+	}
+}
+
+func TestIncidentStatusForOutcome(t *testing.T) {
+	cases := map[string]string{
+		audit.OutcomeResolved:          audit.IncidentStatusResolved,
+		audit.OutcomeEscalatedResolved: audit.IncidentStatusResolved,
+		audit.OutcomeEscalated:         audit.IncidentStatusEscalated,
+		audit.OutcomeAbandoned:         audit.IncidentStatusAbandoned,
+	}
+	for outcome, want := range cases {
+		if got := incidentStatusForOutcome(outcome); got != want {
+			t.Errorf("incidentStatusForOutcome(%q) = %q, want %q", outcome, got, want)
+		}
+	}
+}
+
+func TestCloseIncidentRecord_NoIncidentFound_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{} // incidentByRun unset -> 404
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.closeIncidentRecord(context.Background(), "plr_x", audit.OutcomeResolved)
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when no incident row exists", len(calls))
+	}
+}
+
+func TestCloseIncidentRecord_Found_PatchesStatusAndResolvedAt(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_close01"}}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.closeIncidentRecord(context.Background(), "plr_x", audit.OutcomeEscalated)
+
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_close01")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", len(calls))
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != audit.IncidentStatusEscalated {
+		t.Errorf("status = %v, want escalated", body["status"])
+	}
+	if body["resolved_at"] == nil || body["resolved_at"] == "" {
+		t.Error("resolved_at missing or empty")
+	}
+}
+
+// mockIncidentDirectAgent serves POST /tool/{name} the way agents/incident's
+// direct-tool registry does, recording requests and returning a canned
+// directToolResp so triggerIncidentBundle's HTTP mechanics can be tested
+// without a real incident agent process.
+type mockIncidentDirectAgent struct {
+	mu       sync.Mutex
+	requests []capturedRequest
+	status   int    // 0 = 200
+	output   string // JSON-encoded incidentBundleResult; empty uses a default
+	toolErr  string
+}
+
+func (m *mockIncidentDirectAgent) start(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf strings.Builder
+		io.Copy(&buf, r.Body) //nolint:errcheck
+		m.mu.Lock()
+		m.requests = append(m.requests, capturedRequest{method: r.Method, path: r.URL.Path, body: buf.String()})
+		m.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		status := m.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		output := m.output
+		if output == "" && m.toolErr == "" {
+			output = `{"incident_id":"a1b2c3d4","bundle_path":"/data/incidents/a1b2c3d4.tar.gz","timestamp":"20260101-000000","layers":["os","storage"]}`
+		}
+		json.NewEncoder(w).Encode(map[string]string{"output": output, "error": m.toolErr}) //nolint:errcheck
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func (m *mockIncidentDirectAgent) calls() []capturedRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]capturedRequest(nil), m.requests...)
+}
+
+func TestTriggerIncidentBundle_FlagOff_NoCall(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_x"}}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: false,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "findings")
+
+	if len(agentMock.calls()) != 0 {
+		t.Error("incident agent should not be called when autoIncidentBundle is off")
+	}
+}
+
+func TestTriggerIncidentBundle_AgentNotWired_NoCall(t *testing.T) {
+	auditMock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_x"}}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{}, // incident agent absent
+	}
+
+	// Should not panic even though there's nowhere to call.
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "findings")
+}
+
+func TestTriggerIncidentBundle_NoIncidentFound_NoCall(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{} // incidentByRun unset -> 404
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "findings")
+
+	if len(agentMock.calls()) != 0 {
+		t.Error("incident agent should not be called when no incident row exists for this run")
+	}
+}
+
+func TestTriggerIncidentBundle_HappyPath_CallsDirectToolWithArgs(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_bundle01", TraceID: "tr_bundle01"},
+		priorRun:      &audit.PlaybookRun{RunID: "plr_x", ConnectionString: "postgres://localhost/test"},
+	}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "pool exhausted")
+
+	calls := agentMock.calls()
+	if len(calls) != 1 {
+		t.Fatalf("direct tool calls = %d, want 1", len(calls))
+	}
+	if calls[0].path != "/tool/create_incident_bundle" {
+		t.Errorf("path = %q, want /tool/create_incident_bundle", calls[0].path)
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if req.TraceID != "tr_bundle01" {
+		t.Errorf("trace_id = %q, want tr_bundle01", req.TraceID)
+	}
+	if req.Args["incident_id"] != "inc_bundle01" {
+		t.Errorf("args.incident_id = %v, want inc_bundle01", req.Args["incident_id"])
+	}
+	if req.Args["connection_string"] != "postgres://localhost/test" {
+		t.Errorf("args.connection_string = %v, want the fetched PlaybookRun's ConnectionString", req.Args["connection_string"])
+	}
+	if req.Args["outcome"] != audit.OutcomeResolved {
+		t.Errorf("args.outcome = %v, want resolved", req.Args["outcome"])
+	}
+}
+
+func TestTriggerIncidentBundle_PlaybookRunFetchFails_StillCallsWithoutConnectionString(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	// priorRun unset -> fetchPlaybookRun 404s; triggerIncidentBundle must
+	// still proceed (best-effort degrade to no connection_string, matching
+	// create_incident_bundle's own "layer skipped if absent" semantics).
+	auditMock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_bundle02"}}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "findings")
+
+	calls := agentMock.calls()
+	if len(calls) != 1 {
+		t.Fatalf("direct tool calls = %d, want 1 (best-effort even when the PlaybookRun fetch fails)", len(calls))
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if _, has := req.Args["connection_string"]; has {
+		t.Error("connection_string should be absent when the PlaybookRun fetch failed")
+	}
+}
+
+func TestTriggerIncidentBundle_AgentToolError_DoesNotPanic(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{toolErr: "psql: connection refused"}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_bundle03"}}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	// Best-effort: an agent-side tool error must not panic or propagate.
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "findings")
+}
+
+func TestCallIncidentDirectTool_DecodesResult(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{
+		output: `{"incident_id":"xyz","bundle_path":"/data/incidents/xyz.tar.gz","layers":["database","os"]}`,
+	}
+	agentSrv := agentMock.start(t)
+	gw := &Gateway{}
+
+	result, err := gw.callIncidentDirectTool(context.Background(), agentSrv.URL+"/invoke", "create_incident_bundle", map[string]any{"incident_id": "inc_x"}, "tr_x")
+	if err != nil {
+		t.Fatalf("callIncidentDirectTool: %v", err)
+	}
+	if result.BundlePath != "/data/incidents/xyz.tar.gz" {
+		t.Errorf("BundlePath = %q, want /data/incidents/xyz.tar.gz", result.BundlePath)
+	}
+	if len(result.Layers) != 2 {
+		t.Errorf("Layers = %v, want 2 entries", result.Layers)
+	}
+}
+
+func TestCallIncidentDirectTool_ErrorStatus_ReturnsError(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{status: http.StatusUnprocessableEntity, toolErr: "psql: connection refused"}
+	agentSrv := agentMock.start(t)
+	gw := &Gateway{}
+
+	_, err := gw.callIncidentDirectTool(context.Background(), agentSrv.URL+"/invoke", "create_incident_bundle", map[string]any{}, "")
+	if err == nil {
+		t.Fatal("expected an error for a 422 tool response, got nil")
+	}
+	if !strings.Contains(err.Error(), "psql: connection refused") {
+		t.Errorf("error = %v, want it to include the agent's tool error", err)
 	}
 }

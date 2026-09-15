@@ -158,6 +158,12 @@ gateway:
   # comparisons and demos only. NOT recommended for production use.
   crystalBall: false
 
+  # Auto incident bundle (v0.29 incident-entity design, Phase 3): on a
+  # resolved/escalated entry-point playbook run, automatically call the
+  # incident agent's create_incident_bundle tool and record bundle_path on
+  # the incidents row. Opt-in, default off. See docs/INCIDENTS.md.
+  autoIncidentBundle: false
+
   # Public base URL of this gateway (e.g. "https://helpdesk.example.com").
   # Used to build absolute resolve_url links in Decision Hub API responses and
   # webhook notification payloads. Leave empty to use relative paths (fine for

@@ -19,6 +19,13 @@ type Manifest struct {
 	Timestamp   time.Time `json:"timestamp"`
 	Layers      []string  `json:"layers"`
 	Errors      []string  `json:"errors,omitempty"`
+	// TraceID cross-references this bundle back to its audit trace — set from
+	// currentTraceStore when available. Independent of IncidentID above (this
+	// bundle's own locally-generated identity, used for its tarball filename)
+	// and of the caller-supplied incidents-table ID (CreateIncidentBundleArgs.IncidentID,
+	// v0.29 incident-entity design, Phase 3) — three distinct identifiers that
+	// happen to share a bundle, not the same concept under different names.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // assembleTarball creates a .tar.gz bundle from collected layer data.

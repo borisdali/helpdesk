@@ -77,7 +77,7 @@ func main() {
 		SkillTags: map[string][]string{
 			"incident_agent":                        {"incident", "diagnostics", "bundle"},
 			"incident_agent-create_incident_bundle": {"incident", "bundle", "diagnostics", "tarball"},
-			"incident_agent-list_incidents":          {"incident", "listing", "history"},
+			"incident_agent-list_incidents":         {"incident", "listing", "history"},
 		},
 		SkillExamples: map[string][]string{
 			"incident_agent-create_incident_bundle": {
@@ -88,7 +88,7 @@ func main() {
 		},
 	}
 
-	if err := agentserve.ServeWithTracing(ctx, incidentAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
+	if err := agentserve.ServeWithTracingAndDirectTools(ctx, incidentAgent, cfg, traceStore, auditStore, NewIncidentDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
