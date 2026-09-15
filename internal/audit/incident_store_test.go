@@ -284,6 +284,91 @@ func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_MigrateIsIdempotent(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if _, err := NewIncidentStore(store.DB(), false); err != nil {
+		t.Fatalf("first NewIncidentStore: %v", err)
+	}
+	if _, err := NewIncidentStore(store.DB(), false); err != nil {
+		t.Fatalf("second NewIncidentStore (migrate should be idempotent): %v", err)
+	}
+}
+
+// TestIncidentStore_MigrateAddsSeriesID proves the Phase 2 series_id column
+// lands correctly on a genuinely pre-existing (Phase 1-shaped) incidents
+// table — not just a freshly created one — and that the pre-existing row
+// survives untouched. Mirrors this package's established migration-test
+// pattern (see TestRunFeedbackStore_MigrateV1ToV2).
+func TestIncidentStore_MigrateAddsSeriesID(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	db := store.DB()
+
+	// Seed a pre-Phase-2 (no series_id column) incidents table directly.
+	_, err = db.Exec(`CREATE TABLE incidents (
+		incident_id              TEXT     NOT NULL PRIMARY KEY,
+		trace_id                 TEXT     NOT NULL DEFAULT '',
+		entry_run_id             TEXT     NOT NULL DEFAULT '',
+		origin                   TEXT     NOT NULL DEFAULT 'real',
+		severity                 TEXT     NOT NULL DEFAULT '',
+		status                   TEXT     NOT NULL DEFAULT 'open',
+		attribution              TEXT     NOT NULL DEFAULT '',
+		external_correlation_id  TEXT     NOT NULL DEFAULT '',
+		bundle_path              TEXT     NOT NULL DEFAULT '',
+		detected_at              DATETIME NOT NULL,
+		resolved_at              DATETIME NOT NULL DEFAULT '',
+		created_at               DATETIME NOT NULL,
+		updated_at               DATETIME NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create pre-Phase-2 table: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO incidents
+		(incident_id, trace_id, entry_run_id, detected_at, created_at, updated_at)
+		VALUES ('inc_preexisting01', 'tr_old', 'plr_old', '2026-01-01 00:00:00', '2026-01-01 00:00:00', '2026-01-01 00:00:00')`)
+	if err != nil {
+		t.Fatalf("seed pre-existing row: %v", err)
+	}
+
+	// Open the store — should trigger migrate() to add series_id.
+	s, err := NewIncidentStore(db, false)
+	if err != nil {
+		t.Fatalf("NewIncidentStore (migrate): %v", err)
+	}
+
+	got, err := s.GetByID(context.Background(), "inc_preexisting01")
+	if err != nil {
+		t.Fatalf("GetByID after migrate: %v", err)
+	}
+	if got.TraceID != "tr_old" || got.EntryRunID != "plr_old" {
+		t.Errorf("pre-existing row corrupted by migration: %+v", got)
+	}
+	if got.SeriesID != "" {
+		t.Errorf("SeriesID = %q, want empty-string default for a pre-existing row", got.SeriesID)
+	}
+
+	// New rows can set series_id without collision.
+	newInc := &Incident{EntryRunID: "plr_new", SeriesID: "pbs_new_series"}
+	if err := s.Create(context.Background(), newInc); err != nil {
+		t.Fatalf("Create after migrate: %v", err)
+	}
+	got2, err := s.GetByID(context.Background(), newInc.IncidentID)
+	if err != nil {
+		t.Fatalf("GetByID for new row: %v", err)
+	}
+	if got2.SeriesID != "pbs_new_series" {
+		t.Errorf("SeriesID = %q, want pbs_new_series", got2.SeriesID)
+	}
+}
+
 func TestIncidentStore_List_LimitClamping(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()

@@ -39,6 +39,10 @@ func mockAuditdPlaybook(t *testing.T, pb *audit.Playbook) *httptest.Server {
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_mockauditdplaybook01"}) //nolint:errcheck
 			return
 		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.Write(data) //nolint:errcheck
 	}))
 	t.Cleanup(srv.Close)
@@ -3145,6 +3149,8 @@ func newMockChainAuditd(t *testing.T, byID map[string]*audit.Playbook, bySeries 
 			// createIncidentRecord's best-effort call doesn't log noise.
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_chaintest01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			runID := strings.TrimPrefix(r.URL.Path, "/v1/fleet/playbook-runs/")
 			var body map[string]any
@@ -3344,6 +3350,8 @@ func TestHandlePlaybookRun_RawTextAndSawSignalLine_Persisted(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_rawtext_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			body, _ := io.ReadAll(r.Body)
 			mu.Lock()
@@ -3456,6 +3464,8 @@ func TestHandlePlaybookRun_PolicyDenials_SurfacedOnResponse(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_policydenial_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=policy_decision"):
@@ -3543,6 +3553,8 @@ func TestHandlePlaybookRun_FabricationRisk_SurfacedOnResponse(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_fabrication_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "event_type=delegation_verification"):
@@ -3629,6 +3641,8 @@ func TestHandlePlaybookRun_AutoChain_PolicyDenials_AccumulateAcrossHops(t *testi
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_pdchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Query().Get("event_type") == "policy_decision":
@@ -3749,6 +3763,8 @@ func TestHandlePlaybookRun_AutoChain_ToolCallsAggregatedAcrossHops(t *testing.T)
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_tcchain_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -5835,6 +5851,8 @@ func mockGateAuditdPlaybook(t *testing.T, pb *audit.Playbook) *httptest.Server {
 			// createIncidentRecord's best-effort call doesn't log noise.
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_mockgateauditdplaybook01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -6038,6 +6056,8 @@ func TestHandlePlaybookRun_GateEscalation_RemediationPreview(t *testing.T) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_gate_preview01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -6583,6 +6603,8 @@ func mockChainTrustGateAuditd(t *testing.T, byID map[string]*audit.Playbook, byS
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_chaintrust01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -6948,6 +6970,8 @@ func mockGateAuditdPlaybookWithEvidence(t *testing.T, pb *audit.Playbook, signal
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_mockevidence01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -6983,6 +7007,8 @@ func mockGateAuditdPlaybookWithMultipleEvidence(t *testing.T, pb *audit.Playbook
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_mockevidencemulti01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -7140,6 +7166,8 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *t
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/v1/incidents"):
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_plr_gatereason_test01"}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPatch:
 			body, _ := io.ReadAll(r.Body)
 			mu.Lock()

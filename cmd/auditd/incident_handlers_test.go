@@ -54,6 +54,34 @@ func TestIncidentHandlers_Create_OK(t *testing.T) {
 	}
 }
 
+func TestIncidentHandlers_Create_SeriesIDSurvivesRoundTrip(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	body, _ := json.Marshal(map[string]any{"entry_run_id": "plr_xyz", "series_id": "pbs_db_max_connections_triage"})
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(body))
+	createRec := httptest.NewRecorder()
+	srv.handleCreate(createRec, createReq)
+	var created audit.Incident
+	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.SeriesID != "pbs_db_max_connections_triage" {
+		t.Errorf("create response series_id = %q, want pbs_db_max_connections_triage", created.SeriesID)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/incidents/"+created.IncidentID, nil)
+	getReq.SetPathValue("incidentID", created.IncidentID)
+	getRec := httptest.NewRecorder()
+	srv.handleGet(getRec, getReq)
+	var fetched audit.Incident
+	if err := json.NewDecoder(getRec.Body).Decode(&fetched); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if fetched.SeriesID != "pbs_db_max_connections_triage" {
+		t.Errorf("GET series_id = %q, want pbs_db_max_connections_triage", fetched.SeriesID)
+	}
+}
+
 func TestIncidentHandlers_Create_InvalidJSON(t *testing.T) {
 	srv := newIncidentServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader([]byte("not json")))
