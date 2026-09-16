@@ -24,7 +24,7 @@ func TestDoPlaybookDraftRequest_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	draft, pbID, err := doPlaybookDraftRequest(context.Background(), srv.URL, "secret-key", "inc-001", "resolved")
+	draft, pbID, err := doPlaybookDraftRequest(context.Background(), srv.URL, "secret-key", "inc-001", "resolved", "")
 	if err != nil {
 		t.Fatalf("doPlaybookDraftRequest: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestDoPlaybookDraftRequest_Success(t *testing.T) {
 }
 
 func TestDoPlaybookDraftRequest_EmptyGatewayURL(t *testing.T) {
-	_, _, err := doPlaybookDraftRequest(context.Background(), "", "", "inc-001", "resolved")
+	_, _, err := doPlaybookDraftRequest(context.Background(), "", "", "inc-001", "resolved", "")
 	if err == nil {
 		t.Error("expected error for empty gateway URL, got nil")
 	}
@@ -69,7 +69,7 @@ func TestDoPlaybookDraftRequest_NoAuth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved") //nolint:errcheck
+	doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved", "") //nolint:errcheck
 	if gotAuth != "" {
 		t.Errorf("Authorization = %q, want empty when no api key", gotAuth)
 	}
@@ -82,7 +82,7 @@ func TestDoPlaybookDraftRequest_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved")
+	_, _, err := doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved", "")
 	if err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
@@ -96,7 +96,7 @@ func TestDoPlaybookDraftRequest_NoPlaybookID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	draft, pbID, err := doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved")
+	draft, pbID, err := doPlaybookDraftRequest(context.Background(), srv.URL, "", "inc-001", "resolved", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestDoPlaybookDraftRequest_NoPlaybookID(t *testing.T) {
 }
 
 func TestDoPlaybookDraftRequest_NetworkError(t *testing.T) {
-	_, _, err := doPlaybookDraftRequest(context.Background(), "http://127.0.0.1:19997", "", "inc-001", "resolved")
+	_, _, err := doPlaybookDraftRequest(context.Background(), "http://127.0.0.1:19997", "", "inc-001", "resolved", "")
 	if err == nil {
 		t.Error("expected error for unreachable server, got nil")
 	}
@@ -137,7 +137,7 @@ func TestShouldGenerateDraft_ResolvedOutcome_WithGateway(t *testing.T) {
 	if !shouldGenerate {
 		t.Fatal("shouldGenerateDraft should be true for outcome=resolved with gateway set")
 	}
-	_, _, err := doPlaybookDraftRequest(context.Background(), gateway, "", "inc-001", outcome)
+	_, _, err := doPlaybookDraftRequest(context.Background(), gateway, "", "inc-001", outcome, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

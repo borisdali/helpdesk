@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,12 @@ func TestHandlePlaybookFromTrace_StripMarkdownFences(t *testing.T) {
 func TestHandlePlaybookFromTrace_SuccessWithAuditd(t *testing.T) {
 	// auditd returns events → LLM synthesizes → draft persisted → playbook_id returned.
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-trace/") {
+			// linkDraftToIncident's lookup — not under test here, just needs a
+			// 404 so it doesn't try to decode fakeTraceEvents as an Incident.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
@@ -182,6 +189,12 @@ func TestHandlePlaybookFromTrace_SuccessWithAuditd(t *testing.T) {
 func TestHandlePlaybookFromTrace_AuditdPersistFails_DraftStillReturned(t *testing.T) {
 	// auditd fetch succeeds but persist POST fails → draft still returned, playbook_id empty.
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-trace/") {
+			// linkDraftToIncident's lookup — not under test here, just needs a
+			// 404 so it doesn't try to decode fakeTraceEvents as an Incident.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
@@ -212,6 +225,106 @@ func TestHandlePlaybookFromTrace_AuditdPersistFails_DraftStillReturned(t *testin
 // fakeTraceEvents is a minimal non-empty tool execution trace for tests that
 // need auditd to return real content so the handler proceeds past the empty-trace guard.
 const fakeTraceEvents = `[{"event_type":"tool_execution","tool_name":"get_active_connections","result":"42 connections active","trace_id":"tr_test"}]`
+
+// ── linkDraftToIncident / fetchIncidentByTraceID ──────────────────────────────
+
+func TestLinkDraftToIncident_NoIncidentFound_NoPatch(t *testing.T) {
+	var patchCalls int
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		patchCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer auditd.Close()
+
+	g := newFromTraceGateway(nil, auditd.URL, "")
+	g.linkDraftToIncident(context.Background(), "tr_nomatch", "pb_draft01")
+
+	if patchCalls != 0 {
+		t.Errorf("PATCH calls = %d, want 0 when no incident matches trace_id", patchCalls)
+	}
+}
+
+func TestLinkDraftToIncident_Found_PatchesDraftPlaybookID(t *testing.T) {
+	var gotPath, gotBody string
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_abc"}) //nolint:errcheck
+			return
+		}
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer auditd.Close()
+
+	g := newFromTraceGateway(nil, auditd.URL, "")
+	g.linkDraftToIncident(context.Background(), "tr_match", "pb_draft01")
+
+	if gotPath != "/v1/incidents/inc_abc" {
+		t.Errorf("PATCH path = %q, want /v1/incidents/inc_abc", gotPath)
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
+		t.Fatalf("decode PATCH body: %v", err)
+	}
+	if body["draft_playbook_id"] != "pb_draft01" {
+		t.Errorf("draft_playbook_id = %q, want pb_draft01", body["draft_playbook_id"])
+	}
+}
+
+// TestHandlePlaybookFromTrace_LinksDraftToIncident_ViaRealHandler proves the
+// real handler (not linkDraftToIncident called directly) reaches this on a
+// successful persist — the same "direct-call tests only prove the function's
+// own logic" gap this session has repeatedly found and closed elsewhere.
+func TestHandlePlaybookFromTrace_LinksDraftToIncident_ViaRealHandler(t *testing.T) {
+	var patchedPath, patchedBody string
+	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-trace/"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(audit.Incident{IncidentID: "inc_link01"}) //nolint:errcheck
+		case r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
+		case r.Method == http.MethodPatch:
+			b, _ := io.ReadAll(r.Body)
+			patchedPath = r.URL.Path
+			patchedBody = string(b)
+			w.WriteHeader(http.StatusNoContent)
+		default: // POST /v1/fleet/playbooks — persist the draft.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(audit.Playbook{PlaybookID: "pb_generated_link01"}) //nolint:errcheck
+		}
+	}))
+	defer auditd.Close()
+
+	llm := func(_ context.Context, _ string) (string, error) {
+		return "name: Test Playbook\ndescription: Restart triage.\n", nil
+	}
+	g := newFromTraceGateway(llm, auditd.URL, "")
+	w := doFromTraceRequest(t, g, map[string]string{"trace_id": "tr_link01", "outcome": "resolved"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	if patchedPath != "/v1/incidents/inc_link01" {
+		t.Errorf("PATCH path = %q, want /v1/incidents/inc_link01 — handlePlaybookFromTrace never linked the draft", patchedPath)
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(patchedBody), &body); err != nil {
+		t.Fatalf("decode PATCH body: %v", err)
+	}
+	if body["draft_playbook_id"] != "pb_generated_link01" {
+		t.Errorf("draft_playbook_id = %q, want pb_generated_link01", body["draft_playbook_id"])
+	}
+}
 
 // ── persistPlaybookDraft ──────────────────────────────────────────────────
 
@@ -425,6 +538,12 @@ func TestHandlePlaybookFromTrace_PinsSeriesAndVersion(t *testing.T) {
 	// written to the draft posted to auditd — not whatever the LLM wrote.
 	var gotDraft audit.Playbook
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-trace/") {
+			// linkDraftToIncident's lookup — not under test here, just needs a
+			// 404 so it doesn't try to decode fakeTraceEvents as an Incident.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
@@ -470,6 +589,12 @@ func TestHandlePlaybookFromTrace_NoPinUsesGeneratedSeries(t *testing.T) {
 	// (existing behaviour for direct from-trace calls without suggest-update).
 	var gotDraft audit.Playbook
 	auditd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/incidents/by-trace/") {
+			// linkDraftToIncident's lookup — not under test here, just needs a
+			// 404 so it doesn't try to decode fakeTraceEvents as an Incident.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(fakeTraceEvents)) //nolint:errcheck
@@ -647,7 +772,7 @@ func TestValidatePlaybookProtocol_Triage_Valid(t *testing.T) {
 		ExecutionMode: "agent",
 		Symptoms:      []string{"too many connections"},
 		Escalation:    []string{"pg_hba rejection"},
-		Guidance: "Step 1: check connections.\n\nFINDINGS: conn=<N>/<max>\nTRANSITION_TO: pbs_conn_remediate",
+		Guidance:      "Step 1: check connections.\n\nFINDINGS: conn=<N>/<max>\nTRANSITION_TO: pbs_conn_remediate",
 	}
 	if warns := validatePlaybookProtocol(pb); len(warns) != 0 {
 		t.Errorf("expected no warnings for valid triage, got: %v", warns)
@@ -674,8 +799,8 @@ func TestValidatePlaybookProtocol_Triage_MissingFields(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Triage_WrongExecutionMode(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "triage",
-		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		PlaybookType: "triage",
+		Name:         "T", SeriesID: "pbs_t", Description: "d",
 		ExecutionMode: "agent_approve",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "FINDINGS: x\nTRANSITION_TO: pbs_r",
@@ -688,8 +813,8 @@ func TestValidatePlaybookProtocol_Triage_WrongExecutionMode(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Triage_MissingFINDINGS(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "triage",
-		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		PlaybookType: "triage",
+		Name:         "T", SeriesID: "pbs_t", Description: "d",
 		ExecutionMode: "agent",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "Step 1: do stuff.\nTRANSITION_TO: pbs_r",
@@ -702,8 +827,8 @@ func TestValidatePlaybookProtocol_Triage_MissingFINDINGS(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Triage_MissingSignalLine(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "triage",
-		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		PlaybookType: "triage",
+		Name:         "T", SeriesID: "pbs_t", Description: "d",
 		ExecutionMode: "agent",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "Step 1: do stuff.\nFINDINGS: x=1",
@@ -716,8 +841,8 @@ func TestValidatePlaybookProtocol_Triage_MissingSignalLine(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Triage_EscalateToAccepted(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "triage",
-		Name:          "T", SeriesID: "pbs_t", Description: "d",
+		PlaybookType: "triage",
+		Name:         "T", SeriesID: "pbs_t", Description: "d",
 		ExecutionMode: "agent",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "FINDINGS: x\nESCALATE_TO: none",
@@ -745,8 +870,8 @@ func TestValidatePlaybookProtocol_Remediation_Valid(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Remediation_WrongExecutionMode(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "remediation",
-		Name:          "R", SeriesID: "pbs_r", Description: "d",
+		PlaybookType: "remediation",
+		Name:         "R", SeriesID: "pbs_r", Description: "d",
 		ExecutionMode: "agent",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "Step 1: do stuff.",
@@ -759,8 +884,8 @@ func TestValidatePlaybookProtocol_Remediation_WrongExecutionMode(t *testing.T) {
 
 func TestValidatePlaybookProtocol_Remediation_HasTransitionTo(t *testing.T) {
 	pb := audit.Playbook{
-		PlaybookType:  "remediation",
-		Name:          "R", SeriesID: "pbs_r", Description: "d",
+		PlaybookType: "remediation",
+		Name:         "R", SeriesID: "pbs_r", Description: "d",
 		ExecutionMode: "agent_approve",
 		Symptoms:      []string{"s"}, Escalation: []string{"e"},
 		Guidance: "Step 1: fix.\nTRANSITION_TO: pbs_other",

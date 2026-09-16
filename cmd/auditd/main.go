@@ -350,6 +350,7 @@ func main() {
 	mux.HandleFunc("POST /v1/incidents", auth("POST /v1/incidents", incidentSrv.handleCreate))
 	mux.HandleFunc("PATCH /v1/incidents/{incidentID}", auth("PATCH /v1/incidents/{incidentID}", incidentSrv.handleUpdate))
 	mux.HandleFunc("GET /v1/incidents/by-run/{runID}", auth("GET /v1/incidents/by-run/{runID}", incidentSrv.handleGetByEntryRunID))
+	mux.HandleFunc("GET /v1/incidents/by-trace/{traceID}", auth("GET /v1/incidents/by-trace/{traceID}", incidentSrv.handleGetByTraceID))
 	mux.HandleFunc("GET /v1/incidents/{incidentID}", auth("GET /v1/incidents/{incidentID}", incidentSrv.handleGet))
 	mux.HandleFunc("GET /v1/incidents", auth("GET /v1/incidents", incidentSrv.handleList))
 

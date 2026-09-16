@@ -2430,6 +2430,56 @@ func TestProxyToAuditd_RoutesWithPreexistingManualQueryForwarding_NoDoubleAppend
 	}
 }
 
+// TestHandleListIncidents_ProxiesToAuditdIncidentsTable is a regression
+// guard for the v0.29 incident-entity design's repurposing of
+// GET /api/v1/incidents (see docs/INCIDENTS.md): it used to LLM-narrate the
+// incident agent's legacy incidents.json flat file (proxyToAgent); it must
+// now proxy straight to auditd's real incidents table, filters and all —
+// nothing in this codebase's own production callers ever consumed the old
+// response, but a silent revert back to the LLM path would be easy to miss
+// without a test pinned to this exact behavior.
+func TestHandleListIncidents_ProxiesToAuditdIncidentsTable(t *testing.T) {
+	var gotPath, gotQuery string
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incidents": []audit.Incident{{IncidentID: "inc_x", Origin: "faulttest"}},
+			"count":     1,
+		})
+	}))
+	defer auditSrv.Close()
+
+	gw := &Gateway{auditURL: auditSrv.URL}
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/incidents?origin=faulttest&limit=10", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotPath != "/v1/incidents" {
+		t.Errorf("proxied path = %q, want /v1/incidents (the real table, not the incident agent)", gotPath)
+	}
+	if gotQuery != "origin=faulttest&limit=10" {
+		t.Errorf("proxied query = %q, want origin=faulttest&limit=10", gotQuery)
+	}
+	var resp struct {
+		Incidents []audit.Incident `json:"incidents"`
+		Count     int              `json:"count"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Count != 1 || len(resp.Incidents) != 1 || resp.Incidents[0].IncidentID != "inc_x" {
+		t.Errorf("response = %+v, want the real incidents-table shape passed through unchanged", resp)
+	}
+}
+
 func TestHandleRegisterEphemeralDB_MissingFields(t *testing.T) {
 	gw := &Gateway{auditor: audit.NewGatewayAuditor(&testAuditor{})}
 	mux := http.NewServeMux()

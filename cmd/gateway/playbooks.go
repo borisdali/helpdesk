@@ -2947,6 +2947,13 @@ func (g *Gateway) triggerIncidentBundle(ctx context.Context, runID, outcome, fin
 		"description": description,
 		"outcome":     outcome,
 	}
+	if inc.SeriesID != "" {
+		// Improvement-mode parity with faulttest's own from-trace call (see
+		// agentutil.RequestPlaybookDraft): pin the auto-synthesized draft to
+		// the entry playbook's own series so it improves that series instead
+		// of always cold-starting a new one.
+		args["series_id"] = inc.SeriesID
+	}
 	// Best-effort: a fetch failure just means the bundle's database layer is
 	// skipped (create_incident_bundle already tolerates partial collection —
 	// see docs/INCIDENTS.md's "Not every layer is populated" note). K8s layer

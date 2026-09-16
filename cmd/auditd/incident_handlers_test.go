@@ -299,3 +299,66 @@ func TestIncidentHandlers_GetByEntryRunID(t *testing.T) {
 		t.Errorf("status = %d, want 404", notFoundRec.Code)
 	}
 }
+
+func TestIncidentHandlers_GetByTraceID(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	body, _ := json.Marshal(map[string]any{"trace_id": "tr_findme", "entry_run_id": "plr_x"})
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(body))
+	createRec := httptest.NewRecorder()
+	srv.handleCreate(createRec, createReq)
+	var created audit.Incident
+	json.NewDecoder(createRec.Body).Decode(&created) //nolint:errcheck
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/incidents/by-trace/tr_findme", nil)
+	req.SetPathValue("traceID", "tr_findme")
+	rec := httptest.NewRecorder()
+	srv.handleGetByTraceID(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var got audit.Incident
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.IncidentID != created.IncidentID {
+		t.Errorf("incident_id = %q, want %q", got.IncidentID, created.IncidentID)
+	}
+
+	notFoundReq := httptest.NewRequest(http.MethodGet, "/v1/incidents/by-trace/tr_never", nil)
+	notFoundReq.SetPathValue("traceID", "tr_never")
+	notFoundRec := httptest.NewRecorder()
+	srv.handleGetByTraceID(notFoundRec, notFoundReq)
+	if notFoundRec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", notFoundRec.Code)
+	}
+}
+
+func TestIncidentHandlers_Update_DraftPlaybookID(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader([]byte("{}")))
+	createRec := httptest.NewRecorder()
+	srv.handleCreate(createRec, createReq)
+	var created audit.Incident
+	json.NewDecoder(createRec.Body).Decode(&created) //nolint:errcheck
+
+	patchBody, _ := json.Marshal(map[string]any{"draft_playbook_id": "pb_draft01"})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/v1/incidents/"+created.IncidentID, bytes.NewReader(patchBody))
+	patchReq.SetPathValue("incidentID", created.IncidentID)
+	patchRec := httptest.NewRecorder()
+	srv.handleUpdate(patchRec, patchReq)
+	if patchRec.Code != http.StatusNoContent {
+		t.Fatalf("PATCH status = %d, want 204; body: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/incidents/"+created.IncidentID, nil)
+	getReq.SetPathValue("incidentID", created.IncidentID)
+	getRec := httptest.NewRecorder()
+	srv.handleGet(getRec, getReq)
+	var after audit.Incident
+	json.NewDecoder(getRec.Body).Decode(&after) //nolint:errcheck
+	if after.DraftPlaybookID != "pb_draft01" {
+		t.Errorf("draft_playbook_id = %q, want pb_draft01", after.DraftPlaybookID)
+	}
+}

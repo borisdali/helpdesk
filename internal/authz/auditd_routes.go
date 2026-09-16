@@ -65,11 +65,12 @@ var DefaultAuditdPermissions = map[string]Permission{
 	// by the gateway's service account on a genuine entry-point playbook run;
 	// reads/updates open to any authenticated user, same convention as
 	// playbook-runs above.
-	"POST /v1/incidents":               {ServiceOnly: true, AdminBypass: true},
-	"PATCH /v1/incidents/{incidentID}": {AdminBypass: true},
-	"GET /v1/incidents/{incidentID}":   {AdminBypass: true},
-	"GET /v1/incidents/by-run/{runID}": {AdminBypass: true},
-	"GET /v1/incidents":                {AdminBypass: true},
+	"POST /v1/incidents":                   {ServiceOnly: true, AdminBypass: true},
+	"PATCH /v1/incidents/{incidentID}":     {AdminBypass: true},
+	"GET /v1/incidents/{incidentID}":       {AdminBypass: true},
+	"GET /v1/incidents/by-run/{runID}":     {AdminBypass: true},
+	"GET /v1/incidents/by-trace/{traceID}": {AdminBypass: true},
+	"GET /v1/incidents":                    {AdminBypass: true},
 
 	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
 	"POST /v1/uploads":                   {AdminBypass: true},

@@ -37,10 +37,10 @@ type PlaybookFromTraceRequest struct {
 // When auditd is configured, the draft is persisted as an inactive "generated"
 // playbook and its ID is returned in PlaybookID for later activation or review.
 type PlaybookFromTraceResponse struct {
-	Draft      string   `json:"draft"`                  // synthesized playbook YAML text
-	Source     string   `json:"source"`                 // trace_id used as source
-	PlaybookID string   `json:"playbook_id,omitempty"`  // ID of the persisted draft (empty if auditd unavailable)
-	Warnings   []string `json:"warnings,omitempty"`     // protocol violations detected in the draft
+	Draft      string   `json:"draft"`                 // synthesized playbook YAML text
+	Source     string   `json:"source"`                // trace_id used as source
+	PlaybookID string   `json:"playbook_id,omitempty"` // ID of the persisted draft (empty if auditd unavailable)
+	Warnings   []string `json:"warnings,omitempty"`    // protocol violations detected in the draft
 }
 
 // fromTracePromptTemplate is used for cold synthesis when no active playbook exists.
@@ -191,16 +191,16 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			// change between versions — routing, execution mode, and tool permissions
 			// are controlled by operators, not synthesized from traces.
 			if activePlaybook != nil {
-				pb.ExecutionMode    = activePlaybook.ExecutionMode
-				pb.ApprovalMode     = activePlaybook.ApprovalMode
-				pb.AgentName        = activePlaybook.AgentName
-				pb.TransitionsTo    = activePlaybook.TransitionsTo
-				pb.EscalatesTo      = activePlaybook.EscalatesTo
-				pb.EntryPoint       = activePlaybook.EntryPoint
+				pb.ExecutionMode = activePlaybook.ExecutionMode
+				pb.ApprovalMode = activePlaybook.ApprovalMode
+				pb.AgentName = activePlaybook.AgentName
+				pb.TransitionsTo = activePlaybook.TransitionsTo
+				pb.EscalatesTo = activePlaybook.EscalatesTo
+				pb.EntryPoint = activePlaybook.EntryPoint
 				pb.RequiresEvidence = activePlaybook.RequiresEvidence
-				pb.PermittedTools   = activePlaybook.PermittedTools
-				pb.TargetHints      = activePlaybook.TargetHints
-				pb.PlaybookType     = activePlaybook.PlaybookType
+				pb.PermittedTools = activePlaybook.PermittedTools
+				pb.TargetHints = activePlaybook.TargetHints
+				pb.PlaybookType = activePlaybook.PlaybookType
 				// Preserve the structured output protocol embedded in guidance.
 				// The "Required output" trailer (HYPOTHESIS_N / FINDINGS /
 				// TRANSITION_TO lines) is an operational instruction, not
@@ -217,16 +217,16 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 				// Active playbook fetch failed earlier (logged above); try once more
 				// for operational field preservation so the draft is still usable.
 				if active, ferr := g.fetchPlaybookBySeriesID(r.Context(), req.SeriesID); ferr == nil {
-					pb.ExecutionMode    = active.ExecutionMode
-					pb.ApprovalMode     = active.ApprovalMode
-					pb.AgentName        = active.AgentName
-					pb.TransitionsTo    = active.TransitionsTo
-					pb.EscalatesTo      = active.EscalatesTo
-					pb.EntryPoint       = active.EntryPoint
+					pb.ExecutionMode = active.ExecutionMode
+					pb.ApprovalMode = active.ApprovalMode
+					pb.AgentName = active.AgentName
+					pb.TransitionsTo = active.TransitionsTo
+					pb.EscalatesTo = active.EscalatesTo
+					pb.EntryPoint = active.EntryPoint
 					pb.RequiresEvidence = active.RequiresEvidence
-					pb.PermittedTools   = active.PermittedTools
-					pb.TargetHints      = active.TargetHints
-					pb.PlaybookType     = active.PlaybookType
+					pb.PermittedTools = active.PermittedTools
+					pb.TargetHints = active.TargetHints
+					pb.PlaybookType = active.PlaybookType
 					if idx := strings.Index(active.Guidance, "\nRequired output"); idx >= 0 {
 						trailer := strings.TrimRight(active.Guidance[idx:], "\n")
 						if !strings.Contains(pb.Guidance, "Required output") {
@@ -248,6 +248,13 @@ func (g *Gateway) handlePlaybookFromTrace(w http.ResponseWriter, r *http.Request
 			} else {
 				playbookID = id
 				slog.Info("from-trace: persisted draft playbook", "playbook_id", playbookID, "series_id", pb.SeriesID)
+				// v0.29 incident-entity design follow-up (see docs/INCIDENTS.md):
+				// this is the one place both /from-trace callers converge
+				// (faulttest's own direct call, and create_incident_bundle's) —
+				// link the draft back to whichever incidents-table row shares
+				// this trace_id, so a listing can show draft status without
+				// either caller needing to know about the incidents table at all.
+				g.linkDraftToIncident(r.Context(), req.TraceID, playbookID)
 			}
 		}
 	}
@@ -289,6 +296,81 @@ func (g *Gateway) persistPlaybookDraft(ctx context.Context, pb *audit.Playbook) 
 		return "", fmt.Errorf("parse auditd response: %w", err)
 	}
 	return created.PlaybookID, nil
+}
+
+// linkDraftToIncident is a v0.29 incident-entity design follow-up (see
+// docs/INCIDENTS.md): best-effort, PATCHes draft_playbook_id onto whichever
+// incidents-table row shares traceID, if any. No-ops quietly when there's no
+// matching row (e.g. a trace that predates this table, or one with no
+// genuine entry point) or when auditd isn't configured — never blocks the
+// draft response itself.
+func (g *Gateway) linkDraftToIncident(ctx context.Context, traceID, playbookID string) {
+	if g.auditURL == "" || traceID == "" || playbookID == "" {
+		return
+	}
+	inc, err := g.fetchIncidentByTraceID(ctx, traceID)
+	if err != nil {
+		slog.Warn("linkDraftToIncident: could not look up incident", "trace_id", traceID, "err", err)
+		return
+	}
+	if inc == nil {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"draft_playbook_id": playbookID})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + inc.IncidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("linkDraftToIncident: PATCH failed", "incident_id", inc.IncidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Warn("linkDraftToIncident: unexpected status",
+			"incident_id", inc.IncidentID, "status", resp.StatusCode, "auditd_error", strings.TrimSpace(string(respBody)))
+	}
+}
+
+// fetchIncidentByTraceID returns the incidents row whose trace_id matches
+// traceID, if any. Returns (nil, nil) — not an error — on a 404: no matching
+// incident is a normal, expected case (see fetchIncidentByEntryRunID in
+// playbooks.go for the identical reasoning).
+func (g *Gateway) fetchIncidentByTraceID(ctx context.Context, traceID string) (*audit.Incident, error) {
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/by-trace/" + traceID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var inc audit.Incident
+	if err := json.NewDecoder(resp.Body).Decode(&inc); err != nil {
+		return nil, err
+	}
+	return &inc, nil
 }
 
 // fetchTraceEvents queries auditd for all events belonging to the given trace_id
@@ -469,13 +551,13 @@ func parsePlaybookYAMLLenient(text string) (audit.Playbook, error) {
 	}
 
 	return audit.Playbook{
-		Name:         str("name"),
-		Description:  str("description"),
-		ProblemClass: str("problem_class"),
-		Guidance:     str("guidance"),
-		Symptoms:     strSlice("symptoms"),
-		Escalation:   strSlice("escalation"),
-		TargetHints:  strSlice("target_hints"),
+		Name:          str("name"),
+		Description:   str("description"),
+		ProblemClass:  str("problem_class"),
+		Guidance:      str("guidance"),
+		Symptoms:      strSlice("symptoms"),
+		Escalation:    strSlice("escalation"),
+		TargetHints:   strSlice("target_hints"),
 		EscalatesTo:   strSlice("escalates_to"),
 		TransitionsTo: strSlice("transitions_to"),
 		SeriesID:      str("series_id"),

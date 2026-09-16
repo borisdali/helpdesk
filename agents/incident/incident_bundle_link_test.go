@@ -238,6 +238,48 @@ func TestCreateIncidentBundleImpl_TraceIDFromCurrentTraceStore(t *testing.T) {
 	}
 }
 
+// TestCreateIncidentBundleImpl_SeriesIDThreadsToFromTraceRequest proves
+// args.SeriesID actually reaches the from-trace HTTP request body end-to-end
+// through createIncidentBundleImpl -> requestPlaybookDraft ->
+// doPlaybookDraftRequest -> agentutil.RequestPlaybookDraft, not just that the
+// shared helper accepts a seriesID parameter in isolation.
+func TestCreateIncidentBundleImpl_SeriesIDThreadsToFromTraceRequest(t *testing.T) {
+	withMockedLayers(t)
+	outputDir := t.TempDir()
+	t.Setenv("HELPDESK_INCIDENT_DIR", outputDir)
+	t.Setenv("HELPDESK_AUDIT_URL", "")
+
+	var gotBody string
+	gatewaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, r.ContentLength)
+		r.Body.Read(b) //nolint:errcheck
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"playbook_id": "pb_improved01"}) //nolint:errcheck
+	}))
+	defer gatewaySrv.Close()
+	t.Setenv("HELPDESK_GATEWAY_URL", gatewaySrv.URL)
+
+	result, err := createIncidentBundleImpl(context.Background(), CreateIncidentBundleArgs{
+		Outcome:  "resolved",
+		SeriesID: "pbs_vacuum_triage",
+	})
+	if err != nil {
+		t.Fatalf("createIncidentBundleImpl: %v", err)
+	}
+	if result.PlaybookID != "pb_improved01" {
+		t.Errorf("result.PlaybookID = %q, want pb_improved01", result.PlaybookID)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
+		t.Fatalf("from-trace request body is not JSON: %v", err)
+	}
+	if body["series_id"] != "pbs_vacuum_triage" {
+		t.Errorf("series_id = %q, want pbs_vacuum_triage", body["series_id"])
+	}
+}
+
 // --- NewIncidentDirectRegistry ---
 
 func TestNewIncidentDirectRegistry_CreateIncidentBundle_Success(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/buildinfo"
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
@@ -987,43 +988,8 @@ func postNotify(notifyURL string, report Report) {
 // the active version and use improvement mode instead of cold synthesis.
 // Returns the persisted playbook_id, or "" when auditd is not configured.
 func requestVaultDraft(ctx context.Context, cfg *HarnessConfig, traceID, outcome, seriesID string) (string, error) {
-	body := map[string]string{
-		"trace_id": traceID,
-		"outcome":  outcome,
-	}
-	if seriesID != "" {
-		body["series_id"] = seriesID
-	}
-	reqBody, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("marshal: %w", err)
-	}
-	reqURL := strings.TrimSuffix(cfg.GatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if cfg.GatewayAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+cfg.GatewayAPIKey)
-	}
-	client := &http.Client{Timeout: 90 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("POST from-trace: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, respBody)
-	}
-	var result struct {
-		PlaybookID string `json:"playbook_id"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	return result.PlaybookID, nil
+	_, playbookID, err := agentutil.RequestPlaybookDraft(ctx, cfg.GatewayURL, cfg.GatewayAPIKey, traceID, outcome, seriesID)
+	return playbookID, err
 }
 
 // fetchRemediationSteps retrieves the executed steps for a remediation playbook

@@ -236,6 +236,7 @@ func TestAuthorize_Incidents_ReadsAndUpdatesOpenToAnyAuthenticatedUser(t *testin
 		"PATCH /v1/incidents/{incidentID}",
 		"GET /v1/incidents/{incidentID}",
 		"GET /v1/incidents/by-run/{runID}",
+		"GET /v1/incidents/by-trace/{traceID}",
 		"GET /v1/incidents",
 	}
 	for _, pattern := range routes {
@@ -598,6 +599,7 @@ var auditdRoutes = []string{
 	"PATCH /v1/incidents/{incidentID}",
 	"GET /v1/incidents/{incidentID}",
 	"GET /v1/incidents/by-run/{runID}",
+	"GET /v1/incidents/by-trace/{traceID}",
 	"GET /v1/incidents",
 	"POST /v1/uploads",
 	"GET /v1/uploads/{uploadID}",

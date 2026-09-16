@@ -719,8 +719,20 @@ func (g *Gateway) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
 	g.proxyToAgent(w, r, agentNameIncident, "", prompt)
 }
 
+// handleListIncidents handles GET /api/v1/incidents — a thin proxy to
+// auditd's GET /v1/incidents (v0.29 incident-entity design; see
+// docs/INCIDENTS.md), which lists real+faulttest incidents together with
+// origin/status/attribution/bundle_path/draft_playbook_id, filterable by
+// ?origin=&status=&attribution=&limit=.
+//
+// This used to LLM-mediate a "list bundles" prompt to the incident agent's
+// own legacy incidents.json flat-file index (proxyToAgent, agentNameIncident)
+// — repurposed rather than left in place: nothing in this codebase's
+// production callers (grepped cmd/srebot, testing/, docs) ever consumed that
+// response, which was itself just the agent's free-form narration, not
+// structured data a caller could have reliably parsed anyway.
 func (g *Gateway) handleListIncidents(w http.ResponseWriter, r *http.Request) {
-	g.proxyToAgent(w, r, agentNameIncident, "", "List all previously created incident bundles.")
+	g.proxyToAuditd(w, r, "/v1/incidents")
 }
 
 // checkOperatingMode returns false and writes a 403 if the current operating

@@ -82,7 +82,7 @@ The `outcome` field is the trigger for the flywheel:
 | `"escalated"` | Handed off to a human — draft captures diagnostic steps taken before escalation |
 | `""` (empty) | Still investigating — no draft generated yet |
 
-When `outcome` is `"resolved"` or `"escalated"` and `HELPDESK_GATEWAY_URL` is configured, the gateway's `from-trace` endpoint is called automatically. A Playbook draft is synthesised from the audit trail of every tool call made during the investigation and saved to the Vault as an inactive draft.
+When `outcome` is `"resolved"` or `"escalated"` and `HELPDESK_GATEWAY_URL` is configured, the gateway's `from-trace` endpoint is called automatically. A Playbook draft is synthesised from the audit trail of every tool call made during the investigation and saved to the Vault as an inactive draft. An optional `series_id` arg pins the draft to an existing series (e.g. `"pbs_vacuum_triage"`) so the draft improves that series instead of starting a new one — the same "improvement mode" `faulttest` already uses for its own draft requests below; both callers share one implementation (`agentutil.RequestPlaybookDraft`). The resulting `playbook_id` is also recorded onto the incident's own row (`draft_playbook_id`) when a tracked `incident_id` was supplied, so a later `GET /api/v1/incidents` listing can show draft status without a separate lookup.
 
 The bundle result:
 
@@ -103,7 +103,7 @@ The bundle result:
 
 As of v0.29, setting `HELPDESK_AUTO_INCIDENT_BUNDLE=true` on the gateway adds a second way a bundle gets created, alongside the incident agent's own judgment call above: when a triage or remediation playbook run started from a genuine entry point (not a chained escalation hop) concludes with outcome `resolved` or `escalated`, the gateway calls `create_incident_bundle` directly — no manual invocation and no incident-agent decision required. This uses the same direct tool-dispatch mechanism the database, Kubernetes, and sysadmin agents already use for fleet jobs (`POST /tool/{name}`, bypassing the LLM), not the conversational path shown above — an automated trigger needs `bundle_path` back as real structured JSON, not something parsed out of narration.
 
-The resulting bundle is linked to that run's internal audit-side incident record (a durable per-incident row, keyed to the run's trace) via its `bundle_path`, rather than the legacy `incidents.json` index this doc describes elsewhere — that index is still used for bundles created without this linkage (a human or script invoking the tool directly, with no incident record to link to).
+The resulting bundle is linked to that run's internal audit-side incident record (a durable per-incident row, keyed to the run's trace) via its `bundle_path`, rather than the legacy `incidents.json` index this doc describes elsewhere — that index is still used for bundles created without this linkage (a human or script invoking the tool directly, with no incident record to link to). When the incident's entry playbook has a series, that series ID is also passed through as `series_id`, so an auto-triggered draft improves the same series the run itself used rather than always cold-starting a new one.
 
 Default is off; the manually-invoked path above is unaffected either way. Only the database, OS, and storage layers are collected automatically — Kubernetes context isn't yet resolved for this path, so a K8s-relevant incident bundled this way will be missing that layer. Manually calling the tool with `k8s_context` set still works exactly as documented above.
 

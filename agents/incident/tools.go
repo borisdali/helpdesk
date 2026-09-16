@@ -357,6 +357,7 @@ type CreateIncidentBundleArgs struct {
 	K8sNamespace          string `json:"k8s_namespace,omitempty" jsonschema:"Kubernetes namespace for k8s commands. Defaults to 'default'."`
 	CallbackURL           string `json:"callback_url,omitempty" jsonschema:"Optional HTTP(S) URL. When set, the agent POSTs the IncidentBundleResult JSON to this URL after the bundle is created. Best-effort: failures are logged but do not affect the tool result."`
 	Outcome               string `json:"outcome,omitempty" jsonschema:"Incident outcome: 'resolved', 'escalated', or '' (still investigating). When 'resolved' or 'escalated' and HELPDESK_GATEWAY_URL is set, a playbook draft is automatically synthesized from the audit trace and saved to the vault as an inactive draft."`
+	SeriesID              string `json:"series_id,omitempty" jsonschema:"Optional existing Playbook series ID to pin the synthesized draft to (e.g. 'pbs_vacuum_triage'), so the draft improves that series instead of starting a new one. Only used when a draft is generated (see outcome)."`
 	GeneratePlaybookDraft bool   `json:"generate_playbook_draft,omitempty" jsonschema:"Deprecated: set outcome='resolved' instead. When true, requests a playbook draft from the gateway's from-trace endpoint using the current audit trace."`
 	IncidentID            string `json:"incident_id,omitempty" jsonschema:"Optional aiHelpDesk incidents-table ID (e.g. 'inc_a1b2c3d4'), supplied by the gateway when this bundle is being created for a tracked incident. When set, the resulting bundle_path is PATCHed onto that incidents row via auditd instead of being recorded in the local incidents.json index."`
 }
@@ -537,7 +538,7 @@ func createIncidentBundleImpl(ctx context.Context, args CreateIncidentBundleArgs
 				traceID = id
 			}
 		}
-		if draft, playbookID, err := requestPlaybookDraft(ctx, traceID, outcome); err != nil {
+		if draft, playbookID, err := requestPlaybookDraft(ctx, traceID, outcome, args.SeriesID); err != nil {
 			slog.Warn("playbook draft generation failed", "incident_id", incidentID, "trace_id", traceID, "err", err)
 		} else {
 			result.PlaybookDraft = draft
@@ -557,55 +558,16 @@ func createIncidentBundleImpl(ctx context.Context, args CreateIncidentBundleArgs
 // bundle ID (best-effort approximation when a real auditd trace is unavailable).
 // Returns the draft YAML and the persisted playbook_id (empty when auditd is not
 // configured on the gateway).
-func requestPlaybookDraft(ctx context.Context, incidentID, outcome string) (draft, playbookID string, err error) {
-	return doPlaybookDraftRequest(context.Background(), os.Getenv("HELPDESK_GATEWAY_URL"), os.Getenv("HELPDESK_CLIENT_API_KEY"), incidentID, outcome)
+func requestPlaybookDraft(ctx context.Context, incidentID, outcome, seriesID string) (draft, playbookID string, err error) {
+	return doPlaybookDraftRequest(context.Background(), os.Getenv("HELPDESK_GATEWAY_URL"), os.Getenv("HELPDESK_CLIENT_API_KEY"), incidentID, outcome, seriesID)
 }
 
 // doPlaybookDraftRequest performs the actual HTTP call to the from-trace endpoint.
 // Extracted for testability (takes plain context.Context, explicit URL and API key).
-func doPlaybookDraftRequest(ctx context.Context, gatewayURL, apiKey, incidentID, outcome string) (draft, playbookID string, err error) {
-	if gatewayURL == "" {
-		return "", "", fmt.Errorf("HELPDESK_GATEWAY_URL not set")
-	}
-
-	reqBody, marshalErr := json.Marshal(map[string]string{
-		"trace_id": incidentID,
-		"outcome":  outcome,
-	})
-	if marshalErr != nil {
-		return "", "", fmt.Errorf("marshal request: %w", marshalErr)
-	}
-
-	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
-	client := &http.Client{Timeout: 60 * time.Second}
-	req, buildErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if buildErr != nil {
-		return "", "", fmt.Errorf("build request: %w", buildErr)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	resp, doErr := client.Do(req)
-	if doErr != nil {
-		return "", "", fmt.Errorf("POST from-trace: %w", doErr)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, respBody)
-	}
-
-	var result struct {
-		Draft      string `json:"draft"`
-		PlaybookID string `json:"playbook_id"`
-	}
-	if decErr := json.Unmarshal(respBody, &result); decErr != nil {
-		return "", "", fmt.Errorf("decode response: %w", decErr)
-	}
-	return result.Draft, result.PlaybookID, nil
+// Thin wrapper around agentutil.RequestPlaybookDraft, shared with faulttest's
+// own from-trace caller.
+func doPlaybookDraftRequest(ctx context.Context, gatewayURL, apiKey, incidentID, outcome, seriesID string) (draft, playbookID string, err error) {
+	return agentutil.RequestPlaybookDraft(ctx, gatewayURL, apiKey, incidentID, outcome, seriesID)
 }
 
 // postCallback POSTs the incident result to a callback URL. Best-effort: failures

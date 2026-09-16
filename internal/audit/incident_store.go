@@ -39,6 +39,7 @@ type Incident struct {
 	Attribution           string    `json:"attribution,omitempty"`             // root-cause class; same classifier faulttest already uses
 	ExternalCorrelationID string    `json:"external_correlation_id,omitempty"` // PagerDuty/Alertmanager id, optional
 	BundlePath            string    `json:"bundle_path,omitempty"`             // tarball path once create_incident_bundle records one
+	DraftPlaybookID       string    `json:"draft_playbook_id,omitempty"`       // Vault playbook_id synthesized via /from-trace for this incident, if any
 	DetectedAt            time.Time `json:"detected_at"`
 	ResolvedAt            time.Time `json:"resolved_at,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
@@ -57,6 +58,7 @@ type IncidentUpdate struct {
 	Severity              *string
 	ExternalCorrelationID *string
 	BundlePath            *string
+	DraftPlaybookID       *string
 	ResolvedAt            *time.Time
 }
 
@@ -120,6 +122,12 @@ func (s *IncidentStore) migrate() error {
 		// time can re-fetch that series' current root_cause_classes without an
 		// extra playbook_runs round-trip just to relearn which series this was.
 		{"series_id", `ALTER TABLE incidents ADD COLUMN series_id TEXT NOT NULL DEFAULT ''`},
+		// v0.29 follow-up: links an incident to the Vault draft synthesized
+		// from it (if any), so a listing can show draft status (pending
+		// review vs. activated) without a separate join at query time —
+		// populated by whichever /from-trace call succeeds for this
+		// incident's trace_id (see handlePlaybookFromTrace).
+		{"draft_playbook_id", `ALTER TABLE incidents ADD COLUMN draft_playbook_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -155,11 +163,11 @@ func (s *IncidentStore) Create(ctx context.Context, inc *Incident) error {
 	_, err := s.db.ExecContext(ctx, rebind(s.isPostgres, `
 		INSERT INTO incidents
 		    (incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
-		     attribution, external_correlation_id, bundle_path,
+		     attribution, external_correlation_id, bundle_path, draft_playbook_id,
 		     detected_at, resolved_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		inc.IncidentID, inc.TraceID, inc.EntryRunID, inc.SeriesID, inc.Origin, inc.Severity, inc.Status,
-		inc.Attribution, inc.ExternalCorrelationID, inc.BundlePath,
+		inc.Attribution, inc.ExternalCorrelationID, inc.BundlePath, inc.DraftPlaybookID,
 		inc.DetectedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(inc.ResolvedAt),
 		inc.CreatedAt.Format("2006-01-02 15:04:05"),
@@ -194,6 +202,10 @@ func (s *IncidentStore) Update(ctx context.Context, incidentID string, u Inciden
 	if u.BundlePath != nil {
 		sets = append(sets, "bundle_path = ?")
 		args = append(args, *u.BundlePath)
+	}
+	if u.DraftPlaybookID != nil {
+		sets = append(sets, "draft_playbook_id = ?")
+		args = append(args, *u.DraftPlaybookID)
 	}
 	if u.ResolvedAt != nil {
 		sets = append(sets, "resolved_at = ?")
@@ -232,7 +244,7 @@ func (s *IncidentStore) Update(ctx context.Context, incidentID string, u Inciden
 func (s *IncidentStore) GetByID(ctx context.Context, incidentID string) (*Incident, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
-		       attribution, external_correlation_id, bundle_path,
+		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE incident_id = ?`), incidentID)
@@ -246,10 +258,25 @@ func (s *IncidentStore) GetByID(ctx context.Context, incidentID string) (*Incide
 func (s *IncidentStore) GetByEntryRunID(ctx context.Context, runID string) (*Incident, error) {
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
-		       attribution, external_correlation_id, bundle_path,
+		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE entry_run_id = ?`), runID)
+	return scanIncident(row)
+}
+
+// GetByTraceID returns the Incident whose trace_id matches the given trace,
+// if any. Returns sql.ErrNoRows if not found. Needed because /from-trace
+// (the draft-synthesis endpoint) is keyed by trace_id, not run_id — both of
+// its callers (faulttest's own direct call, and create_incident_bundle's)
+// only ever have the trace_id in hand, not the entry run_id.
+func (s *IncidentStore) GetByTraceID(ctx context.Context, traceID string) (*Incident, error) {
+	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
+		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
+		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		       detected_at, resolved_at, created_at, updated_at
+		FROM incidents
+		WHERE trace_id = ?`), traceID)
 	return scanIncident(row)
 }
 
@@ -270,7 +297,7 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 	}
 	query := `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
-		       attribution, external_correlation_id, bundle_path,
+		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE 1=1`
@@ -315,7 +342,7 @@ func scanIncident(s incidentScanner) (*Incident, error) {
 	var detectedStr, resolvedStr, createdStr, updatedStr string
 	if err := s.Scan(
 		&inc.IncidentID, &inc.TraceID, &inc.EntryRunID, &inc.SeriesID, &inc.Origin, &inc.Severity, &inc.Status,
-		&inc.Attribution, &inc.ExternalCorrelationID, &inc.BundlePath,
+		&inc.Attribution, &inc.ExternalCorrelationID, &inc.BundlePath, &inc.DraftPlaybookID,
 		&detectedStr, &resolvedStr, &createdStr, &updatedStr,
 	); err != nil {
 		return nil, err

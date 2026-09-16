@@ -824,6 +824,64 @@ func TestTriggerIncidentBundle_HappyPath_CallsDirectToolWithArgs(t *testing.T) {
 	}
 }
 
+func TestTriggerIncidentBundle_SeriesIDSet_PassedForImprovementMode(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_bundle02", TraceID: "tr_bundle02", SeriesID: "pbs_vacuum_triage"},
+	}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "pool exhausted")
+
+	calls := agentMock.calls()
+	if len(calls) != 1 {
+		t.Fatalf("direct tool calls = %d, want 1", len(calls))
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if req.Args["series_id"] != "pbs_vacuum_triage" {
+		t.Errorf("args.series_id = %v, want pbs_vacuum_triage (the entry incident's own series, for improvement mode)", req.Args["series_id"])
+	}
+}
+
+func TestTriggerIncidentBundle_NoSeriesID_OmittedFromArgs(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_bundle03", TraceID: "tr_bundle03"},
+	}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeResolved, "pool exhausted")
+
+	calls := agentMock.calls()
+	if len(calls) != 1 {
+		t.Fatalf("direct tool calls = %d, want 1", len(calls))
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if _, ok := req.Args["series_id"]; ok {
+		t.Errorf("args.series_id should be omitted when the incident has no SeriesID, got %v", req.Args["series_id"])
+	}
+}
+
 func TestTriggerIncidentBundle_PlaybookRunFetchFails_StillCallsWithoutConnectionString(t *testing.T) {
 	agentMock := &mockIncidentDirectAgent{}
 	agentSrv := agentMock.start(t)

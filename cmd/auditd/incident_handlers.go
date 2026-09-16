@@ -59,6 +59,7 @@ func (s *incidentServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Severity              *string `json:"severity,omitempty"`
 		ExternalCorrelationID *string `json:"external_correlation_id,omitempty"`
 		BundlePath            *string `json:"bundle_path,omitempty"`
+		DraftPlaybookID       *string `json:"draft_playbook_id,omitempty"`
 		ResolvedAt            *string `json:"resolved_at,omitempty"` // RFC3339; parsed below
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -72,6 +73,7 @@ func (s *incidentServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Severity:              body.Severity,
 		ExternalCorrelationID: body.ExternalCorrelationID,
 		BundlePath:            body.BundlePath,
+		DraftPlaybookID:       body.DraftPlaybookID,
 	}
 	if body.ResolvedAt != nil {
 		t, err := time.Parse(time.RFC3339, *body.ResolvedAt)
@@ -159,6 +161,30 @@ func (s *incidentServer) handleGetByEntryRunID(w http.ResponseWriter, r *http.Re
 			return
 		}
 		slog.Error("failed to get incident by entry_run_id", "run_id", runID, "err", err)
+		http.Error(w, "failed to get incident", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(inc) //nolint:errcheck
+}
+
+// handleGetByTraceID handles GET /v1/incidents/by-trace/{traceID} — lets the
+// /from-trace draft-synthesis handler (the one place both its callers,
+// faulttest's own and create_incident_bundle's, converge) find the incident
+// row to attach draft_playbook_id to, given only a trace_id.
+func (s *incidentServer) handleGetByTraceID(w http.ResponseWriter, r *http.Request) {
+	traceID := r.PathValue("traceID")
+	if traceID == "" {
+		http.Error(w, "traceID is required", http.StatusBadRequest)
+		return
+	}
+	inc, err := s.store.GetByTraceID(r.Context(), traceID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "no incident for trace_id", http.StatusNotFound)
+			return
+		}
+		slog.Error("failed to get incident by trace_id", "trace_id", traceID, "err", err)
 		http.Error(w, "failed to get incident", http.StatusInternalServerError)
 		return
 	}

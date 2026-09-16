@@ -95,6 +95,51 @@ func TestIncidentStore_SeriesID_RoundTrips(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_GetByTraceID(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	inc := &Incident{TraceID: "tr_findme", EntryRunID: "plr_x"}
+	if err := s.Create(ctx, inc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := s.GetByTraceID(ctx, "tr_findme")
+	if err != nil {
+		t.Fatalf("GetByTraceID: %v", err)
+	}
+	if got.IncidentID != inc.IncidentID {
+		t.Errorf("GetByTraceID returned %q, want %q", got.IncidentID, inc.IncidentID)
+	}
+
+	if _, err := s.GetByTraceID(ctx, "tr_never"); err != sql.ErrNoRows {
+		t.Errorf("GetByTraceID for unknown trace = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestIncidentStore_DraftPlaybookID_RoundTrips(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	inc := &Incident{TraceID: "tr_draft_test", EntryRunID: "plr_drafttest"}
+	if err := s.Create(ctx, inc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	draftID := "pb_draft_abc"
+	if err := s.Update(ctx, inc.IncidentID, IncidentUpdate{DraftPlaybookID: &draftID}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.GetByTraceID(ctx, "tr_draft_test")
+	if err != nil {
+		t.Fatalf("GetByTraceID: %v", err)
+	}
+	if got.DraftPlaybookID != "pb_draft_abc" {
+		t.Errorf("DraftPlaybookID = %q, want pb_draft_abc", got.DraftPlaybookID)
+	}
+}
+
 func TestIncidentStore_Create_ExplicitOrigin(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()
