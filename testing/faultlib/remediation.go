@@ -214,9 +214,20 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID, name
 	if r.cfg.AgentConnStr != "" {
 		connStr = r.cfg.AgentConnStr
 	}
-	// skip_trust_gate: faulttest traffic is evaluation, never a real incident —
-	// see the matching comment in faultlib/runner.go.
-	reqBody := map[string]any{"connection_string": connStr, "skip_trust_gate": true}
+	// skip_trust_gate, origin: faulttest traffic is evaluation, never a real
+	// incident — see the matching comments in faultlib/runner.go. RunPlaybook
+	// is currently only ever called with a non-empty priorRunID (chained from
+	// a triage run — see Remediate's one call site in
+	// testing/cmd/faulttest/main.go), so origin is inert in practice today
+	// (createIncidentRecord only reads it for a genuine entry point), but this
+	// request-builder is independently maintained from runner.go's and should
+	// carry the same faulttest-identifying fields regardless — the same
+	// reasoning that already applies to skip_trust_gate here.
+	reqBody := map[string]any{
+		"connection_string": connStr,
+		"skip_trust_gate":   true,
+		"origin":            audit.IncidentOriginFaulttest,
+	}
 	if namespace != "" {
 		reqBody["namespace"] = namespace
 	}
