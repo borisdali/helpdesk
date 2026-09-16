@@ -902,3 +902,80 @@ func TestCallIncidentDirectTool_ErrorStatus_ReturnsError(t *testing.T) {
 		t.Errorf("error = %v, want it to include the agent's tool error", err)
 	}
 }
+
+// TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_TriggersIncidentBundle
+// is the bundle-trigger sibling of ..._ClassifiesAttribution above — same gap,
+// same fix: every TestTriggerIncidentBundle_* test calls gw.triggerIncidentBundle
+// directly, which only proves that function's own parameter handling, not that
+// a real HTTP-driven resolution (real A2A response, real outcome computation,
+// real async recordPlaybookRunComplete) actually reaches it with
+// autoIncidentBundle=true.
+func TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_TriggersIncidentBundle(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_inc_bundle01",
+		SeriesID:      "pbs_inc_bundle01",
+		Name:          "Incident Bundle Trigger Wiring Test",
+		ExecutionMode: "agent",
+		AgentName:     "bundle_test_agent",
+		IsActive:      true,
+	}
+	// SeriesID deliberately has no matching playbookBySeriesID/RootCauseClasses
+	// on the mock — classification cleanly no-ops (SeriesID lookup finds
+	// nothing to classify against), keeping this test focused on the bundle
+	// trigger alone.
+	auditMock := &mockRunStartAuditd{
+		playbook:      pb,
+		incidentByRun: &audit.Incident{IncidentID: "inc_bundle_e2e01", TraceID: "tr_bundle_e2e01"},
+		priorRun:      &audit.PlaybookRun{RunID: "plr_entry01", ConnectionString: "postgres://localhost/test"},
+	}
+	auditSrv := auditMock.start(t)
+
+	agentMock := &mockIncidentDirectAgent{}
+	incidentAgentSrv := agentMock.start(t)
+
+	_, card := mockA2AServerWithText(t, "bundle_test_agent",
+		"FINDINGS: disk is full, root cause confirmed.\n")
+	client, err := a2aclient.NewFromCard(context.Background(), card)
+	if err != nil {
+		t.Fatalf("create A2A client: %v", err)
+	}
+
+	gw := makePlaybookRunGateway(auditSrv.URL, nil)
+	gw.clients = map[string]*a2aclient.Client{"bundle_test_agent": client}
+	gw.autoIncidentBundle = true
+	gw.agents = map[string]*discovery.Agent{agentNameIncident: {InvokeURL: incidentAgentSrv.URL + "/invoke"}}
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"disk alert"}`)
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("got 502; body: %s", rec.Body.String())
+	}
+
+	// Fires via the same fire-and-forget recordPlaybookRunComplete path —
+	// poll instead of racing it.
+	var calls []capturedRequest
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		calls = agentMock.calls()
+		if len(calls) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(calls) == 0 {
+		t.Fatal("incident agent's direct-tool endpoint was never called — a real HTTP-driven resolution did not trigger the incident bundle")
+	}
+	if calls[0].path != "/tool/create_incident_bundle" {
+		t.Errorf("path = %q, want /tool/create_incident_bundle", calls[0].path)
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if req.Args["incident_id"] != "inc_bundle_e2e01" {
+		t.Errorf("args.incident_id = %v, want inc_bundle_e2e01", req.Args["incident_id"])
+	}
+	if req.Args["connection_string"] != "postgres://localhost/test" {
+		t.Errorf("args.connection_string = %v, want postgres://localhost/test", req.Args["connection_string"])
+	}
+}

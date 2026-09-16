@@ -159,6 +159,37 @@ func TestCreateIncidentBundleImpl_WithIncidentID_PatchesAuditd_NotIndexFile(t *t
 	}
 }
 
+// TestCreateIncidentBundleImpl_WithIncidentID_AuditURLMisconfigured_BundleStillCreated
+// documents a real, accepted edge case: when a caller supplies IncidentID
+// (implying auditd should be configured) but HELPDESK_AUDIT_URL is actually
+// unset/misconfigured, the bundle is still written to disk, but it lands in
+// NEITHER the incidents table (PATCH fails) NOR the legacy incidents.json
+// index (skipped, since IncidentID was supplied) — a genuinely untracked
+// bundle. Best-effort, matching this codebase's established convention
+// elsewhere (a failed downstream write logs and moves on rather than falling
+// back to a different write path) — not a crash, not silently discarding the
+// tarball itself, just its index entry. Documented here so this is a known,
+// deliberate tradeoff if it's ever noticed in the field, not a surprise.
+func TestCreateIncidentBundleImpl_WithIncidentID_AuditURLMisconfigured_BundleStillCreated(t *testing.T) {
+	withMockedLayers(t)
+	outputDir := t.TempDir()
+	t.Setenv("HELPDESK_INCIDENT_DIR", outputDir)
+	t.Setenv("HELPDESK_AUDIT_URL", "") // misconfigured despite IncidentID being supplied
+
+	result, err := createIncidentBundleImpl(context.Background(), CreateIncidentBundleArgs{
+		IncidentID: "inc_orphaned01",
+	})
+	if err != nil {
+		t.Fatalf("createIncidentBundleImpl should not fail outright: %v", err)
+	}
+	if _, err := os.Stat(result.BundlePath); err != nil {
+		t.Errorf("bundle tarball should still be written to disk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "incidents.json")); !os.IsNotExist(err) {
+		t.Error("incidents.json should still be skipped when IncidentID is supplied, even if the PATCH failed")
+	}
+}
+
 func TestCreateIncidentBundleImpl_WithoutIncidentID_WritesIndexFile(t *testing.T) {
 	withMockedLayers(t)
 	outputDir := t.TempDir()
