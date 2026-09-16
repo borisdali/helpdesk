@@ -25,6 +25,7 @@ The [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) run
 1. [What an Incident Contains](#what-an-incident-contains)
 2. [Two Paths Into the System](#two-paths-into-the-system)
    - [Real Incidents](#real-incidents)
+   - [Automatic Bundle Creation (opt-in)](#automatic-bundle-creation-opt-in)
    - [Injected Incidents (faulttest)](#injected-incidents-faulttest)
 3. [Faults and Incidents](#faults-and-incidents)
 4. [The Audit Trail](#the-audit-trail)
@@ -97,6 +98,14 @@ The bundle result:
 ```
 
 `playbook_id` is the Vault identifier of the persisted draft. When the gateway's auditd integration is not configured, the draft is returned inline in `playbook_draft` only.
+
+### Automatic Bundle Creation (opt-in)
+
+As of v0.29, setting `HELPDESK_AUTO_INCIDENT_BUNDLE=true` on the gateway adds a second way a bundle gets created, alongside the incident agent's own judgment call above: when a triage or remediation playbook run started from a genuine entry point (not a chained escalation hop) concludes with outcome `resolved` or `escalated`, the gateway calls `create_incident_bundle` directly — no manual invocation and no incident-agent decision required. This uses the same direct tool-dispatch mechanism the database, Kubernetes, and sysadmin agents already use for fleet jobs (`POST /tool/{name}`, bypassing the LLM), not the conversational path shown above — an automated trigger needs `bundle_path` back as real structured JSON, not something parsed out of narration.
+
+The resulting bundle is linked to that run's internal audit-side incident record (a durable per-incident row, keyed to the run's trace) via its `bundle_path`, rather than the legacy `incidents.json` index this doc describes elsewhere — that index is still used for bundles created without this linkage (a human or script invoking the tool directly, with no incident record to link to).
+
+Default is off; the manually-invoked path above is unaffected either way. Only the database, OS, and storage layers are collected automatically — Kubernetes context isn't yet resolved for this path, so a K8s-relevant incident bundled this way will be missing that layer. Manually calling the tool with `k8s_context` set still works exactly as documented above.
 
 ### Injected Incidents (faulttest)
 
