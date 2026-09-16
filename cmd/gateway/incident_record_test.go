@@ -114,7 +114,7 @@ func TestRecordPlaybookRunStart_EntryPointRun_CreatesIncident(t *testing.T) {
 
 	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "series1"}
 	runID := gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
-		"trace_abc", "" /* priorRunID */, "", "operator1")
+		"trace_abc", "" /* priorRunID */, "", "operator1", "")
 
 	if runID != "plr_entry01" {
 		t.Fatalf("runID = %q, want plr_entry01", runID)
@@ -142,7 +142,7 @@ func TestRecordPlaybookRunStart_ContinuationRun_NoIncidentCreated(t *testing.T) 
 
 	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "series1"}
 	runID := gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
-		"trace_abc", "plr_prior01" /* priorRunID set: chained/remediation hop */, "", "operator1")
+		"trace_abc", "plr_prior01" /* priorRunID set: chained/remediation hop */, "", "operator1", "")
 
 	if runID != "plr_entry01" {
 		t.Fatalf("runID = %q, want plr_entry01", runID)
@@ -161,7 +161,7 @@ func TestRecordPlaybookRunStart_IncidentCreateFails_RunStillReturned(t *testing.
 
 	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "series1"}
 	runID := gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
-		"trace_abc", "", "", "operator1")
+		"trace_abc", "", "", "operator1", "")
 
 	if runID != "plr_entry01" {
 		t.Errorf("runID = %q, want plr_entry01 — an incidents-table failure must not affect the run being recorded (best-effort)", runID)
@@ -175,7 +175,7 @@ func TestRecordPlaybookRunStart_IncidentCreateFails_RunStillReturned(t *testing.
 func TestCreateIncidentRecord_NoAuditURL_NoOp(t *testing.T) {
 	gw := &Gateway{}
 	// Should not panic and should simply return — no server configured.
-	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x")
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "")
 }
 
 func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
@@ -183,7 +183,7 @@ func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
 	srv := mock.start(t)
 	gw := &Gateway{auditURL: srv.URL}
 
-	gw.createIncidentRecord(context.Background(), "", "trace_x", "pbs_x")
+	gw.createIncidentRecord(context.Background(), "", "trace_x", "pbs_x", "")
 
 	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
 		t.Errorf("POST /v1/incidents calls = %d, want 0 when runID is empty", len(calls))
@@ -277,7 +277,7 @@ func TestCreateIncidentRecord_IncludesSeriesID(t *testing.T) {
 
 	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "pbs_max_connections_triage"}
 	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
-		"trace_abc", "", "", "operator1")
+		"trace_abc", "", "", "operator1", "")
 
 	incidentCalls := mock.calls(http.MethodPost, "/v1/incidents")
 	if len(incidentCalls) != 1 {
@@ -977,5 +977,107 @@ func TestHandlePlaybookRun_ResolvedOutcome_ViaRealHTTPHandler_TriggersIncidentBu
 	}
 	if req.Args["connection_string"] != "postgres://localhost/test" {
 		t.Errorf("args.connection_string = %v, want postgres://localhost/test", req.Args["connection_string"])
+	}
+}
+
+// --- Phase 4: faulttest origin tagging ---
+
+func TestCreateIncidentRecord_FaulttestOrigin_SetOnIncident(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", audit.IncidentOriginFaulttest)
+
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Origin != audit.IncidentOriginFaulttest {
+		t.Errorf("origin = %q, want %q", body.Origin, audit.IncidentOriginFaulttest)
+	}
+}
+
+func TestCreateIncidentRecord_UnrecognizedOrigin_TreatedAsUnset(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	// A caller (or a bug) sending an arbitrary origin string must not land in
+	// the incidents table verbatim — only the recognized "faulttest" value
+	// survives; anything else is treated the same as unset (IncidentStore.Create
+	// then defaults it to "real" server-side).
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "not-a-real-origin-value")
+
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Origin != "" {
+		t.Errorf("origin = %q, want empty (unrecognized value must not pass through)", body.Origin)
+	}
+}
+
+func TestRecordPlaybookRunStart_EntryPointRun_FaulttestOrigin_ThreadedThrough(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "series1"}
+	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "diagnostic",
+		"trace_abc", "", "", "operator1", audit.IncidentOriginFaulttest)
+
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Origin != audit.IncidentOriginFaulttest {
+		t.Errorf("origin = %q, want %q — recordPlaybookRunStart must thread its origin param through to createIncidentRecord", body.Origin, audit.IncidentOriginFaulttest)
+	}
+}
+
+// TestHandlePlaybookRun_FaulttestOriginInRequestBody_ViaRealHTTPHandler proves
+// the full real-HTTP-driven path: a request body carrying "origin":"faulttest"
+// (exactly what testing/faultlib/runner.go now sends on every request) results
+// in an incidents-table row tagged origin="faulttest" — not just that
+// recordPlaybookRunStart's own parameter handling is correct in isolation.
+func TestHandlePlaybookRun_FaulttestOriginInRequestBody_ViaRealHTTPHandler(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_origin01",
+		SeriesID:      "pbs_origin01",
+		ExecutionMode: "fleet",
+		IsActive:      true,
+	}
+	mock := &mockRunStartAuditd{playbook: pb}
+	srv := mock.start(t)
+	gw := makePlaybookRunGateway(srv.URL, fleetPlannerLLM(t))
+
+	rec := postPlaybookRun(t, gw, pb.PlaybookID, `{"origin":"faulttest"}`)
+	if rec.Code == http.StatusBadGateway {
+		t.Fatalf("got 502; body: %s", rec.Body.String())
+	}
+
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Origin != audit.IncidentOriginFaulttest {
+		t.Errorf("origin = %q, want %q — a real request body's origin field did not reach the incidents table", body.Origin, audit.IncidentOriginFaulttest)
 	}
 }

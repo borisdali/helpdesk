@@ -451,6 +451,42 @@ func TestRunViaPlaybook_SendsSkipTrustGate(t *testing.T) {
 	}
 }
 
+// TestRunViaPlaybook_SendsFaulttestOrigin is the v0.29 incident-entity design's
+// Phase 4 sibling of the skip_trust_gate regression guard above: faulttest
+// traffic must always set origin="faulttest", unconditionally, on every
+// playbook-run request, so the resulting incidents-table row is tagged
+// correctly rather than defaulting to "real". If this field were ever
+// silently dropped by a refactor, every faulttest-triggered incident would
+// again be indistinguishable from a real one — the exact gap Phase 4 closes.
+func TestRunViaPlaybook_SendsFaulttestOrigin(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"playbook_id": "pb_abc"}},
+			})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)                //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"text": "ok"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRunner(t, srv.URL, true)
+	f := Failure{
+		ID: "db-lock", Prompt: "investigate", Timeout: "30s",
+		DiagnosisPlaybookSeriesID: "pbs_lock_chain_triage",
+	}
+	resp := r.runViaPlaybook(context.Background(), f)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+	if gotBody["origin"] != "faulttest" {
+		t.Errorf("origin = %v, want \"faulttest\"", gotBody["origin"])
+	}
+}
+
 // ── X-User propagation ────────────────────────────────────────────────────────
 
 func TestRunViaPlaybook_SendsXUser(t *testing.T) {

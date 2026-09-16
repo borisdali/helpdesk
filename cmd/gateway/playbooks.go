@@ -322,6 +322,18 @@ type PlaybookRunRequest struct {
 	// set this. Not exposed as a general escape hatch: it does not affect
 	// lowConfidenceForceGate or objectiveEvidenceForceGate, only the trust gate.
 	SkipTrustGate bool `json:"skip_trust_gate,omitempty"`
+
+	// Origin declares who's driving this run, for the incidents table's
+	// origin column (v0.29 incident-entity design, Phase 4 — see
+	// docs/INCIDENTS.md). Self-reported, same trust model as SkipTrustGate
+	// above (no distinctive faulttest service identity exists to infer this
+	// from instead — every faulttest deployment reuses an ordinary gateway
+	// API key). Validated against a closed allow-list (audit.IncidentOriginReal
+	// is the harmless zero-value default); an unrecognized value doesn't
+	// error, it's just treated as unset. faulttest sets this to "faulttest"
+	// unconditionally on every run it triggers (testing/faultlib/runner.go),
+	// the same way it already always sets skip_trust_gate.
+	Origin string `json:"origin,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -409,7 +421,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator, req.Origin)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -1302,7 +1314,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 	// shared function every auto-chained hop goes through.
 	r.Header.Set("X-Purpose", derivedPurpose(nextPB.PlaybookType, req.Purpose))
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"), req.Origin)
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1938,7 +1950,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy, remReq.Origin)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -2475,7 +2487,7 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator, origin string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -2534,7 +2546,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		// this is where the incidents table's one row per user-facing
 		// incident gets created. See docs/INCIDENTS.md and the v0.29
 		// incident-entity design (Phase 1).
-		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID)
+		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID, origin)
 	}
 	return created.RunID
 }
@@ -2543,17 +2555,25 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 // entry-point playbook run. seriesID is recorded so attribution
 // classification at resolution time (Phase 2) can re-fetch this series'
 // current root_cause_classes without a second playbook_runs round-trip.
+// origin is validated against a closed allow-list (v0.29 incident-entity
+// design, Phase 4) rather than passed through as arbitrary caller-supplied
+// text — anything other than the recognized "faulttest" value is left empty,
+// which IncidentStore.Create already defaults to IncidentOriginReal.
 // Best-effort: a failure here must never block the playbook run itself, so it
 // only logs — recordPlaybookRunStart's caller already has the run ID it needs
 // regardless of whether this succeeds.
-func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID string) {
+func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID, origin string) {
 	if g.auditURL == "" || runID == "" {
 		return
+	}
+	if origin != audit.IncidentOriginFaulttest {
+		origin = ""
 	}
 	inc := audit.Incident{
 		TraceID:    traceID,
 		EntryRunID: runID,
 		SeriesID:   seriesID,
+		Origin:     origin,
 	}
 	body, err := json.Marshal(inc)
 	if err != nil {
