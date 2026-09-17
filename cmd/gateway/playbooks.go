@@ -2864,9 +2864,22 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 // diagnostic conclusion worth root-cause classification — as opposed to
 // "unknown" (nothing was concluded), "abandoned" (gate denied / step failed),
 // or "gate_pending" (not yet concluded).
+//
+// OutcomeTransitioned (TRANSITION_TO — a same-domain triage→remediation
+// handoff, e.g. connection-triage -> connection-remediate) is included
+// alongside OutcomeEscalated (ESCALATE_TO — a cross-domain handoff, e.g.
+// DB agent -> sysadmin agent): both represent the entry playbook's own
+// diagnostic conclusion being conclusive enough to hand off, the same
+// condition that already makes OutcomeEscalated attributable. Found via
+// live K8s verification of the v0.29 incident-entity design — TRANSITION_TO
+// is actually the *more common* pattern in this codebase's own playbook
+// catalog (most triage playbooks transition to a same-series remediation;
+// ESCALATE_TO is reserved for the less common cross-domain case), so its
+// prior omission here silently skipped classification for the majority of
+// real incidents, not an edge case.
 func isAttributableOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned:
 		return true
 	default:
 		return false
@@ -2878,9 +2891,16 @@ func isAttributableOutcome(outcome string) bool {
 // "abandoned" (gate denied / step failed) is terminal (nothing more will
 // happen on this run) but not attributable (there's no diagnostic conclusion
 // to classify).
+//
+// See isAttributableOutcome's comment on OutcomeTransitioned: without it
+// here, an incident whose entry playbook resolved via TRANSITION_TO was
+// permanently stuck at status="open" in the incidents table — status/
+// resolved_at/attribution/bundle_path/draft_playbook_id never populated,
+// regardless of how the downstream remediation it handed off to eventually
+// resolved (including when that remediation itself failed/was abandoned).
 func isTerminalIncidentOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned:
 		return true
 	default:
 		return false
@@ -2891,9 +2911,15 @@ func isTerminalIncidentOutcome(outcome string) bool {
 // table's status vocabulary (open | resolved | escalated | abandoned).
 // "escalated+resolved" (a chain that escalated partway through but ultimately
 // resolved) maps to resolved — that's the incident's final state.
+//
+// OutcomeTransitioned reuses the "escalated" status bucket rather than
+// introducing a new status value: both represent "the entry playbook's own
+// diagnosis concluded and handed off elsewhere" — same-domain (TRANSITION_TO)
+// vs. cross-domain (ESCALATE_TO) is a distinction that matters for chaining
+// logic, not for what an operator scanning the incidents list needs to see.
 func incidentStatusForOutcome(outcome string) string {
 	switch outcome {
-	case audit.OutcomeEscalated:
+	case audit.OutcomeEscalated, audit.OutcomeTransitioned:
 		return audit.IncidentStatusEscalated
 	case audit.OutcomeAbandoned:
 		return audit.IncidentStatusAbandoned
@@ -3010,10 +3036,23 @@ func (g *Gateway) triggerIncidentBundle(ctx context.Context, runID, outcome, fin
 	if description == "" {
 		description = "Auto-generated bundle for " + runID
 	}
+	// create_incident_bundle's own Outcome arg only recognizes "resolved" or
+	// "escalated" (see its shouldGenerateDraft gate in agents/incident/tools.go)
+	// — anything else (including "transitioned") skips draft synthesis
+	// entirely. Normalize the same way incidentStatusForOutcome does: a
+	// same-domain TRANSITION_TO handoff is, from create_incident_bundle's
+	// binary resolved-vs-escalated perspective, an escalation. Found via the
+	// same live K8s verification that surfaced the isAttributableOutcome/
+	// isTerminalIncidentOutcome gap above — without this, a TRANSITION_TO
+	// incident's auto-triggered bundle would never get a draft_playbook_id.
+	bundleOutcome := outcome
+	if bundleOutcome == audit.OutcomeTransitioned {
+		bundleOutcome = audit.OutcomeEscalated
+	}
 	args := map[string]any{
 		"incident_id": inc.IncidentID,
 		"description": description,
-		"outcome":     outcome,
+		"outcome":     bundleOutcome,
 	}
 	if inc.SeriesID != "" {
 		// Improvement-mode parity with faulttest's own from-trace call (see

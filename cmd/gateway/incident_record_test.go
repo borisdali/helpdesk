@@ -511,10 +511,15 @@ func TestIsAttributableOutcome(t *testing.T) {
 		audit.OutcomeResolved:          true,
 		audit.OutcomeEscalated:         true,
 		audit.OutcomeEscalatedResolved: true,
-		audit.OutcomeAbandoned:         false,
-		audit.OutcomeUnknown:           false,
-		"gate_pending":                 false,
-		"":                             false,
+		// TRANSITION_TO (same-domain handoff) is attributable exactly like
+		// ESCALATE_TO (cross-domain handoff) — found missing via live K8s
+		// verification; TRANSITION_TO is the more common of the two in this
+		// codebase's own playbook catalog.
+		audit.OutcomeTransitioned: true,
+		audit.OutcomeAbandoned:    false,
+		audit.OutcomeUnknown:      false,
+		"gate_pending":            false,
+		"":                        false,
 	}
 	for outcome, want := range cases {
 		if got := isAttributableOutcome(outcome); got != want {
@@ -703,9 +708,14 @@ func TestIsTerminalIncidentOutcome(t *testing.T) {
 		audit.OutcomeEscalated:         true,
 		audit.OutcomeEscalatedResolved: true,
 		audit.OutcomeAbandoned:         true,
-		audit.OutcomeUnknown:           false,
-		"gate_pending":                 false,
-		"":                             false,
+		// See isAttributableOutcome's test above — found missing via live
+		// K8s verification. Without this, a TRANSITION_TO entry incident
+		// stayed status="open" forever, regardless of how its downstream
+		// remediation eventually resolved.
+		audit.OutcomeTransitioned: true,
+		audit.OutcomeUnknown:      false,
+		"gate_pending":            false,
+		"":                        false,
 	}
 	for outcome, want := range cases {
 		if got := isTerminalIncidentOutcome(outcome); got != want {
@@ -720,6 +730,9 @@ func TestIncidentStatusForOutcome(t *testing.T) {
 		audit.OutcomeEscalatedResolved: audit.IncidentStatusResolved,
 		audit.OutcomeEscalated:         audit.IncidentStatusEscalated,
 		audit.OutcomeAbandoned:         audit.IncidentStatusAbandoned,
+		// TRANSITION_TO reuses the "escalated" status bucket — see
+		// incidentStatusForOutcome's comment.
+		audit.OutcomeTransitioned: audit.IncidentStatusEscalated,
 	}
 	for outcome, want := range cases {
 		if got := incidentStatusForOutcome(outcome); got != want {
@@ -855,6 +868,38 @@ func TestTriggerIncidentBundle_NoIncidentFound_NoCall(t *testing.T) {
 
 	if len(agentMock.calls()) != 0 {
 		t.Error("incident agent should not be called when no incident row exists for this run")
+	}
+}
+
+func TestTriggerIncidentBundle_TransitionedOutcome_NormalizedToEscalated(t *testing.T) {
+	agentMock := &mockIncidentDirectAgent{}
+	agentSrv := agentMock.start(t)
+	auditMock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_bundle04", TraceID: "tr_bundle04"},
+	}
+	auditSrv := auditMock.start(t)
+
+	gw := &Gateway{
+		auditURL:           auditSrv.URL,
+		autoIncidentBundle: true,
+		agents:             map[string]*discovery.Agent{agentNameIncident: {InvokeURL: agentSrv.URL + "/invoke"}},
+	}
+
+	gw.triggerIncidentBundle(context.Background(), "plr_x", audit.OutcomeTransitioned, "handed off to remediation")
+
+	calls := agentMock.calls()
+	if len(calls) != 1 {
+		t.Fatalf("direct tool calls = %d, want 1", len(calls))
+	}
+	var req directToolReq
+	if err := json.Unmarshal([]byte(calls[0].body), &req); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	// create_incident_bundle's own gate only recognizes "resolved"/"escalated"
+	// — passing "transitioned" straight through would silently skip draft
+	// synthesis (a real, found-via-live-K8s-verification bug).
+	if req.Args["outcome"] != audit.OutcomeEscalated {
+		t.Errorf("args.outcome = %v, want %q (transitioned normalized to escalated)", req.Args["outcome"], audit.OutcomeEscalated)
 	}
 }
 
