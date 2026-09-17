@@ -60,6 +60,13 @@ type IncidentUpdate struct {
 	BundlePath            *string
 	DraftPlaybookID       *string
 	ResolvedAt            *time.Time
+	// TraceID backfills the trace_id column when it was empty at creation
+	// time — genuine for execution_mode="agent" entry playbooks, where the
+	// real trace_id isn't minted until the agent's first response comes back
+	// (see handlePlaybookRunAsAgent's backfillIncidentTraceID). Never
+	// overwrites a non-empty existing value; callers only set this when they
+	// already confirmed the row's own TraceID was "".
+	TraceID *string
 }
 
 // IncidentStore persists Incident rows.
@@ -210,6 +217,10 @@ func (s *IncidentStore) Update(ctx context.Context, incidentID string, u Inciden
 	if u.ResolvedAt != nil {
 		sets = append(sets, "resolved_at = ?")
 		args = append(args, formatNullableTime(*u.ResolvedAt))
+	}
+	if u.TraceID != nil {
+		sets = append(sets, "trace_id = ?")
+		args = append(args, *u.TraceID)
 	}
 
 	query := "UPDATE incidents SET "

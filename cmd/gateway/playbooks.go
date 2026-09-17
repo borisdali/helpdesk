@@ -666,6 +666,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 // to a follow-on playbook when ESCALATE_TO fires and approval_mode permits it.
 func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
 	primary := g.runAgentPlaybook(r, pb, req, "", runID)
+	g.backfillIncidentTraceID(r.Context(), runID, primary.traceID)
 
 	extra := map[string]any{}
 	if runID != "" {
@@ -2685,6 +2686,73 @@ func (g *Gateway) patchIncidentAttribution(ctx context.Context, incidentID, attr
 			"auditd_error", strings.TrimSpace(string(respBody)),
 		)
 	}
+}
+
+// patchIncidentTraceID writes the real trace_id onto an existing incidents
+// row. Best-effort: failures are logged but never propagated.
+func (g *Gateway) patchIncidentTraceID(ctx context.Context, incidentID, traceID string) {
+	if g.auditURL == "" || incidentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"trace_id": traceID})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("patchIncidentTraceID: request failed", "incident_id", incidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("patchIncidentTraceID: unexpected status",
+			"incident_id", incidentID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// backfillIncidentTraceID fills in the incidents row's trace_id once the real
+// one is known, for execution_mode="agent" entry playbooks: at run-start
+// (recordPlaybookRunStart/createIncidentRecord) the real trace_id doesn't
+// exist yet — it's minted by the agent itself and only comes back as an
+// X-Trace-ID response header once the primary hop completes (see traceID at
+// the top of runAgentPlaybook's response parsing). Until this backfill,
+// anything keyed on this incident's trace_id — most importantly
+// create_incident_bundle's automatic /from-trace call and linkDraftToIncident
+// — silently misses this incident (a real gap found via live verification of
+// the v0.29 incident-entity design, not a hypothetical).
+//
+// No-ops quietly when: runID isn't a genuine entry point (no incidents row),
+// traceID is empty, or the row already has a trace_id (never overwrites).
+func (g *Gateway) backfillIncidentTraceID(ctx context.Context, runID, traceID string) {
+	if traceID == "" {
+		return
+	}
+	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	if err != nil {
+		slog.Warn("backfillIncidentTraceID: could not look up incident", "run_id", runID, "err", err)
+		return
+	}
+	if inc == nil || inc.TraceID != "" {
+		return
+	}
+	g.patchIncidentTraceID(ctx, inc.IncidentID, traceID)
 }
 
 // classifyIncidentAttribution is Phase 2 of the v0.29 incident-entity design

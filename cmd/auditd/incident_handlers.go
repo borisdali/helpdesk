@@ -60,6 +60,7 @@ func (s *incidentServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		ExternalCorrelationID *string `json:"external_correlation_id,omitempty"`
 		BundlePath            *string `json:"bundle_path,omitempty"`
 		DraftPlaybookID       *string `json:"draft_playbook_id,omitempty"`
+		TraceID               *string `json:"trace_id,omitempty"`
 		ResolvedAt            *string `json:"resolved_at,omitempty"` // RFC3339; parsed below
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -74,6 +75,7 @@ func (s *incidentServer) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		ExternalCorrelationID: body.ExternalCorrelationID,
 		BundlePath:            body.BundlePath,
 		DraftPlaybookID:       body.DraftPlaybookID,
+		TraceID:               body.TraceID,
 	}
 	if body.ResolvedAt != nil {
 		t, err := time.Parse(time.RFC3339, *body.ResolvedAt)

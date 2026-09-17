@@ -362,3 +362,35 @@ func TestIncidentHandlers_Update_DraftPlaybookID(t *testing.T) {
 		t.Errorf("draft_playbook_id = %q, want pb_draft01", after.DraftPlaybookID)
 	}
 }
+
+func TestIncidentHandlers_Update_TraceIDBackfill(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader([]byte("{}")))
+	createRec := httptest.NewRecorder()
+	srv.handleCreate(createRec, createReq)
+	var created audit.Incident
+	json.NewDecoder(createRec.Body).Decode(&created) //nolint:errcheck
+	if created.TraceID != "" {
+		t.Fatalf("expected empty trace_id at creation, got %q", created.TraceID)
+	}
+
+	patchBody, _ := json.Marshal(map[string]any{"trace_id": "tr_backfilled01"})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/v1/incidents/"+created.IncidentID, bytes.NewReader(patchBody))
+	patchReq.SetPathValue("incidentID", created.IncidentID)
+	patchRec := httptest.NewRecorder()
+	srv.handleUpdate(patchRec, patchReq)
+	if patchRec.Code != http.StatusNoContent {
+		t.Fatalf("PATCH status = %d, want 204; body: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/incidents/"+created.IncidentID, nil)
+	getReq.SetPathValue("incidentID", created.IncidentID)
+	getRec := httptest.NewRecorder()
+	srv.handleGet(getRec, getReq)
+	var after audit.Incident
+	json.NewDecoder(getRec.Body).Decode(&after) //nolint:errcheck
+	if after.TraceID != "tr_backfilled01" {
+		t.Errorf("trace_id = %q, want tr_backfilled01", after.TraceID)
+	}
+}

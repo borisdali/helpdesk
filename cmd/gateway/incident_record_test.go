@@ -340,6 +340,82 @@ func TestPatchIncidentAttribution_SendsAttributionBody(t *testing.T) {
 	}
 }
 
+func TestPatchIncidentTraceID_SendsTraceIDBody(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.patchIncidentTraceID(context.Background(), "inc_abc", "tr_backfilled01")
+
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 1", len(calls))
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["trace_id"] != "tr_backfilled01" {
+		t.Errorf("trace_id = %q, want tr_backfilled01", body["trace_id"])
+	}
+}
+
+func TestBackfillIncidentTraceID_NoIncidentFound_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{} // incidentByRun unset → 404
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.backfillIncidentTraceID(context.Background(), "plr_x", "tr_real01")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when no incident row exists for this run", len(calls))
+	}
+}
+
+func TestBackfillIncidentTraceID_EmptyTraceID_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_abc"}}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.backfillIncidentTraceID(context.Background(), "plr_x", "")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when the new trace_id is empty", len(calls))
+	}
+}
+
+func TestBackfillIncidentTraceID_AlreadySet_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_abc", TraceID: "tr_existing"}}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.backfillIncidentTraceID(context.Background(), "plr_x", "tr_new")
+
+	if calls := mock.calls(http.MethodPatch, "/v1/incidents/"); len(calls) != 0 {
+		t.Errorf("PATCH /v1/incidents calls = %d, want 0 when the incident already has a trace_id — must never overwrite", len(calls))
+	}
+}
+
+func TestBackfillIncidentTraceID_HappyPath_Patches(t *testing.T) {
+	mock := &mockRunStartAuditd{incidentByRun: &audit.Incident{IncidentID: "inc_abc"}} // TraceID unset
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.backfillIncidentTraceID(context.Background(), "plr_x", "tr_real01")
+
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_abc")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH /v1/incidents/inc_abc calls = %d, want 1", len(calls))
+	}
+	var body map[string]string
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode patch body: %v", err)
+	}
+	if body["trace_id"] != "tr_real01" {
+		t.Errorf("trace_id = %q, want tr_real01", body["trace_id"])
+	}
+}
+
 func TestClassifyIncidentAttribution_NoIncidentFound_NoPatch(t *testing.T) {
 	mock := &mockRunStartAuditd{} // incidentByRun unset → 404
 	srv := mock.start(t)

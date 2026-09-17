@@ -140,6 +140,34 @@ func TestIncidentStore_DraftPlaybookID_RoundTrips(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_Update_TraceIDBackfill(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	// execution_mode="agent" entry playbooks create the row before the real
+	// trace_id is known — see backfillIncidentTraceID.
+	inc := &Incident{EntryRunID: "plr_backfilltest"}
+	if err := s.Create(ctx, inc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if inc.TraceID != "" {
+		t.Fatalf("expected empty TraceID at creation, got %q", inc.TraceID)
+	}
+
+	traceID := "tr_backfilled"
+	if err := s.Update(ctx, inc.IncidentID, IncidentUpdate{TraceID: &traceID}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.GetByTraceID(ctx, "tr_backfilled")
+	if err != nil {
+		t.Fatalf("GetByTraceID: %v", err)
+	}
+	if got.IncidentID != inc.IncidentID {
+		t.Errorf("GetByTraceID returned incident_id = %q, want %q", got.IncidentID, inc.IncidentID)
+	}
+}
+
 func TestIncidentStore_Create_ExplicitOrigin(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()
