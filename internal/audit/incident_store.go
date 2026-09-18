@@ -297,7 +297,13 @@ type IncidentListFilter struct {
 	Origin      string
 	Status      string
 	Attribution string
-	Limit       int
+	// SeriesID filters to incidents whose entry playbook is this series —
+	// lets a caller that already has a series-scoped view (e.g. faulttest's
+	// `vault incidents <fault-id>` drilldown, which lists playbook_runs by
+	// series) fetch the matching incidents-table rows (origin/status/
+	// bundle_path/draft_playbook_id) in one call instead of one per run.
+	SeriesID string
+	Limit    int
 }
 
 // List returns incidents matching filter, most recently detected first.
@@ -324,6 +330,10 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 	if filter.Attribution != "" {
 		query += " AND attribution = ?"
 		args = append(args, filter.Attribution)
+	}
+	if filter.SeriesID != "" {
+		query += " AND series_id = ?"
+		args = append(args, filter.SeriesID)
 	}
 	query += fmt.Sprintf(" ORDER BY detected_at DESC LIMIT %d", limit)
 

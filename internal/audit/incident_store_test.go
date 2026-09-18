@@ -332,6 +332,35 @@ func TestIncidentStore_List_Filters(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_List_SeriesIDFilter(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	seed := []*Incident{
+		{SeriesID: "pbs_k8s_pod_crash_triage"},
+		{SeriesID: "pbs_k8s_pod_crash_triage"},
+		{SeriesID: "pbs_replication_lag"},
+	}
+	for _, inc := range seed {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	got, err := s.List(ctx, IncidentListFilter{SeriesID: "pbs_k8s_pod_crash_triage"})
+	if err != nil {
+		t.Fatalf("List (series_id): %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List (series_id=pbs_k8s_pod_crash_triage) = %d, want 2", len(got))
+	}
+	for _, inc := range got {
+		if inc.SeriesID != "pbs_k8s_pod_crash_triage" {
+			t.Errorf("SeriesID = %q, want pbs_k8s_pod_crash_triage", inc.SeriesID)
+		}
+	}
+}
+
 func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()

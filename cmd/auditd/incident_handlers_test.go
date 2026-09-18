@@ -221,6 +221,38 @@ func TestIncidentHandlers_List_Filters(t *testing.T) {
 	}
 }
 
+func TestIncidentHandlers_List_SeriesIDQueryParam(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	for _, body := range []map[string]any{
+		{"series_id": "pbs_k8s_pod_crash_triage"},
+		{"series_id": "pbs_k8s_pod_crash_triage"},
+		{"series_id": "pbs_replication_lag"},
+	} {
+		data, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data))
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, req)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/incidents?series_id=pbs_k8s_pod_crash_triage", nil)
+	rec := httptest.NewRecorder()
+	srv.handleList(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Incidents []audit.Incident `json:"incidents"`
+		Count     int              `json:"count"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Count != 2 {
+		t.Errorf("count = %d, want 2", result.Count)
+	}
+}
+
 func TestIncidentHandlers_List_LimitQueryParam(t *testing.T) {
 	srv := newIncidentServer(t)
 

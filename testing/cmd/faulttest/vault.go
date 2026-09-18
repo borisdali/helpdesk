@@ -1993,13 +1993,6 @@ type incidentFeedback struct {
 	Operator       string `json:"operator"`
 }
 
-// fetchRunsByOutcome calls GET /api/v1/fleet/playbook-runs?outcome=<o>&limit=<n>.
-func fetchRunsByOutcome(gatewayURL, apiKey, outcome string, limit int) ([]incidentRun, error) {
-	params := neturl.Values{"outcome": {outcome}, "limit": {fmt.Sprintf("%d", limit)}}
-	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs?" + params.Encode()
-	return doFetchRuns(u, apiKey)
-}
-
 // fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
 func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
 	url := strings.TrimSuffix(gatewayURL, "/") +
@@ -2244,126 +2237,127 @@ func formatRemediationOutcome(r *incidentRun) string {
 // including outcome, timestamp, truncated findings, and feedback status.
 // vaultIncidentsRecent shows the most recent playbook runs across all faults
 // by querying resolved and failed outcomes and merging the results.
+// vaultIncidentsRecent lists recent incidents from the incidents table
+// (v0.29 incident-entity design — see docs/INCIDENTS.md), the durable,
+// per-incident summary layer above playbook_runs. Prior to this, the default
+// `vault incidents` listing queried playbook_runs directly across 6 outcome
+// values and guessed real-vs-injected by checking a journey trace_id's
+// "faulttest-" prefix (--details only) — the exact fragile heuristic the
+// incidents table's own origin field was built to replace. Series-filtered
+// drilldown (`vault incidents <fault-id-or-series>`, see vaultIncidents
+// below) still queries playbook_runs directly: it shows per-run
+// fault/diagnosis/remediation/feedback/score detail the incidents table,
+// being a one-row-per-incident summary rather than a per-hop execution log,
+// doesn't carry.
 func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool) {
-	outcomes := []string{"resolved", "transitioned", "failed", "abandoned", "escalated", "escalated+resolved"}
-	seen := map[string]bool{}
-	var all []incidentRun
-	for _, o := range outcomes {
-		runs, err := fetchRunsByOutcome(cfg.GatewayURL, cfg.GatewayAPIKey, o, limit)
-		if err != nil {
-			continue
-		}
-		for _, r := range runs {
-			if !seen[r.RunID] {
-				seen[r.RunID] = true
-				all = append(all, r)
-			}
-		}
+	incidents, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching incidents: %v\n", err)
+		os.Exit(1)
 	}
-
-	if len(all) == 0 {
+	if len(incidents) == 0 {
 		fmt.Println("No recent incidents found.")
 		fmt.Println("Run `faulttest vault incidents <fault-id>` to filter by fault.")
 		return
 	}
 
-	// Sort by started_at descending.
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].StartedAt > all[j].StartedAt
-	})
-	if len(all) > limit {
-		all = all[:limit]
-	}
-
-	// Optionally fetch per-run narratives for journey count and source detection.
-	type extra struct {
-		journeyCount int
-		source       string // "injected" or "real" or ""
-	}
-	extras := make([]extra, len(all))
+	// Optionally fetch per-run narratives for journey count (origin/status/
+	// bundle/draft already come straight from the incidents table, no extra
+	// call needed for those).
+	journeyCounts := make([]int, len(incidents))
 	if details {
-		fmt.Fprintf(os.Stderr, "Fetching details for %d runs...\n", len(all))
-		for i, run := range all {
-			n, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		fmt.Fprintf(os.Stderr, "Fetching details for %d incidents...\n", len(incidents))
+		for i, inc := range incidents {
+			if inc.EntryRunID == "" {
+				continue
+			}
+			n, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, inc.EntryRunID)
 			if err != nil {
 				continue
 			}
-			extras[i].journeyCount = len(n.Journeys)
-			// Detect injected: any journey trace_id starting with "faulttest-".
-			for _, j := range n.Journeys {
-				if strings.HasPrefix(j.TraceID, "faulttest-") {
-					extras[i].source = "injected"
-					break
-				}
-			}
-			if extras[i].source == "" && len(n.Journeys) > 0 {
-				extras[i].source = "real"
-			}
+			journeyCounts[i] = len(n.Journeys)
 		}
 	}
 
-	fmt.Printf("Recent incidents (last %d)", len(all))
-	if details {
-		fmt.Printf(" — SOURCE: injected=faulttest harness, real=human operator")
-	}
-	fmt.Printf("\n\n")
+	fmt.Printf("Recent incidents (last %d)\n\n", len(incidents))
 
 	const (
+		colIncID   = 12
 		colRunID   = 14
-		colSeries  = 28
+		colSeries  = 24
 		colDate    = 16
-		colOutcome = 18 // wide enough for "escalated+resolved"
-		colOp      = 20
+		colOrigin  = 10
+		colStatus  = 11 // wide enough for "escalated"
+		colAttr    = 26
 		colJourney = 8
-		colSource  = 8
+		colBundle  = 8
+		colDraft   = 8
 	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		colIncID, "INCIDENT", colRunID, "ENTRY RUN", colSeries, "SERIES", colDate, "DETECTED",
+		colOrigin, "ORIGIN", colStatus, "STATUS", colAttr, "ATTRIBUTION",
+		colBundle, "BUNDLE", colDraft, "DRAFT")
 	if details {
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED",
-			colOutcome, "OUTCOME", colJourney, "JOURNEYS", colSource, "SOURCE", "OPERATOR")
-		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colJourney+2+colSource+2+colOp))
-	} else {
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
-			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED", colOutcome, "OUTCOME", "OPERATOR")
-		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colOp+4))
+		fmt.Printf("  %s", "JOURNEYS")
 	}
+	fmt.Println()
+	sepLen := colIncID + 2 + colRunID + 2 + colSeries + 2 + colDate + 2 + colOrigin + 2 + colStatus + 2 + colAttr + 2 + colBundle + 2 + colDraft
+	if details {
+		sepLen += 2 + colJourney
+	}
+	fmt.Println(strings.Repeat("─", sepLen))
 
-	for i, run := range all {
-		date := run.StartedAt
-		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
-			date = t.Format("2006-01-02 15:04")
-		} else if len(run.StartedAt) >= 16 {
-			date = run.StartedAt[:16]
-		}
-		series := run.SeriesID
-		if len(series) > colSeries {
+	for i, inc := range incidents {
+		date := inc.DetectedAt.Format("2006-01-02 15:04")
+		series := inc.SeriesID
+		if series == "" {
+			series = "–"
+		} else if len(series) > colSeries {
 			series = series[:colSeries-3] + "..."
 		}
-		op := run.Operator
-		if op == "" {
-			op = "–"
+		origin := inc.Origin
+		if origin == "" {
+			origin = "real"
 		}
+		status := inc.Status
+		if status == "" {
+			status = "open"
+		}
+		attr := inc.Attribution
+		if len(attr) > colAttr {
+			attr = attr[:colAttr-3] + "..."
+		}
+		if attr == "" {
+			attr = "–"
+		}
+		bundle := "no"
+		if inc.BundlePath != "" {
+			bundle = "yes"
+		}
+		draft := "no"
+		if inc.DraftPlaybookID != "" {
+			draft = "yes"
+		}
+		runID := inc.EntryRunID
+		if runID == "" {
+			runID = "–"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+			colIncID, inc.IncidentID, colRunID, runID, colSeries, series, colDate, date,
+			colOrigin, origin, colStatus, status, colAttr, attr, colBundle, bundle, colDraft, draft)
 		if details {
 			jc := "–"
-			if extras[i].journeyCount > 0 {
-				jc = fmt.Sprintf("%d", extras[i].journeyCount)
+			if journeyCounts[i] > 0 {
+				jc = fmt.Sprintf("%d", journeyCounts[i])
 			}
-			src := extras[i].source
-			if src == "" {
-				src = "–"
-			}
-			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-				colRunID, run.RunID, colSeries, series, colDate, date,
-				colOutcome, run.Outcome, colJourney, jc, colSource, src, op)
-		} else {
-			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
-				colRunID, run.RunID, colSeries, series, colDate, date, colOutcome, run.Outcome, op)
+			fmt.Printf("  %s", jc)
 		}
+		fmt.Println()
 	}
 	fmt.Println()
 	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
-	fmt.Println("  → vault incidents <fault-id>        all runs for a fault")
-	fmt.Println("  → vault incidents --details         show JOURNEYS count and SOURCE")
+	fmt.Println("  → vault incidents <fault-id>        all runs for a fault (per-hop detail)")
+	fmt.Println("  → vault incidents --details         show JOURNEYS count")
 }
 
 // Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
@@ -2448,20 +2442,39 @@ func vaultIncidents(args []string) {
 
 	fmt.Printf("Incidents for %s (%s) — %d runs\n\n", arg, seriesID, len(runs))
 
+	// One extra call for the whole series (not one per run) to merge in the
+	// incidents table's own origin/bundle/draft fields — see
+	// fetchIncidentsList's docs/INCIDENTS.md reference and
+	// vaultIncidentsRecent's comment for why this table exists alongside
+	// playbook_runs.
+	incidentsBySeries, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not fetch incidents table for origin/bundle/draft columns: %v\n", err)
+	}
+	incByRunID := make(map[string]*audit.Incident, len(incidentsBySeries))
+	for _, inc := range incidentsBySeries {
+		if inc.EntryRunID != "" {
+			incByRunID[inc.EntryRunID] = inc
+		}
+	}
+
 	const (
 		colRunID    = 14
 		colDate     = 16
+		colOrigin   = 9
 		colFault    = 28
 		colDiag     = 18 // wide enough for "escalated+resolved"
 		colRemed    = 24 // wide enough for "escalated+resolved 30.0s"
 		colFeedback = 12
 		colScore    = 5
+		colBundle   = 6
+		colDraft    = 5
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colRunID, "RUN ID", colDate, "STARTED", colFault, "FAULT",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colOrigin, "ORIGIN", colFault, "FAULT",
 		colDiag, "DIAG", colRemed, "REMEDIATION",
-		colFeedback, "FEEDBACK", colScore, "SCORE", "FINDINGS")
-	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
+		colFeedback, "FEEDBACK", colScore, "SCORE", colBundle, "BUNDLE", colDraft, "DRAFT", "FINDINGS")
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colOrigin+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+colBundle+2+colDraft+2+40))
 
 	for _, run := range runs {
 		date := run.StartedAt
@@ -2518,14 +2531,41 @@ func vaultIncidents(args []string) {
 			findings = "–"
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		// No incidents-table row for this run means untracked (predates the
+		// incidents table, or this run was never a genuine entry point) —
+		// not "no bundle/draft exists" and definitely not "origin=real".
+		// Many older runs here are plainly faulttest-injected (see the FAULT
+		// column, extracted from a faulttest-* trace ID) despite having no
+		// row; guessing "real" for a map miss would flatly contradict that.
+		origin := "–"
+		bundleStr := "–"
+		draftStr := "–"
+		if inc := incByRunID[run.RunID]; inc != nil {
+			origin = inc.Origin
+			if origin == "" {
+				origin = "real"
+			}
+			bundleStr = "no"
+			if inc.BundlePath != "" {
+				bundleStr = "yes"
+			}
+			draftStr = "no"
+			if inc.DraftPlaybookID != "" {
+				draftStr = "yes"
+			}
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colRunID, run.RunID,
 			colDate, date,
+			colOrigin, origin,
 			colFault, faultDisplay,
 			colDiag, diagOutcome,
 			colRemed, remedStr,
 			colFeedback, feedbackStr,
 			colScore, scoreStr,
+			colBundle, bundleStr,
+			colDraft, draftStr,
 			findings,
 		)
 	}
@@ -4879,6 +4919,41 @@ func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrativ
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &n, nil
+}
+
+// fetchIncidentsList calls the v0.29 incident-entity design's GET
+// /api/v1/incidents (repurposed from a legacy LLM-mediated flat-file listing
+// to a real, indexed query over the incidents table — see docs/INCIDENTS.md).
+// limit<=0 omits the query param (server default applies).
+func fetchIncidentsList(gatewayURL, apiKey string, limit int) ([]*audit.Incident, error) {
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/incidents"
+	if limit > 0 {
+		url += fmt.Sprintf("?limit=%d", limit)
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Incidents []*audit.Incident `json:"incidents"`
+		Count     int               `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Incidents, nil
 }
 
 func printIncidentJourney(gatewayURL, apiKey, runID string) {

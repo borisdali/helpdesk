@@ -126,6 +126,7 @@ func (s *incidentServer) handleList(w http.ResponseWriter, r *http.Request) {
 		Origin:      q.Get("origin"),
 		Status:      q.Get("status"),
 		Attribution: q.Get("attribution"),
+		SeriesID:    q.Get("series_id"),
 	}
 	if l := q.Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil {

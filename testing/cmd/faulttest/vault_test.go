@@ -2885,114 +2885,201 @@ func TestFetchJourneys_WithDelegations(t *testing.T) {
 	}
 }
 
-// ── postEvaluations primary_confidence ───────────────────────────────────
+// ── fetchIncidentsList / vaultIncidentsRecent ─────────────────────────────
 
-// ── fetchRunsByOutcome ────────────────────────────────────────────────────────
-
-func TestFetchRunsByOutcome_Found(t *testing.T) {
+func TestFetchIncidentsList_Found(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/fleet/playbook-runs" {
+		if r.URL.Path != "/api/v1/incidents" {
 			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Query().Get("outcome") != "resolved" {
-			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"runs": []incidentRun{
-				{RunID: "plr_aaa111", SeriesID: "pbs_db_triage", Outcome: "resolved"},
-				{RunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Outcome: "resolved"},
+			"count": 2,
+			"incidents": []audit.Incident{
+				{IncidentID: "inc_aaa111", EntryRunID: "plr_aaa111", SeriesID: "pbs_db_triage", Origin: "real", Status: "resolved"},
+				{IncidentID: "inc_bbb222", EntryRunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Origin: "faulttest", Status: "escalated"},
 			},
 		})
 	}))
 	defer srv.Close()
 
-	got, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	got, err := fetchIncidentsList(srv.URL, "", 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
-	if got[0].RunID != "plr_aaa111" {
-		t.Errorf("RunID = %q, want plr_aaa111", got[0].RunID)
+	if got[0].IncidentID != "inc_aaa111" {
+		t.Errorf("IncidentID = %q, want inc_aaa111", got[0].IncidentID)
 	}
-	if got[1].SeriesID != "pbs_k8s_triage" {
-		t.Errorf("SeriesID = %q, want pbs_k8s_triage", got[1].SeriesID)
-	}
-}
-
-func TestFetchRunsByOutcome_Empty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
-	}))
-	defer srv.Close()
-
-	got, err := fetchRunsByOutcome(srv.URL, "", "failed", 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
+	if got[1].Origin != "faulttest" {
+		t.Errorf("Origin = %q, want faulttest", got[1].Origin)
 	}
 }
 
-func TestFetchRunsByOutcome_ServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	_, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
-	if err == nil {
-		t.Error("expected error for 500 response, got nil")
-	}
-}
-
-func TestFetchRunsByOutcome_NetworkError(t *testing.T) {
-	_, err := fetchRunsByOutcome("http://127.0.0.1:19997", "", "resolved", 10)
-	if err == nil {
-		t.Error("expected error for unreachable server, got nil")
-	}
-}
-
-func TestFetchRunsByOutcome_SendsAuth(t *testing.T) {
-	var gotHeader string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
-	}))
-	defer srv.Close()
-
-	fetchRunsByOutcome(srv.URL, "tok-xyz", "resolved", 10) //nolint:errcheck
-	if gotHeader != "Bearer tok-xyz" {
-		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
-	}
-}
-
-func TestFetchRunsByOutcome_PassesOutcomeAndLimit(t *testing.T) {
+func TestFetchIncidentsList_PassesLimit(t *testing.T) {
 	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
 	}))
 	defer srv.Close()
 
-	fetchRunsByOutcome(srv.URL, "", "abandoned", 7) //nolint:errcheck
-	if gotQuery.Get("outcome") != "abandoned" {
-		t.Errorf("outcome = %q, want abandoned", gotQuery.Get("outcome"))
-	}
+	fetchIncidentsList(srv.URL, "", 7) //nolint:errcheck
 	if gotQuery.Get("limit") != "7" {
 		t.Errorf("limit = %q, want 7", gotQuery.Get("limit"))
 	}
 }
 
-// ── TestPostEvaluations_IncludesPrimaryConfidence ─────────────────────────────
+func TestFetchIncidentsList_OmitsLimitWhenZero(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 0) //nolint:errcheck
+	if gotQuery.Has("limit") {
+		t.Errorf("limit param present = %q, want omitted when limit<=0", gotQuery.Get("limit"))
+	}
+}
+
+func TestFetchIncidentsList_SendsAuth(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "tok-xyz", 10) //nolint:errcheck
+	if gotHeader != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
+	}
+}
+
+func TestFetchIncidentsList_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchIncidentsList(srv.URL, "", 10)
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestFetchIncidentsList_NetworkError(t *testing.T) {
+	_, err := fetchIncidentsList("http://127.0.0.1:19997", "", 10)
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+// TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft is the real-caller-
+// level test proving vaultIncidentsRecent surfaces the incidents table's own
+// fields (origin/status/bundle_path/draft_playbook_id) directly — not a
+// trace_id-prefix guess (the pre-v0.29 heuristic this replaced).
+func TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"count": 2,
+			"incidents": []audit.Incident{
+				{
+					IncidentID: "inc_real01", EntryRunID: "plr_real01", SeriesID: "pbs_replication_lag",
+					Origin: "real", Status: "escalated", Attribution: "replica-disconnected",
+					BundlePath: "/data/incidents/x.tar.gz", DraftPlaybookID: "pb_draft01",
+					DetectedAt: time.Now().UTC(),
+				},
+				{
+					IncidentID: "inc_fault01", EntryRunID: "plr_fault01", SeriesID: "pbs_db_max_connections",
+					Origin: "faulttest", Status: "open",
+					DetectedAt: time.Now().UTC(),
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false)
+	})
+
+	for _, want := range []string{
+		"inc_real01", "real", "escalated", "replica-disconnected", "yes", // bundle+draft both yes
+		"inc_fault01", "faulttest", "open",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestVaultIncidents_SeriesDrilldown_MergesOriginBundleDraft proves the
+// series/fault drilldown (`vault incidents <series-or-fault-id>`) merges in
+// the incidents table's origin/bundle_path/draft_playbook_id fields
+// alongside its existing per-run DIAG/REMEDIATION/FEEDBACK/SCORE/FINDINGS
+// columns, via one extra GET /api/v1/incidents call (not one per run).
+func TestVaultIncidents_SeriesDrilldown_MergesOriginBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/fleet/playbook-runs" && r.URL.Query().Get("series_id") == "pbs_k8s_pod_crash_triage":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"runs": []incidentRun{
+					{RunID: "plr_test1", SeriesID: "pbs_k8s_pod_crash_triage", Outcome: "transitioned", StartedAt: time.Now().UTC().Format(time.RFC3339)},
+				},
+			})
+		case r.URL.Path == "/api/v1/incidents":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"count": 1,
+				"incidents": []audit.Incident{
+					{IncidentID: "inc_test1", EntryRunID: "plr_test1", SeriesID: "pbs_k8s_pod_crash_triage",
+						Origin: "faulttest", BundlePath: "/data/incidents/x.tar.gz", DraftPlaybookID: "pb_test1"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidents([]string{"--gateway", srv.URL, "pbs_k8s_pod_crash_triage"})
+	})
+
+	for _, want := range []string{"plr_test1", "faulttest", "yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestVaultIncidentsRecent_NoIncidents_PrintsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false)
+	})
+
+	if !strings.Contains(out, "No recent incidents found.") {
+		t.Errorf("output missing no-incidents message, got:\n%s", out)
+	}
+}
+
+// ── postEvaluations primary_confidence ───────────────────────────────────
 
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 	var gotBody map[string]any
