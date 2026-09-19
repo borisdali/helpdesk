@@ -13,6 +13,8 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── infrastructure.json.example # Infrastructure inventory template
 ├── policies.example.yaml       # Policy rules template
 ├── users.example.yaml          # Identity & access template (static provider)
+├── objective_evidence-database.yaml  # Forced-gate evidence rules for database-agent
+├── objective_evidence-k8s.yaml       # Forced-gate evidence rules for k8s-agent
 │
 ├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
 ├── helpdesk-client             # Authenticated gateway CLI (operators, scripts, CI)
