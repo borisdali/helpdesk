@@ -6,9 +6,11 @@
 </p>
 
 
-# aiHelpDesk: AI-driven incident response and remediation for database hosted on VM, Docker/Podman or K8s: governed, certified, auditable
+# aiHelpDesk: The Governed, Certified AI for Database Incident Response and Remediation
 
 [![CI](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/ci.yml) [![golangci-lint](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/golangci-lint.yml) [![Release](https://github.com/borisdali/helpdesk/actions/workflows/release.yml/badge.svg)](https://github.com/borisdali/helpdesk/actions/workflows/release.yml) [![Go Version](https://img.shields.io/github/go-mod/go-version/borisdali/helpdesk)](https://github.com/borisdali/helpdesk/blob/main/go.mod) [![codecov](https://codecov.io/gh/borisdali/helpdesk/badge.svg)](https://codecov.io/gh/borisdali/helpdesk) [![Docs](https://img.shields.io/badge/docs-helpdesk-blue)](https://github.com/borisdali/helpdesk/tree/main/docs)
+
+**AI is shipping database-backed apps faster than any DBA team can review them. Every AI tool promises a faster fix. aiHelpDesk is the one that proves it is safe.** See [who this is for →](docs/FOR_WHOM.md)
 
 aiHelpDesk is the accountability layer for teams using AI agents on production databases hosted on VM/Bare Metal, inside Docker/Podman containers or running on K8s. It diagnoses incidents, proposes remediation and actually fixes your database problems. All under a strict governance framework that ensures every consequential action is approved, audited and certified as consistent.
 
