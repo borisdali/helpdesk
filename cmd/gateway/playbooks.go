@@ -2492,6 +2492,20 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 	if g.auditURL == "" {
 		return ""
 	}
+	// A chained hop inherits the prior run's own EntryRunID (not priorRunID
+	// itself) so a 3+-hop chain still resolves back to the true entry point
+	// in one step, not a walk. Falls back to priorRunID when the fetch fails
+	// or the prior run predates this field — PlaybookRunStore.Record applies
+	// the identical fallback server-side, so this is defense in depth, not
+	// the only place this is handled. See closeIncidentRecord.
+	entryRunID := ""
+	if priorRunID != "" {
+		if priorRun, err := g.fetchPlaybookRun(ctx, priorRunID); err == nil && priorRun != nil && priorRun.EntryRunID != "" {
+			entryRunID = priorRun.EntryRunID
+		} else {
+			entryRunID = priorRunID
+		}
+	}
 	run := audit.PlaybookRun{
 		PlaybookID:       pb.PlaybookID,
 		SeriesID:         pb.SeriesID,
@@ -2502,6 +2516,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		Purpose:          purpose,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
+		EntryRunID:       entryRunID,
 		TriggerContext:   triggerContext,
 		Operator:         operator,
 	}
@@ -2928,6 +2943,25 @@ func incidentStatusForOutcome(outcome string) string {
 	}
 }
 
+// resolveEntryRunID returns the entry run_id for the chain runID belongs to
+// — runID itself when the lookup fails or runID has no stored EntryRunID
+// (either it IS the entry point, or it predates this field), or its stored
+// EntryRunID (inherited from the prior run at creation time — see
+// recordPlaybookRunStart) when runID is a downstream hop. Unlike
+// classifyIncidentAttribution/triggerIncidentBundle, which are intentionally
+// scoped to fire only on the entry hop itself (attribution reflects the
+// original diagnosis; bundles are most useful captured while the incident is
+// still live, not after remediation already fixed it), closeIncidentRecord's
+// job is to reflect the chain's LATEST outcome regardless of which hop
+// produced it — so it alone needs to resolve through to the true entry run.
+func (g *Gateway) resolveEntryRunID(ctx context.Context, runID string) string {
+	run, err := g.fetchPlaybookRun(ctx, runID)
+	if err != nil || run == nil || run.EntryRunID == "" {
+		return runID
+	}
+	return run.EntryRunID
+}
+
 // closeIncidentRecord is Phase 3 of the v0.29 incident-entity design (see
 // docs/INCIDENTS.md): patches status/resolved_at on a terminal outcome.
 // Every incident row is permanently status=open until this fires — Phase 1/2
@@ -2936,10 +2970,20 @@ func incidentStatusForOutcome(outcome string) string {
 // — an extra background HTTP GET on a fire-and-forget completion path is a
 // fine trade for keeping these three independently-gated, independently-tested
 // steps from sharing mutable state.
+//
+// Found live (v0.29 host/VM platform testing): a same-domain TRANSITION_TO
+// chain (e.g. connection-triage→connection-remediate) that fully resolved
+// downstream left status permanently stuck at "escalated" — the triage hop's
+// own completion (runID == entry_run_id) patched status once, but the
+// remediation hop's later "resolved" completion (runID != entry_run_id) no-
+// opped, since the lookup only ever matched the entry hop's own run ID.
+// resolveEntryRunID fixes this by resolving runID to its chain's entry point
+// before the lookup, regardless of which hop is completing.
 func (g *Gateway) closeIncidentRecord(ctx context.Context, runID, outcome string) {
-	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	entryRunID := g.resolveEntryRunID(ctx, runID)
+	inc, err := g.fetchIncidentByEntryRunID(ctx, entryRunID)
 	if err != nil {
-		slog.Warn("closeIncidentRecord: could not look up incident", "run_id", runID, "err", err)
+		slog.Warn("closeIncidentRecord: could not look up incident", "run_id", runID, "entry_run_id", entryRunID, "err", err)
 		return
 	}
 	if inc == nil {

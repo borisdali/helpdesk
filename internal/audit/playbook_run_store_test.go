@@ -433,6 +433,54 @@ func TestPlaybookRunStore_NewFields_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestPlaybookRunStore_EntryRunID_DefaultsAndRoundTrip covers the three
+// EntryRunID cases: a genuine entry point defaults to its own RunID, a
+// continuation hop whose caller left EntryRunID unset falls back to
+// PriorRunID (a defensive backstop — the real inheritance lives in
+// cmd/gateway/playbooks.go's recordPlaybookRunStart, which normally sets
+// this explicitly from the prior run's own EntryRunID), and an explicitly
+// set EntryRunID is preserved as-is, not overwritten by either default.
+func TestPlaybookRunStore_EntryRunID_DefaultsAndRoundTrip(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+
+	entry := &PlaybookRun{PlaybookID: "pb_triage", SeriesID: "pbs_triage"}
+	if err := s.Record(ctx, entry); err != nil {
+		t.Fatalf("Record (entry): %v", err)
+	}
+	got, err := s.GetByRunID(ctx, entry.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID (entry): %v", err)
+	}
+	if got.EntryRunID != entry.RunID {
+		t.Errorf("entry point EntryRunID = %q, want its own RunID %q", got.EntryRunID, entry.RunID)
+	}
+
+	fallback := &PlaybookRun{PlaybookID: "pb_remed", SeriesID: "pbs_remed", PriorRunID: entry.RunID}
+	if err := s.Record(ctx, fallback); err != nil {
+		t.Fatalf("Record (fallback): %v", err)
+	}
+	got2, err := s.GetByRunID(ctx, fallback.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID (fallback): %v", err)
+	}
+	if got2.EntryRunID != entry.RunID {
+		t.Errorf("continuation hop with unset EntryRunID = %q, want fallback to PriorRunID %q", got2.EntryRunID, entry.RunID)
+	}
+
+	explicit := &PlaybookRun{PlaybookID: "pb_hop3", SeriesID: "pbs_hop3", PriorRunID: fallback.RunID, EntryRunID: entry.RunID}
+	if err := s.Record(ctx, explicit); err != nil {
+		t.Fatalf("Record (explicit): %v", err)
+	}
+	got3, err := s.GetByRunID(ctx, explicit.RunID)
+	if err != nil {
+		t.Fatalf("GetByRunID (explicit): %v", err)
+	}
+	if got3.EntryRunID != entry.RunID {
+		t.Errorf("explicitly set EntryRunID = %q, want preserved value %q (not overwritten by PriorRunID %q)", got3.EntryRunID, entry.RunID, fallback.RunID)
+	}
+}
+
 func TestPlaybookRunStore_ListByPriorRunID(t *testing.T) {
 	s := newPlaybookRunStore(t)
 	ctx := context.Background()

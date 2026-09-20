@@ -154,6 +154,54 @@ func TestRecordPlaybookRunStart_ContinuationRun_NoIncidentCreated(t *testing.T) 
 	}
 }
 
+func TestRecordPlaybookRunStart_ContinuationRun_InheritsEntryRunIDFromPriorRun(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		priorRun: &audit.PlaybookRun{RunID: "plr_triage01", EntryRunID: "plr_triage01"},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	pb := &audit.Playbook{PlaybookID: "pb_remed", SeriesID: "pbs_remed"}
+	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "remediation",
+		"trace_abc", "plr_triage01" /* priorRunID */, "", "operator1", "")
+
+	runCalls := mock.calls(http.MethodPost, "/runs")
+	if len(runCalls) != 1 {
+		t.Fatalf("POST .../runs calls = %d, want 1", len(runCalls))
+	}
+	var body audit.PlaybookRun
+	if err := json.Unmarshal([]byte(runCalls[0].body), &body); err != nil {
+		t.Fatalf("decode run body: %v", err)
+	}
+	if body.EntryRunID != "plr_triage01" {
+		t.Errorf("entry_run_id = %q, want plr_triage01 (inherited from the prior run's own EntryRunID)", body.EntryRunID)
+	}
+}
+
+func TestRecordPlaybookRunStart_ContinuationRun_PriorRunHasNoEntryRunID_FallsBackToPriorRunID(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		priorRun: &audit.PlaybookRun{RunID: "plr_prior01"}, // EntryRunID left empty — predates this field
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	pb := &audit.Playbook{PlaybookID: "pb_remed", SeriesID: "pbs_remed"}
+	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "", "", "remediation",
+		"trace_abc", "plr_prior01" /* priorRunID */, "", "operator1", "")
+
+	runCalls := mock.calls(http.MethodPost, "/runs")
+	if len(runCalls) != 1 {
+		t.Fatalf("POST .../runs calls = %d, want 1", len(runCalls))
+	}
+	var body audit.PlaybookRun
+	if err := json.Unmarshal([]byte(runCalls[0].body), &body); err != nil {
+		t.Fatalf("decode run body: %v", err)
+	}
+	if body.EntryRunID != "plr_prior01" {
+		t.Errorf("entry_run_id = %q, want plr_prior01 (fallback to priorRunID when the prior run has no stored EntryRunID)", body.EntryRunID)
+	}
+}
+
 func TestRecordPlaybookRunStart_IncidentCreateFails_RunStillReturned(t *testing.T) {
 	mock := &mockRunStartAuditd{incidentStatus: http.StatusInternalServerError}
 	srv := mock.start(t)
@@ -773,6 +821,73 @@ func TestCloseIncidentRecord_Found_PatchesStatusAndResolvedAt(t *testing.T) {
 	}
 	if body["resolved_at"] == nil || body["resolved_at"] == "" {
 		t.Error("resolved_at missing or empty")
+	}
+}
+
+func TestResolveEntryRunID_RunHasEntryRunID_ReturnsIt(t *testing.T) {
+	mock := &mockRunStartAuditd{priorRun: &audit.PlaybookRun{RunID: "plr_x", EntryRunID: "plr_entry01"}}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	if got := gw.resolveEntryRunID(context.Background(), "plr_x"); got != "plr_entry01" {
+		t.Errorf("resolveEntryRunID = %q, want plr_entry01", got)
+	}
+}
+
+func TestResolveEntryRunID_RunNotFound_ReturnsInputUnchanged(t *testing.T) {
+	mock := &mockRunStartAuditd{} // priorRun unset -> fetchPlaybookRun 404s
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	if got := gw.resolveEntryRunID(context.Background(), "plr_x"); got != "plr_x" {
+		t.Errorf("resolveEntryRunID = %q, want plr_x (input unchanged on lookup failure)", got)
+	}
+}
+
+func TestResolveEntryRunID_RunFoundNoEntryRunID_ReturnsInputUnchanged(t *testing.T) {
+	mock := &mockRunStartAuditd{priorRun: &audit.PlaybookRun{RunID: "plr_x"}} // EntryRunID left empty — pre-migration row
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	if got := gw.resolveEntryRunID(context.Background(), "plr_x"); got != "plr_x" {
+		t.Errorf("resolveEntryRunID = %q, want plr_x (input unchanged when the stored run has no EntryRunID)", got)
+	}
+}
+
+// TestCloseIncidentRecord_ContinuationHop_ResolvesToEntryRunID_PatchesStatus
+// is the regression test for the bug found live during v0.29 host/VM
+// platform testing: a same-domain TRANSITION_TO chain
+// (connection-triage→connection-remediate) that fully resolved downstream
+// left status permanently stuck at "escalated". The triage hop's own
+// completion (runID == entry_run_id) patched status once; the remediation
+// hop's later "resolved" completion (runID != entry_run_id) silently
+// no-opped, because fetchIncidentByEntryRunID only ever matched the entry
+// hop's own run ID. This proves closeIncidentRecord now resolves THROUGH to
+// the chain's true entry run before looking up the incident, regardless of
+// which hop is completing.
+func TestCloseIncidentRecord_ContinuationHop_ResolvesToEntryRunID_PatchesStatus(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		priorRun:      &audit.PlaybookRun{RunID: "plr_remed01", EntryRunID: "plr_entry01"},
+		incidentByRun: &audit.Incident{IncidentID: "inc_close01"},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.closeIncidentRecord(context.Background(), "plr_remed01", audit.OutcomeResolved)
+
+	if calls := mock.calls(http.MethodGet, "/v1/incidents/by-run/plr_entry01"); len(calls) != 1 {
+		t.Fatalf("GET /v1/incidents/by-run/plr_entry01 calls = %d, want 1 (must look up by the resolved entry run, not the completing hop's own run ID)", len(calls))
+	}
+	calls := mock.calls(http.MethodPatch, "/v1/incidents/inc_close01")
+	if len(calls) != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", len(calls))
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != audit.IncidentStatusResolved {
+		t.Errorf("status = %v, want resolved", body["status"])
 	}
 }
 
