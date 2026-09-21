@@ -868,6 +868,64 @@ func TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips(t 
 	}
 }
 
+// TestIntegration_PolicyDecision_ToolNameRoundTripsThroughRealHTTP closes the
+// same class of gap TestIntegration_BuildDelegationVerification_PolicyDeniedWrite_RoundTrips
+// closed for Action/Effect: PolicyDecision.ToolName is a new field (added to
+// thread tool attribution into tool_invoked/policy_decision audit events),
+// and every test covering it elsewhere (agentutil, agents/k8s) writes and
+// reads through the same in-process audit.Store, which never actually
+// serializes the field over HTTP. This test records a policy_decision event
+// with ToolName set via a real RemoteStore -> auditd HTTP write, then queries
+// it back with the ToolName filter -> auditd HTTP read, proving both the JSON
+// wire round trip and RemoteStore.Query's ToolName forwarding (previously
+// silently dropped — see internal/audit/remote_store_test.go) work end to end
+// against a real running auditd process, not a mock.
+func TestIntegration_PolicyDecision_ToolNameRoundTripsThroughRealHTTP(t *testing.T) {
+	traceID := fmt.Sprintf("tr-toolname-%d", time.Now().UnixNano())
+
+	store := audit.NewRemoteStore(auditdAddr)
+	err := store.Record(context.Background(), &audit.Event{
+		EventID:   fmt.Sprintf("pd-toolname-%d", time.Now().UnixNano()),
+		Timestamp: time.Now().UTC(),
+		EventType: audit.EventTypePolicyDecision,
+		TraceID:   traceID,
+		Session:   audit.Session{ID: "sess_toolname_it"},
+		PolicyDecision: &audit.PolicyDecision{
+			ToolName:     "terminate_idle_connections",
+			ResourceType: "database",
+			ResourceName: "prod-db",
+			Action:       "destructive",
+			Effect:       "deny",
+			PolicyName:   "blast-radius-policy",
+			Message:      "Operation affects 500 rows, limit is 100",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "terminate_idle_connections",
+		EventType: audit.EventTypePolicyDecision,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var found *audit.Event
+	for i := range events {
+		if events[i].TraceID == traceID {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("policy_decision event with trace_id=%s not found among %d events returned by ToolName=terminate_idle_connections filter — RemoteStore.Query's ToolName forwarding or auditd's tool_name column may be broken", traceID, len(events))
+	}
+	if found.PolicyDecision == nil || found.PolicyDecision.ToolName != "terminate_idle_connections" {
+		t.Errorf("PolicyDecision.ToolName = %+v, want terminate_idle_connections", found.PolicyDecision)
+	}
+}
+
 func TestGovernance_PoliciesSummaryWithEngine(t *testing.T) {
 	policyPath := filepath.Join(t.TempDir(), "policies.yaml")
 	if err := os.WriteFile(policyPath, []byte(minimalPolicyYAML), 0644); err != nil {
