@@ -795,6 +795,225 @@ func TestScaleDeploymentTool_PolicyDenied(t *testing.T) {
 	}
 }
 
+func TestPatchDeploymentResourcesTool_Success(t *testing.T) {
+	mockOutput := `deployment.apps/postgres resource requirements updated` + "\n"
+	// Call 1: pre-state read (current limit). Call 2: pre-state read (current
+	// request). Call 3: kubectl set resources. Call 4: verification read →
+	// matches requested limit.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("patchDeploymentResourcesTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "updated") {
+		t.Errorf("patchDeploymentResourcesTool() output = %q, want the kubectl output", result.Output)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_WithContainer(t *testing.T) {
+	// Same sequence, but a specific container is named — proves the tool
+	// accepts the arg and still completes; the --containers flag itself is
+	// exercised via the real kubectl arg-building code path, not asserted on
+	// here since withMockKubectlSequence doesn't capture invocation args.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		Container:      "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_CapturesPreState(t *testing.T) {
+	// Verifies that patchDeploymentResourcesImpl reads the current memory
+	// limit/request before patching and stores them as PreState in the audit
+	// event. Uses a real ToolAuditor backed by an in-process audit store,
+	// same pattern as TestScaleDeploymentTool_CapturesPreState.
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_resource_prestate_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	defer withZeroVerifyConfig()()
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_resource_prestate", "trace_resource_prestate")
+	defer func() { toolAuditor = origAuditor }()
+
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil}, // pre-state read → previous limit
+		kubectlResponse{out: "192Mi", err: nil}, // pre-state read → previous request
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	_, err = patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "patch_deployment_resources",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) == 0 {
+		t.Fatal("no patch_deployment_resources audit event found")
+	}
+	ev := events[0]
+	if ev.Tool == nil || len(ev.Tool.PreState) == 0 {
+		t.Fatal("PreState is empty in audit event")
+	}
+	var pre audit.ResourcePatchPreState
+	if jsonErr := json.Unmarshal(ev.Tool.PreState, &pre); jsonErr != nil {
+		t.Fatalf("unmarshal PreState: %v", jsonErr)
+	}
+	if pre.PreviousMemoryLimit != "256Mi" {
+		t.Errorf("PreviousMemoryLimit = %q, want 256Mi", pre.PreviousMemoryLimit)
+	}
+	if pre.PreviousMemoryRequest != "192Mi" {
+		t.Errorf("PreviousMemoryRequest = %q, want 192Mi", pre.PreviousMemoryRequest)
+	}
+	if pre.DeploymentName != "postgres" {
+		t.Errorf("DeploymentName = %q, want postgres", pre.DeploymentName)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_PreStateReadFailure_ToolStillRuns(t *testing.T) {
+	// If either pre-state kubectl read fails, the patch must still proceed.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "", err: fmt.Errorf("connection refused")}, // limit read fails
+		kubectlResponse{out: "192Mi", err: nil},                        // request read succeeds
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "updated") {
+		t.Errorf("output = %q, want the kubectl output", result.Output)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_Failure(t *testing.T) {
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf(`Error from server (NotFound): deployments "ghost" not found`)},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "ghost",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("patchDeploymentResourcesTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("patchDeploymentResourcesTool() output = %q, want ERROR on failure", result.Output)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_VerificationWarning_LimitMismatch(t *testing.T) {
+	// Simulates kubectl reporting success but the new limit not yet visible —
+	// Level-2 verification fires a warning (mirrors
+	// TestScaleDeploymentTool_VerificationFailed_WrongReplicas).
+	defer withZeroVerifyConfig()()
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "256Mi", err: nil}, // verify still shows the OLD limit
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("VerifyStatus = %q, want warning", result.VerifyStatus)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("output = %q, want VERIFICATION WARNING", result.Output)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_PolicyDenied(t *testing.T) {
+	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
+	defer withMockKubectl("", nil)() // should not be reached
+
+	ctx := newK8sTestContext()
+	_, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "production",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err == nil {
+		t.Fatal("patchDeploymentResourcesTool() expected Go error on policy denial, got nil")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("patchDeploymentResourcesTool() error = %v, want 'policy denied'", err)
+	}
+}
+
 // =============================================================================
 // Retry scenario tests — Level-2 resolves after 1 or more re-checks
 // =============================================================================

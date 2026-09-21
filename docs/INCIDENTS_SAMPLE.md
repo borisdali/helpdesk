@@ -1,12 +1,12 @@
 # aiHelpDesk Incidents: sample runs
 
-See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and the [v0.29 release](https://github.com/borisdali/helpdesk/releases/tag/v0.29.0) that introduced the new incident-entity design (with the `incidents` table underneath every `vault incidents` listing). What's presented below are three real sample runs. The same `db-max-connections` fault, injected and remediated end to end on aiHelpDesk deployed directly on...
+See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and the [v0.29 release](https://github.com/borisdali/helpdesk/releases/tag/v0.29.0) that introduced the new incident-entity design (with the `incidents` table underneath every `vault incidents` listing). What's presented below are four real sample runs. The same `db-max-connections` fault, injected and remediated end to end on aiHelpDesk deployed directly on...
 
   - [a host/VM](INCIDENTS_SAMPLE.md#hostvm-sample-run)  
   - [in Docker/Podman containers](INCIDENTS_SAMPLE.md#dockerpodman-sample-run) and  
   - [on K8s](INCIDENTS_SAMPLE.md#k8s-sample-run)  
 
-Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation.
+Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation. A fourth run, [a real (non-injected) incident](INCIDENTS_SAMPLE.md#a-real-non-injected-incident-side-by-side-with-an-injected-one), goes through the exact same path with no `faulttest` involvement at all — showing what actually distinguishes a genuine incident from an injected one in the `incidents` table.
 
 ## Host/VM sample run
 
@@ -482,6 +482,93 @@ inc_a974c306  plr_fbe4968d    pbs_k8s_pod_crash_triage  2026-09-17 20:58  real  
 ```
 
 `ORIGIN` distinguishes the fault-injection run just above (`faulttest`) from the three pre-existing production incidents on the same cluster (`real`) — this is the field the v0.29 design added specifically so `vault incidents` no longer has to guess real-vs-injected from a trace-ID naming convention. The three real incidents also show the range of `STATUS` values a genuine incident's lifecycle produces on its own, with no faulttest involved: `open` (never closed out), `escalated` (handed off cross-domain, not yet resolved downstream), alongside the `resolved` fault-injection run above it.
+
+## A real (non-injected) incident, side by side with an injected one
+
+Every example above went through `faulttest`, which always tags its own requests with `origin: faulttest` on the wire — that's how the `ORIGIN` column above can tell them apart from the three pre-existing real incidents on the K8s cluster. To show what a genuine `origin: real` incident looks like end to end (not just as a pre-existing row from a cluster's own history), the same `db-max-connections` symptom below was triggered directly against the Docker/Podman deployment's gateway API — the same way an operator, `srebot`, or an alerting webhook would — with no `faulttest` involvement anywhere in the request path:
+
+```
+$ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a4c9595c/run \
+    -H "Content-Type: application/json" \
+    -H "X-User: alice@example.com" \
+    -H "X-Purpose: diagnostic" \
+    -d '{
+      "context": "Users are getting \"too many clients\" errors connecting to the database. The connection_string is \"host=host.docker.internal port=15432 dbname=testdb user=postgres password=xxx\" — use it verbatim for all tool calls. Please investigate.",
+      "connection_string": "host=host.docker.internal port=15432 dbname=testdb user=postgres password=xxx"
+    }'
+```
+
+The triage response ended with `TRANSITION_TO: pbs_connection_remediate` and `gate_pending`, so the operator approves the gate and steps through remediation the same way the interactive `faulttest` CLI's `Approve? [y/n]` prompts do underneath — just called directly as an operator would via `POST .../proceed-escalation` then `POST .../proceed` per step (see [PLAYBOOKS.md](PLAYBOOKS.md#proceeding-through-the-gate) for the full step-by-step API). Five approved steps later:
+
+```
+$ go run ./testing/cmd/faulttest vault incidents plr_28cbdca9 --gateway $HELPDESK_GATEWAY_URL
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: $HELPDESK_HOST_NAME
+
+
+════════════════════════════════════════════════════════════
+INCIDENT plr_28cbdca9
+Started: 2026-09-21 03:43 UTC   Duration: 118s
+Operator: alice@example.com
+════════════════════════════════════════════════════════════
+
+── TRIAGE
+Playbook:  pbs_connection_triage
+Findings:  connections 98/100 (98%); idle=95; blocker=none; recommended=kill_idle
+           ⚠ unverified — no matching tool execution in the audit trail
+
+Hypotheses:
+  [PRIMARY  95%] Connection pool saturation due to accumulation of idle sessions with disabled idle_session_timeout
+                 Evidence: "idle_session_timeout | 0 | ms | default_value | 0 | source | default"
+  [REJECTED  5%] Long-running transaction blocking new connection attempts
+                 Rejected: get_blocking_queries returned "No blocking queries found" and active_connections shows only 3 of 98 are running queries, eliminating lock contention or transaction blocking as the cause.
+
+── GATE
+Decision:  approved by alice@example.com  at 03:45 UTC
+
+── REMEDIATION
+Playbook:  pbs_connection_remediate   Outcome: resolved
+Plan:      Connection overload remediation complete. Step 1: Confirmed 95 idle
+           connections (state='idle') consuming 98/100 connection slots. Step 2A:
+           Terminated all 90 idle connections under 5 minutes old using
+           idle_minutes=0 (safe bulk termination for plain idle sessions with no
+           open transactions). Step 3: Verified connections freed — second
+           get_active_connections shows 0 active connections, freeing 90 slots
+           and dropping usage to well below max_connections. Root cause:
+           Application connection pool exhausted the slot limit with newly-opened
+           idle connections. Recommendation: Review pool max_size and
+           idle_timeout settings to prevent recurrence.
+Steps:     ✓   ✓   ✓   ✓   ✓
+
+── JOURNEYS
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_a5ddf21d-8a3
+                         reasoning chain, hypothesis building
+  remediation:           tr_a2780fba-274
+                         tool calls, approvals, blast-radius decisions
+
+  → vault journeys tr_a5ddf21d-8a3
+```
+
+Two details only a genuine real incident carries: an **`Operator:`** line (`alice@example.com` — whoever approved the gate), which no `faulttest` run in this doc ever shows, and trace IDs in the plain `tr_...` form rather than the `faulttest-<runid>-<fault-id>` shape every injected example above uses. Now the two incidents sit side by side in the same table, distinguished only by the field built for exactly this:
+
+```
+$ go run ./testing/cmd/faulttest vault incidents --gateway $HELPDESK_GATEWAY_URL
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: $HELPDESK_HOST_NAME
+
+Recent incidents (last 2)
+
+INCIDENT      ENTRY RUN       SERIES                    DETECTED          ORIGIN      STATUS       ATTRIBUTION                 BUNDLE    DRAFT
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+inc_71297527  plr_28cbdca9    pbs_connection_triage     2026-09-21 03:43  real        resolved     idle-connection-accumul...  yes       yes
+inc_75d61771  plr_34ec7540    pbs_connection_triage     2026-09-20 23:53  faulttest   resolved     idle-connection-accumul...  yes       yes
+
+  → vault incidents <plr_*>           full incident narrative
+  → vault incidents <fault-id>        all runs for a fault (per-hop detail)
+  → vault incidents --details         show JOURNEYS count
+```
+
+Same symptom, same playbook, same gateway, same outcome — the only thing that tells them apart is `ORIGIN`, because that's the only thing that's actually different between a real operator's incident and a faulttest run: who — or what — sent the request.
 
 ## Connection to Other Docs
 

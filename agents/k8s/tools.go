@@ -1371,6 +1371,115 @@ func getPodResourcesTool(ctx agent.ToolContext, args GetPodResourcesArgs) (GetPo
 	return getPodResourcesImpl(ctx, args)
 }
 
+// PatchDeploymentResourcesArgs defines arguments for the patch_deployment_resources tool.
+type PatchDeploymentResourcesArgs struct {
+	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace      string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the deployment."`
+	DeploymentName string `json:"deployment" jsonschema:"required,The name of the deployment to patch. Use get_pods or kubectl get deployments to find the name."`
+	MemoryLimit    string `json:"memory_limit" jsonschema:"required,New memory limit (e.g. '1Gi' or '512Mi'). Use get_pod_resources first to determine the current limit and calculate the new one."`
+	MemoryRequest  string `json:"memory_request" jsonschema:"required,New memory request (e.g. '768Mi'). Should not exceed memory_limit."`
+	Container      string `json:"container,omitempty" jsonschema:"Specific container name to patch. If empty, applies to all containers in the pod template (kubectl's default)."`
+}
+
+func patchDeploymentResourcesImpl(ctx context.Context, args PatchDeploymentResourcesArgs) (KubectlResult, error) {
+	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
+	namespace := nsInfo.Namespace
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
+
+	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Best-effort pre-mutation state capture for rollback support. A failure to
+	// read the current limits does NOT abort the patch operation — mirrors
+	// scaleDeploymentImpl's identical trade-off.
+	containerIndex := 0
+	containerPath := fmt.Sprintf("containers[%d]", containerIndex)
+	if args.Container != "" {
+		containerPath = fmt.Sprintf(`containers[?(@.name=="%s")]`, args.Container)
+	}
+	var preStateJSON json.RawMessage
+	prevLimit, limitErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.limits.memory}", containerPath))
+	prevRequest, requestErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.requests.memory}", containerPath))
+	if limitErr == nil && requestErr == nil {
+		if b, marshalErr := json.Marshal(audit.ResourcePatchPreState{
+			Namespace:             namespace,
+			DeploymentName:        args.DeploymentName,
+			Container:             args.Container,
+			PreviousMemoryLimit:   strings.TrimSpace(prevLimit),
+			PreviousMemoryRequest: strings.TrimSpace(prevRequest),
+		}); marshalErr == nil {
+			preStateJSON = b
+		}
+	}
+
+	cmdArgs := []string{
+		"set", "resources", "deployment", args.DeploymentName,
+		"-n", namespace,
+		"--limits", "memory=" + args.MemoryLimit,
+		"--requests", "memory=" + args.MemoryRequest,
+	}
+	if args.Container != "" {
+		cmdArgs = append(cmdArgs, "--containers", args.Container)
+	}
+	output, err := runKubectlAndRecord(ctx, kubeContext, "patch_deployment_resources", preStateJSON, cmdArgs...)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	// Level 2: confirm the new limit was actually applied to the pod template
+	// (kubectl set resources reports success even before the API server commits
+	// the change) — same re-poll pattern as scaleDeploymentImpl.
+	limitPath := fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.limits.memory}", containerPath)
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName, "-n", namespace, "-o", limitPath)
+			return err == nil && strings.TrimSpace(out) == args.MemoryLimit, nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "patch_deployment_resources", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "patch_deployment_resources", "warning")
+	}
+	if !resolved {
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: memory limit %q not visible on deployment %q after %d check(s).\n"+
+					"The command reported success but the patch could not be confirmed. Check:\n"+
+					"  kubectl get deployment %s -n %s -o jsonpath='{.spec.template.spec.containers[*].resources}'\n\n"+
+					"--- Patch result ---\n%s",
+				args.MemoryLimit, args.DeploymentName, attempts, args.DeploymentName, namespace, output),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
+}
+
+func patchDeploymentResourcesTool(ctx agent.ToolContext, args PatchDeploymentResourcesArgs) (KubectlResult, error) {
+	return patchDeploymentResourcesImpl(ctx, args)
+}
+
 // GetNodeStatusArgs defines arguments for the get_node_status tool.
 type GetNodeStatusArgs struct {
 	Context  string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -1826,6 +1935,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		return k8sJSONOutput(result)
+	})
+
+	r.Register("patch_deployment_resources", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[PatchDeploymentResourcesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := patchDeploymentResourcesImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
 	})
 
 	return r

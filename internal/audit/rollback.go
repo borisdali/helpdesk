@@ -59,6 +59,20 @@ type ScalePreState struct {
 	PreviousReplicas int    `json:"previous_replicas"`
 }
 
+// ResourcePatchPreState captures a deployment's memory limit/request before a
+// patch_deployment_resources call. Container is empty when the patch targeted
+// all containers in the pod template (kubectl's default); PreviousMemoryLimit/
+// PreviousMemoryRequest are empty strings when the pre-read failed (a
+// best-effort capture, same trade-off as ScalePreState) — DeriveRollbackPlan
+// treats an empty PreviousMemoryLimit as not reversible.
+type ResourcePatchPreState struct {
+	Namespace             string `json:"namespace"`
+	DeploymentName        string `json:"deployment"`
+	Container             string `json:"container,omitempty"`
+	PreviousMemoryLimit   string `json:"previous_memory_limit"`
+	PreviousMemoryRequest string `json:"previous_memory_request"`
+}
+
 // DMLPreState captures the affected rows before a DML operation (INSERT/UPDATE/DELETE).
 // Tier 1 (row-capture): rows are fetched via SELECT with the same WHERE condition.
 // Tier 2 (WAL decode): rows are extracted from the WAL change stream; see WALCapture.
@@ -124,6 +138,8 @@ func DeriveRollbackPlan(event *Event) (*RollbackPlan, error) {
 	switch event.Tool.Name {
 	case "scale_deployment":
 		return deriveScaleRollback(plan, event)
+	case "patch_deployment_resources":
+		return deriveResourcePatchRollback(plan, event)
 	case "delete_pod":
 		plan.Reversibility = ReversibilityPartial
 		plan.NotReversibleReason = "Pod deletion is partially reversible: the pod's owning " +
@@ -183,6 +199,42 @@ func deriveScaleRollback(plan *RollbackPlan, event *Event) (*RollbackPlan, error
 		},
 		Description: fmt.Sprintf("restore deployment/%s in namespace %s to %d replica(s)",
 			pre.DeploymentName, pre.Namespace, pre.PreviousReplicas),
+	}
+	return plan, nil
+}
+
+// deriveResourcePatchRollback builds a RollbackPlan for patch_deployment_resources events.
+func deriveResourcePatchRollback(plan *RollbackPlan, event *Event) (*RollbackPlan, error) {
+	if len(event.Tool.PreState) == 0 {
+		plan.Reversibility = ReversibilityNo
+		plan.NotReversibleReason = "Pre-mutation state was not captured for this " +
+			"patch_deployment_resources event. Events recorded before rollback support was added " +
+			"cannot be reversed automatically."
+		return plan, nil
+	}
+	var pre ResourcePatchPreState
+	if err := json.Unmarshal(event.Tool.PreState, &pre); err != nil {
+		return nil, fmt.Errorf("unmarshal ResourcePatchPreState for event %s: %w", event.EventID, err)
+	}
+	if pre.PreviousMemoryLimit == "" || pre.PreviousMemoryRequest == "" {
+		plan.Reversibility = ReversibilityNo
+		plan.NotReversibleReason = "Pre-mutation memory limit/request could not be read before " +
+			"this patch was applied; cannot safely restore to that state."
+		return plan, nil
+	}
+	plan.Reversibility = ReversibilityYes
+	plan.InverseOp = &InverseOperation{
+		Agent: "k8s",
+		Tool:  "patch_deployment_resources",
+		Args: map[string]any{
+			"namespace":      pre.Namespace,
+			"deployment":     pre.DeploymentName,
+			"container":      pre.Container,
+			"memory_limit":   pre.PreviousMemoryLimit,
+			"memory_request": pre.PreviousMemoryRequest,
+		},
+		Description: fmt.Sprintf("restore deployment/%s in namespace %s to memory limit=%s request=%s",
+			pre.DeploymentName, pre.Namespace, pre.PreviousMemoryLimit, pre.PreviousMemoryRequest),
 	}
 	return plan, nil
 }
