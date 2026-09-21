@@ -2957,7 +2957,8 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 			fmt.Fprintf(os.Stderr, "  Warning: could not fetch run events: %v\n", err)
 		} else {
 			sectionJ("EXECUTION TRACE")
-			printReasoningTrace(events)
+			printReasoningTrace(filterJourneyEventTypes(events, "agent_reasoning", "tool_execution"))
+			printToolCallIntegrity(events, sectionJ)
 		}
 		// Show the structured FINDINGS from the playbook run's diagnostic_report.
 		// This is the agent's final conclusion that often falls after the last tool
@@ -3097,11 +3098,12 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 
 // journeyEvent is a minimal mirror of audit.Event for JSON decoding.
 type journeyEvent struct {
-	EventID        string            `json:"event_id"`
-	Timestamp      string            `json:"timestamp"`
-	EventType      string            `json:"event_type"`
-	ToolExecution  *journeyToolExec  `json:"tool,omitempty"`
-	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
+	EventID        string                 `json:"event_id"`
+	Timestamp      string                 `json:"timestamp"`
+	EventType      string                 `json:"event_type"`
+	ToolExecution  *journeyToolExec       `json:"tool,omitempty"`
+	AgentReasoning *journeyReasoning      `json:"agent_reasoning,omitempty"`
+	PolicyDecision *journeyPolicyDecision `json:"policy_decision,omitempty"`
 }
 
 type journeyToolExec struct {
@@ -3112,6 +3114,15 @@ type journeyToolExec struct {
 type journeyReasoning struct {
 	Reasoning string   `json:"reasoning"`
 	ToolCalls []string `json:"tool_calls"`
+}
+
+// journeyPolicyDecision mirrors audit.PolicyDecision's fields relevant to
+// tool_invoked/policy_decision events client-side. ToolName is the field the
+// turn-by-turn tool-call integrity map (printJourneyDetail --detail) needs —
+// it wasn't populated in the audit trail at all until PolicyDecision.ToolName
+// was added server-side; this client-side mirror just makes it visible here.
+type journeyPolicyDecision struct {
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // fetchRunFindings fetches the findings_summary from a single playbook run.
@@ -3147,11 +3158,17 @@ func fetchRunFindings(gatewayURL, apiKey, runID string) string {
 }
 
 // fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
-// returns tool_execution and agent_reasoning events sorted by timestamp.
+// returns agent_reasoning, tool_invoked, policy_decision, and tool_execution
+// events sorted by timestamp. tool_invoked/policy_decision were added for the
+// turn-by-turn tool-call integrity map (see printJourneyDetail's --detail
+// section) — without them, a declared tool call that got dropped before
+// tool_execution is invisible to this client, even though the gateway's own
+// default type list already includes policy_decision (this client always
+// overrode that default with a narrower list, so it never mattered before).
 func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") +
 		"/api/v1/fleet/playbook-runs/" + runID +
-		"/events?types=agent_reasoning,tool_execution&limit=500"
+		"/events?types=agent_reasoning,tool_invoked,policy_decision,tool_execution&limit=500"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -3173,6 +3190,152 @@ func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
 		return nil, fmt.Errorf("decode events: %w", err)
 	}
 	return events, nil
+}
+
+// filterJourneyEventTypes returns the subset of events matching one of the
+// given types, preserving order. Used to hand printReasoningTrace only the
+// two event types it was built for — fetchRunEvents now also fetches
+// tool_invoked/policy_decision (for buildToolCallTurns below), which
+// printReasoningTrace has no rendering case for and would otherwise throw
+// off its "blank line between groups" adjacency logic (it looks at the very
+// next event in the slice, which would now sometimes be an invisible
+// tool_invoked/policy_decision event instead of the next visible one).
+func filterJourneyEventTypes(events []journeyEvent, types ...string) []journeyEvent {
+	want := make(map[string]bool, len(types))
+	for _, t := range types {
+		want[t] = true
+	}
+	filtered := make([]journeyEvent, 0, len(events))
+	for _, ev := range events {
+		if want[ev.EventType] {
+			filtered = append(filtered, ev)
+		}
+	}
+	return filtered
+}
+
+// toolCallTurn is one model reasoning turn's declared-vs-confirmed tool-call
+// accounting. A turn is everything from one agent_reasoning event up to (but
+// not including) the next — the same timestamp-order grouping
+// printReasoningTrace already assumes; no parent_id/correlation-ID chain
+// exists anywhere in this pipeline to group more precisely (a per-turn ID
+// threaded from agentutil.NewReasoningCallback through ADK's dispatch
+// goroutines would be more exact under concurrent/parallel tool calls, but
+// is a bigger, separate change — not attempted here).
+type toolCallTurn struct {
+	Index         int
+	Declared      []string // agent_reasoning.tool_calls, in order, duplicates preserved
+	InvokedCount  int
+	PolicyCount   int
+	ExecutedCount int
+	executedNames []string // tool_execution.Name values seen in this turn, in order
+	// Missing is Declared minus executedNames as a multiset difference (a
+	// tool declared 3 times with 3 matching executions is never "missing"
+	// even though the names repeat) — this is what actually caught the real
+	// get_config_parameter drop this feature exists because of. Deliberately
+	// diffed against tool_execution names specifically, not tool_invoked/
+	// policy_decision: tool_execution has always carried a name, even in
+	// audit data recorded before PolicyDecision.ToolName existed, so this
+	// naming works on old traces too — InvokedCount/PolicyCount are honest
+	// raw counts either way, but can't be attributed to a specific declared
+	// name on pre-fix data.
+	Missing []string
+}
+
+// buildToolCallTurns groups a trace's events into per-turn declared-vs-
+// confirmed accounting — see toolCallTurn's doc comment for the grouping
+// model and what Missing does and doesn't depend on.
+func buildToolCallTurns(events []journeyEvent) []toolCallTurn {
+	var turns []toolCallTurn
+	var current *toolCallTurn
+	for _, ev := range events {
+		switch ev.EventType {
+		case "agent_reasoning":
+			if ev.AgentReasoning == nil || len(ev.AgentReasoning.ToolCalls) == 0 {
+				current = nil
+				continue
+			}
+			turns = append(turns, toolCallTurn{Index: len(turns) + 1, Declared: ev.AgentReasoning.ToolCalls})
+			current = &turns[len(turns)-1]
+		case "tool_invoked":
+			if current != nil {
+				current.InvokedCount++
+			}
+		case "policy_decision":
+			if current != nil {
+				current.PolicyCount++
+			}
+		case "tool_execution":
+			if current != nil {
+				current.ExecutedCount++
+				if ev.ToolExecution != nil {
+					current.executedNames = append(current.executedNames, ev.ToolExecution.Name)
+				}
+			}
+		}
+	}
+	for i := range turns {
+		turns[i].Missing = multisetDiff(turns[i].Declared, turns[i].executedNames)
+	}
+	return turns
+}
+
+// multisetDiff returns the elements of a not accounted for by b, respecting
+// counts (an element appearing twice in a is only "missing" if it appears
+// fewer than twice in b).
+func multisetDiff(a, b []string) []string {
+	remaining := make(map[string]int, len(b))
+	for _, v := range b {
+		remaining[v]++
+	}
+	var diff []string
+	for _, v := range a {
+		if remaining[v] > 0 {
+			remaining[v]--
+		} else {
+			diff = append(diff, v)
+		}
+	}
+	return diff
+}
+
+// printToolCallIntegrity renders the turn-by-turn declared → invoked →
+// policy-checked → executed map — Layer 2 (docs/AIGOVERNANCE.md §1.1) made
+// visible without a raw DB pull. Built directly from a manual sqlite3
+// investigation this same pipeline required to catch a real, reproducible
+// tool-call drop (get_config_parameter, found live 2026-09-19/20 on 2 of 3
+// deployment platforms — see project_fabrication_detection_followups.md):
+// this turns that one-off DB query into a first-class CLI feature.
+// sectionHeader is called (once, with this section's title) only when there's
+// actually a turn to show — printJourneyDetail's own sectionJ closure, passed
+// in rather than assumed global, so an empty trace doesn't print a bare
+// header with nothing under it.
+func printToolCallIntegrity(events []journeyEvent, sectionHeader func(string)) {
+	turns := buildToolCallTurns(events)
+	if len(turns) == 0 {
+		return
+	}
+	sectionHeader("TOOL CALL INTEGRITY (declared → invoked → policy-checked → executed) [" + audit.LayerDelegationVerification + "]")
+	const (
+		colTurn     = 4
+		colDeclared = 42
+		colCount    = 7
+	)
+	fmt.Printf("  %-*s %-*s %*s %*s %*s  %s\n",
+		colTurn, "TURN", colDeclared, "DECLARED", colCount, "INVOKED", colCount, "POLICY", colCount, "EXECUTED", "VERDICT")
+	for _, t := range turns {
+		declaredStr := strings.Join(t.Declared, ", ")
+		if len(declaredStr) > colDeclared {
+			declaredStr = declaredStr[:colDeclared-3] + "..."
+		}
+		verdict := "✓"
+		if len(t.Missing) > 0 {
+			verdict = fmt.Sprintf("✗ [%s] %s never confirmed", audit.LayerDelegationVerification, strings.Join(t.Missing, ", "))
+		}
+		fmt.Printf("  %-*d %-*s %*d %*d %*d  %s\n",
+			colTurn, t.Index, colDeclared, declaredStr, colCount, t.InvokedCount, colCount, t.PolicyCount, colCount, t.ExecutedCount, verdict)
+	}
+	fmt.Println()
 }
 
 // printReasoningTrace renders agent_reasoning and tool_execution events

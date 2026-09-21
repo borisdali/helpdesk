@@ -6,7 +6,9 @@ See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and 
   - [in Docker/Podman containers](INCIDENTS_SAMPLE.md#dockerpodman-sample-run) and  
   - [on K8s](INCIDENTS_SAMPLE.md#k8s-sample-run)  
 
-Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation. A fourth run, [a real (non-injected) incident](INCIDENTS_SAMPLE.md#a-real-non-injected-incident-side-by-side-with-an-injected-one), goes through the exact same path with no `faulttest` involvement at all — showing what actually distinguishes a genuine incident from an injected one in the `incidents` table.
+Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation.   
+
+A fourth run is different. It is [a real (non-injected) incident](INCIDENTS_SAMPLE.md#a-real-non-injected-incident-side-by-side-with-an-injected-one) that goes through the exact same path with no `faulttest` involvement at all. It shows what actually distinguishes a genuine incident from an injected one in the `incidents` table.
 
 ## Host/VM sample run
 

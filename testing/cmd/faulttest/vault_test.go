@@ -2529,6 +2529,160 @@ func TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent(t *testing.T) {
 	}
 }
 
+// ── printToolCallIntegrity / buildToolCallTurns ──────────────────────────
+
+// TestBuildToolCallTurns_NamesTheDroppedTool is the deterministic regression
+// test for the exact real-world failure this feature exists for
+// (get_config_parameter, found live 2026-09-19/20 — see
+// project_fabrication_detection_followups.md): a turn declares 2 tools, only
+// 1 actually reaches tool_execution. Unlike the live incident, this is fully
+// reproducible — no dependency on the model's own non-determinism.
+func TestBuildToolCallTurns_NamesTheDroppedTool(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"check_connection"}}},
+		{EventType: "tool_invoked", PolicyDecision: &journeyPolicyDecision{ToolName: "check_connection"}},
+		{EventType: "policy_decision", PolicyDecision: &journeyPolicyDecision{ToolName: "check_connection"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "check_connection"}},
+
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_config_parameter", "get_session_info"}}},
+		{EventType: "tool_invoked", PolicyDecision: &journeyPolicyDecision{ToolName: "get_session_info"}},
+		{EventType: "policy_decision", PolicyDecision: &journeyPolicyDecision{ToolName: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		// get_config_parameter never reaches any downstream event.
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 2 {
+		t.Fatalf("len(turns) = %d, want 2", len(turns))
+	}
+
+	clean := turns[0]
+	if len(clean.Missing) != 0 {
+		t.Errorf("turn 1 Missing = %v, want none (fully confirmed)", clean.Missing)
+	}
+	if clean.InvokedCount != 1 || clean.PolicyCount != 1 || clean.ExecutedCount != 1 {
+		t.Errorf("turn 1 counts = invoked=%d policy=%d executed=%d, want 1/1/1", clean.InvokedCount, clean.PolicyCount, clean.ExecutedCount)
+	}
+
+	dropped := turns[1]
+	if len(dropped.Missing) != 1 || dropped.Missing[0] != "get_config_parameter" {
+		t.Fatalf("turn 2 Missing = %v, want [get_config_parameter]", dropped.Missing)
+	}
+	if dropped.InvokedCount != 1 || dropped.PolicyCount != 1 || dropped.ExecutedCount != 1 {
+		t.Errorf("turn 2 counts = invoked=%d policy=%d executed=%d, want 1/1/1 (only get_session_info reached each stage)", dropped.InvokedCount, dropped.PolicyCount, dropped.ExecutedCount)
+	}
+}
+
+// TestBuildToolCallTurns_DuplicateDeclaredTool_NotFalselyMissing proves the
+// multiset-diff correctly handles a tool declared and executed more than
+// once in the same turn (a real pattern seen live: 3 identical parallel
+// get_session_info calls) — a naive set-membership diff would have nothing
+// to say about count, but would at least still be correct; this guards
+// against a cruder implementation (e.g. "declared name not present anywhere
+// in executed names") that would work by accident for singletons but not for
+// this case, since a set-based check can't tell "3 declared, 2 executed"
+// from "3 declared, 3 executed".
+func TestBuildToolCallTurns_DuplicateDeclaredTool_NotFalselyMissing(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_session_info", "get_session_info", "get_session_info"}}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 1 {
+		t.Fatalf("len(turns) = %d, want 1", len(turns))
+	}
+	if len(turns[0].Missing) != 0 {
+		t.Errorf("Missing = %v, want none (all 3 declared calls were confirmed executed)", turns[0].Missing)
+	}
+	if turns[0].ExecutedCount != 3 {
+		t.Errorf("ExecutedCount = %d, want 3", turns[0].ExecutedCount)
+	}
+}
+
+// TestBuildToolCallTurns_DuplicateDeclaredTool_PartialDropDetected is the
+// asymmetric case the previous test's naive-set-check concern actually
+// guards against: 3 declared, only 2 executed — must report exactly 1
+// missing, not 0 (set membership would say "present, therefore not
+// missing") and not 3 (that would be wrong the other way).
+func TestBuildToolCallTurns_DuplicateDeclaredTool_PartialDropDetected(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_session_info", "get_session_info", "get_session_info"}}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 1 {
+		t.Fatalf("len(turns) = %d, want 1", len(turns))
+	}
+	if len(turns[0].Missing) != 1 {
+		t.Fatalf("Missing = %v, want exactly 1 entry (3 declared, 2 executed)", turns[0].Missing)
+	}
+}
+
+// TestPrintJourneyDetail_ToolCallIntegrity_DetailGatesSection proves the new
+// section only appears with --detail (matching EXECUTION TRACE's own gating,
+// since both are driven by the same fetchRunEvents call), and that the
+// rendered table names the dropped tool and labels it Layer 2.
+func TestPrintJourneyDetail_ToolCallIntegrity_DetailGatesSection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":        "tr_integrity1",
+					"started_at":      time.Now().UTC().Format(time.RFC3339),
+					"incident_run_id": "plr_integrity1",
+					"outcome":         "success",
+					"tools_used":      []string{"get_session_info"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type":      "agent_reasoning",
+					"agent_reasoning": map[string]any{"reasoning": "checking config and session", "tool_calls": []string{"get_config_parameter", "get_session_info"}},
+				},
+				{
+					"event_type":      "tool_invoked",
+					"policy_decision": map[string]any{"tool_name": "get_session_info"},
+				},
+				{
+					"event_type": "tool_execution",
+					"tool":       map[string]any{"name": "get_session_info"},
+				},
+			})
+		default:
+			w.Write([]byte("{}")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	withoutDetail := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_integrity1", false)
+	})
+	if strings.Contains(withoutDetail, "TOOL CALL INTEGRITY") {
+		t.Errorf("TOOL CALL INTEGRITY should not appear without --detail, got:\n%s", withoutDetail)
+	}
+
+	withDetail := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_integrity1", true)
+	})
+	if !strings.Contains(withDetail, "TOOL CALL INTEGRITY") {
+		t.Fatalf("TOOL CALL INTEGRITY missing with --detail, got:\n%s", withDetail)
+	}
+	if !strings.Contains(withDetail, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("output missing Layer 2 label, got:\n%s", withDetail)
+	}
+	if !strings.Contains(withDetail, "get_config_parameter") {
+		t.Errorf("output missing the dropped tool's name, got:\n%s", withDetail)
+	}
+}
+
 // ── escalationHopDesc ─────────────────────────────────────────────────────
 
 func TestEscalationHopDesc(t *testing.T) {
