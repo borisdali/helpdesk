@@ -471,6 +471,7 @@ See [JOURNEYS.md §7.2](JOURNEYS.md#72-incident--journey-cross-links) for the fu
 
 | Document | What it covers |
 |----------|----------------|
+| [INCIDENTS_SAMPLE.md](INCIDENTS_SAMPLE.md) | Real, complete sample runs of the same fault through `incidents` table on Host/VM, Docker/Podman and K8s |
 | [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel; how drafts enter and are activated; vault CLI commands including `vault incidents`, `vault journey` |
 | [JOURNEYS.md](JOURNEYS.md) | Journey audit trail API; `incident_run_id` cross-link; bidirectional Incident ↔ Journey navigation model |
 | [FAULTTEST.md](FAULTTEST.md) | Fault catalog, injection mechanics, scoring, remediation mode, vault integration |
