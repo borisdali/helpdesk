@@ -5062,6 +5062,15 @@ type incidentNarrative struct {
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
 	Journeys   []narrativeJourneyRef `json:"journeys,omitempty"`
+	// IncidentRecord is the v0.29 incidents-table row for this run, when one
+	// exists — reuses audit.Incident directly (same as fetchIncidentsList
+	// already does for list mode) rather than a mirrored struct, since
+	// there's no reason to hand-duplicate its fields a second time. nil for
+	// any run that predates the incident-entity redesign, or was never
+	// tracked as an incident. Closes a gap where `vault incidents <plr_id>`'s
+	// deep-dive never showed origin/status/attribution/bundle/draft even
+	// after the gateway started returning them — list mode already did.
+	IncidentRecord *audit.Incident `json:"incident_record,omitempty"`
 }
 
 func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrative, error) {
@@ -5202,6 +5211,32 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	}
 	if n.TriggerContext != "" {
 		fmt.Printf("Triggered by: %s\n", wordWrap(n.TriggerContext, 70, "              "))
+	}
+	// IncidentRecord fields — fail-open, same as every other section here:
+	// absent means either "no incidents-table row for this run" (pre-v0.29,
+	// or never tracked) or auditd being unreachable, not a positive claim
+	// that these are unset. List mode's own origin-default ("real" when
+	// Origin=="") and status-default ("open" when Status=="") conventions
+	// are mirrored here for consistency between the two views.
+	if n.IncidentRecord != nil {
+		origin := n.IncidentRecord.Origin
+		if origin == "" {
+			origin = "real"
+		}
+		status := n.IncidentRecord.Status
+		if status == "" {
+			status = "open"
+		}
+		fmt.Printf("Origin: %s   Status: %s\n", origin, status)
+		if n.IncidentRecord.Attribution != "" {
+			fmt.Printf("Attribution: %s\n", n.IncidentRecord.Attribution)
+		}
+		if n.IncidentRecord.BundlePath != "" {
+			fmt.Printf("Bundle: %s\n", n.IncidentRecord.BundlePath)
+		}
+		if n.IncidentRecord.DraftPlaybookID != "" {
+			fmt.Printf("Draft playbook: %s\n", n.IncidentRecord.DraftPlaybookID)
+		}
 	}
 	fmt.Printf("%s\n", divider)
 

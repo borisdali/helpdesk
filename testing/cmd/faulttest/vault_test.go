@@ -1975,6 +1975,129 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft closes
+// the gap found during v0.29 doc review: the gateway's incident-narrative
+// response now includes an incident_record object (origin/status/
+// attribution/bundle_path/draft_playbook_id from the incidents table), but
+// this CLI's client-side decode struct had no field for it, so the data was
+// fetched and silently dropped — list mode already showed this, the deep-dive
+// view didn't. Proves it's now rendered.
+func TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec1",
+				"playbook": "pbs_lock_chain_triage",
+			},
+			"incident_record": map[string]any{
+				"incident_id":       "inc_abc123",
+				"entry_run_id":      "plr_rec1",
+				"origin":            "faulttest",
+				"status":            "resolved",
+				"attribution":       "lock_contention",
+				"bundle_path":       "/incidents/a3f9b2c1.tar.gz",
+				"draft_playbook_id": "pb_generated_001",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec1")
+	})
+
+	if !strings.Contains(out, "Origin: faulttest") {
+		t.Errorf("output missing Origin: faulttest, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Status: resolved") {
+		t.Errorf("output missing Status: resolved, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Attribution: lock_contention") {
+		t.Errorf("output missing Attribution: lock_contention, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Bundle: /incidents/a3f9b2c1.tar.gz") {
+		t.Errorf("output missing Bundle: path, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Draft playbook: pb_generated_001") {
+		t.Errorf("output missing Draft playbook: id, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty
+// proves the deep-dive view mirrors list mode's own defaulting convention:
+// an empty Origin displays as "real" (untagged == not faulttest-injected)
+// and an empty Status displays as "open" — not a blank or missing line.
+func TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec2",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec2",
+				"playbook": "pbs_lock_chain_triage",
+			},
+			"incident_record": map[string]any{
+				"incident_id":  "inc_def456",
+				"entry_run_id": "plr_rec2",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec2")
+	})
+
+	if !strings.Contains(out, "Origin: real") {
+		t.Errorf("output missing Origin: real default, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Status: open") {
+		t.Errorf("output missing Status: open default, got:\n%s", out)
+	}
+	if strings.Contains(out, "Attribution:") {
+		t.Errorf("output should not show an Attribution: line when empty, got:\n%s", out)
+	}
+	if strings.Contains(out, "Bundle:") {
+		t.Errorf("output should not show a Bundle: line when empty, got:\n%s", out)
+	}
+	if strings.Contains(out, "Draft playbook:") {
+		t.Errorf("output should not show a Draft playbook: line when empty, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow proves a run
+// with no incidents-table row (pre-v0.29, or never tracked) shows no
+// Origin/Status/Attribution/Bundle/Draft lines at all — fail-open, not a
+// false "Origin: real" claim about data that was never actually looked up.
+func TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec3",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec3",
+				"playbook": "pbs_lock_chain_triage",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec3")
+	})
+
+	for _, want := range []string{"Origin:", "Status:", "Attribution:", "Bundle:", "Draft playbook:"} {
+		if strings.Contains(out, want) {
+			t.Errorf("output should not show %q when incident_record is absent, got:\n%s", want, out)
+		}
+	}
+}
+
 // TestPrintIncidentJourney_VerificationFlags_InlineWarnings verifies that
 // has_mismatch/has_target_drift surface inline right under each chapter's
 // Findings — previously invisible in this exact CLI output, requiring a

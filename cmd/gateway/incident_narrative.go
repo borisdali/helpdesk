@@ -432,9 +432,16 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	narrative.Evaluation = g.fetchRunEvaluation(r.Context(), runID)
 
 	// 6. IncidentRecord — the v0.29 incidents-table row, if one exists for
-	// this run. Best-effort/fail-open, same as every other join above: a
-	// pre-v0.29 or never-tracked run simply gets nil here, not an error.
-	narrative.IncidentRecord = audit.FetchIncidentByEntryRunID(g.auditURL, g.auditAPIKey, runID)
+	// this run. Reuses the same fetchIncidentByEntryRunID already used by
+	// classifyIncidentAttribution/closeIncidentRecord/triggerIncidentBundle
+	// (playbooks.go) rather than a new client — best-effort/fail-open, same
+	// as every other join above: a pre-v0.29 or never-tracked run, or a
+	// lookup error, simply leaves this nil rather than failing the request.
+	if inc, err := g.fetchIncidentByEntryRunID(r.Context(), runID); err != nil {
+		slog.Warn("handleGetIncident: could not look up incident record", "run_id", runID, "err", err)
+	} else {
+		narrative.IncidentRecord = inc
+	}
 
 	writeJSON(w, http.StatusOK, narrative)
 }
