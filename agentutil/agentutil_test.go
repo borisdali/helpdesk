@@ -574,6 +574,86 @@ func TestCheckTool_ToolNameThreadedIntoToolInvokedAndPolicyDecision(t *testing.T
 	}
 }
 
+// TestCheckResult_ToolNameThreadedIntoPolicyDecision proves CheckResult's
+// post-execution blast-radius denial threads toolNameFromContext(ctx) into
+// the recorded PolicyDecision, the same way TestCheckTool_... already proves
+// for CheckTool — CheckResult builds its own separate PolicyDecision literal
+// and was not covered by that test.
+func TestCheckResult_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	path := writeTempPolicyFile(t, blastRadiusPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-cr", "trace-cr")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine, ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "run_bulk_update")
+	err = e.CheckResult(ctx, "database", "mydb", policy.ActionWrite, nil, ToolOutcome{RowsAffected: 150})
+	if err == nil {
+		t.Fatal("150 rows exceeds blast-radius limit, expected denial error")
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "run_bulk_update", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=run_bulk_update, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "run_bulk_update" {
+		t.Errorf("policy_decision ToolName = %q, want run_bulk_update", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
+// TestCheckDatabaseSessionAge_ToolNameThreadedIntoPolicyDecision mirrors the
+// CheckResult test above for CheckDatabaseSessionAge's own, independent
+// PolicyDecision literal.
+func TestCheckDatabaseSessionAge_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	path := writeTempPolicyFile(t, xactAgePolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-xa", "trace-xa")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine, ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "terminate_connection")
+	err = e.CheckDatabaseSessionAge(ctx, "prod-db", "destructive", nil, 7200, true)
+	if err == nil {
+		t.Fatal("expected denial for transaction older than limit, got nil")
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_connection", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=terminate_connection, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "terminate_connection" {
+		t.Errorf("policy_decision ToolName = %q, want terminate_connection", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
 // TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
 // event is recorded unconditionally even when policy enforcement is disabled
 // (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage

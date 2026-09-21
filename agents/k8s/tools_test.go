@@ -1048,6 +1048,163 @@ func TestGetPodsTool_ToolNameThreadedIntoAuditEvents(t *testing.T) {
 	}
 }
 
+// TestDeletePodTool_ToolNameThreadedIntoPolicyDecision proves
+// checkK8sPolicyResult's toolName parameter reaches the recorded
+// policy_decision event — distinct from TestGetPodsTool_..., which only
+// covers checkK8sPolicy. CheckResult (unlike CheckTool) only records a
+// PolicyDecision on denial, so this reuses TestDeletePodTool_BlastRadiusDenied's
+// deny scenario (3 pods deleted against a limit of 1) with a real audit store
+// swapped in to observe the event.
+func TestDeletePodTool_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_result_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname_res", "trace_toolname_res")
+	defer func() { toolAuditor = origAuditor }()
+
+	path := writeTempK8sPolicyFile(t, fmt.Sprintf(`
+version: "1"
+policies:
+  - name: k8s-blast-radius
+    resources:
+      - type: kubernetes
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_pods_affected: %d
+`, 1))
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine, ToolAuditor: toolAuditor}))()
+
+	mockOutput := "pod \"pod-a\" deleted\npod \"pod-b\" deleted\npod \"pod-c\" deleted\n"
+	defer withMockKubectl(mockOutput, nil)()
+
+	ctx := newK8sTestContext()
+	_, err = deletePodTool(ctx, DeletePodArgs{Namespace: "default", PodName: "pod-a"})
+	if err == nil {
+		t.Fatal("expected error when blast-radius limit (1) exceeded by 3 pods")
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "delete_pod",
+		EventType: audit.EventTypePolicyDecision,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	// checkK8sPolicy's own pre-check (already covered by
+	// TestGetPodsTool_ToolNameThreadedIntoAuditEvents) also fires a
+	// policy_decision event here with the correct ToolName — find the
+	// specific PostExecution=true one, which is the checkK8sPolicyResult
+	// event this test targets.
+	var postExec *audit.Event
+	for i := range events {
+		if events[i].PolicyDecision != nil && events[i].PolicyDecision.PostExecution {
+			postExec = &events[i]
+		}
+	}
+	if postExec == nil {
+		t.Fatalf("no post-execution policy_decision event found among %d events findable by ToolName=delete_pod", len(events))
+	}
+	if postExec.PolicyDecision.ToolName != "delete_pod" {
+		t.Errorf("post-execution PolicyDecision.ToolName = %q, want delete_pod", postExec.PolicyDecision.ToolName)
+	}
+}
+
+// TestScaleDeploymentTool_ToolNameThreadedIntoPolicyDecision_PreExec proves
+// checkK8sBlastRadiusPreExec's toolName parameter reaches the recorded
+// policy_decision event — the pre-execution counterpart to
+// TestDeletePodTool_ToolNameThreadedIntoPolicyDecision above. Reuses
+// TestScaleDeploymentTool_BlastRadiusDenied_PreExec's deny scenario (scale to
+// 20 against a limit of 5).
+func TestScaleDeploymentTool_ToolNameThreadedIntoPolicyDecision_PreExec(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_preexec_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname_pre", "trace_toolname_pre")
+	defer func() { toolAuditor = origAuditor }()
+
+	path := writeTempK8sPolicyFile(t, fmt.Sprintf(`
+version: "1"
+policies:
+  - name: k8s-blast-radius
+    resources:
+      - type: kubernetes
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_pods_affected: %d
+`, 5))
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine, ToolAuditor: toolAuditor}))()
+	// kubectl must never be called — the pre-execution blast-radius check fires first.
+	defer withMockKubectl("", fmt.Errorf("kubectl should not have been invoked"))()
+
+	ctx := newK8sTestContext()
+	_, err = scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "web",
+		Replicas:       20,
+	})
+	if err == nil {
+		t.Fatal("expected error when pre-exec blast-radius limit (5) exceeded by scaling to 20")
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "scale_deployment",
+		EventType: audit.EventTypePolicyDecision,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	// checkK8sPolicy's own pre-check (already covered by
+	// TestGetPodsTool_ToolNameThreadedIntoAuditEvents) also fires a
+	// policy_decision event here (allowed, since it runs before the
+	// replica count is known) with the correct ToolName — find the
+	// specific PostExecution=true one, which is the checkK8sBlastRadiusPreExec
+	// event this test targets.
+	var postExec *audit.Event
+	for i := range events {
+		if events[i].PolicyDecision != nil && events[i].PolicyDecision.PostExecution {
+			postExec = &events[i]
+		}
+	}
+	if postExec == nil {
+		t.Fatalf("no post-execution policy_decision event found among %d events findable by ToolName=scale_deployment", len(events))
+	}
+	if postExec.PolicyDecision.ToolName != "scale_deployment" {
+		t.Errorf("post-execution PolicyDecision.ToolName = %q, want scale_deployment", postExec.PolicyDecision.ToolName)
+	}
+}
+
 func TestPatchDeploymentResourcesTool_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	defer withMockKubectl("", nil)() // should not be reached

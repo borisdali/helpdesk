@@ -2311,6 +2311,62 @@ func TestPrintJourneyDetail_TargetDriftWarning(t *testing.T) {
 	}
 }
 
+// TestPrintJourneyDetail_VerifiedWarningOutcome_ShowsLayer1Verification proves
+// the new Layer 1 backfill line renders next to Retries: when the journey's
+// outcome is one of the post-mutation re-verification failure states, and
+// that it carries the [Layer 1] label from internal/audit.LayerIntraAgentVerification.
+func TestPrintJourneyDetail_VerifiedWarningOutcome_ShowsLayer1Verification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":    "tr_verifywarn1",
+				"started_at":  time.Now().UTC().Format(time.RFC3339),
+				"outcome":     "verified_warning",
+				"retry_count": 1,
+				"tools_used":  []string{"restart_service"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_verifywarn1", false)
+	})
+
+	if !strings.Contains(out, "[Layer 1]") {
+		t.Errorf("output missing [Layer 1] verification warning for outcome=verified_warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "post-action re-verification did not confirm the change stuck") {
+		t.Errorf("output missing Layer 1 warning text, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_ResolvedOutcome_NoLayer1Verification is the inverse
+// case — a clean "resolved" outcome must not show the Layer 1 warning line.
+func TestPrintJourneyDetail_ResolvedOutcome_NoLayer1Verification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":   "tr_resolved1",
+				"started_at": time.Now().UTC().Format(time.RFC3339),
+				"outcome":    "resolved",
+				"tools_used": []string{"restart_service"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_resolved1", false)
+	})
+
+	if strings.Contains(out, "[Layer 1]") {
+		t.Errorf("output should not show [Layer 1] verification warning for outcome=resolved, got:\n%s", out)
+	}
+}
+
 // TestPrintJourneyDetail_MismatchWarning_NoDriftWarning is the inverse case —
 // confirms the two warning sections are independently gated, not accidentally
 // coupled by the fix above.
