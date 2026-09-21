@@ -332,11 +332,19 @@ func NewPolicyEnforcerWithConfig(cfg PolicyEnforcerConfig) *PolicyEnforcer {
 // approval and wait for resolution.
 // sensitivity is a list of sensitivity labels from the infra config (e.g., "pii", "critical").
 func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceName string, action policy.ActionClass, tags []string, note string, sensitivity []string) error {
+	// Computed once and reused everywhere below — toolNameFromContext(ctx) was
+	// previously only read for policy *matching* (policyCheckReq.ToolName /
+	// policy.Request.Resource.ToolName further down); it's now also the
+	// source for every PolicyDecision.ToolName in this function, so
+	// tool_invoked/policy_decision audit events become attributable to a
+	// specific tool, not just a resource.
+	toolName := toolNameFromContext(ctx)
+
 	// Emit unconditional tool_invoked event before any policy evaluation.
 	// Fires even when enforcement is disabled, so govbot can detect tool calls
 	// that were never policy-checked (tool_invoked with no matching policy_decision).
 	if e.toolAuditor != nil {
-		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), tags)
+		e.toolAuditor.RecordToolInvoked(ctx, resourceType, resourceName, string(action), toolName, tags)
 	}
 
 	// Block write and destructive tools unconditionally in readonly-governed mode.
@@ -351,6 +359,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		if e.toolAuditor != nil {
 			principal := audit.PrincipalFromContext(ctx)
 			e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+				ToolName:     toolName,
 				ResourceType: resourceType,
 				ResourceName: resourceName,
 				Action:       string(action),
@@ -380,6 +389,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			if e.toolAuditor != nil {
 				principal := audit.PrincipalFromContext(ctx)
 				e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+					ToolName:     toolName,
 					ResourceType: resourceType,
 					ResourceName: resourceName,
 					Action:       string(action),
@@ -410,7 +420,6 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 		}
 		principal := audit.PrincipalFromContext(ctx)
 		purpose, purposeNote := audit.PurposeFromContext(ctx)
-		toolName := toolNameFromContext(ctx)
 		resp, err := e.callRemotePolicyCheck(ctx, policyCheckReq{
 			ResourceType: resourceType,
 			ResourceName: resourceName,
@@ -445,7 +454,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 			Name:        resourceName,
 			Tags:        tags,
 			Sensitivity: sensitivity,
-			ToolName:    toolNameFromContext(ctx),
+			ToolName:    toolName,
 		},
 		Action: action,
 	}
@@ -478,6 +487,7 @@ func (e *PolicyEnforcer) CheckTool(ctx context.Context, resourceType, resourceNa
 	// Record the policy decision to the audit trail (allow, deny, or require_approval).
 	if e.toolAuditor != nil {
 		pd := audit.PolicyDecision{
+			ToolName:     toolName,
 			ResourceType: resourceType,
 			ResourceName: resourceName,
 			Action:       string(action),
@@ -749,6 +759,7 @@ func (e *PolicyEnforcer) CheckResult(ctx context.Context, resourceType, resource
 	// Blast-radius violated — audit the post-execution denial and return an error.
 	if e.toolAuditor != nil {
 		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+			ToolName:      toolNameFromContext(ctx),
 			ResourceType:  resourceType,
 			ResourceName:  resourceName,
 			Action:        string(action),
@@ -886,6 +897,7 @@ func (e *PolicyEnforcer) CheckDatabaseSessionAge(ctx context.Context, dbName str
 
 	if e.toolAuditor != nil {
 		e.toolAuditor.RecordPolicyDecision(ctx, audit.PolicyDecision{
+			ToolName:     toolNameFromContext(ctx),
 			ResourceType: "database",
 			ResourceName: dbName,
 			Action:       string(action),
@@ -931,7 +943,6 @@ func toolNameFromContext(ctx context.Context) string {
 	}
 	return ""
 }
-
 
 // policyCheckReq is the body sent to POST /v1/governance/check.
 // Field names match PolicyCheckRequest in cmd/auditd/governance_handlers.go.
@@ -1293,4 +1304,3 @@ func NewReasoningCallback(auditor *audit.ToolAuditor) func(agent.CallbackContext
 		return nil, nil
 	}
 }
-

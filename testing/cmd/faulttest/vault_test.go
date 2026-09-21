@@ -2010,18 +2010,18 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 		printIncidentJourney(srv.URL, "", "plr_flags1")
 	})
 
-	if !strings.Contains(out, "⚠ unverified") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
 		t.Errorf("output missing inline unverified warning for triage's has_mismatch=true, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ target drift") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output missing inline target drift warning for escalation's has_target_drift=true, got:\n%s", out)
 	}
 	// The two warnings must appear on the *correct* chapter, not both on
 	// every chapter — count occurrences precisely rather than just presence.
-	if got := strings.Count(out, "⚠ unverified"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified"); got != 1 {
 		t.Errorf("⚠ unverified appeared %d times, want exactly 1 (triage only)", got)
 	}
-	if got := strings.Count(out, "⚠ target drift"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift"); got != 1 {
 		t.Errorf("⚠ target drift appeared %d times, want exactly 1 (escalation only)", got)
 	}
 }
@@ -2054,10 +2054,10 @@ func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T
 		printIncidentJourney(srv.URL, "", "plr_unvevid1")
 	})
 
-	if !strings.Contains(out, "⚠ unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
 		t.Errorf("output missing the actual primary quote text, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {
 		t.Errorf("output missing the actual secondary quote text, labeled non-blocking, got:\n%s", out)
 	}
 }
@@ -2096,10 +2096,10 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	if !strings.Contains(out, "REMEDIATION") {
 		t.Fatalf("output missing REMEDIATION section, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ unverified") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
 		t.Errorf("output missing inline unverified warning for remediation's has_mismatch=true, got:\n%s", out)
 	}
-	if strings.Contains(out, "⚠ target drift") {
+	if strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output should not show target drift warning, has_target_drift is false, got:\n%s", out)
 	}
 }
@@ -2146,13 +2146,13 @@ func TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters(t *testing.T
 		printIncidentJourney(srv.URL, "", "plr_oevprint1")
 	})
 
-	if !strings.Contains(out, "⚠ unconfirmed evidence — replica_disconnected") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence — replica_disconnected") {
 		t.Errorf("output missing unconfirmed evidence line for triage, got:\n%s", out)
 	}
-	if got := strings.Count(out, "✓ confirmed evidence — replica_disconnected"); got != 2 {
+	if got := strings.Count(out, "✓ ["+audit.LayerObjectiveEvidence+"] confirmed evidence — replica_disconnected"); got != 2 {
 		t.Errorf("✓ confirmed evidence appeared %d times, want exactly 2 (escalation + remediation), got:\n%s", got, out)
 	}
-	if got := strings.Count(out, "⚠ unconfirmed evidence"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence"); got != 1 {
 		t.Errorf("⚠ unconfirmed evidence appeared %d times, want exactly 1 (triage only), got:\n%s", got, out)
 	}
 }
@@ -2182,10 +2182,10 @@ func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) 
 		printIncidentJourney(srv.URL, "", "plr_pvflag1")
 	})
 
-	if !strings.Contains(out, "⚠ protocol violation") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] protocol violation") {
 		t.Errorf("output missing inline protocol violation warning, got:\n%s", out)
 	}
-	if strings.Contains(out, "⚠ unverified") || strings.Contains(out, "⚠ target drift") {
+	if strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") || strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output should not show the other two warnings, got:\n%s", out)
 	}
 }

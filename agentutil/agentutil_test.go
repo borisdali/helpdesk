@@ -525,6 +525,55 @@ func TestCheckTool_ReadonlyGoverned_AuditsDenial(t *testing.T) {
 	}
 }
 
+// TestCheckTool_ToolNameThreadedIntoToolInvokedAndPolicyDecision verifies that
+// a tool name set via WithToolName on the incoming context reaches the
+// ToolName field of both the tool_invoked event (RecordToolInvoked) and the
+// policy_decision event (RecordPolicyDecision) — previously
+// toolNameFromContext was only read for policy *matching*
+// (policy.Request.Resource.ToolName / policyCheckReq.ToolName), never
+// forwarded into the audit trail, so tool_invoked/policy_decision events were
+// unattributable to a specific tool even though the audit_events.tool_name
+// column already existed and was already used by tool_execution events.
+func TestCheckTool_ToolNameThreadedIntoToolInvokedAndPolicyDecision(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-tn", "trace-tn")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "terminate_idle_connections")
+	err = e.CheckTool(ctx, "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, "test note", nil)
+	if err == nil {
+		t.Fatal("expected error for write in readonly-governed mode, got nil")
+	}
+
+	invokedEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_idle_connections", EventType: audit.EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query tool_invoked by ToolName: %v", err)
+	}
+	if len(invokedEvents) != 1 {
+		t.Fatalf("expected 1 tool_invoked event findable by ToolName=terminate_idle_connections, got %d", len(invokedEvents))
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_idle_connections", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=terminate_idle_connections, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "terminate_idle_connections" {
+		t.Errorf("policy_decision ToolName = %q, want terminate_idle_connections", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
 // TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
 // event is recorded unconditionally even when policy enforcement is disabled
 // (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage

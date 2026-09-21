@@ -995,6 +995,59 @@ func TestPatchDeploymentResourcesTool_VerificationWarning_LimitMismatch(t *testi
 	}
 }
 
+// TestGetPodsTool_ToolNameThreadedIntoAuditEvents proves checkK8sPolicy's new
+// toolName parameter actually reaches the recorded tool_invoked event, the
+// same property agents/database and agents/sysadmin already had (they call
+// agentutil.WithToolName directly) but agents/k8s never did until now — every
+// one of its 16 checkK8sPolicy call sites was silently missing tool_name on
+// its audit events. Mirrors TestScaleDeploymentTool_CapturesPreState's real
+// in-process audit store pattern; representative of the other 15 call sites
+// rather than duplicating this test for each.
+func TestGetPodsTool_ToolNameThreadedIntoAuditEvents(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "production"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cs := fake.NewClientset(pod)
+	defer injectFakeClientset("", cs)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname", "trace_toolname")
+	defer func() { toolAuditor = origAuditor }()
+
+	// No Engine/PolicyCheckURL — enforcement disabled, but RecordToolInvoked
+	// still fires unconditionally (see agentutil.PolicyEnforcer.CheckTool's
+	// own doc comment), which is all this test needs to observe.
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{ToolAuditor: toolAuditor}))()
+
+	ctx := newK8sTestContext()
+	if _, err := getPodsTool(ctx, GetPodsArgs{Namespace: "production"}); err != nil {
+		t.Fatalf("getPodsTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "get_pods",
+		EventType: audit.EventTypeToolInvoked,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("tool_invoked events findable by ToolName=get_pods = %d, want 1", len(events))
+	}
+	if events[0].PolicyDecision == nil || events[0].PolicyDecision.ToolName != "get_pods" {
+		t.Errorf("PolicyDecision.ToolName = %+v, want get_pods", events[0].PolicyDecision)
+	}
+}
+
 func TestPatchDeploymentResourcesTool_PolicyDenied(t *testing.T) {
 	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
 	defer withMockKubectl("", nil)() // should not be reached

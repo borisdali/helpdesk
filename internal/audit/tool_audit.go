@@ -184,7 +184,9 @@ func (ta *ToolAuditor) RecordPolicyDecision(ctx context.Context, pd PolicyDecisi
 // of every tool dispatch, before any policy evaluation. This enables gap analysis:
 // comparing tool_invoked events against policy_decision events reveals tool calls
 // that bypassed policy entirely (no corresponding policy_decision event).
-func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, resourceName, action string, tags []string) {
+// toolName is best-effort — empty when the caller never set it via
+// agentutil.WithToolName (see PolicyDecision.ToolName's own doc comment).
+func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, resourceName, action, toolName string, tags []string) {
 	if ta.auditor == nil {
 		return
 	}
@@ -203,6 +205,7 @@ func (ta *ToolAuditor) RecordToolInvoked(ctx context.Context, resourceType, reso
 		ActionClass: ActionClass(action),
 		Session:     Session{ID: ta.sessionID},
 		PolicyDecision: &PolicyDecision{
+			ToolName:     toolName,
 			ResourceType: resourceType,
 			ResourceName: resourceName,
 			Action:       action,

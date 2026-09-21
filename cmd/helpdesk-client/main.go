@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"golang.org/x/term"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/client"
 )
 
@@ -229,13 +230,13 @@ func runQuery(ctx context.Context, c *client.Client, agentName, contextID, messa
 // formatVerification builds the short audit summary line printed after each query.
 func formatVerification(v *client.TraceVerification) string {
 	if len(v.ToolsConfirmed) == 0 {
-		return "no tool executions confirmed — response unverified ⚠"
+		return "[" + audit.LayerDelegationVerification + "] no tool executions confirmed — response unverified ⚠"
 	}
 	parts := make([]string, len(v.ToolsConfirmed))
 	for i, t := range v.ToolsConfirmed {
 		parts[i] = t.Name + " (" + t.ActionClass + ")"
 	}
-	summary := strings.Join(parts, ", ")
+	summary := "[" + audit.LayerDelegationVerification + "] " + strings.Join(parts, ", ")
 	if v.HasMutations() {
 		if len(v.DestructiveConfirmed) > 0 {
 			summary += " — destructive confirmed ✓"

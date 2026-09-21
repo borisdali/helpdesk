@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"helpdesk/agentutil"
+	"helpdesk/internal/audit"
 	"helpdesk/internal/buildinfo"
 	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
@@ -592,7 +593,7 @@ func cmdRun(args []string) {
 				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
 				if resp.Mismatch {
 					evalResult.Mismatch = true
-					fmt.Printf("  ⚠  FABRICATION RISK: mismatch (narrated tool call not confirmed)\n")
+					fmt.Printf("  ⚠  [%s] FABRICATION RISK: mismatch (narrated tool call not confirmed)\n", audit.LayerDelegationVerification)
 				}
 				// Content-provenance: an EVIDENCE quote didn't match any real tool
 				// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
@@ -610,7 +611,7 @@ func cmdRun(args []string) {
 				if len(resp.UnverifiedEvidence) > 0 {
 					evalResult.UnverifiedEvidence = true
 					evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
-					fmt.Printf("  ⚠  UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", len(resp.UnverifiedEvidence))
+					fmt.Printf("  ⚠  [%s] UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidence))
 					for _, q := range resp.UnverifiedEvidence {
 						fmt.Printf("         %s\n", q)
 					}
@@ -618,7 +619,7 @@ func cmdRun(args []string) {
 				if len(resp.UnverifiedEvidenceSecondary) > 0 {
 					evalResult.UnverifiedEvidenceSecondary = true
 					evalResult.UnverifiedEvidenceSecondaryQuotes = resp.UnverifiedEvidenceSecondary
-					fmt.Printf("  ⚠  unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", len(resp.UnverifiedEvidenceSecondary))
+					fmt.Printf("  ⚠  [%s] unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidenceSecondary))
 					for _, q := range resp.UnverifiedEvidenceSecondary {
 						fmt.Printf("         %s\n", q)
 					}

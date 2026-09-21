@@ -2923,6 +2923,14 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	if j.RetryCount > 0 {
 		fmt.Printf("  %-18s %d\n", "Retries:", j.RetryCount)
 	}
+	// Layer 1 (docs/AIGOVERNANCE.md §1.1): a mutation tool's own post-action
+	// re-verification found the change didn't stick, or never confirmed it
+	// did within the retry budget. Previously this had no dedicated warning
+	// anywhere — only visible indirectly via the generic Outcome string above.
+	switch j.Outcome {
+	case "verified_warning", "verified_failed", "escalation_required":
+		fmt.Printf("  %-18s ⚠ [%s] post-action re-verification did not confirm the change stuck\n", "Verification:", audit.LayerIntraAgentVerification)
+	}
 
 	if j.UserQuery != "" {
 		sectionJ("QUERY")
@@ -2983,7 +2991,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasMismatch {
-		sectionJ("FABRICATION WARNING")
+		sectionJ("FABRICATION WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  ! One or more delegations reported success but no matching tool")
 		fmt.Println("    execution was recorded in the audit trail.")
 		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
@@ -3003,7 +3011,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasTargetDrift {
-		sectionJ("TARGET DRIFT WARNING")
+		sectionJ("TARGET DRIFT WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  D A real tool call in this journey used a different connection_string")
 		fmt.Println("    than the run was invoked with. The tool call itself is genuine —")
 		fmt.Println("    HasMismatch may be false — but any diagnosis built on it reflects")
@@ -3038,7 +3046,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasProtocolViolation {
-		sectionJ("PROTOCOL VIOLATION WARNING")
+		sectionJ("PROTOCOL VIOLATION WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  P A triage-typed playbook's hop resolved without emitting the")
 		fmt.Println("    required TRANSITION_TO/ESCALATE_TO signal at all — not even an")
 		fmt.Println("    explicit \"none\". No gate was forced (no target to gate into);")
@@ -4977,13 +4985,13 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// attestation either way.
 	printFlags := func(hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
 		if hasMismatch {
-			fmt.Println("           ⚠ unverified — no matching tool execution in the audit trail")
+			fmt.Printf("           ⚠ [%s] unverified — no matching tool execution in the audit trail\n", audit.LayerDelegationVerification)
 		}
 		if hasTargetDrift {
-			fmt.Println("           ⚠ target drift — a tool call used a different connection string")
+			fmt.Printf("           ⚠ [%s] target drift — a tool call used a different connection string\n", audit.LayerDelegationVerification)
 		}
 		if hasProtocolViolation {
-			fmt.Println("           ⚠ protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted")
+			fmt.Printf("           ⚠ [%s] protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted\n", audit.LayerDelegationVerification)
 		}
 	}
 	// printUnverifiedEvidence surfaces the actual flagged quote(s), not just a
@@ -4998,10 +5006,10 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// visually distinct since it's still the stronger of the two signals.
 	printUnverifiedEvidence := func(primary, secondary []string) {
 		for _, q := range primary {
-			fmt.Printf("           ⚠ unverified evidence (non-blocking) — %s\n", q)
+			fmt.Printf("           ⚠ [%s] unverified evidence (non-blocking) — %s\n", audit.LayerContentProvenance, q)
 		}
 		for _, q := range secondary {
-			fmt.Printf("           ⚠ unverified evidence (secondary, non-blocking) — %s\n", q)
+			fmt.Printf("           ⚠ [%s] unverified evidence (secondary, non-blocking) — %s\n", audit.LayerContentProvenance, q)
 		}
 	}
 	// printObjectiveEvidence surfaces Layer 4 (docs/AIGOVERNANCE.md §1.1) inline,
@@ -5012,10 +5020,10 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// not as a warning — it's proof the model saw and cited the real data.
 	printObjectiveEvidence := func(confirmed, unconfirmed []string) {
 		if len(unconfirmed) > 0 {
-			fmt.Printf("           ⚠ unconfirmed evidence — %s\n", strings.Join(unconfirmed, ", "))
+			fmt.Printf("           ⚠ [%s] unconfirmed evidence — %s\n", audit.LayerObjectiveEvidence, strings.Join(unconfirmed, ", "))
 		}
 		if len(confirmed) > 0 {
-			fmt.Printf("           ✓ confirmed evidence — %s\n", strings.Join(confirmed, ", "))
+			fmt.Printf("           ✓ [%s] confirmed evidence — %s\n", audit.LayerObjectiveEvidence, strings.Join(confirmed, ", "))
 		}
 	}
 
