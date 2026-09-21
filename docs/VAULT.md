@@ -21,7 +21,7 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
-   - [vault journey](#vault-journey) — [`--detail`: reasoning interleaved with tool calls](#--detail-reasoning-interleaved-with-tool-calls)
+   - [vault journey](#vault-journey) — [`--detail`: reasoning interleaved with tool calls](#--detail-reasoning-interleaved-with-tool-calls), [TOOL CALL INTEGRITY: declared vs. confirmed tool calls](#tool-call-integrity-declared-vs-confirmed-tool-calls)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
    - [vault versions](#vault-versions)
@@ -519,13 +519,13 @@ that chapter's `Findings`, so it's visible without a separate `vault journey <tr
 ── TRIAGE ──────────────────────────────────────────────────
 Playbook:  pbs_db_restart_triage
 Findings:  Connection refused; no infra entry for this target
-           ⚠ unverified — no matching tool execution in the audit trail
+           ⚠ [Layer 2] unverified — no matching tool execution in the audit trail
 
 ── ESCALATION 1/1 ───────────────────────────────────────────
 Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
 Findings:  check_host runtime=kubectl — target is Kubernetes-managed
-           ⚠ target drift — a tool call used a different connection string
-           ⚠ unverified evidence — an EVIDENCE quote didn't match any real tool output
+           ⚠ [Layer 2] target drift — a tool call used a different connection string
+           ⚠ [Layer 3] unverified evidence (non-blocking) — "walreceiver stopped due to administrator command"
 ```
 
 Absence of any line can mean either "verified clean" or "no delegation_verification events
@@ -534,27 +534,32 @@ either way. Computed per chapter, not per-Journey/whole-trace, so a mismatch on 
 force-mode auto-chain doesn't flag every chapter sharing that trace_id. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome)
 and [§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) for what sets each.
-The `⚠ unverified evidence` line is [AIGOVERNANCE.md §1.1's Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)
+Every line carries an explicit `[Layer N]` tag matching
+[AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#11-llm-fabrication-detection)'s own numbering — the
+`unverified`/`target drift` lines are Layer 2 (inter-agent delegation verification); the
+`unverified evidence` line is [Layer 3](AIGOVERNANCE.md#layer-3--content-provenance-verification)
 (content-provenance verification, v0.28.0) — same underlying event type as the two lines
-above it, a new field (`UnverifiedEvidence`) alongside `Mismatch`/`TargetDrift`.
+above it, a new field (`UnverifiedEvidence`) alongside `Mismatch`/`TargetDrift`. A run with a
+*secondary* (rejected-hypothesis) fabricated quote prints a second, otherwise-identical line
+with `(secondary, non-blocking)` in place of `(non-blocking)`.
 
 **Objective-evidence lines appear inline too (v0.27.0)**, same placement, right under a
 chapter's `Findings` — the incident-narrative counterpart to
-[AIGOVERNANCE.md §1.1's Layer 4](AIGOVERNANCE.md#layer-4--objective-evidence-content-verification).
-`⚠` marks a signal the chapter's own response never demonstrably engaged with (real,
-code-derived tool evidence — worth investigating); `✓` marks one the response correctly
-cited — corroboration, not a concern:
+[AIGOVERNANCE.md §1.1's Layer 4](AIGOVERNANCE.md#layer-4--objective-evidence-content-verification),
+tagged `[Layer 4]` accordingly. `⚠` marks a signal the chapter's own response never
+demonstrably engaged with (real, code-derived tool evidence — worth investigating); `✓`
+marks one the response correctly cited — corroboration, not a concern:
 
 ```
 ── TRIAGE ──────────────────────────────────────────────────
 Playbook:  pbs_replication_lag
 Findings:  Replica disconnected — inactive slot retaining WAL
-           ⚠ unconfirmed evidence — replica_disconnected
+           ⚠ [Layer 4] unconfirmed evidence — replica_disconnected
 
 ── ESCALATION 1/1 ───────────────────────────────────────────
 Playbook:  pbs_sysadmin_replica_connectivity_triage   Outcome: resolved
 Findings:  Replica container healthy; primary-side pg_hba.conf rejection
-           ✓ confirmed evidence — replica_disconnected
+           ✓ [Layer 4] confirmed evidence — replica_disconnected
 ```
 
 Same fail-open caveat as above: absence means either "confirmed" or "no objective_evidence
@@ -683,6 +688,15 @@ INCIDENT LINK
 
 The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
 
+When the journey's outcome is `verified_warning`, `verified_failed`, or `escalation_required` — the Layer 1 post-mutation re-verification outcomes [JOURNEYS.md](JOURNEYS.md) documents — a `Verification:` line appears next to `Retries:` in the header block, tagged with [AIGOVERNANCE.md §1.1's Layer 1](AIGOVERNANCE.md#layer-1--intra-agent-post-mutation-verification):
+
+```
+  Retries:           1
+  Verification:      ⚠ [Layer 1] post-action re-verification did not confirm the change stuck
+```
+
+This is Layer 1's only dedicated rendering anywhere in `vault` — previously visible only indirectly via the generic `Outcome:` string above it.
+
 #### `--detail`: reasoning interleaved with tool calls
 
 Pass `--detail` on any incident-linked journey to replace the flat TOOLS USED list with an EXECUTION TRACE that interleaves the agent's deliberation text with each tool call it produced:
@@ -740,7 +754,34 @@ Tool calls are shown as `► name [ok]` or `► name [error]`. If a tool call ha
 | Incident-linked but no `agent_reasoning` events in the run | EXECUTION TRACE section shows only the tool calls with `(no preceding reasoning captured)` on each |
 | Gateway returns an error fetching events | A warning is printed and the flat TOOLS USED list is shown instead |
 
-`--detail` fetches events from `GET /api/v1/fleet/playbook-runs/{runID}/events?types=agent_reasoning,tool_execution&limit=500`. The gateway endpoint requires `--gateway` and `--api-key` to be set. `agent_reasoning` events are only present for runs where the agent server was started with the reasoning callback enabled (the default for all aiHelpDesk agents since v0.19).
+`--detail` fetches events from `GET /api/v1/fleet/playbook-runs/{runID}/events?types=agent_reasoning,tool_invoked,policy_decision,tool_execution&limit=500`. The gateway endpoint requires `--gateway` and `--api-key` to be set. `agent_reasoning` events are only present for runs where the agent server was started with the reasoning callback enabled (the default for all aiHelpDesk agents since v0.19). `tool_invoked`/`policy_decision` are fetched for the TOOL CALL INTEGRITY table below; `printReasoningTrace` itself is still only ever handed the `agent_reasoning`/`tool_execution` subset, so EXECUTION TRACE's own rendering is unaffected by the wider fetch.
+
+#### TOOL CALL INTEGRITY: declared vs. confirmed tool calls
+
+Immediately below EXECUTION TRACE, `--detail` also prints a turn-by-turn table comparing the tool calls the model *declared* in its reasoning against what the audit trail shows actually reached `tool_invoked` → `policy_decision` → `tool_execution`. A "turn" is everything from one `agent_reasoning` event up to (but not including) the next — the same grouping EXECUTION TRACE itself uses; no `parent_id`/correlation-ID chain exists anywhere in the pipeline to group more precisely.
+
+This exists because of a real, reproducible finding: `get_config_parameter` was observed as "narrated but unconfirmed" — declared by the model, never actually reaching `tool_execution` — on two of three deployment platforms during v0.29 verification. Diagnosing it required a manual `sqlite3` query against auditd's database to build exactly this table by hand. `--detail` now builds it automatically from the same `tool_invoked`/`policy_decision`/`tool_execution` events EXECUTION TRACE already fetches — no extra flag, no raw DB access needed:
+
+```
+TOOL CALL INTEGRITY (declared → invoked → policy-checked → executed) [Layer 2]
+------------------------------------------------------------------------------------
+  TURN DECLARED                                   INVOKED  POLICY EXECUTED  VERDICT
+  1    get_db_info, get_session_info                    2       2       2  ✓
+  2    get_config_parameter, get_replication_s...       1       1       1  ✗ [Layer 2] get_config_parameter never confirmed
+```
+
+| Column | Meaning |
+|--------|---------|
+| `TURN` | 1-indexed reasoning turn, in chronological order |
+| `DECLARED` | Tool names from that turn's `agent_reasoning.tool_calls`, in order, duplicates preserved; truncated with `...` if too long to fit |
+| `INVOKED` | Count of `tool_invoked` events observed in this turn |
+| `POLICY` | Count of `policy_decision` events observed in this turn |
+| `EXECUTED` | Count of `tool_execution` events observed in this turn |
+| `VERDICT` | `✓` when every declared name is accounted for among this turn's `tool_execution` names; otherwise `✗ [Layer 2] <names> never confirmed`, naming exactly which declared tool(s) never executed |
+
+The verdict is computed as a **multiset** difference (declared minus executed, respecting counts), not simple set membership — a tool declared three times with three matching executions is never flagged as missing just because the names repeat. It is diffed against `tool_execution` names specifically (not `tool_invoked`/`policy_decision`) because `tool_execution` has always carried a tool name, even on audit data recorded before this feature's `PolicyDecision.ToolName` field existed — so the VERDICT column works on old traces too, though `INVOKED`/`POLICY` are honest raw counts either way and can't be attributed to a specific declared name on pre-upgrade data.
+
+The section is omitted entirely when there are no turns to show (no `agent_reasoning` event in the trace declared any tool calls) — no bare header prints with nothing under it.
 
 ### vault status
 
