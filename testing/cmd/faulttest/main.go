@@ -589,41 +589,7 @@ func cmdRun(args []string) {
 						fmt.Printf("  ⚠  EVIDENCE REQUIRED: expected signal %q fired but was not confirmed — failing regardless of keyword/category score\n", sig)
 					}
 				}
-				// Fabrication risk: the agent narrated calling a tool that never
-				// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
-				if resp.Mismatch {
-					evalResult.Mismatch = true
-					fmt.Printf("  ⚠  [%s] FABRICATION RISK: mismatch (narrated tool call not confirmed)\n", audit.LayerDelegationVerification)
-				}
-				// Content-provenance: an EVIDENCE quote didn't match any real tool
-				// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
-				// Prints the actual flagged quote(s), not just a count (found live
-				// 2026-09-07: a count alone meant tracking down what was actually
-				// fabricated required querying the raw audit trail by hand — each
-				// quote is already prefixed with its owning hypothesis's text, so
-				// no further lookup is needed here). Both primary and secondary
-				// are labeled non-blocking as of 2026-09-08 (see hasCleanWarning's
-				// doc comment: four live rounds each surfaced a new, genuine
-				// citation-formatting false-positive variant, warn-only for this
-				// release) — primary still reads as the stronger signal (it backs
-				// the acted-on conclusion, not a rejected hypothesis), so the two
-				// labels stay visually distinct even though neither gates CLEAN.
-				if len(resp.UnverifiedEvidence) > 0 {
-					evalResult.UnverifiedEvidence = true
-					evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
-					fmt.Printf("  ⚠  [%s] UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidence))
-					for _, q := range resp.UnverifiedEvidence {
-						fmt.Printf("         %s\n", q)
-					}
-				}
-				if len(resp.UnverifiedEvidenceSecondary) > 0 {
-					evalResult.UnverifiedEvidenceSecondary = true
-					evalResult.UnverifiedEvidenceSecondaryQuotes = resp.UnverifiedEvidenceSecondary
-					fmt.Printf("  ⚠  [%s] unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidenceSecondary))
-					for _, q := range resp.UnverifiedEvidenceSecondary {
-						fmt.Printf("         %s\n", q)
-					}
-				}
+				printFabricationAndEvidenceWarnings(resp, &evalResult)
 
 				// Push judge reasoning to the audit store so it appears alongside
 				// live agent_reasoning events in the governance trail.
@@ -870,6 +836,55 @@ func cmdRun(args []string) {
 	// with operator feedback for calibration. Failures are non-fatal.
 	if cfg.GatewayURL != "" {
 		postEvaluations(cfg.GatewayURL, cfg.GatewayAPIKey, report.Results)
+	}
+}
+
+// printFabricationAndEvidenceWarnings prints the live per-fault fabrication
+// (Layer 2) and content-provenance (Layer 3) warning lines and mirrors their
+// state onto evalResult, exactly as cmdRun's main loop did inline before this
+// was extracted. Pulled out into its own function so it's unit-testable with
+// a synthetic testutil.AgentResponse — previously this logic lived inline in
+// cmdRun (a ~500-line function driving live agent calls), and had zero test
+// coverage: a regression to any of these three labeled lines (all three now
+// carry the [Layer N] constants from Feature A, testing/cmd/faulttest_test.go
+// was the closest existing coverage but only for vault's rendering, never
+// this live-run print path) would have gone unnoticed until a human read a
+// live run's terminal output.
+func printFabricationAndEvidenceWarnings(resp testutil.AgentResponse, evalResult *EvalResult) {
+	// Fabrication risk: the agent narrated calling a tool that never
+	// actually executed — see checkFabricationRisk (cmd/gateway/playbooks.go).
+	if resp.Mismatch {
+		evalResult.Mismatch = true
+		fmt.Printf("  ⚠  [%s] FABRICATION RISK: mismatch (narrated tool call not confirmed)\n", audit.LayerDelegationVerification)
+	}
+	// Content-provenance: an EVIDENCE quote didn't match any real tool
+	// output — see checkEvidenceProvenance (cmd/gateway/playbooks.go).
+	// Prints the actual flagged quote(s), not just a count (found live
+	// 2026-09-07: a count alone meant tracking down what was actually
+	// fabricated required querying the raw audit trail by hand — each
+	// quote is already prefixed with its owning hypothesis's text, so
+	// no further lookup is needed here). Both primary and secondary
+	// are labeled non-blocking as of 2026-09-08 (see hasCleanWarning's
+	// doc comment: four live rounds each surfaced a new, genuine
+	// citation-formatting false-positive variant, warn-only for this
+	// release) — primary still reads as the stronger signal (it backs
+	// the acted-on conclusion, not a rejected hypothesis), so the two
+	// labels stay visually distinct even though neither gates CLEAN.
+	if len(resp.UnverifiedEvidence) > 0 {
+		evalResult.UnverifiedEvidence = true
+		evalResult.UnverifiedEvidenceQuotes = resp.UnverifiedEvidence
+		fmt.Printf("  ⚠  [%s] UNVERIFIED EVIDENCE (primary, non-blocking): %d quote(s) did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidence))
+		for _, q := range resp.UnverifiedEvidence {
+			fmt.Printf("         %s\n", q)
+		}
+	}
+	if len(resp.UnverifiedEvidenceSecondary) > 0 {
+		evalResult.UnverifiedEvidenceSecondary = true
+		evalResult.UnverifiedEvidenceSecondaryQuotes = resp.UnverifiedEvidenceSecondary
+		fmt.Printf("  ⚠  [%s] unverified evidence (secondary, non-blocking): %d quote(s) on a rejected hypothesis did not match any real tool output\n", audit.LayerContentProvenance, len(resp.UnverifiedEvidenceSecondary))
+		for _, q := range resp.UnverifiedEvidenceSecondary {
+			fmt.Printf("         %s\n", q)
+		}
 	}
 }
 
