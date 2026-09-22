@@ -15,31 +15,30 @@ A fourth run is different. It is [a real (non-injected) incident](INCIDENTS_SAMP
 See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly on a host/VM [here](../deploy/host/README.md#8-fault-injection-testing-faulttest). Start the stack, inject the fault via the gateway and step through the remediation approvals:
 
 ```
-[boris@ /tmp/helpdesk-host-test]$ date; time ./faulttest run \
-    --ids db-max-connections \
-    --external \
-    --via-gateway \
-    --remediate \
-    --gateway $HELPDESK_GATEWAY_URL \
-    --conn "host=localhost port=15432 dbname=testdb user=postgres password=xxx" \
-    --agent-conn faulttest-db-local \
-    --infra-config ./infrastructure.json
-Sun Sep 20 18:30:07 EDT 2026
-time=2026-09-20T18:30:07.699-04:00 level=INFO msg=--conn host=localhost
-time=2026-09-20T18:30:07.699-04:00 level=INFO msg=--agent-conn alias=faulttest-db-local host=localhost
+[boris@ /tmp/helpdesk/helpdesk-v0.26.0-darwin-arm64]$ date; time ./faulttest run \
+      --ids db-max-connections --external --via-gateway \
+      --gateway "$HELPDESK_GATEWAY_URL" --api-key "$FAULTTEST_API_KEY" \
+      --conn "host=localhost port=15432 dbname=testdb user=postgres password=xxx" \
+      --agent-conn faulttest-db-local \
+      --remediate
+Tue Sep 22 08:45:03 EDT 2026
+time=2026-09-22T08:45:04.932-04:00 level=INFO msg=--conn host=localhost
+time=2026-09-22T08:45:04.932-04:00 level=INFO msg=--agent-conn host=faulttest-db-local
 
 --- Testing: Max connections exhausted (db-max-connections) ---
-time=2026-09-20T18:30:07.702-04:00 level=INFO msg="executing injection spec" type=shell_exec phase=inject
-time=2026-09-20T18:30:11.408-04:00 level=INFO msg="shell_exec completed" output="Injected: 94 idle connections (1 existing → 95/100)"
-time=2026-09-20T18:30:11.815-04:00 level=INFO msg="sending prompt to agent via playbook" failure=db-max-connections series_id=pbs_connection_triage playbook_id=pb_5dde3be2 gateway=http://localhost:8080 agent-conn="host=localhost port=15432 dbname=testdb user=postgres password=xxx"
-time=2026-09-20T18:30:30.420-04:00 level=INFO msg="starting remediation" failure=db-max-connections playbook=pbs_connection_remediate agent_prompt=false prior_run_id=plr_9a83537d
+time=2026-09-22T08:45:04.936-04:00 level=INFO msg="executing injection spec" type=shell_exec phase=inject
+time=2026-09-22T08:45:08.224-04:00 level=INFO msg="shell_exec completed" output="Injected: 16 idle connections (1 existing → 17/20)"
+time=2026-09-22T08:45:08.852-04:00 level=INFO msg="sending prompt to agent via playbook" failure=db-max-connections series_id=pbs_connection_triage playbook_id=pb_a91387b4 gateway=http://localhost:8080 agent-conn=faulttest-db-local
+  ⚠  [Layer 2] FABRICATION RISK: mismatch (narrated tool call not confirmed)
+time=2026-09-22T08:45:32.960-04:00 level=INFO msg="starting remediation" failure=db-max-connections playbook=pbs_connection_remediate agent_prompt=false prior_run_id=plr_eab39d87
 
 ────────────────────────────────────────────────────────────────
   Step 1 — get_active_connections
 
-  Verify the prior triage finding of 95 idle connections
-  still blocks the system before proceeding with remediation
-  in Step 1.
+  Step 1: Confirm the nature of the overload by counting
+  connections by state (idle, idle in transaction, etc.) to
+  verify the prior triage finding of 16 idle connections and
+  determine which remediation path to follow.
 ────────────────────────────────────────────────────────────────
   Approve? [y/n]: y
 
@@ -49,10 +48,8 @@ time=2026-09-20T18:30:30.420-04:00 level=INFO msg="starting remediation" failure
   dry_run:   true
   idle_minutes: 5
 
-  Step 1 confirms 95 idle connections (state='idle') with no
-  open transactions or locks; Step 2A requires a dry-run
-  preview before requesting approval to terminate idle
-  connections older than 5 minutes.
+  Step 2A: Preview which idle connections will be terminated
+  with the safe 5-minute threshold before requesting approval.
 ────────────────────────────────────────────────────────────────
   Approve? [y/n]: y
 
@@ -61,53 +58,41 @@ time=2026-09-20T18:30:30.420-04:00 level=INFO msg="starting remediation" failure
 
   idle_minutes: 0
 
-  Dry run showed 0 connections older than 5 minutes; all 95
-  idle connections are newly created (under 5 min old), so
-  call with idle_minutes=0 to terminate all idle connections
-  regardless of age before requesting approval.
+  All 16 idle connections are under 5 minutes old (newly
+  created); terminating with idle_minutes=0 to free all idle
+  slots regardless of age, per Step 2A guidance.
 ────────────────────────────────────────────────────────────────
   Approve? [y/n]: y
 
 ────────────────────────────────────────────────────────────────
   Step 4 — get_active_connections
 
-  Step 3: Verify that the 94 idle connections terminated
-  successfully and confirm total connection count is now
-  below max_connections - 5 (below 95 for a
-  max_connections=100 system).
+  Step 3: Verify that the 16 terminated idle connections have
+  been freed and confirm total count is below max_connections
+  - 5 (below 15 slots).
 ────────────────────────────────────────────────────────────────
   Approve? [y/n]: y
 
-────────────────────────────────────────────────────────────────
-  Step 5 — get_active_connections
-
-  Step 3 verification: confirm total connection count is now
-  below max_connections - 5 (95 or fewer) and no
-  idle-in-transaction sessions remain after terminating 94
-  idle connections.
-────────────────────────────────────────────────────────────────
-  Approve? [y/n]: y
-
-  Remediation complete: Connection overload remediation complete. Step 1 confirmed 94 idle connections (state='idle') consuming all 100 slots. Step 2A: Dry-run with idle_minutes=5 found no connections older than 5 minutes (newly created), so executed terminate_idle_connections with idle_minutes=0, which successfully terminated 94 idle connections. Step 3 verified: get_active_connections now shows no active connections, freeing all 94 slots and restoring headroom well below max_connections=100. Root cause: application connection pool is oversized or not returning idle connections on close; recommend reviewing pool max_size and idle timeout settings.
+  Remediation complete: Connection overload remediation completed successfully. Step 1: Confirmed 16 idle connections (state='idle') from 192.168.65.1 were the root cause. Step 2A: Terminated all 16 idle connections using idle_minutes=0 (all were under 5 minutes old, newly created). Step 3: Verified with get_active_connections that only 1 active replication connection (pid 13786) remains, freeing 16 of 20 slots. Current utilization is 1/20 (5%), well below max_connections headroom. Step 4: Root cause identified as oversized or non-returning connection pool from 192.168.65.1 — recommend configuring idle_session_timeout (e.g., 900 seconds) on the application pool to prevent recurrence.
 
 Remediation: RECOVERED in 0.0s (score: 100%)
-Vault: draft saved → pb_b034cf44 (activate with 'faulttest vault list')
+Vault: draft saved → pb_6c0154da (activate with 'faulttest vault list')
 
   Post-incident feedback (optional, but recommended):
     Was the triage diagnosis correct? [y/n/skip]: y
-    Root cause (Enter to confirm: "Idle connection pool saturation preventing new connections"):
-  Feedback submitted (triage/post_incident run_id=plr_9a83537d)
+    Root cause (Enter to confirm: "Connection saturation due to idle connections occupying all available slots, exacerbated by disabled idle_session_timeout preventing automatic cleanup."):
+  Feedback submitted (triage/post_incident run_id=plr_eab39d87)
     Was the remediation approach appropriate? [y/n/skip]: y
-    Remediation approach notes (optional): remediation looks reasonable
-  Feedback submitted (remediation/post_incident run_id=plr_9a83537d)
-  Feedback submitted (remediation/post_incident run_id=plr_cbab6859)
-time=2026-09-20T18:32:42.673-04:00 level=INFO msg="executing injection spec" type=shell_exec phase=teardown
-time=2026-09-20T18:32:44.741-04:00 level=INFO msg="shell_exec completed" output="Teardown: idle connections terminated"
+    Remediation approach notes (optional): lgtm
+  Feedback submitted (remediation/post_incident run_id=plr_eab39d87)
+  Feedback submitted (remediation/post_incident run_id=plr_5970d2ac)
+time=2026-09-22T08:47:02.584-04:00 level=INFO msg="executing injection spec" type=shell_exec phase=teardown
+time=2026-09-22T08:47:04.658-04:00 level=INFO msg="shell_exec completed" output="Teardown: idle connections terminated"
 Diagnostic Result:   [PASS] score=85% (keywords=100% tools=100% judge=50%)
 Remediation Result:  [PASS] score=100% (0.0s, playbook)
 Overall Result:      [PASS] score=91%
 
-=== Fault Test Report: ef2fe0ac ===
+=== Fault Test Report: 30f297c6 ===
 
 [PASS] Max connections exhausted (db-max-connections) - score: 85%
        Keywords: 100% | Tools: 100% | Category: 50% [no judge — add --judge for semantic scoring]
@@ -117,87 +102,205 @@ Overall Result:      [PASS] score=91%
 Total: 1 | Passed: 1 | Failed: 0 | Rate: 100%
   database: 1/1 (100%)
 
-Report written to ./faulttest-ef2fe0ac.json
+Report written to ./faulttest-30f297c6.json
 ```
+
+The inline `⚠ [Layer 2] FABRICATION RISK` warning is a real, live catch, not a staged example — the triage agent narrated calling `get_config_parameter` twice but neither call actually reached `tool_execution`. The TOOL CALL INTEGRITY walkthrough below names exactly which call it was.
 
 Now check the `incidents` table — this is the v0.29 design's own row for the run above, not a live-reconstructed view over `playbook_runs`:
 
 ```
-[boris@ /tmp/helpdesk-host-test]$ ./faulttest vault incidents --gateway http://localhost:8080
-Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: $HELPDESK_HOST_NAME
+[boris@ /tmp/helpdesk/helpdesk-v0.26.0-darwin-arm64]$ date; time ./faulttest run vault incidents --gateway "$HELPDESK_GATEWAY_URL" --api-key "$FAULTTEST_API_KEY"
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: dev  ·  host: $HELPDESK_HOST_NAME
 
-Recent incidents (last 2)
+Recent incidents (last 4)
 
 INCIDENT      ENTRY RUN       SERIES                    DETECTED          ORIGIN      STATUS       ATTRIBUTION                 BUNDLE    DRAFT
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-inc_d0c3aba7  plr_9a83537d    pbs_connection_triage     2026-09-20 22:30  faulttest   resolved     idle-connection-accumul...  yes       yes
-inc_bc2b1d2d  plr_44ddcf65    pbs_connection_triage     2026-09-19 15:04  faulttest   escalated    idle-connection-accumul...  yes       yes
+inc_370a6d33  plr_eab39d87    pbs_connection_triage     2026-09-22 12:45  faulttest   resolved     idle-connection-accumul...  no        yes
+inc_3c3896da  plr_3b6cc2ed    pbs_connection_triage     2026-09-22 04:51  faulttest   resolved     idle-connection-accumul...  no        no
+inc_560b7150  plr_d808eb80    pbs_connection_triage     2026-09-22 04:25  faulttest   resolved     connection-pool-saturation  no        yes
+inc_8652177e  plr_18587af9    pbs_connection_triage     2026-09-22 04:21  faulttest   escalated    idle-connection-accumul...  no        yes
 
   → vault incidents <plr_*>           full incident narrative
   → vault incidents <fault-id>        all runs for a fault (per-hop detail)
   → vault incidents --details         show JOURNEYS count
+  → vault incidents --origin real     real incidents only (excludes faulttest)
+  → vault incidents --status open     only incidents still open
 ```
 
-`STATUS=resolved` on `inc_d0c3aba7` reflects the remediation hop's own outcome, not just the triage hop's initial handoff — the older `inc_bc2b1d2d` above it shows `escalated`, from a run recorded before a fix let a downstream remediation hop's completion patch the same incident row that only the entry hop could patch before. Drill into the full narrative for the resolved run:
+The top row, `inc_370a6d33`/`plr_eab39d87`, is the run above. The other three rows are earlier `db-max-connections` runs from the same session — real accumulated history, not trimmed for this example. `BUNDLE=no` on all of them: none of these runs ever called `create_incident_bundle` (no `HELPDESK_AUTO_INCIDENT_BUNDLE` and no manual bundle request) — `DRAFT=yes` where a Playbook draft was synthesised regardless, since bundle creation and draft synthesis are independent (see [INCIDENTS.md § Automatic Bundle Creation](INCIDENTS.md#automatic-bundle-creation-opt-in)). Drill into the full narrative for the top row:
 
 ```
-[boris@ /tmp/helpdesk-host-test]$ ./faulttest vault incidents plr_9a83537d --gateway http://localhost:8080
-Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: $HELPDESK_HOST_NAME
+[boris@ /tmp/helpdesk/helpdesk-v0.26.0-darwin-arm64]$ date; time ./faulttest vault incidents plr_eab39d87 --gateway "$HELPDESK_GATEWAY_URL" --api-key "$FAULTTEST_API_KEY"
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: dev  ·  host: $HELPDESK_HOST_NAME
 
 
 ════════════════════════════════════════════════════════════
-INCIDENT plr_9a83537d
-Started: 2026-09-20 22:30 UTC   Duration: 101s
+INCIDENT plr_eab39d87
+Started: 2026-09-22 12:45 UTC   Duration: 79s
+Origin: faulttest   Status: resolved
+Attribution: idle-connection-accumulation
+Draft playbook: pb_6c0154da
 ════════════════════════════════════════════════════════════
 
 ── TRIAGE
 Playbook:  pbs_connection_triage
-Findings:  95 idle connections (94%) consume all 100 available slots with no
-           active work or locks present; immediate remediation is
-           terminate_idle_connections with idle_minutes threshold 5 to free slots
-           for new clients; recommended action: kill_idle
+Findings:  connections 2/20 (10%) actively in use; idle=16; blocker=none;
+           recommended=kill_idle (terminate the 16 idle connections from
+           192.168.65.1 immediately to free slots for new user connections, then
+           configure idle_session_timeout to a reasonable value like 900 seconds
+           as a long-term preventive measure).
+           ⚠ [Layer 2] unverified — no matching tool execution in the audit trail
 
 Hypotheses:
-  [PRIMARY  99%] Idle connection pool saturation preventing new connections
-                 Evidence: "idle: 94" and "total_connections: 100" and "max_connections: 100"
-  [REJECTED  1%] Blocking transaction holding lock and preventing new connections
-                 Rejected: get_blocking_queries returned "No blocking queries found" and only 1 active connection is present
+  [PRIMARY  95%] Connection saturation due to idle connections occupying all available slots, exacerbated by disabled idle_session_timeout preventing automatic cleanup.
+                 Evidence: "idle_session_timeout = 0"
+  [REJECTED 15%] Replication connection lag or stuck WAL sender causing extra connection overhead.
+                 Rejected: The replication sender (PID 13786) is actively streaming, not blocked, and occupies only 1 slot; 15 of the 16 idle application connections are the dominant cause.
 
 ── GATE
 Decision:  approved
 
 ── REMEDIATION
 Playbook:  pbs_connection_remediate   Outcome: resolved
-Plan:      Connection overload remediation complete. Step 1 confirmed 94 idle
-           connections (state='idle') consuming all 100 slots. Step 2A: Dry-run
-           with idle_minutes=5 found no connections older than 5 minutes (newly
-           created), so executed terminate_idle_connections with idle_minutes=0,
-           which successfully terminated 94 idle connections. Step 3 verified:
-           get_active_connections now shows no active connections, freeing all 94
-           slots and restoring headroom well below max_connections=100. Root
-           cause: application connection pool is oversized or not returning idle
-           connections on close; recommend reviewing pool max_size and idle
-           timeout settings.
-Steps:     ✓   ✓   ✓   ✓   ✓
+Plan:      Connection overload remediation completed successfully. Step 1:
+           Confirmed 16 idle connections (state='idle') from 192.168.65.1 were
+           the root cause. Step 2A: Terminated all 16 idle connections using
+           idle_minutes=0 (all were under 5 minutes old, newly created). Step 3:
+           Verified with get_active_connections that only 1 active replication
+           connection (pid 13786) remains, freeing 16 of 20 slots. Current
+           utilization is 1/20 (5%), well below max_connections headroom. Step 4:
+           Root cause identified as oversized or non-returning connection pool
+           from 192.168.65.1 — recommend configuring idle_session_timeout
+           (e.g., 900 seconds) on the application pool to prevent recurrence.
+Steps:     ✓   ✓   ✓   ✓
 
 ── EVALUATION
 Score:         91%   (diagnosis 50% · remediation 100%)
-Diagnosis:     0.50 (heuristic)   Agent confidence: 99%
+Diagnosis:     0.50 (heuristic)   Agent confidence: 95%
 
 ── POST-INCIDENT FEEDBACK
-  triage:                      ✓ correct (Idle connection pool saturation preventing new connections)
-  remediation:                 ✓ correct (remediation looks reasonable)
+  triage:                      ✓ correct (Connection saturation due to idle connections occupying all available slots, exacerbated by disabled idle_session_timeout preventing automatic cleanup.)
+  remediation:                 ✓ correct (lgtm)
 
 ── JOURNEYS
   WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
 
-  triage:                faulttest-ef2fe0ac-db-max-connections
+  triage:                faulttest-30f297c6-db-max-connections
                          reasoning chain, hypothesis building
-  remediation:           faulttest-ef2fe0ac-db-max-connections-remed
+  remediation:           faulttest-30f297c6-db-max-connections-remed
                          tool calls, approvals, blast-radius decisions
 
-  → vault journeys faulttest-ef2fe0ac-db-max-connections
+  → vault journeys faulttest-30f297c6-db-max-connections
 ```
+
+`Origin:`/`Status:`/`Attribution:`/`Draft playbook:` come straight from the incidents-table row shown above — no separate lookup. There's no `Bundle:` line here, matching `BUNDLE=no` in the list above: the field is omitted entirely when empty, not shown as blank (fail-open, not a false claim). The `⚠ [Layer 2] unverified` line under `Findings` is the same fabrication the live run flagged inline — `get_config_parameter`, narrated but never executed. Follow the navigation hint to see exactly which call it was:
+
+```
+[boris@ /tmp/helpdesk/helpdesk-v0.26.0-darwin-arm64]$ date; time ./faulttest vault journey faulttest-30f297c6-db-max-connections --detail --gateway "$HELPDESK_GATEWAY_URL" --api-key "$FAULTTEST_API_KEY"
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: dev  ·  host: $HELPDESK_HOST_NAME
+
+
+JOURNEY  faulttest-30f297c6-db-max-connections
+──────────────────────────────────────────────────────────────────────
+  Started:           2026-09-22 12:45:09 UTC
+  Ended:             2026-09-22 12:45:31 UTC
+  Duration:          22.0s
+  Agent:             postgres_database_agent
+  Category:          incident
+  Origin:            agent
+  Outcome:           unverified_claim
+  Events:            31
+
+QUERY
+──────────────────────────────────────────────────────────────────────
+  Call check_connection with connection_string="faulttest-db-local"
+  and begin diagnosing why it is unavailable. Do not ask which
+  database — the target is "faulttest-db-local". ...
+
+DELEGATIONS
+──────────────────────────────────────────────────────────────────────
+  1. playbook transition from pbs_connection_triage
+
+EXECUTION TRACE
+──────────────────────────────────────────────────────────────────────
+  "I'll begin investigating why faulttest-db-local is unavailable.
+   Let me start by checking connectivity and then gather diagnostic
+   information about connection status."
+  ► check_connection                       [ok]
+
+  ► get_server_info                        [ok]
+
+  "I've established a successful connection, but I can already see
+   the problem: the database shows **max_connections = 20** but
+   **total_connections = 23**. This is the root cause of the "too
+   many clients" errors. Let me gather more details on the active
+   sessions and lock status.
+   I'm checking for blocking queries and session details to
+   understand which connections are held and why they persist."
+  ► get_active_connections                 [ok]
+
+  ► get_connection_stats                   [ok]
+
+  ► get_lock_info                          [ok]
+
+  ► get_blocking_queries                   [ok]
+
+  "The connection status is clear. The database is actually
+   reachable now, but I can see the problem structure. Let me check
+   the configuration to understand idle connection handling and
+   verify the constraint on connections.
+   I'm checking PostgreSQL configuration to see if
+   idle_session_timeout or tcp_keepalives settings might explain
+   why idle connections persist."
+  ► get_pg_settings                        [ok]
+
+  "Let me try a different approach to check idle session timeout
+   and connection-related settings."
+  ► get_pg_settings                        [ok]
+
+TOOL CALL INTEGRITY (declared → invoked → policy-checked → executed) [Layer 2]
+──────────────────────────────────────────────────────────────────────
+  TURN DECLARED                                   INVOKED  POLICY EXECUTED  VERDICT
+  1    check_connection, get_server_info                2       2       2  ✓
+  2    get_active_connections, get_blocking_qu...       4       4       4  ✓
+  3    get_pg_settings, get_config_parameter, ...       1       1       1  ✗ [Layer 2] get_config_parameter, get_config_parameter never confirmed
+  4    get_pg_settings                                  1       1       1  ✓
+
+
+FINDINGS
+──────────────────────────────────────────────────────────────────────
+  connections 2/20 (10%) actively in use; idle=16; blocker=none;
+  recommended=kill_idle (terminate the 16 idle connections from
+  192.168.65.1 immediately to free slots for new user connections,
+  then configure idle_session_timeout to a reasonable value like 900
+  seconds as a long-term preventive measure).
+
+FABRICATION WARNING [Layer 2]
+──────────────────────────────────────────────────────────────────────
+  ! One or more delegations reported success but no matching tool
+    execution was recorded in the audit trail.
+    This may indicate LLM fabrication. Review the agent transcript.
+    Narrated but unconfirmed: get_config_parameter
+
+INCIDENT LINK
+──────────────────────────────────────────────────────────────────────
+  Run ID:            plr_eab39d87
+
+  → vault incidents plr_eab39d87
+
+REMEDIATION JOURNEY
+──────────────────────────────────────────────────────────────────────
+  Trace:             faulttest-30f297c6-db-max-connections-remed
+  Agent:             postgres_database_agent
+  Outcome:           success
+  Tools:             get_active_connections, terminate_idle_connections, terminate_idle_connections, get_active_connections
+
+  → vault journeys faulttest-30f297c6-db-max-connections-remed
+```
+
+This is the real, reproducible case the TOOL CALL INTEGRITY table was built for (see [AIGOVERNANCE.md § Making the layers visible](AIGOVERNANCE.md#making-the-layers-visible-layer-n-labels-and-the-tool-call-integrity-map)): turn 3 declared `get_config_parameter` twice — visible in the EXECUTION TRACE above only as two `► get_pg_settings [ok]` entries with no third line, since a tool that never executes has nothing to interleave into that trace — and the table names it exactly, twice, once per declared occurrence, rather than just showing a count. Before this feature existed, confirming which specific call dropped required a manual `sqlite3` query against auditd's database; here it's the first thing in the table.
 
 ## 2. Docker/Podman sample run
 
@@ -209,7 +312,7 @@ See the platform deployment specifics of running aiHelpDesk Fault Injection Test
      --external \
      --via-gateway \
      --remediate \
-     --gateway http://localhost:8080 \
+     --gateway $HELPDESK_GATEWAY_URL \
      --conn "host=localhost port=15432 dbname=testdb user=postgres password=xxx" \
      --agent-conn faulttest-db \
      --infra-config ./infrastructure.json
@@ -300,7 +403,7 @@ Report written to ./faulttest-ef5d242e.json
 Note the `FABRICATION RISK`/`UNVERIFIED EVIDENCE` warnings above — the agent still reached the correct diagnosis and the remediation still recovered the database, but aiHelpDesk's [multi-layer fabrication detection](AIGOVERNANCE.md#11-llm-fabrication-detection) caught and surfaced a narrated tool call that never executed and an evidence quote that didn't match any real tool output, non-blocking, right in the CLI output. This is what "governed" means in practice: the pass/fail score and the accountability layer are two independent signals, not one.
 
 ```
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents --gateway http://localhost:8080
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents --gateway $HELPDESK_GATEWAY_URL
 Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: fc6cb7520d22
 
 Recent incidents (last 1)
@@ -317,7 +420,7 @@ inc_75d61771  plr_34ec7540    pbs_connection_triage     2026-09-20 23:53  faultt
 The audit trail behind the fabrication warning above is one `vault journeys --detail` call away — this is the `WHAT` layer INCIDENTS.md talks about, the raw tool-execution trace underneath the incident narrative's `WHY`:
 
 ```
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault journeys faulttest-ef5d242e-db-max-connections --detail --gateway http://localhost:8080
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault journeys faulttest-ef5d242e-db-max-connections --detail --gateway $HELPDESK_GATEWAY_URL 
 Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: fc6cb7520d22
 
 
@@ -407,7 +510,7 @@ Forwarding from [::1]:8080 -> 8080
     --external \
     --via-gateway \
     --remediate \
-    --gateway http://localhost:8080 \
+    --gateway $HELPDESK_GATEWAY_URL \
     --conn "host=localhost port=15432 dbname=testdb user=postgres password=xxx" \
     --agent-conn faulttest-db \
     --infra-config ./infrastructure.json
@@ -465,7 +568,7 @@ Report written to ./faulttest-bfe74c19.json
 A clean pass, no fabrication warnings this particular run — the detection layers in the Docker/Podman example above aren't always firing; they catch discrepancies when they're actually there. Now the `incidents` table, running on a cluster that had already accumulated real (non-injected) incidents before this test:
 
 ```
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents --gateway http://localhost:8080
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents --gateway $HELPDESK_GATEWAY_URL
 Handling connection for 8080
 Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.28.0-25-gb2dc49c-b2dc49c  ·  host: helpdesk-gateway-79d9c5d66f-mwkjc
 
@@ -490,7 +593,7 @@ inc_a974c306  plr_fbe4968d    pbs_k8s_pod_crash_triage  2026-09-17 20:58  real  
 Every example above went through `faulttest`, which always tags its own requests with `origin: faulttest` on the wire — that's how the `ORIGIN` column above can tell them apart from the three pre-existing real incidents on the K8s cluster. To show what a genuine `origin: real` incident looks like end to end (not just as a pre-existing row from a cluster's own history), the same `db-max-connections` symptom below was triggered directly against the Docker/Podman deployment's gateway API — the same way an operator, `srebot`, or an alerting webhook would — with no `faulttest` involvement anywhere in the request path:
 
 ```
-$ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a4c9595c/run \
+$ curl -s -X POST $HELPDESK_GATEWAY_URL/api/v1/fleet/playbooks/pb_a4c9595c/run \
     -H "Content-Type: application/json" \
     -H "X-User: alice@example.com" \
     -H "X-Purpose: diagnostic" \
