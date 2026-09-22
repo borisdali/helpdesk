@@ -249,12 +249,18 @@ func diagnoseKubectlError(output string) string {
 }
 
 // checkK8sPolicy checks if a kubernetes operation is allowed by policy.
-// Returns nil if allowed, error if denied.
-func checkK8sPolicy(ctx context.Context, namespace string, action policy.ActionClass, tags []string) error {
+// Returns nil if allowed, error if denied. toolName is threaded into the
+// context so the resulting tool_invoked/policy_decision audit events are
+// attributable to a specific tool — the database and sysadmin agents already
+// do this via agentutil.WithToolName at their own call sites; the k8s agent
+// never did, so its policy-check audit events had no tool_name until now
+// (agentutil.PolicyEnforcer.CheckTool/CheckResult already read this context
+// value for policy *matching*, just never had it here to read).
+func checkK8sPolicy(ctx context.Context, toolName, namespace string, action policy.ActionClass, tags []string) error {
 	if policyEnforcer == nil {
 		return nil
 	}
-	return policyEnforcer.CheckKubernetes(ctx, namespace, action, tags, "", nil)
+	return policyEnforcer.CheckKubernetes(agentutil.WithToolName(ctx, toolName), namespace, action, tags, "", nil)
 }
 
 // parsePodsAffected counts the number of Kubernetes resources modified from
@@ -282,12 +288,15 @@ func parsePodsAffected(output string) int {
 
 // checkK8sPolicyResult runs a post-execution policy check for a Kubernetes
 // operation, enforcing blast-radius conditions with the actual resource count.
-// Call this after write or destructive kubectl commands.
-func checkK8sPolicyResult(ctx context.Context, namespace string, action policy.ActionClass, tags []string, output string, execErr error) error {
+// Call this after write or destructive kubectl commands. toolName — see
+// checkK8sPolicy's doc comment; threaded independently here since this is a
+// separate call with the caller's own base ctx, not the wrapped one
+// checkK8sPolicy created for itself.
+func checkK8sPolicyResult(ctx context.Context, toolName, namespace string, action policy.ActionClass, tags []string, output string, execErr error) error {
 	if policyEnforcer == nil {
 		return nil
 	}
-	return policyEnforcer.CheckKubernetesResult(ctx, namespace, action, tags, agentutil.ToolOutcome{
+	return policyEnforcer.CheckKubernetesResult(agentutil.WithToolName(ctx, toolName), namespace, action, tags, agentutil.ToolOutcome{
 		PodsAffected: parsePodsAffected(output),
 		Err:          execErr,
 	})
@@ -296,12 +305,12 @@ func checkK8sPolicyResult(ctx context.Context, namespace string, action policy.A
 // checkK8sBlastRadiusPreExec runs a pre-execution blast-radius check with a
 // caller-supplied resource count. Use when the target count is available before
 // execution (e.g. args.Replicas for scale_deployment). No-op when policyEnforcer
-// is nil.
-func checkK8sBlastRadiusPreExec(ctx context.Context, namespace string, action policy.ActionClass, tags []string, podsAffected int) error {
+// is nil. toolName — see checkK8sPolicy's doc comment.
+func checkK8sBlastRadiusPreExec(ctx context.Context, toolName, namespace string, action policy.ActionClass, tags []string, podsAffected int) error {
 	if policyEnforcer == nil {
 		return nil
 	}
-	return policyEnforcer.CheckKubernetesResult(ctx, namespace, action, tags, agentutil.ToolOutcome{
+	return policyEnforcer.CheckKubernetesResult(agentutil.WithToolName(ctx, toolName), namespace, action, tags, agentutil.ToolOutcome{
 		PodsAffected: podsAffected,
 	})
 }
@@ -443,7 +452,7 @@ func getPodsImpl(ctx context.Context, args GetPodsArgs) (GetPodsResult, error) {
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_pods", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		slog.Warn("policy denied kubernetes access",
 			"tool", "get_pods",
 			"namespace", namespace,
@@ -537,7 +546,7 @@ func getServiceImpl(ctx context.Context, args GetServiceArgs) (GetServiceResult,
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_service", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetServiceResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -577,7 +586,7 @@ func describeServiceImpl(ctx context.Context, args DescribeServiceArgs) (Kubectl
 		return KubectlResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "describe_service", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -688,7 +697,7 @@ func getEndpointsImpl(ctx context.Context, args GetEndpointsArgs) (GetEndpointsR
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_endpoints", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetEndpointsResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -729,7 +738,7 @@ func getEventsImpl(ctx context.Context, args GetEventsArgs) (GetEventsResult, er
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_events", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetEventsResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -822,7 +831,7 @@ func getPodLogsImpl(ctx context.Context, args GetPodLogsArgs) (KubectlResult, er
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_pod_logs", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -899,7 +908,7 @@ func readPodFileImpl(ctx context.Context, args ReadPodFileArgs) (KubectlResult, 
 		return KubectlResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "read_pod_file", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -987,7 +996,7 @@ func describePodImpl(ctx context.Context, args DescribePodArgs) (KubectlResult, 
 	}
 
 	// Check policy before executing
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "describe_pod", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1053,7 +1062,7 @@ func getNodesImpl(ctx context.Context, args GetNodesArgs) (GetNodesResult, error
 	}
 
 	// Nodes are cluster-scoped; use "cluster" as the sentinel resource_name.
-	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
+	if err := checkK8sPolicy(ctx, "get_nodes", "cluster", policy.ActionRead, nil); err != nil {
 		return GetNodesResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1092,7 +1101,7 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 		return KubectlResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "delete_pod", namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1106,7 +1115,7 @@ func deletePodImpl(ctx context.Context, args DeletePodArgs) (KubectlResult, erro
 		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
 
-	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+	if postErr := checkK8sPolicyResult(ctx, "delete_pod", namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
 	}
 
@@ -1169,7 +1178,7 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 		return KubectlResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "restart_deployment", namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1179,7 +1188,7 @@ func restartDeploymentImpl(ctx context.Context, args RestartDeploymentArgs) (Kub
 		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
 
-	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+	if postErr := checkK8sPolicyResult(ctx, "restart_deployment", namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
 	}
 
@@ -1242,12 +1251,12 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 		return KubectlResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "scale_deployment", namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
 	// Pre-execution blast-radius: args.Replicas is the target state, known now.
-	if err := checkK8sBlastRadiusPreExec(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, args.Replicas); err != nil {
+	if err := checkK8sBlastRadiusPreExec(ctx, "scale_deployment", namespace, policy.ActionDestructive, nsInfo.Tags, args.Replicas); err != nil {
 		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
 	}
 
@@ -1277,7 +1286,7 @@ func scaleDeploymentImpl(ctx context.Context, args ScaleDeploymentArgs) (Kubectl
 		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
 
-	if postErr := checkK8sPolicyResult(ctx, namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+	if postErr := checkK8sPolicyResult(ctx, "scale_deployment", namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
 	}
 
@@ -1350,7 +1359,7 @@ func getPodResourcesImpl(ctx context.Context, args GetPodResourcesArgs) (GetPodR
 		return GetPodResourcesResult{}, err
 	}
 
-	if err := checkK8sPolicy(ctx, namespace, policy.ActionRead, nsInfo.Tags); err != nil {
+	if err := checkK8sPolicy(ctx, "get_pod_resources", namespace, policy.ActionRead, nsInfo.Tags); err != nil {
 		return GetPodResourcesResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1371,6 +1380,115 @@ func getPodResourcesTool(ctx agent.ToolContext, args GetPodResourcesArgs) (GetPo
 	return getPodResourcesImpl(ctx, args)
 }
 
+// PatchDeploymentResourcesArgs defines arguments for the patch_deployment_resources tool.
+type PatchDeploymentResourcesArgs struct {
+	Context        string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
+	Namespace      string `json:"namespace" jsonschema:"required,The Kubernetes namespace of the deployment."`
+	DeploymentName string `json:"deployment" jsonschema:"required,The name of the deployment to patch. Use get_pods or kubectl get deployments to find the name."`
+	MemoryLimit    string `json:"memory_limit" jsonschema:"required,New memory limit (e.g. '1Gi' or '512Mi'). Use get_pod_resources first to determine the current limit and calculate the new one."`
+	MemoryRequest  string `json:"memory_request" jsonschema:"required,New memory request (e.g. '768Mi'). Should not exceed memory_limit."`
+	Container      string `json:"container,omitempty" jsonschema:"Specific container name to patch. If empty, applies to all containers in the pod template (kubectl's default)."`
+}
+
+func patchDeploymentResourcesImpl(ctx context.Context, args PatchDeploymentResourcesArgs) (KubectlResult, error) {
+	nsInfo, err := resolveNamespaceInfo(args.Namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, fmt.Errorf("access denied: %w", err)
+	}
+	namespace := nsInfo.Namespace
+	kubeContext, err := resolveKubeContext(namespace, args.Context)
+	if err != nil {
+		return KubectlResult{}, err
+	}
+
+	if err := checkK8sPolicy(ctx, "patch_deployment_resources", namespace, policy.ActionDestructive, nsInfo.Tags); err != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
+	}
+
+	// Best-effort pre-mutation state capture for rollback support. A failure to
+	// read the current limits does NOT abort the patch operation — mirrors
+	// scaleDeploymentImpl's identical trade-off.
+	containerIndex := 0
+	containerPath := fmt.Sprintf("containers[%d]", containerIndex)
+	if args.Container != "" {
+		containerPath = fmt.Sprintf(`containers[?(@.name=="%s")]`, args.Container)
+	}
+	var preStateJSON json.RawMessage
+	prevLimit, limitErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.limits.memory}", containerPath))
+	prevRequest, requestErr := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName,
+		"-n", namespace, "-o", fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.requests.memory}", containerPath))
+	if limitErr == nil && requestErr == nil {
+		if b, marshalErr := json.Marshal(audit.ResourcePatchPreState{
+			Namespace:             namespace,
+			DeploymentName:        args.DeploymentName,
+			Container:             args.Container,
+			PreviousMemoryLimit:   strings.TrimSpace(prevLimit),
+			PreviousMemoryRequest: strings.TrimSpace(prevRequest),
+		}); marshalErr == nil {
+			preStateJSON = b
+		}
+	}
+
+	cmdArgs := []string{
+		"set", "resources", "deployment", args.DeploymentName,
+		"-n", namespace,
+		"--limits", "memory=" + args.MemoryLimit,
+		"--requests", "memory=" + args.MemoryRequest,
+	}
+	if args.Container != "" {
+		cmdArgs = append(cmdArgs, "--containers", args.Container)
+	}
+	output, err := runKubectlAndRecord(ctx, kubeContext, "patch_deployment_resources", preStateJSON, cmdArgs...)
+	if err != nil {
+		return KubectlResult{Output: fmt.Sprintf("ERROR: %v", err)}, nil
+	}
+
+	if postErr := checkK8sPolicyResult(ctx, "patch_deployment_resources", namespace, policy.ActionDestructive, nsInfo.Tags, output, err); postErr != nil {
+		return KubectlResult{}, fmt.Errorf("policy denied after execution: %w", postErr)
+	}
+
+	// Level 2: confirm the new limit was actually applied to the pod template
+	// (kubectl set resources reports success even before the API server commits
+	// the change) — same re-poll pattern as scaleDeploymentImpl.
+	limitPath := fmt.Sprintf("jsonpath={.spec.template.spec.%s.resources.limits.memory}", containerPath)
+	resolved, attempts, _ := retryutil.WaitUntilResolved(ctx, verifyRetryConfig,
+		func() (bool, error) {
+			out, err := runKubectl(ctx, kubeContext, "get", "deployment", args.DeploymentName, "-n", namespace, "-o", limitPath)
+			return err == nil && strings.TrimSpace(out) == args.MemoryLimit, nil
+		},
+		func(attempt int, r bool) {
+			if toolAuditor != nil {
+				toolAuditor.RecordToolRetry(ctx, "patch_deployment_resources", attempt, r)
+			}
+		},
+	)
+	retryCount := attempts - 1
+	if retryCount < 0 {
+		retryCount = 0
+	}
+	if !resolved && toolAuditor != nil {
+		toolAuditor.RecordToolVerification(ctx, "patch_deployment_resources", "warning")
+	}
+	if !resolved {
+		return KubectlResult{
+			Output: fmt.Sprintf(
+				"VERIFICATION WARNING: memory limit %q not visible on deployment %q after %d check(s).\n"+
+					"The command reported success but the patch could not be confirmed. Check:\n"+
+					"  kubectl get deployment %s -n %s -o jsonpath='{.spec.template.spec.containers[*].resources}'\n\n"+
+					"--- Patch result ---\n%s",
+				args.MemoryLimit, args.DeploymentName, attempts, args.DeploymentName, namespace, output),
+			VerifyStatus: "warning",
+			RetryCount:   retryCount,
+		}, nil
+	}
+	return KubectlResult{Output: output, VerifyStatus: "ok", RetryCount: retryCount}, nil
+}
+
+func patchDeploymentResourcesTool(ctx agent.ToolContext, args PatchDeploymentResourcesArgs) (KubectlResult, error) {
+	return patchDeploymentResourcesImpl(ctx, args)
+}
+
 // GetNodeStatusArgs defines arguments for the get_node_status tool.
 type GetNodeStatusArgs struct {
 	Context  string `json:"context,omitempty" jsonschema:"Kubernetes context to use. If empty, uses current context."`
@@ -1385,7 +1503,7 @@ func getNodeStatusImpl(ctx context.Context, args GetNodeStatusArgs) (GetNodeStat
 
 	// Nodes are cluster-scoped (no namespace); use the sentinel "cluster" so the
 	// policy check request carries a non-empty resource_name.
-	if err := checkK8sPolicy(ctx, "cluster", policy.ActionRead, nil); err != nil {
+	if err := checkK8sPolicy(ctx, "get_node_status", "cluster", policy.ActionRead, nil); err != nil {
 		return GetNodeStatusResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1592,7 +1710,7 @@ func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlRe
 	}
 	lines := resolveDmesgLines(args.Lines)
 
-	if err := checkK8sPolicy(ctx, args.NodeName, policy.ActionWrite, nil); err != nil {
+	if err := checkK8sPolicy(ctx, "debug_node_dmesg", args.NodeName, policy.ActionWrite, nil); err != nil {
 		return KubectlResult{}, fmt.Errorf("policy denied: %w", err)
 	}
 
@@ -1608,7 +1726,7 @@ func debugNodeDmesgImpl(ctx context.Context, args DebugNodeDmesgArgs) (KubectlRe
 	// deny this call via max_pods_affected. This check is kept for
 	// consistency with other mutating k8s tools and in case the engine's
 	// zero-semantics are fixed later; it is not currently enforceable.
-	if err := checkK8sBlastRadiusPreExec(ctx, args.NodeName, policy.ActionWrite, nil, 1); err != nil {
+	if err := checkK8sBlastRadiusPreExec(ctx, "debug_node_dmesg", args.NodeName, policy.ActionWrite, nil, 1); err != nil {
 		return KubectlResult{}, fmt.Errorf("blast radius check denied: %w", err)
 	}
 
@@ -1826,6 +1944,18 @@ func NewK8sDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		return k8sJSONOutput(result)
+	})
+
+	r.Register("patch_deployment_resources", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := k8sArgsToStruct[PatchDeploymentResourcesArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := patchDeploymentResourcesImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return result.Output, nil
 	})
 
 	return r

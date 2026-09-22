@@ -44,6 +44,20 @@ type IncidentNarrative struct {
 	// Triage = the WHY (reasoning chain, hypothesis building).
 	// Remediation = the WHAT (tool calls, approvals, blast-radius decisions).
 	Journeys []audit.IncidentJourneyRef `json:"journeys,omitempty"`
+	// IncidentRecord is the v0.29 incidents-table row (Origin, Status,
+	// Attribution, BundlePath, DraftPlaybookID, etc.) for this run, when one
+	// exists — best-effort, looked up by entry_run_id via
+	// audit.FetchIncidentByEntryRunID. nil for any run that predates the
+	// incident-entity redesign, or that was never tracked as an incident at
+	// all (e.g. an ad-hoc diagnostic query with no gate/remediation chain).
+	// Closes a real gap found during v0.29 doc review: GET /api/v1/incidents
+	// (list) was rewired to read this table and carries these fields, but
+	// this single-item endpoint (GET /api/v1/incidents/{runID}) never did —
+	// a caller listing incidents got the rich object, drilling into one got
+	// none of it. Its own IncidentID (an inc_* identifier) is intentionally
+	// not the same value as this struct's IncidentID field above (the
+	// triage run_id) — the two identify different rows in different tables.
+	IncidentRecord *audit.Incident `json:"incident_record,omitempty"`
 }
 
 // TriageChapter holds the investigative phase of the incident.
@@ -416,6 +430,18 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 
 	// 5. Evaluation — automated faulttest eval scores.
 	narrative.Evaluation = g.fetchRunEvaluation(r.Context(), runID)
+
+	// 6. IncidentRecord — the v0.29 incidents-table row, if one exists for
+	// this run. Reuses the same fetchIncidentByEntryRunID already used by
+	// classifyIncidentAttribution/closeIncidentRecord/triggerIncidentBundle
+	// (playbooks.go) rather than a new client — best-effort/fail-open, same
+	// as every other join above: a pre-v0.29 or never-tracked run, or a
+	// lookup error, simply leaves this nil rather than failing the request.
+	if inc, err := g.fetchIncidentByEntryRunID(r.Context(), runID); err != nil {
+		slog.Warn("handleGetIncident: could not look up incident record", "run_id", runID, "err", err)
+	} else {
+		narrative.IncidentRecord = inc
+	}
 
 	writeJSON(w, http.StatusOK, narrative)
 }

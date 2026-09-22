@@ -342,6 +342,38 @@ line — see [VAULT.md § vault incidents](VAULT.md#vault-incidents).
 | **Enforcement** | Bounded retry + escalation at execution time — not an audit-verification gate | Warn-only — narrated to the user as unverifiable, journey outcome elevated, never blocks the run | Warn-only by design — a broad, general-purpose text check, deliberately not a hard gate | **Hard gate** — forces a human-reviewed `pending_gate`, but only on a genuine, checkable contradiction; evidence the model correctly cited is corroboration, not a red flag |
 | **STABLE/CLEAN cert signal(s)** | None — a runtime safety mechanism, not an audit-trail verification signal faulttest tracks | `Mismatch` (+ sibling `TargetDrift`, same delegation-verification event) | `UnverifiedEvidence`/`UnverifiedEvidenceSecondary` — both tracked and surfaced (`WarningDistribution`, CLI, `vault`), **neither is CLEAN-blocking as of 2026-09-08** (primary was, from v0.28.0 ship until that date — see [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis) for why it moved to warn-only) | `EvidenceWarnings`/`ObjectiveEvidenceGate` (the production force-gate itself) **and**, for faulttest catalog runs specifically, `EvidenceCoverageGap`/`EvidenceRequiredButUnconfirmed` (v0.28.0 split of "signal never fired" vs. "fired but unconfirmed") |
 
+### Making the layers visible: `[Layer N]` labels and the tool-call integrity map
+
+Everything above establishes what each layer checks and how it's *wired*; two v0.29
+additions make that architecture directly visible in output an operator or customer
+actually reads, rather than something they need to already know to interpret a bare
+`⚠` symbol:
+
+**`[Layer N]` labels.** Every warning line this section describes — `vault incidents`'
+inline `⚠ unverified`/`⚠ target drift`/`⚠ unverified evidence`/`⚠ unconfirmed evidence`/
+`✓ confirmed evidence` lines, `vault journey --detail`'s `FABRICATION WARNING`/`TARGET DRIFT
+WARNING`/`PROTOCOL VIOLATION WARNING` sections and its new `Verification:` line
+(Layer 1's only dedicated rendering anywhere — previously visible only indirectly via
+the generic journey `Outcome:` string), **helpdesk-client**'s `[audit: ...]`
+confirmation line, and **auditor**'s `fabrication_mismatch`/`narrated_tool_not_confirmed`
+security-alert messages — now carries an explicit `[Layer N]` tag matching this
+section's numbering, sourced from a single canonical set of constants
+(`internal/audit.Layer*`, `internal/audit/layers.go`) so every surface prints the
+identical string. See [VAULT.md § vault incidents](VAULT.md#vault-incidents) and
+[VAULT.md § vault journey](VAULT.md#vault-journey) for the labeled examples.
+
+**Tool-call integrity map.** `vault journey --detail` prints a turn-by-turn table
+comparing tool calls the model *declared* in its reasoning against what the audit
+trail shows actually reached `tool_invoked` → `policy_decision` → `tool_execution` —
+a direct, named instantiation of Layer 2 (a dropped call is named, not just counted,
+using `PolicyDecision.ToolName` — new in v0.29 on `tool_invoked`/`policy_decision`
+events, mirroring `tool_execution`'s existing `tool_name` column). Built after a real,
+reproducible finding (`get_config_parameter` narrated but unconfirmed on 2 of 3
+deployment platforms) required a manual `sqlite3` query to diagnose — turning that
+one-off DB pull into a first-class CLI feature. See
+[VAULT.md § TOOL CALL INTEGRITY](VAULT.md#tool-call-integrity-declared-vs-confirmed-tool-calls)
+for the full column reference and worked example.
+
 ### Coverage
 
 | Session path | Layer 1 | Layer 2 | Layer 3 | Layer 4 |

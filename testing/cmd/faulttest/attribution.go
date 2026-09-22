@@ -2,69 +2,32 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"os"
 	"sort"
-	"strings"
 
 	"helpdesk/agentutil"
 )
 
-const attributionUnknown = "UNKNOWN"
+// attributionUnknown is a package-local alias for agentutil.AttributionUnknown
+// so the many existing references throughout this package don't need renaming.
+const attributionUnknown = agentutil.AttributionUnknown
 
 // attributionSummary aggregates per-run attribution classifications at cert time.
 type attributionSummary struct {
-	PrimaryAttribution     string         // plurality class (UNKNOWN when no majority or all UNKNOWN)
-	AttributionConsistent  bool           // all N runs mapped to the same non-UNKNOWN class
+	PrimaryAttribution      string         // plurality class (UNKNOWN when no majority or all UNKNOWN)
+	AttributionConsistent   bool           // all N runs mapped to the same non-UNKNOWN class
 	AttributionDistribution map[string]int // label → count, including UNKNOWN
-	JudgeSpread            float64        // std dev of DiagnosisScore across all runs (0 when no judge)
-	TaxonomyVersion        string         // semver string from root_cause_classes.version
+	JudgeSpread             float64        // std dev of DiagnosisScore across all runs (0 when no judge)
+	TaxonomyVersion         string         // semver string from root_cause_classes.version
 }
 
-// classifyAttribution calls a cheap LLM completer to map response text to one
-// of the provided root-cause classes. Returns UNKNOWN when the LLM output does
-// not match any class in the closed list.
+// classifyAttribution is a thin package-local alias for agentutil.ClassifyAttribution
+// — extracted to a shared package (2026-09) so the gateway can run the identical
+// classification against real, organically-resolved incidents. See
+// agentutil.ClassifyAttribution's doc comment for the package-boundary reason.
 func classifyAttribution(ctx context.Context, completer agentutil.TextCompleter, responseText string, classes []string) string {
-	if len(classes) == 0 || responseText == "" {
-		return attributionUnknown
-	}
-
-	classList := strings.Join(classes, "\n  - ")
-	prompt := fmt.Sprintf(`You are classifying a triage agent's diagnostic response into exactly one root-cause category.
-
-Allowed categories (return one of these exact strings, nothing else):
-  - %s
-  - %s
-
-Agent response to classify:
----
-%s
----
-
-Instructions:
-- Read the FINDINGS and ROOT_CAUSE lines carefully.
-- Return exactly one string from the allowed list above that best matches the root cause described.
-- If the response does not clearly match any category, return exactly: %s
-- Return ONLY the category string. No explanation, no punctuation, no other text.`,
-		classList, attributionUnknown, responseText, attributionUnknown)
-
-	out, err := completer(ctx, prompt)
-	if err != nil {
-		return attributionUnknown
-	}
-	label := strings.TrimSpace(out)
-
-	// Validate against allowed list.
-	for _, c := range classes {
-		if strings.EqualFold(label, c) {
-			return c // return canonical casing from the list
-		}
-	}
-	if strings.EqualFold(label, attributionUnknown) {
-		return attributionUnknown
-	}
-	return attributionUnknown // non-matching output → treat as unknown
+	return agentutil.ClassifyAttribution(ctx, completer, responseText, classes)
 }
 
 // computeAttributionSummary classifies each eval result's response text and

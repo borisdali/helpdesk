@@ -795,6 +795,435 @@ func TestScaleDeploymentTool_PolicyDenied(t *testing.T) {
 	}
 }
 
+func TestPatchDeploymentResourcesTool_Success(t *testing.T) {
+	mockOutput := `deployment.apps/postgres resource requirements updated` + "\n"
+	// Call 1: pre-state read (current limit). Call 2: pre-state read (current
+	// request). Call 3: kubectl set resources. Call 4: verification read →
+	// matches requested limit.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: mockOutput, err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("patchDeploymentResourcesTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "updated") {
+		t.Errorf("patchDeploymentResourcesTool() output = %q, want the kubectl output", result.Output)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_WithContainer(t *testing.T) {
+	// Same sequence, but a specific container is named — proves the tool
+	// accepts the arg and still completes; the --containers flag itself is
+	// exercised via the real kubectl arg-building code path, not asserted on
+	// here since withMockKubectlSequence doesn't capture invocation args.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		Container:      "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "ok" {
+		t.Errorf("VerifyStatus = %q, want ok", result.VerifyStatus)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_CapturesPreState(t *testing.T) {
+	// Verifies that patchDeploymentResourcesImpl reads the current memory
+	// limit/request before patching and stores them as PreState in the audit
+	// event. Uses a real ToolAuditor backed by an in-process audit store,
+	// same pattern as TestScaleDeploymentTool_CapturesPreState.
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_resource_prestate_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	defer withZeroVerifyConfig()()
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_resource_prestate", "trace_resource_prestate")
+	defer func() { toolAuditor = origAuditor }()
+
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil}, // pre-state read → previous limit
+		kubectlResponse{out: "192Mi", err: nil}, // pre-state read → previous request
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	_, err = patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "patch_deployment_resources",
+		EventType: audit.EventTypeToolExecution,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) == 0 {
+		t.Fatal("no patch_deployment_resources audit event found")
+	}
+	ev := events[0]
+	if ev.Tool == nil || len(ev.Tool.PreState) == 0 {
+		t.Fatal("PreState is empty in audit event")
+	}
+	var pre audit.ResourcePatchPreState
+	if jsonErr := json.Unmarshal(ev.Tool.PreState, &pre); jsonErr != nil {
+		t.Fatalf("unmarshal PreState: %v", jsonErr)
+	}
+	if pre.PreviousMemoryLimit != "256Mi" {
+		t.Errorf("PreviousMemoryLimit = %q, want 256Mi", pre.PreviousMemoryLimit)
+	}
+	if pre.PreviousMemoryRequest != "192Mi" {
+		t.Errorf("PreviousMemoryRequest = %q, want 192Mi", pre.PreviousMemoryRequest)
+	}
+	if pre.DeploymentName != "postgres" {
+		t.Errorf("DeploymentName = %q, want postgres", pre.DeploymentName)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_PreStateReadFailure_ToolStillRuns(t *testing.T) {
+	// If either pre-state kubectl read fails, the patch must still proceed.
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "", err: fmt.Errorf("connection refused")}, // limit read fails
+		kubectlResponse{out: "192Mi", err: nil},                        // request read succeeds
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "512Mi", err: nil},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "updated") {
+		t.Errorf("output = %q, want the kubectl output", result.Output)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_Failure(t *testing.T) {
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: "", err: fmt.Errorf(`Error from server (NotFound): deployments "ghost" not found`)},
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "ghost",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("patchDeploymentResourcesTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ERROR") {
+		t.Errorf("patchDeploymentResourcesTool() output = %q, want ERROR on failure", result.Output)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_VerificationWarning_LimitMismatch(t *testing.T) {
+	// Simulates kubectl reporting success but the new limit not yet visible —
+	// Level-2 verification fires a warning (mirrors
+	// TestScaleDeploymentTool_VerificationFailed_WrongReplicas).
+	defer withZeroVerifyConfig()()
+	defer withMockKubectlSequence(
+		kubectlResponse{out: "256Mi", err: nil},
+		kubectlResponse{out: "192Mi", err: nil},
+		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
+		kubectlResponse{out: "256Mi", err: nil}, // verify still shows the OLD limit
+	)()
+
+	ctx := newK8sTestContext()
+	result, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "db",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if result.VerifyStatus != "warning" {
+		t.Errorf("VerifyStatus = %q, want warning", result.VerifyStatus)
+	}
+	if !strings.Contains(result.Output, "VERIFICATION WARNING") {
+		t.Errorf("output = %q, want VERIFICATION WARNING", result.Output)
+	}
+}
+
+// TestGetPodsTool_ToolNameThreadedIntoAuditEvents proves checkK8sPolicy's new
+// toolName parameter actually reaches the recorded tool_invoked event, the
+// same property agents/database and agents/sysadmin already had (they call
+// agentutil.WithToolName directly) but agents/k8s never did until now — every
+// one of its 16 checkK8sPolicy call sites was silently missing tool_name on
+// its audit events. Mirrors TestScaleDeploymentTool_CapturesPreState's real
+// in-process audit store pattern; representative of the other 15 call sites
+// rather than duplicating this test for each.
+func TestGetPodsTool_ToolNameThreadedIntoAuditEvents(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "production"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cs := fake.NewClientset(pod)
+	defer injectFakeClientset("", cs)()
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname", "trace_toolname")
+	defer func() { toolAuditor = origAuditor }()
+
+	// No Engine/PolicyCheckURL — enforcement disabled, but RecordToolInvoked
+	// still fires unconditionally (see agentutil.PolicyEnforcer.CheckTool's
+	// own doc comment), which is all this test needs to observe.
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{ToolAuditor: toolAuditor}))()
+
+	ctx := newK8sTestContext()
+	if _, err := getPodsTool(ctx, GetPodsArgs{Namespace: "production"}); err != nil {
+		t.Fatalf("getPodsTool() error = %v", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "get_pods",
+		EventType: audit.EventTypeToolInvoked,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	if len(events) != 1 {
+		t.Fatalf("tool_invoked events findable by ToolName=get_pods = %d, want 1", len(events))
+	}
+	if events[0].PolicyDecision == nil || events[0].PolicyDecision.ToolName != "get_pods" {
+		t.Errorf("PolicyDecision.ToolName = %+v, want get_pods", events[0].PolicyDecision)
+	}
+}
+
+// TestDeletePodTool_ToolNameThreadedIntoPolicyDecision proves
+// checkK8sPolicyResult's toolName parameter reaches the recorded
+// policy_decision event — distinct from TestGetPodsTool_..., which only
+// covers checkK8sPolicy. CheckResult (unlike CheckTool) only records a
+// PolicyDecision on denial, so this reuses TestDeletePodTool_BlastRadiusDenied's
+// deny scenario (3 pods deleted against a limit of 1) with a real audit store
+// swapped in to observe the event.
+func TestDeletePodTool_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_result_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname_res", "trace_toolname_res")
+	defer func() { toolAuditor = origAuditor }()
+
+	path := writeTempK8sPolicyFile(t, fmt.Sprintf(`
+version: "1"
+policies:
+  - name: k8s-blast-radius
+    resources:
+      - type: kubernetes
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_pods_affected: %d
+`, 1))
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine, ToolAuditor: toolAuditor}))()
+
+	mockOutput := "pod \"pod-a\" deleted\npod \"pod-b\" deleted\npod \"pod-c\" deleted\n"
+	defer withMockKubectl(mockOutput, nil)()
+
+	ctx := newK8sTestContext()
+	_, err = deletePodTool(ctx, DeletePodArgs{Namespace: "default", PodName: "pod-a"})
+	if err == nil {
+		t.Fatal("expected error when blast-radius limit (1) exceeded by 3 pods")
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "delete_pod",
+		EventType: audit.EventTypePolicyDecision,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	// checkK8sPolicy's own pre-check (already covered by
+	// TestGetPodsTool_ToolNameThreadedIntoAuditEvents) also fires a
+	// policy_decision event here with the correct ToolName — find the
+	// specific PostExecution=true one, which is the checkK8sPolicyResult
+	// event this test targets.
+	var postExec *audit.Event
+	for i := range events {
+		if events[i].PolicyDecision != nil && events[i].PolicyDecision.PostExecution {
+			postExec = &events[i]
+		}
+	}
+	if postExec == nil {
+		t.Fatalf("no post-execution policy_decision event found among %d events findable by ToolName=delete_pod", len(events))
+	}
+	if postExec.PolicyDecision.ToolName != "delete_pod" {
+		t.Errorf("post-execution PolicyDecision.ToolName = %q, want delete_pod", postExec.PolicyDecision.ToolName)
+	}
+}
+
+// TestScaleDeploymentTool_ToolNameThreadedIntoPolicyDecision_PreExec proves
+// checkK8sBlastRadiusPreExec's toolName parameter reaches the recorded
+// policy_decision event — the pre-execution counterpart to
+// TestDeletePodTool_ToolNameThreadedIntoPolicyDecision above. Reuses
+// TestScaleDeploymentTool_BlastRadiusDenied_PreExec's deny scenario (scale to
+// 20 against a limit of 5).
+func TestScaleDeploymentTool_ToolNameThreadedIntoPolicyDecision_PreExec(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "k8s_toolname_preexec_test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "k8s_agent", "sess_toolname_pre", "trace_toolname_pre")
+	defer func() { toolAuditor = origAuditor }()
+
+	path := writeTempK8sPolicyFile(t, fmt.Sprintf(`
+version: "1"
+policies:
+  - name: k8s-blast-radius
+    resources:
+      - type: kubernetes
+    rules:
+      - action: destructive
+        effect: allow
+        conditions:
+          max_pods_affected: %d
+`, 5))
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "deny",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	defer withK8sPolicyEnforcer(agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine, ToolAuditor: toolAuditor}))()
+	// kubectl must never be called — the pre-execution blast-radius check fires first.
+	defer withMockKubectl("", fmt.Errorf("kubectl should not have been invoked"))()
+
+	ctx := newK8sTestContext()
+	_, err = scaleDeploymentTool(ctx, ScaleDeploymentArgs{
+		Namespace:      "default",
+		DeploymentName: "web",
+		Replicas:       20,
+	})
+	if err == nil {
+		t.Fatal("expected error when pre-exec blast-radius limit (5) exceeded by scaling to 20")
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{
+		ToolName:  "scale_deployment",
+		EventType: audit.EventTypePolicyDecision,
+	})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	// checkK8sPolicy's own pre-check (already covered by
+	// TestGetPodsTool_ToolNameThreadedIntoAuditEvents) also fires a
+	// policy_decision event here (allowed, since it runs before the
+	// replica count is known) with the correct ToolName — find the
+	// specific PostExecution=true one, which is the checkK8sBlastRadiusPreExec
+	// event this test targets.
+	var postExec *audit.Event
+	for i := range events {
+		if events[i].PolicyDecision != nil && events[i].PolicyDecision.PostExecution {
+			postExec = &events[i]
+		}
+	}
+	if postExec == nil {
+		t.Fatalf("no post-execution policy_decision event found among %d events findable by ToolName=scale_deployment", len(events))
+	}
+	if postExec.PolicyDecision.ToolName != "scale_deployment" {
+		t.Errorf("post-execution PolicyDecision.ToolName = %q, want scale_deployment", postExec.PolicyDecision.ToolName)
+	}
+}
+
+func TestPatchDeploymentResourcesTool_PolicyDenied(t *testing.T) {
+	defer withK8sPolicyEnforcer(newDenyK8sDestructiveEnforcer(t))()
+	defer withMockKubectl("", nil)() // should not be reached
+
+	ctx := newK8sTestContext()
+	_, err := patchDeploymentResourcesTool(ctx, PatchDeploymentResourcesArgs{
+		Namespace:      "production",
+		DeploymentName: "postgres",
+		MemoryLimit:    "512Mi",
+		MemoryRequest:  "384Mi",
+	})
+	if err == nil {
+		t.Fatal("patchDeploymentResourcesTool() expected Go error on policy denial, got nil")
+	}
+	if !strings.Contains(err.Error(), "policy denied") {
+		t.Errorf("patchDeploymentResourcesTool() error = %v, want 'policy denied'", err)
+	}
+}
+
 // =============================================================================
 // Retry scenario tests — Level-2 resolves after 1 or more re-checks
 // =============================================================================

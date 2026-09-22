@@ -370,6 +370,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		toolName = event.Tool.Name
 		toolAgent = event.Tool.Agent
 		toolJSON, _ = json.Marshal(event.Tool)
+	} else if event.PolicyDecision != nil && event.PolicyDecision.ToolName != "" {
+		// tool_invoked/policy_decision events carry no Tool, only PolicyDecision —
+		// mirror the branch above so these two event types become queryable by
+		// tool_name too (idx_events_tool already indexes this column; it was
+		// simply never populated for these two types until now).
+		toolName = event.PolicyDecision.ToolName
 	}
 
 	// For tool executions, use Tool.Agent as fallback for decision_agent

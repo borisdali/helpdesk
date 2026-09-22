@@ -525,6 +525,135 @@ func TestCheckTool_ReadonlyGoverned_AuditsDenial(t *testing.T) {
 	}
 }
 
+// TestCheckTool_ToolNameThreadedIntoToolInvokedAndPolicyDecision verifies that
+// a tool name set via WithToolName on the incoming context reaches the
+// ToolName field of both the tool_invoked event (RecordToolInvoked) and the
+// policy_decision event (RecordPolicyDecision) — previously
+// toolNameFromContext was only read for policy *matching*
+// (policy.Request.Resource.ToolName / policyCheckReq.ToolName), never
+// forwarded into the audit trail, so tool_invoked/policy_decision events were
+// unattributable to a specific tool even though the audit_events.tool_name
+// column already existed and was already used by tool_execution events.
+func TestCheckTool_ToolNameThreadedIntoToolInvokedAndPolicyDecision(t *testing.T) {
+	t.Setenv("HELPDESK_OPERATING_MODE", "readonly-governed")
+
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-tn", "trace-tn")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "terminate_idle_connections")
+	err = e.CheckTool(ctx, "database", "prod-db", policy.ActionWrite, []string{"env:prod"}, "test note", nil)
+	if err == nil {
+		t.Fatal("expected error for write in readonly-governed mode, got nil")
+	}
+
+	invokedEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_idle_connections", EventType: audit.EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query tool_invoked by ToolName: %v", err)
+	}
+	if len(invokedEvents) != 1 {
+		t.Fatalf("expected 1 tool_invoked event findable by ToolName=terminate_idle_connections, got %d", len(invokedEvents))
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_idle_connections", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=terminate_idle_connections, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "terminate_idle_connections" {
+		t.Errorf("policy_decision ToolName = %q, want terminate_idle_connections", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
+// TestCheckResult_ToolNameThreadedIntoPolicyDecision proves CheckResult's
+// post-execution blast-radius denial threads toolNameFromContext(ctx) into
+// the recorded PolicyDecision, the same way TestCheckTool_... already proves
+// for CheckTool — CheckResult builds its own separate PolicyDecision literal
+// and was not covered by that test.
+func TestCheckResult_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	path := writeTempPolicyFile(t, blastRadiusPolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-cr", "trace-cr")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine, ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "run_bulk_update")
+	err = e.CheckResult(ctx, "database", "mydb", policy.ActionWrite, nil, ToolOutcome{RowsAffected: 150})
+	if err == nil {
+		t.Fatal("150 rows exceeds blast-radius limit, expected denial error")
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "run_bulk_update", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=run_bulk_update, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "run_bulk_update" {
+		t.Errorf("policy_decision ToolName = %q, want run_bulk_update", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
+// TestCheckDatabaseSessionAge_ToolNameThreadedIntoPolicyDecision mirrors the
+// CheckResult test above for CheckDatabaseSessionAge's own, independent
+// PolicyDecision literal.
+func TestCheckDatabaseSessionAge_ToolNameThreadedIntoPolicyDecision(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{
+		DBPath: filepath.Join(t.TempDir(), "test.db"),
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	path := writeTempPolicyFile(t, xactAgePolicyYAML)
+	engine, err := InitPolicyEngine(Config{PolicyEnabled: true, PolicyFile: path, DefaultPolicy: "deny"})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+
+	ta := audit.NewToolAuditor(store, "test-agent", "sess-xa", "trace-xa")
+	e := NewPolicyEnforcerWithConfig(PolicyEnforcerConfig{Engine: engine, ToolAuditor: ta})
+
+	ctx := WithToolName(context.Background(), "terminate_connection")
+	err = e.CheckDatabaseSessionAge(ctx, "prod-db", "destructive", nil, 7200, true)
+	if err == nil {
+		t.Fatal("expected denial for transaction older than limit, got nil")
+	}
+
+	polEvents, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "terminate_connection", EventType: audit.EventTypePolicyDecision})
+	if err != nil {
+		t.Fatalf("Query policy_decision by ToolName: %v", err)
+	}
+	if len(polEvents) != 1 {
+		t.Fatalf("expected 1 policy_decision event findable by ToolName=terminate_connection, got %d", len(polEvents))
+	}
+	if polEvents[0].PolicyDecision.ToolName != "terminate_connection" {
+		t.Errorf("policy_decision ToolName = %q, want terminate_connection", polEvents[0].PolicyDecision.ToolName)
+	}
+}
+
 // TestCheckTool_EmitsToolInvokedWhenPolicyDisabled verifies that a tool_invoked
 // event is recorded unconditionally even when policy enforcement is disabled
 // (engine=nil, policyCheckURL=""). This is the core guarantee of the coverage

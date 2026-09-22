@@ -316,6 +316,11 @@ services:
       # Crystal-ball mode: bypass playbook guidance, hypothesis formatting, and
       # escalation chaining. For LLM benchmarks / demos only. NOT for production.
       HELPDESK_CRYSTAL_BALL: ${HELPDESK_CRYSTAL_BALL:-}
+      # Auto incident bundle (v0.29 incident-entity design, Phase 3): on a
+      # resolved/escalated entry-point playbook run, automatically call the
+      # incident agent's create_incident_bundle tool and record bundle_path
+      # on the incidents row. Opt-in, default off. See docs/INCIDENTS.md.
+      HELPDESK_AUTO_INCIDENT_BUNDLE: ${HELPDESK_AUTO_INCIDENT_BUNDLE:-}
       # Decision Hub — public base URL used to build absolute resolve_url links in
       # API responses and webhook notifications. Set to the externally reachable
       # gateway URL (e.g. https://helpdesk.example.com). Leave empty to use

@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -117,29 +120,62 @@ func (r *RemoteStore) RecordOutcome(ctx context.Context, eventID string, outcome
 	return nil
 }
 
-// Query retrieves events from the audit service.
+// Query retrieves events from the audit service. Every field forwarded here
+// must have a matching reader in cmd/auditd's handleQueryEvents — EventID,
+// MinConfidence, MaxConfidence, and ApprovalStatus are QueryOptions fields
+// the in-process Store already supports but auditd's HTTP handler does not
+// yet parse from the URL, so they are deliberately left unsent rather than
+// silently ignored server-side; forwarding them needs a server-side change
+// first.
 func (r *RemoteStore) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
-	url := r.baseURL + "/v1/events?"
+	q := url.Values{}
 	if opts.SessionID != "" {
-		url += "session_id=" + opts.SessionID + "&"
+		q.Set("session_id", opts.SessionID)
 	}
 	if opts.TraceID != "" {
-		url += "trace_id=" + opts.TraceID + "&"
+		q.Set("trace_id", opts.TraceID)
+	}
+	if opts.TraceIDPrefix != "" {
+		q.Set("trace_id_prefix", opts.TraceIDPrefix)
 	}
 	if opts.EventType != "" {
-		url += "event_type=" + string(opts.EventType) + "&"
+		q.Set("event_type", string(opts.EventType))
+	}
+	if len(opts.EventTypes) > 0 {
+		names := make([]string, len(opts.EventTypes))
+		for i, et := range opts.EventTypes {
+			names[i] = string(et)
+		}
+		q.Set("types", strings.Join(names, ","))
 	}
 	if opts.Agent != "" {
-		url += "agent=" + opts.Agent + "&"
+		q.Set("agent", opts.Agent)
 	}
 	if opts.ActionClass != "" {
-		url += "action_class=" + string(opts.ActionClass) + "&"
+		q.Set("action_class", string(opts.ActionClass))
 	}
 	if !opts.Since.IsZero() {
-		url += "since=" + opts.Since.Format(time.RFC3339) + "&"
+		q.Set("since", opts.Since.Format(time.RFC3339))
+	}
+	if opts.ToolName != "" {
+		q.Set("tool_name", opts.ToolName)
+	}
+	if opts.OutcomeStatus != "" {
+		q.Set("outcome_status", opts.OutcomeStatus)
+	}
+	if opts.Origin != "" {
+		q.Set("origin", opts.Origin)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqURL := r.baseURL + "/v1/events"
+	if encoded := q.Encode(); encoded != "" {
+		reqURL += "?" + encoded
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

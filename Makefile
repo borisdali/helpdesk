@@ -508,6 +508,8 @@ binaries:
 		cp policies.example.yaml $$outdir/; \
 		cp users.example.yaml $$outdir/; \
 		cp agents.json $$outdir/; \
+		cp agents/database/objective_evidence.yaml $$outdir/objective_evidence-database.yaml; \
+		cp agents/k8s/objective_evidence.yaml $$outdir/objective_evidence-k8s.yaml; \
 		if [ "$$os" = "linux" ]; then \
 			cp -r deploy/host/systemd $$outdir/systemd; \
 			chmod +x $$outdir/systemd/install-systemd.sh; \

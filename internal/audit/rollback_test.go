@@ -86,6 +86,84 @@ func TestDeriveRollbackPlan_ScaleDeployment_ZeroReplicas(t *testing.T) {
 	}
 }
 
+func TestDeriveRollbackPlan_PatchDeploymentResources_Success(t *testing.T) {
+	pre, _ := json.Marshal(ResourcePatchPreState{
+		Namespace:             "db",
+		DeploymentName:        "postgres",
+		PreviousMemoryLimit:   "256Mi",
+		PreviousMemoryRequest: "192Mi",
+	})
+	event := &Event{
+		EventID: "tool_res12345",
+		TraceID: "sess_trace2",
+		Tool: &ToolExecution{
+			Name:     "patch_deployment_resources",
+			PreState: pre,
+		},
+	}
+	plan, err := DeriveRollbackPlan(event)
+	if err != nil {
+		t.Fatalf("DeriveRollbackPlan() error = %v", err)
+	}
+	if plan.Reversibility != ReversibilityYes {
+		t.Errorf("Reversibility = %q, want yes", plan.Reversibility)
+	}
+	if plan.InverseOp == nil {
+		t.Fatal("InverseOp is nil, want non-nil")
+	}
+	if plan.InverseOp.Tool != "patch_deployment_resources" {
+		t.Errorf("InverseOp.Tool = %q, want patch_deployment_resources", plan.InverseOp.Tool)
+	}
+	if plan.InverseOp.Args["memory_limit"] != "256Mi" {
+		t.Errorf("InverseOp.Args[memory_limit] = %v, want 256Mi", plan.InverseOp.Args["memory_limit"])
+	}
+	if plan.InverseOp.Args["memory_request"] != "192Mi" {
+		t.Errorf("InverseOp.Args[memory_request] = %v, want 192Mi", plan.InverseOp.Args["memory_request"])
+	}
+	if plan.InverseOp.Args["namespace"] != "db" {
+		t.Errorf("InverseOp.Args[namespace] = %v, want db", plan.InverseOp.Args["namespace"])
+	}
+}
+
+func TestDeriveRollbackPlan_PatchDeploymentResources_NoPreState(t *testing.T) {
+	event := &Event{
+		EventID: "tool_res_nostate",
+		Tool:    &ToolExecution{Name: "patch_deployment_resources"},
+	}
+	plan, err := DeriveRollbackPlan(event)
+	if err != nil {
+		t.Fatalf("DeriveRollbackPlan() error = %v", err)
+	}
+	if plan.Reversibility != ReversibilityNo {
+		t.Errorf("Reversibility = %q, want no (no pre-state captured)", plan.Reversibility)
+	}
+	if !strings.Contains(plan.NotReversibleReason, "Pre-mutation state was not captured") {
+		t.Errorf("NotReversibleReason = %q, want pre-state missing message", plan.NotReversibleReason)
+	}
+}
+
+func TestDeriveRollbackPlan_PatchDeploymentResources_EmptyPreviousLimit(t *testing.T) {
+	// PreviousMemoryLimit empty means the pre-read failed at capture time —
+	// same "unsafe to restore" treatment as ScaleDeployment's zero-replicas case.
+	pre, _ := json.Marshal(ResourcePatchPreState{
+		Namespace:             "db",
+		DeploymentName:        "postgres",
+		PreviousMemoryLimit:   "",
+		PreviousMemoryRequest: "192Mi",
+	})
+	event := &Event{
+		EventID: "tool_res_empty",
+		Tool:    &ToolExecution{Name: "patch_deployment_resources", PreState: pre},
+	}
+	plan, err := DeriveRollbackPlan(event)
+	if err != nil {
+		t.Fatalf("DeriveRollbackPlan() error = %v", err)
+	}
+	if plan.Reversibility != ReversibilityNo {
+		t.Errorf("Reversibility = %q, want no (empty previous limit)", plan.Reversibility)
+	}
+}
+
 func TestDeriveRollbackPlan_DeletePod(t *testing.T) {
 	event := &Event{
 		EventID: "tool_delpod",

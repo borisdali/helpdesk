@@ -1398,7 +1398,7 @@ func (a *Auditor) checkFabricationMismatch(event *audit.Event) {
 
 	if writeOrDestructiveMismatch {
 		a.recordSecurityAlert("fabrication_mismatch", AlertCritical,
-			"FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
+			"["+audit.LayerDelegationVerification+"] FABRICATION RISK — agent returned success but audit trail has no matching tool executions",
 			event,
 			"agent", agent,
 			"action_class", actionClass,
@@ -1408,7 +1408,7 @@ func (a *Auditor) checkFabricationMismatch(event *audit.Event) {
 
 	if len(dv.NarratedNotConfirmed) > 0 {
 		a.recordSecurityAlert("narrated_tool_not_confirmed", AlertWarning,
-			"UNVERIFIED — agent's response describes calling a tool with no matching execution in the audit trail",
+			"["+audit.LayerDelegationVerification+"] UNVERIFIED — agent's response describes calling a tool with no matching execution in the audit trail",
 			event,
 			"agent", agent,
 			"action_class", actionClass,

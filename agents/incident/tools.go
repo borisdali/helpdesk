@@ -21,6 +21,7 @@ import (
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 )
 
@@ -356,16 +357,18 @@ type CreateIncidentBundleArgs struct {
 	K8sNamespace          string `json:"k8s_namespace,omitempty" jsonschema:"Kubernetes namespace for k8s commands. Defaults to 'default'."`
 	CallbackURL           string `json:"callback_url,omitempty" jsonschema:"Optional HTTP(S) URL. When set, the agent POSTs the IncidentBundleResult JSON to this URL after the bundle is created. Best-effort: failures are logged but do not affect the tool result."`
 	Outcome               string `json:"outcome,omitempty" jsonschema:"Incident outcome: 'resolved', 'escalated', or '' (still investigating). When 'resolved' or 'escalated' and HELPDESK_GATEWAY_URL is set, a playbook draft is automatically synthesized from the audit trace and saved to the vault as an inactive draft."`
+	SeriesID              string `json:"series_id,omitempty" jsonschema:"Optional existing Playbook series ID to pin the synthesized draft to (e.g. 'pbs_vacuum_triage'), so the draft improves that series instead of starting a new one. Only used when a draft is generated (see outcome)."`
 	GeneratePlaybookDraft bool   `json:"generate_playbook_draft,omitempty" jsonschema:"Deprecated: set outcome='resolved' instead. When true, requests a playbook draft from the gateway's from-trace endpoint using the current audit trace."`
+	IncidentID            string `json:"incident_id,omitempty" jsonschema:"Optional aiHelpDesk incidents-table ID (e.g. 'inc_a1b2c3d4'), supplied by the gateway when this bundle is being created for a tracked incident. When set, the resulting bundle_path is PATCHed onto that incidents row via auditd instead of being recorded in the local incidents.json index."`
 }
 
 // IncidentBundleResult is the output of create_incident_bundle.
 type IncidentBundleResult struct {
-	IncidentID    string   `json:"incident_id"`
-	BundlePath    string   `json:"bundle_path"`
-	Timestamp     string   `json:"timestamp"`
-	Layers        []string `json:"layers"`
-	Errors        []string `json:"errors,omitempty"`
+	IncidentID string   `json:"incident_id"`
+	BundlePath string   `json:"bundle_path"`
+	Timestamp  string   `json:"timestamp"`
+	Layers     []string `json:"layers"`
+	Errors     []string `json:"errors,omitempty"`
 	// PlaybookDraft is a synthesized playbook YAML generated from the audit trace.
 	// Populated when outcome='resolved'/'escalated' and HELPDESK_GATEWAY_URL is set,
 	// or when generate_playbook_draft=true (deprecated).
@@ -376,7 +379,17 @@ type IncidentBundleResult struct {
 	PlaybookID string `json:"playbook_id,omitempty"`
 }
 
+// createIncidentBundleTool is the ADK/LLM-mediated tool wrapper — required by
+// functiontool.New's Func[TArgs, TResults] signature, which is hardcoded to
+// agent.ToolContext. createIncidentBundleImpl below (plain context.Context)
+// holds the actual logic and is also called directly from the direct-tool
+// registry (NewIncidentDirectRegistry), same split already established in
+// agents/database/tools.go (see checkConnectionImpl/checkConnectionTool).
 func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
+	return createIncidentBundleImpl(ctx, args)
+}
+
+func createIncidentBundleImpl(ctx context.Context, args CreateIncidentBundleArgs) (IncidentBundleResult, error) {
 	start := time.Now()
 	now := start
 	incidentID := generateShortID()
@@ -444,6 +457,10 @@ func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleAr
 		allErrors = append(allErrors, errs...)
 	}
 
+	var traceID string
+	if currentTraceStore != nil {
+		traceID = currentTraceStore.Get()
+	}
 	manifest := Manifest{
 		IncidentID:  incidentID,
 		InfraKey:    args.InfraKey,
@@ -451,6 +468,7 @@ func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleAr
 		Timestamp:   now,
 		Layers:      collectedLayers,
 		Errors:      allErrors,
+		TraceID:     traceID,
 	}
 
 	bundlePath, err := assembleTarball(manifest, layers, outputDir)
@@ -458,8 +476,19 @@ func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleAr
 		return IncidentBundleResult{}, fmt.Errorf("failed to assemble tarball: %v", err)
 	}
 
-	// Record in incidents.json index.
-	if err := appendToIndex(outputDir, manifest, bundlePath); err != nil {
+	// v0.29 incident-entity design, Phase 3 (see docs/INCIDENTS.md): when the
+	// caller supplies a real incidents-table ID (the gateway does, for any
+	// bundle it triggers), record bundle_path there instead of the local
+	// incidents.json index — a durable, queryable record instead of a flat
+	// file with no cross-reference to the audit trace. Callers with no
+	// incidents-table awareness (a human hitting this tool directly, srebot's
+	// existing flow) keep the legacy index untouched.
+	if args.IncidentID != "" {
+		if err := patchIncidentBundlePath(ctx, args.IncidentID, bundlePath); err != nil {
+			slog.Warn("failed to record bundle_path on incidents table", "incident_id", args.IncidentID, "err", err)
+			// Non-fatal: the tarball was already written successfully.
+		}
+	} else if err := appendToIndex(outputDir, manifest, bundlePath); err != nil {
 		slog.Warn("failed to update incidents.json index", "err", err)
 		// Non-fatal: the tarball was already written successfully.
 	}
@@ -509,7 +538,7 @@ func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleAr
 				traceID = id
 			}
 		}
-		if draft, playbookID, err := requestPlaybookDraft(ctx, traceID, outcome); err != nil {
+		if draft, playbookID, err := requestPlaybookDraft(ctx, traceID, outcome, args.SeriesID); err != nil {
 			slog.Warn("playbook draft generation failed", "incident_id", incidentID, "trace_id", traceID, "err", err)
 		} else {
 			result.PlaybookDraft = draft
@@ -529,55 +558,16 @@ func createIncidentBundleTool(ctx agent.ToolContext, args CreateIncidentBundleAr
 // bundle ID (best-effort approximation when a real auditd trace is unavailable).
 // Returns the draft YAML and the persisted playbook_id (empty when auditd is not
 // configured on the gateway).
-func requestPlaybookDraft(ctx agent.ToolContext, incidentID, outcome string) (draft, playbookID string, err error) {
-	return doPlaybookDraftRequest(context.Background(), os.Getenv("HELPDESK_GATEWAY_URL"), os.Getenv("HELPDESK_CLIENT_API_KEY"), incidentID, outcome)
+func requestPlaybookDraft(ctx context.Context, incidentID, outcome, seriesID string) (draft, playbookID string, err error) {
+	return doPlaybookDraftRequest(context.Background(), os.Getenv("HELPDESK_GATEWAY_URL"), os.Getenv("HELPDESK_CLIENT_API_KEY"), incidentID, outcome, seriesID)
 }
 
 // doPlaybookDraftRequest performs the actual HTTP call to the from-trace endpoint.
 // Extracted for testability (takes plain context.Context, explicit URL and API key).
-func doPlaybookDraftRequest(ctx context.Context, gatewayURL, apiKey, incidentID, outcome string) (draft, playbookID string, err error) {
-	if gatewayURL == "" {
-		return "", "", fmt.Errorf("HELPDESK_GATEWAY_URL not set")
-	}
-
-	reqBody, marshalErr := json.Marshal(map[string]string{
-		"trace_id": incidentID,
-		"outcome":  outcome,
-	})
-	if marshalErr != nil {
-		return "", "", fmt.Errorf("marshal request: %w", marshalErr)
-	}
-
-	reqURL := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbooks/from-trace"
-	client := &http.Client{Timeout: 60 * time.Second}
-	req, buildErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(reqBody))
-	if buildErr != nil {
-		return "", "", fmt.Errorf("build request: %w", buildErr)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	resp, doErr := client.Do(req)
-	if doErr != nil {
-		return "", "", fmt.Errorf("POST from-trace: %w", doErr)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("gateway returned %d: %s", resp.StatusCode, respBody)
-	}
-
-	var result struct {
-		Draft      string `json:"draft"`
-		PlaybookID string `json:"playbook_id"`
-	}
-	if decErr := json.Unmarshal(respBody, &result); decErr != nil {
-		return "", "", fmt.Errorf("decode response: %w", decErr)
-	}
-	return result.Draft, result.PlaybookID, nil
+// Thin wrapper around agentutil.RequestPlaybookDraft, shared with faulttest's
+// own from-trace caller.
+func doPlaybookDraftRequest(ctx context.Context, gatewayURL, apiKey, incidentID, outcome, seriesID string) (draft, playbookID string, err error) {
+	return agentutil.RequestPlaybookDraft(ctx, gatewayURL, apiKey, incidentID, outcome, seriesID)
 }
 
 // postCallback POSTs the incident result to a callback URL. Best-effort: failures
@@ -659,6 +649,50 @@ func appendToIndex(outputDir string, m Manifest, bundlePath string) error {
 	return os.WriteFile(indexPath, data, 0644)
 }
 
+// patchIncidentBundlePath PATCHes bundle_path onto an existing auditd
+// incidents-table row (v0.29 incident-entity design, Phase 3). Uses
+// HELPDESK_AUDIT_URL/HELPDESK_AUDIT_API_KEY directly — the same env vars
+// already loaded via agentutil.MustLoadConfig for this agent's own tool-call
+// auditing, read here the same way doPlaybookDraftRequest already reads
+// HELPDESK_GATEWAY_URL/HELPDESK_CLIENT_API_KEY directly rather than
+// threading cfg through.
+func patchIncidentBundlePath(ctx context.Context, incidentID, bundlePath string) error {
+	return doPatchIncidentBundlePath(ctx, os.Getenv("HELPDESK_AUDIT_URL"), os.Getenv("HELPDESK_AUDIT_API_KEY"), incidentID, bundlePath)
+}
+
+// doPatchIncidentBundlePath performs the actual HTTP call. Extracted for
+// testability (takes plain context.Context, explicit URL and API key) —
+// same pattern as doPlaybookDraftRequest above.
+func doPatchIncidentBundlePath(ctx context.Context, auditURL, apiKey, incidentID, bundlePath string) error {
+	if auditURL == "" {
+		return fmt.Errorf("HELPDESK_AUDIT_URL not set")
+	}
+	body, err := json.Marshal(map[string]string{"bundle_path": bundlePath})
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+	url := strings.TrimSuffix(auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("PATCH incidents: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("auditd returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
+}
+
 // --- list_incidents tool ---
 
 // ListIncidentsArgs defines arguments for the list_incidents tool.
@@ -712,4 +746,41 @@ func createTools() ([]tool.Tool, error) {
 	}
 
 	return []tool.Tool{bundleTool, listTool}, nil
+}
+
+// --- Direct tool dispatch (bypasses the ADK/LLM layer) ---
+
+func argsToStruct[T any](args map[string]any) (T, error) {
+	var result T
+	data, err := json.Marshal(args)
+	if err != nil {
+		return result, err
+	}
+	return result, json.Unmarshal(data, &result)
+}
+
+// NewIncidentDirectRegistry builds a DirectToolRegistry for create_incident_bundle,
+// invoked via POST /tool/create_incident_bundle on this agent's HTTP server.
+// This is what the gateway's auto-bundle trigger (v0.29 incident-entity design,
+// Phase 3 — see docs/INCIDENTS.md) calls: a real, structured JSON result
+// (crucially, bundle_path) rather than free-form LLM narration, which the
+// gateway would otherwise have to parse out of prose unreliably.
+func NewIncidentDirectRegistry() *agentutil.DirectToolRegistry {
+	r := agentutil.NewDirectToolRegistry()
+	r.Register("create_incident_bundle", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[CreateIncidentBundleArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := createIncidentBundleImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		out, err := json.Marshal(result)
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
+	})
+	return r
 }

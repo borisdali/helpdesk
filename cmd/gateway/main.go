@@ -216,6 +216,11 @@ func main() {
 	}
 
 	gw.SetCrystalBall(crystalBall)
+	autoIncidentBundle := os.Getenv("HELPDESK_AUTO_INCIDENT_BUNDLE") == "true" || os.Getenv("HELPDESK_AUTO_INCIDENT_BUNDLE") == "1"
+	gw.SetAutoIncidentBundle(autoIncidentBundle)
+	if autoIncidentBundle {
+		slog.Info("auto incident bundle enabled — resolved/escalated entry-point runs will trigger create_incident_bundle automatically")
+	}
 	gw.SetAuthorizer(authzr)
 	if diagnosisModel := os.Getenv("HELPDESK_MODEL_NAME"); diagnosisModel != "" {
 		gw.SetDiagnosisModel(diagnosisModel)

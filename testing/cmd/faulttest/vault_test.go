@@ -1975,6 +1975,129 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft closes
+// the gap found during v0.29 doc review: the gateway's incident-narrative
+// response now includes an incident_record object (origin/status/
+// attribution/bundle_path/draft_playbook_id from the incidents table), but
+// this CLI's client-side decode struct had no field for it, so the data was
+// fetched and silently dropped — list mode already showed this, the deep-dive
+// view didn't. Proves it's now rendered.
+func TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec1",
+				"playbook": "pbs_lock_chain_triage",
+			},
+			"incident_record": map[string]any{
+				"incident_id":       "inc_abc123",
+				"entry_run_id":      "plr_rec1",
+				"origin":            "faulttest",
+				"status":            "resolved",
+				"attribution":       "lock_contention",
+				"bundle_path":       "/incidents/a3f9b2c1.tar.gz",
+				"draft_playbook_id": "pb_generated_001",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec1")
+	})
+
+	if !strings.Contains(out, "Origin: faulttest") {
+		t.Errorf("output missing Origin: faulttest, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Status: resolved") {
+		t.Errorf("output missing Status: resolved, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Attribution: lock_contention") {
+		t.Errorf("output missing Attribution: lock_contention, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Bundle: /incidents/a3f9b2c1.tar.gz") {
+		t.Errorf("output missing Bundle: path, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Draft playbook: pb_generated_001") {
+		t.Errorf("output missing Draft playbook: id, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty
+// proves the deep-dive view mirrors list mode's own defaulting convention:
+// an empty Origin displays as "real" (untagged == not faulttest-injected)
+// and an empty Status displays as "open" — not a blank or missing line.
+func TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec2",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec2",
+				"playbook": "pbs_lock_chain_triage",
+			},
+			"incident_record": map[string]any{
+				"incident_id":  "inc_def456",
+				"entry_run_id": "plr_rec2",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec2")
+	})
+
+	if !strings.Contains(out, "Origin: real") {
+		t.Errorf("output missing Origin: real default, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Status: open") {
+		t.Errorf("output missing Status: open default, got:\n%s", out)
+	}
+	if strings.Contains(out, "Attribution:") {
+		t.Errorf("output should not show an Attribution: line when empty, got:\n%s", out)
+	}
+	if strings.Contains(out, "Bundle:") {
+		t.Errorf("output should not show a Bundle: line when empty, got:\n%s", out)
+	}
+	if strings.Contains(out, "Draft playbook:") {
+		t.Errorf("output should not show a Draft playbook: line when empty, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow proves a run
+// with no incidents-table row (pre-v0.29, or never tracked) shows no
+// Origin/Status/Attribution/Bundle/Draft lines at all — fail-open, not a
+// false "Origin: real" claim about data that was never actually looked up.
+func TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_rec3",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_rec3",
+				"playbook": "pbs_lock_chain_triage",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_rec3")
+	})
+
+	for _, want := range []string{"Origin:", "Status:", "Attribution:", "Bundle:", "Draft playbook:"} {
+		if strings.Contains(out, want) {
+			t.Errorf("output should not show %q when incident_record is absent, got:\n%s", want, out)
+		}
+	}
+}
+
 // TestPrintIncidentJourney_VerificationFlags_InlineWarnings verifies that
 // has_mismatch/has_target_drift surface inline right under each chapter's
 // Findings — previously invisible in this exact CLI output, requiring a
@@ -2010,18 +2133,18 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 		printIncidentJourney(srv.URL, "", "plr_flags1")
 	})
 
-	if !strings.Contains(out, "⚠ unverified") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
 		t.Errorf("output missing inline unverified warning for triage's has_mismatch=true, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ target drift") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output missing inline target drift warning for escalation's has_target_drift=true, got:\n%s", out)
 	}
 	// The two warnings must appear on the *correct* chapter, not both on
 	// every chapter — count occurrences precisely rather than just presence.
-	if got := strings.Count(out, "⚠ unverified"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified"); got != 1 {
 		t.Errorf("⚠ unverified appeared %d times, want exactly 1 (triage only)", got)
 	}
-	if got := strings.Count(out, "⚠ target drift"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift"); got != 1 {
 		t.Errorf("⚠ target drift appeared %d times, want exactly 1 (escalation only)", got)
 	}
 }
@@ -2054,10 +2177,10 @@ func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T
 		printIncidentJourney(srv.URL, "", "plr_unvevid1")
 	})
 
-	if !strings.Contains(out, "⚠ unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
 		t.Errorf("output missing the actual primary quote text, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (secondary, non-blocking) — walreceiver timeout — terminating walreceiver due to timeout") {
 		t.Errorf("output missing the actual secondary quote text, labeled non-blocking, got:\n%s", out)
 	}
 }
@@ -2096,10 +2219,10 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	if !strings.Contains(out, "REMEDIATION") {
 		t.Fatalf("output missing REMEDIATION section, got:\n%s", out)
 	}
-	if !strings.Contains(out, "⚠ unverified") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
 		t.Errorf("output missing inline unverified warning for remediation's has_mismatch=true, got:\n%s", out)
 	}
-	if strings.Contains(out, "⚠ target drift") {
+	if strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output should not show target drift warning, has_target_drift is false, got:\n%s", out)
 	}
 }
@@ -2146,13 +2269,13 @@ func TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters(t *testing.T
 		printIncidentJourney(srv.URL, "", "plr_oevprint1")
 	})
 
-	if !strings.Contains(out, "⚠ unconfirmed evidence — replica_disconnected") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence — replica_disconnected") {
 		t.Errorf("output missing unconfirmed evidence line for triage, got:\n%s", out)
 	}
-	if got := strings.Count(out, "✓ confirmed evidence — replica_disconnected"); got != 2 {
+	if got := strings.Count(out, "✓ ["+audit.LayerObjectiveEvidence+"] confirmed evidence — replica_disconnected"); got != 2 {
 		t.Errorf("✓ confirmed evidence appeared %d times, want exactly 2 (escalation + remediation), got:\n%s", got, out)
 	}
-	if got := strings.Count(out, "⚠ unconfirmed evidence"); got != 1 {
+	if got := strings.Count(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence"); got != 1 {
 		t.Errorf("⚠ unconfirmed evidence appeared %d times, want exactly 1 (triage only), got:\n%s", got, out)
 	}
 }
@@ -2182,10 +2305,10 @@ func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) 
 		printIncidentJourney(srv.URL, "", "plr_pvflag1")
 	})
 
-	if !strings.Contains(out, "⚠ protocol violation") {
+	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] protocol violation") {
 		t.Errorf("output missing inline protocol violation warning, got:\n%s", out)
 	}
-	if strings.Contains(out, "⚠ unverified") || strings.Contains(out, "⚠ target drift") {
+	if strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") || strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] target drift") {
 		t.Errorf("output should not show the other two warnings, got:\n%s", out)
 	}
 }
@@ -2308,6 +2431,62 @@ func TestPrintJourneyDetail_TargetDriftWarning(t *testing.T) {
 	}
 	if strings.Contains(out, "FABRICATION WARNING") {
 		t.Errorf("output should not show FABRICATION WARNING when has_mismatch=false, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_VerifiedWarningOutcome_ShowsLayer1Verification proves
+// the new Layer 1 backfill line renders next to Retries: when the journey's
+// outcome is one of the post-mutation re-verification failure states, and
+// that it carries the [Layer 1] label from internal/audit.LayerIntraAgentVerification.
+func TestPrintJourneyDetail_VerifiedWarningOutcome_ShowsLayer1Verification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":    "tr_verifywarn1",
+				"started_at":  time.Now().UTC().Format(time.RFC3339),
+				"outcome":     "verified_warning",
+				"retry_count": 1,
+				"tools_used":  []string{"restart_service"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_verifywarn1", false)
+	})
+
+	if !strings.Contains(out, "[Layer 1]") {
+		t.Errorf("output missing [Layer 1] verification warning for outcome=verified_warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "post-action re-verification did not confirm the change stuck") {
+		t.Errorf("output missing Layer 1 warning text, got:\n%s", out)
+	}
+}
+
+// TestPrintJourneyDetail_ResolvedOutcome_NoLayer1Verification is the inverse
+// case — a clean "resolved" outcome must not show the Layer 1 warning line.
+func TestPrintJourneyDetail_ResolvedOutcome_NoLayer1Verification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+			{
+				"trace_id":   "tr_resolved1",
+				"started_at": time.Now().UTC().Format(time.RFC3339),
+				"outcome":    "resolved",
+				"tools_used": []string{"restart_service"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_resolved1", false)
+	})
+
+	if strings.Contains(out, "[Layer 1]") {
+		t.Errorf("output should not show [Layer 1] verification warning for outcome=resolved, got:\n%s", out)
 	}
 }
 
@@ -2526,6 +2705,160 @@ func TestPrintJourneyDetail_ProtocolViolationWarning_ShowsAgent(t *testing.T) {
 	}
 	if !strings.Contains(out, "Agent(s): sysadmin_agent") {
 		t.Errorf("output missing agent detail, got:\n%s", out)
+	}
+}
+
+// ── printToolCallIntegrity / buildToolCallTurns ──────────────────────────
+
+// TestBuildToolCallTurns_NamesTheDroppedTool is the deterministic regression
+// test for the exact real-world failure this feature exists for
+// (get_config_parameter, found live 2026-09-19/20 — see
+// project_fabrication_detection_followups.md): a turn declares 2 tools, only
+// 1 actually reaches tool_execution. Unlike the live incident, this is fully
+// reproducible — no dependency on the model's own non-determinism.
+func TestBuildToolCallTurns_NamesTheDroppedTool(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"check_connection"}}},
+		{EventType: "tool_invoked", PolicyDecision: &journeyPolicyDecision{ToolName: "check_connection"}},
+		{EventType: "policy_decision", PolicyDecision: &journeyPolicyDecision{ToolName: "check_connection"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "check_connection"}},
+
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_config_parameter", "get_session_info"}}},
+		{EventType: "tool_invoked", PolicyDecision: &journeyPolicyDecision{ToolName: "get_session_info"}},
+		{EventType: "policy_decision", PolicyDecision: &journeyPolicyDecision{ToolName: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		// get_config_parameter never reaches any downstream event.
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 2 {
+		t.Fatalf("len(turns) = %d, want 2", len(turns))
+	}
+
+	clean := turns[0]
+	if len(clean.Missing) != 0 {
+		t.Errorf("turn 1 Missing = %v, want none (fully confirmed)", clean.Missing)
+	}
+	if clean.InvokedCount != 1 || clean.PolicyCount != 1 || clean.ExecutedCount != 1 {
+		t.Errorf("turn 1 counts = invoked=%d policy=%d executed=%d, want 1/1/1", clean.InvokedCount, clean.PolicyCount, clean.ExecutedCount)
+	}
+
+	dropped := turns[1]
+	if len(dropped.Missing) != 1 || dropped.Missing[0] != "get_config_parameter" {
+		t.Fatalf("turn 2 Missing = %v, want [get_config_parameter]", dropped.Missing)
+	}
+	if dropped.InvokedCount != 1 || dropped.PolicyCount != 1 || dropped.ExecutedCount != 1 {
+		t.Errorf("turn 2 counts = invoked=%d policy=%d executed=%d, want 1/1/1 (only get_session_info reached each stage)", dropped.InvokedCount, dropped.PolicyCount, dropped.ExecutedCount)
+	}
+}
+
+// TestBuildToolCallTurns_DuplicateDeclaredTool_NotFalselyMissing proves the
+// multiset-diff correctly handles a tool declared and executed more than
+// once in the same turn (a real pattern seen live: 3 identical parallel
+// get_session_info calls) — a naive set-membership diff would have nothing
+// to say about count, but would at least still be correct; this guards
+// against a cruder implementation (e.g. "declared name not present anywhere
+// in executed names") that would work by accident for singletons but not for
+// this case, since a set-based check can't tell "3 declared, 2 executed"
+// from "3 declared, 3 executed".
+func TestBuildToolCallTurns_DuplicateDeclaredTool_NotFalselyMissing(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_session_info", "get_session_info", "get_session_info"}}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 1 {
+		t.Fatalf("len(turns) = %d, want 1", len(turns))
+	}
+	if len(turns[0].Missing) != 0 {
+		t.Errorf("Missing = %v, want none (all 3 declared calls were confirmed executed)", turns[0].Missing)
+	}
+	if turns[0].ExecutedCount != 3 {
+		t.Errorf("ExecutedCount = %d, want 3", turns[0].ExecutedCount)
+	}
+}
+
+// TestBuildToolCallTurns_DuplicateDeclaredTool_PartialDropDetected is the
+// asymmetric case the previous test's naive-set-check concern actually
+// guards against: 3 declared, only 2 executed — must report exactly 1
+// missing, not 0 (set membership would say "present, therefore not
+// missing") and not 3 (that would be wrong the other way).
+func TestBuildToolCallTurns_DuplicateDeclaredTool_PartialDropDetected(t *testing.T) {
+	events := []journeyEvent{
+		{EventType: "agent_reasoning", AgentReasoning: &journeyReasoning{ToolCalls: []string{"get_session_info", "get_session_info", "get_session_info"}}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+		{EventType: "tool_execution", ToolExecution: &journeyToolExec{Name: "get_session_info"}},
+	}
+
+	turns := buildToolCallTurns(events)
+	if len(turns) != 1 {
+		t.Fatalf("len(turns) = %d, want 1", len(turns))
+	}
+	if len(turns[0].Missing) != 1 {
+		t.Fatalf("Missing = %v, want exactly 1 entry (3 declared, 2 executed)", turns[0].Missing)
+	}
+}
+
+// TestPrintJourneyDetail_ToolCallIntegrity_DetailGatesSection proves the new
+// section only appears with --detail (matching EXECUTION TRACE's own gating,
+// since both are driven by the same fetchRunEvents call), and that the
+// rendered table names the dropped tool and labels it Layer 2.
+func TestPrintJourneyDetail_ToolCallIntegrity_DetailGatesSection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/journeys"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"trace_id":        "tr_integrity1",
+					"started_at":      time.Now().UTC().Format(time.RFC3339),
+					"incident_run_id": "plr_integrity1",
+					"outcome":         "success",
+					"tools_used":      []string{"get_session_info"},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/events"):
+			json.NewEncoder(w).Encode([]map[string]any{ //nolint:errcheck
+				{
+					"event_type":      "agent_reasoning",
+					"agent_reasoning": map[string]any{"reasoning": "checking config and session", "tool_calls": []string{"get_config_parameter", "get_session_info"}},
+				},
+				{
+					"event_type":      "tool_invoked",
+					"policy_decision": map[string]any{"tool_name": "get_session_info"},
+				},
+				{
+					"event_type": "tool_execution",
+					"tool":       map[string]any{"name": "get_session_info"},
+				},
+			})
+		default:
+			w.Write([]byte("{}")) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	withoutDetail := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_integrity1", false)
+	})
+	if strings.Contains(withoutDetail, "TOOL CALL INTEGRITY") {
+		t.Errorf("TOOL CALL INTEGRITY should not appear without --detail, got:\n%s", withoutDetail)
+	}
+
+	withDetail := captureStdout(func() {
+		printJourneyDetail(srv.URL, "", "tr_integrity1", true)
+	})
+	if !strings.Contains(withDetail, "TOOL CALL INTEGRITY") {
+		t.Fatalf("TOOL CALL INTEGRITY missing with --detail, got:\n%s", withDetail)
+	}
+	if !strings.Contains(withDetail, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("output missing Layer 2 label, got:\n%s", withDetail)
+	}
+	if !strings.Contains(withDetail, "get_config_parameter") {
+		t.Errorf("output missing the dropped tool's name, got:\n%s", withDetail)
 	}
 }
 
@@ -2885,114 +3218,285 @@ func TestFetchJourneys_WithDelegations(t *testing.T) {
 	}
 }
 
-// ── postEvaluations primary_confidence ───────────────────────────────────
+// ── fetchIncidentsList / vaultIncidentsRecent ─────────────────────────────
 
-// ── fetchRunsByOutcome ────────────────────────────────────────────────────────
-
-func TestFetchRunsByOutcome_Found(t *testing.T) {
+func TestFetchIncidentsList_Found(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/fleet/playbook-runs" {
+		if r.URL.Path != "/api/v1/incidents" {
 			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Query().Get("outcome") != "resolved" {
-			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"runs": []incidentRun{
-				{RunID: "plr_aaa111", SeriesID: "pbs_db_triage", Outcome: "resolved"},
-				{RunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Outcome: "resolved"},
+			"count": 2,
+			"incidents": []audit.Incident{
+				{IncidentID: "inc_aaa111", EntryRunID: "plr_aaa111", SeriesID: "pbs_db_triage", Origin: "real", Status: "resolved"},
+				{IncidentID: "inc_bbb222", EntryRunID: "plr_bbb222", SeriesID: "pbs_k8s_triage", Origin: "faulttest", Status: "escalated"},
 			},
 		})
 	}))
 	defer srv.Close()
 
-	got, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
+	got, err := fetchIncidentsList(srv.URL, "", 10, "", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
-	if got[0].RunID != "plr_aaa111" {
-		t.Errorf("RunID = %q, want plr_aaa111", got[0].RunID)
+	if got[0].IncidentID != "inc_aaa111" {
+		t.Errorf("IncidentID = %q, want inc_aaa111", got[0].IncidentID)
 	}
-	if got[1].SeriesID != "pbs_k8s_triage" {
-		t.Errorf("SeriesID = %q, want pbs_k8s_triage", got[1].SeriesID)
-	}
-}
-
-func TestFetchRunsByOutcome_Empty(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
-	}))
-	defer srv.Close()
-
-	got, err := fetchRunsByOutcome(srv.URL, "", "failed", 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
+	if got[1].Origin != "faulttest" {
+		t.Errorf("Origin = %q, want faulttest", got[1].Origin)
 	}
 }
 
-func TestFetchRunsByOutcome_ServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	_, err := fetchRunsByOutcome(srv.URL, "", "resolved", 10)
-	if err == nil {
-		t.Error("expected error for 500 response, got nil")
-	}
-}
-
-func TestFetchRunsByOutcome_NetworkError(t *testing.T) {
-	_, err := fetchRunsByOutcome("http://127.0.0.1:19997", "", "resolved", 10)
-	if err == nil {
-		t.Error("expected error for unreachable server, got nil")
-	}
-}
-
-func TestFetchRunsByOutcome_SendsAuth(t *testing.T) {
-	var gotHeader string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
-	}))
-	defer srv.Close()
-
-	fetchRunsByOutcome(srv.URL, "tok-xyz", "resolved", 10) //nolint:errcheck
-	if gotHeader != "Bearer tok-xyz" {
-		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
-	}
-}
-
-func TestFetchRunsByOutcome_PassesOutcomeAndLimit(t *testing.T) {
+func TestFetchIncidentsList_PassesLimit(t *testing.T) {
 	var gotQuery url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"runs": []incidentRun{}}) //nolint:errcheck
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
 	}))
 	defer srv.Close()
 
-	fetchRunsByOutcome(srv.URL, "", "abandoned", 7) //nolint:errcheck
-	if gotQuery.Get("outcome") != "abandoned" {
-		t.Errorf("outcome = %q, want abandoned", gotQuery.Get("outcome"))
-	}
+	fetchIncidentsList(srv.URL, "", 7, "", "", "") //nolint:errcheck
 	if gotQuery.Get("limit") != "7" {
 		t.Errorf("limit = %q, want 7", gotQuery.Get("limit"))
 	}
 }
 
-// ── TestPostEvaluations_IncludesPrimaryConfidence ─────────────────────────────
+// TestFetchIncidentsList_PassesOriginStatusAttribution proves the three new
+// filter params reach the outgoing query string, closing the gap where
+// `vault incidents` could visually show ORIGIN/STATUS/ATTRIBUTION columns
+// but had no way to narrow the query itself before them.
+func TestFetchIncidentsList_PassesOriginStatusAttribution(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 10, "real", "resolved", "connection_pool_saturation") //nolint:errcheck
+
+	cases := map[string]string{
+		"origin":      "real",
+		"status":      "resolved",
+		"attribution": "connection_pool_saturation",
+	}
+	for key, want := range cases {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("query param %q = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestFetchIncidentsList_OmitsFiltersWhenEmpty proves an empty origin/
+// status/attribution sends no corresponding query param at all — not an
+// empty-string param that could be misread server-side as "filter to the
+// empty string" rather than "no filter."
+func TestFetchIncidentsList_OmitsFiltersWhenEmpty(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 10, "", "", "") //nolint:errcheck
+
+	for _, key := range []string{"origin", "status", "attribution"} {
+		if gotQuery.Has(key) {
+			t.Errorf("query param %q present = %q, want omitted when empty", key, gotQuery.Get(key))
+		}
+	}
+}
+
+func TestFetchIncidentsList_OmitsLimitWhenZero(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 0, "", "", "") //nolint:errcheck
+	if gotQuery.Has("limit") {
+		t.Errorf("limit param present = %q, want omitted when limit<=0", gotQuery.Get("limit"))
+	}
+}
+
+func TestFetchIncidentsList_SendsAuth(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "tok-xyz", 10, "", "", "") //nolint:errcheck
+	if gotHeader != "Bearer tok-xyz" {
+		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
+	}
+}
+
+func TestFetchIncidentsList_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchIncidentsList(srv.URL, "", 10, "", "", "")
+	if err == nil {
+		t.Error("expected error for 500 response, got nil")
+	}
+}
+
+func TestFetchIncidentsList_NetworkError(t *testing.T) {
+	_, err := fetchIncidentsList("http://127.0.0.1:19997", "", 10, "", "", "")
+	if err == nil {
+		t.Error("expected error for unreachable server, got nil")
+	}
+}
+
+// TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft is the real-caller-
+// level test proving vaultIncidentsRecent surfaces the incidents table's own
+// fields (origin/status/bundle_path/draft_playbook_id) directly — not a
+// trace_id-prefix guess (the pre-v0.29 heuristic this replaced).
+func TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"count": 2,
+			"incidents": []audit.Incident{
+				{
+					IncidentID: "inc_real01", EntryRunID: "plr_real01", SeriesID: "pbs_replication_lag",
+					Origin: "real", Status: "escalated", Attribution: "replica-disconnected",
+					BundlePath: "/data/incidents/x.tar.gz", DraftPlaybookID: "pb_draft01",
+					DetectedAt: time.Now().UTC(),
+				},
+				{
+					IncidentID: "inc_fault01", EntryRunID: "plr_fault01", SeriesID: "pbs_db_max_connections",
+					Origin: "faulttest", Status: "open",
+					DetectedAt: time.Now().UTC(),
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false, "", "", "")
+	})
+
+	for _, want := range []string{
+		"inc_real01", "real", "escalated", "replica-disconnected", "yes", // bundle+draft both yes
+		"inc_fault01", "faulttest", "open",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestVaultIncidents_CLIFlags_ForwardOriginStatusAttribution is the
+// end-to-end proof (flag parsing -> vaultIncidentsRecent -> fetchIncidentsList
+// -> HTTP query) that `vault incidents --origin --status --attribution`
+// actually narrows the query, not just that the lower-level functions do in
+// isolation (TestFetchIncidentsList_PassesOriginStatusAttribution above).
+func TestVaultIncidents_CLIFlags_ForwardOriginStatusAttribution(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	captureStdout(func() {
+		vaultIncidents([]string{
+			"--gateway", srv.URL,
+			"--origin", "real",
+			"--status", "open",
+			"--attribution", "lock_contention",
+		})
+	})
+
+	cases := map[string]string{
+		"origin":      "real",
+		"status":      "open",
+		"attribution": "lock_contention",
+	}
+	for key, want := range cases {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("query param %q = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestVaultIncidents_SeriesDrilldown_MergesOriginBundleDraft proves the
+// series/fault drilldown (`vault incidents <series-or-fault-id>`) merges in
+// the incidents table's origin/bundle_path/draft_playbook_id fields
+// alongside its existing per-run DIAG/REMEDIATION/FEEDBACK/SCORE/FINDINGS
+// columns, via one extra GET /api/v1/incidents call (not one per run).
+func TestVaultIncidents_SeriesDrilldown_MergesOriginBundleDraft(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/fleet/playbook-runs" && r.URL.Query().Get("series_id") == "pbs_k8s_pod_crash_triage":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"runs": []incidentRun{
+					{RunID: "plr_test1", SeriesID: "pbs_k8s_pod_crash_triage", Outcome: "transitioned", StartedAt: time.Now().UTC().Format(time.RFC3339)},
+				},
+			})
+		case r.URL.Path == "/api/v1/incidents":
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"count": 1,
+				"incidents": []audit.Incident{
+					{IncidentID: "inc_test1", EntryRunID: "plr_test1", SeriesID: "pbs_k8s_pod_crash_triage",
+						Origin: "faulttest", BundlePath: "/data/incidents/x.tar.gz", DraftPlaybookID: "pb_test1"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidents([]string{"--gateway", srv.URL, "pbs_k8s_pod_crash_triage"})
+	})
+
+	for _, want := range []string{"plr_test1", "faulttest", "yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestVaultIncidentsRecent_NoIncidents_PrintsHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false, "", "", "")
+	})
+
+	if !strings.Contains(out, "No recent incidents found.") {
+		t.Errorf("output missing no-incidents message, got:\n%s", out)
+	}
+}
+
+// ── postEvaluations primary_confidence ───────────────────────────────────
 
 func TestPostEvaluations_IncludesPrimaryConfidence(t *testing.T) {
 	var gotBody map[string]any

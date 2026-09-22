@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/testing/testutil"
 )
 
@@ -161,6 +162,13 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		// fault-stability cert, so it can't be gated on one already existing.
 		// See trustNotYetEarnedForceGate (cmd/gateway/playbooks.go).
 		"skip_trust_gate": true,
+		// v0.29 incident-entity design, Phase 4 (see docs/INCIDENTS.md):
+		// tags the resulting incidents-table row's origin explicitly, replacing
+		// the old "faulttest-" trace_id-prefix heuristic (still used for
+		// human-readable trace IDs, but no longer the signal for this). Same
+		// self-reported trust model as skip_trust_gate above — no distinctive
+		// faulttest service identity exists to infer this from instead.
+		"origin": audit.IncidentOriginFaulttest,
 	}
 	if connStr != "" {
 		reqBody["connection_string"] = connStr

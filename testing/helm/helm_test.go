@@ -1267,3 +1267,27 @@ func TestVaultQueryJob_NilVaultQueryValue_DoesNotPanic(t *testing.T) {
 		t.Fatalf("helm template failed with vaultQuery explicitly nil (simulating a pre-vaultQuery release reused via --reuse-values): %v\n%s", err, out)
 	}
 }
+
+// TestAutoIncidentBundle_AbsentByDefault verifies the v0.29 incident-entity
+// design's Phase 3 opt-in flag (HELPDESK_AUTO_INCIDENT_BUNDLE) is absent from
+// the gateway Deployment unless explicitly enabled, mirroring crystalBall's
+// same off-by-default convention.
+func TestAutoIncidentBundle_AbsentByDefault(t *testing.T) {
+	objects := render(t)
+	dep := objects["Deployment/test-gateway"]
+	container := containerByName(t, dep, "gateway")
+	env := containerEnvMap(container)
+	if _, ok := env["HELPDESK_AUTO_INCIDENT_BUNDLE"]; ok {
+		t.Error("HELPDESK_AUTO_INCIDENT_BUNDLE should be absent by default (gateway.autoIncidentBundle=false)")
+	}
+}
+
+func TestAutoIncidentBundle_SetWhenEnabled(t *testing.T) {
+	objects := render(t, "gateway.autoIncidentBundle=true")
+	dep := objects["Deployment/test-gateway"]
+	container := containerByName(t, dep, "gateway")
+	env := containerEnvMap(container)
+	if env["HELPDESK_AUTO_INCIDENT_BUNDLE"] != "true" {
+		t.Errorf("HELPDESK_AUTO_INCIDENT_BUNDLE = %q, want \"true\" when gateway.autoIncidentBundle=true", env["HELPDESK_AUTO_INCIDENT_BUNDLE"])
+	}
+}

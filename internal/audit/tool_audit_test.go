@@ -26,14 +26,14 @@ func newToolAuditTestStore(t *testing.T) *Store {
 func TestRecordToolInvoked_NilAuditor(t *testing.T) {
 	ta := NewToolAuditor(nil, "test-agent", "sess-1", "trace-1")
 	// Should be a no-op and not panic.
-	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", nil)
+	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", "terminate_connection", nil)
 }
 
 func TestRecordToolInvoked_RecordsEvent(t *testing.T) {
 	store := newToolAuditTestStore(t)
 	ta := NewToolAuditor(store, "db-agent", "sess-inv", "trace-inv-42")
 
-	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", []string{"env:prod"})
+	ta.RecordToolInvoked(context.Background(), "database", "prod-db", "write", "terminate_connection", []string{"env:prod"})
 
 	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolInvoked})
 	if err != nil {
@@ -65,8 +65,22 @@ func TestRecordToolInvoked_RecordsEvent(t *testing.T) {
 	if evt.PolicyDecision.Action != "write" {
 		t.Errorf("Action = %q, want write", evt.PolicyDecision.Action)
 	}
+	if evt.PolicyDecision.ToolName != "terminate_connection" {
+		t.Errorf("ToolName = %q, want terminate_connection", evt.PolicyDecision.ToolName)
+	}
 	if evt.PolicyDecision.Effect != "" {
 		t.Errorf("Effect = %q, want empty (not yet evaluated)", evt.PolicyDecision.Effect)
+	}
+
+	// The SQL tool_name column, not just the JSON-embedded PolicyDecision
+	// field, must be populated — that's what makes the event findable by
+	// ToolName filter (and what the turn-by-turn map feature will query on).
+	byToolName, err := store.Query(context.Background(), QueryOptions{ToolName: "terminate_connection", EventType: EventTypeToolInvoked})
+	if err != nil {
+		t.Fatalf("Query by ToolName: %v", err)
+	}
+	if len(byToolName) != 1 {
+		t.Fatalf("Query by ToolName=terminate_connection returned %d events, want 1 — tool_invoked events must be findable by the tool_name column, not just decodable from raw_json", len(byToolName))
 	}
 }
 
@@ -74,7 +88,7 @@ func TestRecordToolInvoked_EventIDHasInvPrefix(t *testing.T) {
 	store := newToolAuditTestStore(t)
 	ta := NewToolAuditor(store, "k8s-agent", "sess-k8s", "")
 
-	ta.RecordToolInvoked(context.Background(), "kubernetes", "prod-ns", "read", nil)
+	ta.RecordToolInvoked(context.Background(), "kubernetes", "prod-ns", "read", "get_pods", nil)
 
 	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeToolInvoked})
 	if err != nil {

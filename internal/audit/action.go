@@ -64,26 +64,28 @@ var ToolClassification = map[string]ActionClass{
 	"read_uploaded_file":         ActionRead,
 
 	// Kubernetes agent tools
-	"get_pods":           ActionRead,
-	"get_pod_logs":       ActionRead,
-	"get_service":        ActionRead,
-	"describe_service":   ActionRead,
-	"get_endpoints":      ActionRead,
-	"get_nodes":          ActionRead,
-	"get_events":         ActionRead,
-	"describe_pod":       ActionRead,
-	"get_pod_resources":  ActionRead,
-	"get_node_status":    ActionRead,
-	"scale_deployment":   ActionDestructive,
-	"restart_deployment": ActionDestructive,
-	"delete_pod":         ActionDestructive,
-	"debug_node_dmesg":   ActionWrite, // creates a debug pod on the node; flip to ActionDestructive to treat as high-risk by default
+	"get_pods":                   ActionRead,
+	"get_pod_logs":               ActionRead,
+	"get_service":                ActionRead,
+	"describe_service":           ActionRead,
+	"get_endpoints":              ActionRead,
+	"get_nodes":                  ActionRead,
+	"get_events":                 ActionRead,
+	"describe_pod":               ActionRead,
+	"get_pod_resources":          ActionRead,
+	"get_node_status":            ActionRead,
+	"scale_deployment":           ActionDestructive,
+	"restart_deployment":         ActionDestructive,
+	"delete_pod":                 ActionDestructive,
+	"patch_deployment_resources": ActionDestructive, // triggers a rollout restart, same risk profile as restart_deployment
+	"debug_node_dmesg":           ActionWrite,       // creates a debug pod on the node; flip to ActionDestructive to treat as high-risk by default
 
 	// Rollback operations — same action class as the original mutation they reverse
-	"rollback_scale_deployment": ActionDestructive,
-	"rollback_exec_update":      ActionDestructive,
-	"rollback_exec_delete":      ActionDestructive,
-	"rollback_exec_insert":      ActionWrite,
+	"rollback_scale_deployment":           ActionDestructive,
+	"rollback_patch_deployment_resources": ActionDestructive,
+	"rollback_exec_update":                ActionDestructive,
+	"rollback_exec_delete":                ActionDestructive,
+	"rollback_exec_insert":                ActionWrite,
 
 	// Incident agent tools
 	"create_incident_bundle": ActionWrite,

@@ -291,6 +291,40 @@ func TestRunPlaybook_SendsSkipTrustGate(t *testing.T) {
 	}
 }
 
+// TestRunPlaybook_SendsFaulttestOrigin is a regression guard mirroring
+// TestRunViaPlaybook_SendsFaulttestOrigin in runner_test.go (v0.29
+// incident-entity design, Phase 4) — found while asking "do we need
+// additional test coverage?" after Phase 4 landed: RunPlaybook is a second,
+// independently-maintained request-builder (already duplicating
+// skip_trust_gate above, for the same reason) that Phase 4's origin tagging
+// initially missed. Currently inert in faulttest's actual usage (RunPlaybook
+// is always called with a non-empty priorRunID today, chained from a triage
+// run — see Remediate's one call site in testing/cmd/faulttest/main.go), but
+// this locks in the field regardless, so a future standalone
+// remediation-only mode doesn't silently reintroduce the exact
+// "origin signal missing from one of two call sites" gap this phase exists
+// to close.
+func TestRunPlaybook_SendsFaulttestOrigin(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := resolveServer(t, "pb_test", func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	})
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+	})
+	if _, err := r.RunPlaybook(context.Background(), "pbs_test", "", ""); err != nil {
+		t.Fatalf("RunPlaybook: %v", err)
+	}
+	if gotBody["origin"] != "faulttest" {
+		t.Errorf("origin = %v, want \"faulttest\"", gotBody["origin"])
+	}
+}
+
 // ── prior_run_id threading ────────────────────────────────────────────────────
 
 func TestTriggerPlaybook_SendsPriorRunID(t *testing.T) {

@@ -39,6 +39,11 @@ type mockIncidentAuditd struct {
 	// requests per trace_id — used to assert the dedup cache in
 	// handleGetIncident actually works.
 	eventsRequestCount map[string]int
+	// incidentRecordByRunID maps a triage run_id to the v0.29 incidents-table
+	// row GET /v1/incidents/by-run/<runID> should return. Absent key ⇒ 404,
+	// the fail-open "no incident row for this run" case (mirrors cmd/auditd's
+	// real handleGetByEntryRunID).
+	incidentRecordByRunID map[string]*audit.Incident
 }
 
 func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
@@ -106,6 +111,16 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 				return
 			}
 			json.NewEncoder(w).Encode(m.evaluation) //nolint:errcheck
+
+		// Incidents-table lookup by entry_run_id — GET /v1/incidents/by-run/{runID}.
+		case strings.Contains(path, "/v1/incidents/by-run/"):
+			runID := strings.TrimPrefix(path, "/v1/incidents/by-run/")
+			inc, ok := m.incidentRecordByRunID[runID]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			json.NewEncoder(w).Encode(inc) //nolint:errcheck
 
 		default:
 			http.NotFound(w, r)
@@ -179,6 +194,79 @@ func TestHandleGetIncident_BasicNarrative(t *testing.T) {
 	}
 	if n.Remediation != nil {
 		t.Errorf("Remediation should be nil, got %+v", n.Remediation)
+	}
+	if n.IncidentRecord != nil {
+		t.Errorf("IncidentRecord should be nil when no incidents-table row exists for this run, got %+v", n.IncidentRecord)
+	}
+}
+
+// TestHandleGetIncident_IncidentRecord_MergedWhenPresent closes the
+// "list vs. get" split-brain found during v0.29 doc review: GET
+// /api/v1/incidents (list) was rewired to read the new incidents table and
+// carries Origin/Status/Attribution/BundlePath/DraftPlaybookID, but this
+// single-item endpoint never looked at that table at all — a caller listing
+// incidents got the rich object, drilling into one specific incident by
+// run ID got none of it. Proves the merge closes that gap.
+func TestHandleGetIncident_IncidentRecord_MergedWhenPresent(t *testing.T) {
+	run := &audit.PlaybookRun{
+		RunID:           "plr_withrec01",
+		SeriesID:        "pbs_db_lock",
+		FindingsSummary: "Lock chain detected on pg_locks",
+		Outcome:         audit.OutcomeResolved,
+		Operator:        "alice",
+		StartedAt:       time.Now().UTC(),
+	}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		incidentRecordByRunID: map[string]*audit.Incident{
+			"plr_withrec01": {
+				IncidentID:      "inc_abc123",
+				EntryRunID:      "plr_withrec01",
+				Origin:          "real",
+				Status:          "resolved",
+				Attribution:     "lock_contention",
+				BundlePath:      "/incidents/a3f9b2c1.tar.gz",
+				DraftPlaybookID: "pb_generated_001",
+			},
+		},
+	}
+	auditSrv := mock.server(t)
+	gw := &Gateway{auditURL: auditSrv.URL}
+
+	rec := getIncident(t, gw, "plr_withrec01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if n.IncidentRecord == nil {
+		t.Fatal("IncidentRecord is nil, want the merged incidents-table row")
+	}
+	if n.IncidentRecord.Origin != "real" {
+		t.Errorf("IncidentRecord.Origin = %q, want real", n.IncidentRecord.Origin)
+	}
+	if n.IncidentRecord.Status != "resolved" {
+		t.Errorf("IncidentRecord.Status = %q, want resolved", n.IncidentRecord.Status)
+	}
+	if n.IncidentRecord.BundlePath != "/incidents/a3f9b2c1.tar.gz" {
+		t.Errorf("IncidentRecord.BundlePath = %q, want /incidents/a3f9b2c1.tar.gz", n.IncidentRecord.BundlePath)
+	}
+	if n.IncidentRecord.DraftPlaybookID != "pb_generated_001" {
+		t.Errorf("IncidentRecord.DraftPlaybookID = %q, want pb_generated_001", n.IncidentRecord.DraftPlaybookID)
+	}
+	// IncidentRecord.IncidentID (inc_*) must stay distinct from the
+	// top-level IncidentNarrative.IncidentID (the triage run_id) — the two
+	// identify different rows in different tables; merging must not
+	// collapse or overwrite either.
+	if n.IncidentID != "plr_withrec01" {
+		t.Errorf("top-level IncidentID = %q, want plr_withrec01 (must not be overwritten by the merge)", n.IncidentID)
+	}
+	if n.IncidentRecord.IncidentID != "inc_abc123" {
+		t.Errorf("IncidentRecord.IncidentID = %q, want inc_abc123", n.IncidentRecord.IncidentID)
 	}
 }
 

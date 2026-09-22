@@ -33,13 +33,13 @@ type config struct {
 	usersFile  string // optional; enables role-based auth on approve/deny/cancel
 
 	// Approval notification configuration
-	approvalWebhook  string
-	smtpHost         string
-	smtpPort         string
-	smtpUser         string
-	smtpPassword     string
-	emailFrom        string
-	emailTo          string
+	approvalWebhook string
+	smtpHost        string
+	smtpPort        string
+	smtpUser        string
+	smtpPassword    string
+	emailFrom       string
+	emailTo         string
 }
 
 func main() {
@@ -130,6 +130,14 @@ func main() {
 	playbookRunStore, err := audit.NewPlaybookRunStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create playbook run store", "err", err)
+		os.Exit(1)
+	}
+
+	// Create incident store (shares the same database connection) — Phase 1
+	// of the v0.29 incident-entity design; see docs/INCIDENTS.md.
+	incidentStore, err := audit.NewIncidentStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create incident store", "err", err)
 		os.Exit(1)
 	}
 
@@ -263,6 +271,7 @@ func main() {
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore, evaluationStore: runEvaluationStore}
+	incidentSrv := &incidentServer{store: incidentStore}
 	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 	faultStabilitySrv := &faultStabilityServer{store: faultStabilityStore}
@@ -334,6 +343,16 @@ func main() {
 	mux.HandleFunc("GET /v1/fleet/series/{seriesID}/version-stats", auth("GET /v1/fleet/series/{seriesID}/version-stats", playbookRunSrv.handleVersionStats))
 	mux.HandleFunc("GET /v1/fleet/calibration", auth("GET /v1/fleet/calibration", playbookRunSrv.handleCalibration))
 	mux.HandleFunc("GET /v1/fleet/fault-run-history", auth("GET /v1/fleet/fault-run-history", playbookRunSrv.handleFaultRunHistory))
+
+	// Incidents — Phase 1 of the v0.29 incident-entity design (see
+	// docs/INCIDENTS.md). One row per user-facing incident, sitting above
+	// playbook_runs (one row per hop) — not a replacement for it.
+	mux.HandleFunc("POST /v1/incidents", auth("POST /v1/incidents", incidentSrv.handleCreate))
+	mux.HandleFunc("PATCH /v1/incidents/{incidentID}", auth("PATCH /v1/incidents/{incidentID}", incidentSrv.handleUpdate))
+	mux.HandleFunc("GET /v1/incidents/by-run/{runID}", auth("GET /v1/incidents/by-run/{runID}", incidentSrv.handleGetByEntryRunID))
+	mux.HandleFunc("GET /v1/incidents/by-trace/{traceID}", auth("GET /v1/incidents/by-trace/{traceID}", incidentSrv.handleGetByTraceID))
+	mux.HandleFunc("GET /v1/incidents/{incidentID}", auth("GET /v1/incidents/{incidentID}", incidentSrv.handleGet))
+	mux.HandleFunc("GET /v1/incidents", auth("GET /v1/incidents", incidentSrv.handleList))
 
 	// Fault triage consistency certification (--repeat N results).
 	mux.HandleFunc("POST /v1/fleet/fault-stability", auth("POST /v1/fleet/fault-stability", faultStabilitySrv.handleUpsert))

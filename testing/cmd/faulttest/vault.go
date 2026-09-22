@@ -1993,13 +1993,6 @@ type incidentFeedback struct {
 	Operator       string `json:"operator"`
 }
 
-// fetchRunsByOutcome calls GET /api/v1/fleet/playbook-runs?outcome=<o>&limit=<n>.
-func fetchRunsByOutcome(gatewayURL, apiKey, outcome string, limit int) ([]incidentRun, error) {
-	params := neturl.Values{"outcome": {outcome}, "limit": {fmt.Sprintf("%d", limit)}}
-	u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/fleet/playbook-runs?" + params.Encode()
-	return doFetchRuns(u, apiKey)
-}
-
 // fetchRunsBySeries calls GET /api/v1/fleet/playbook-runs?series_id=<sid>&limit=<n>.
 func fetchRunsBySeries(gatewayURL, apiKey, seriesID string, limit int) ([]incidentRun, error) {
 	url := strings.TrimSuffix(gatewayURL, "/") +
@@ -2244,135 +2237,151 @@ func formatRemediationOutcome(r *incidentRun) string {
 // including outcome, timestamp, truncated findings, and feedback status.
 // vaultIncidentsRecent shows the most recent playbook runs across all faults
 // by querying resolved and failed outcomes and merging the results.
-func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool) {
-	outcomes := []string{"resolved", "transitioned", "failed", "abandoned", "escalated", "escalated+resolved"}
-	seen := map[string]bool{}
-	var all []incidentRun
-	for _, o := range outcomes {
-		runs, err := fetchRunsByOutcome(cfg.GatewayURL, cfg.GatewayAPIKey, o, limit)
-		if err != nil {
-			continue
-		}
-		for _, r := range runs {
-			if !seen[r.RunID] {
-				seen[r.RunID] = true
-				all = append(all, r)
-			}
-		}
+// vaultIncidentsRecent lists recent incidents from the incidents table
+// (v0.29 incident-entity design — see docs/INCIDENTS.md), the durable,
+// per-incident summary layer above playbook_runs. Prior to this, the default
+// `vault incidents` listing queried playbook_runs directly across 6 outcome
+// values and guessed real-vs-injected by checking a journey trace_id's
+// "faulttest-" prefix (--details only) — the exact fragile heuristic the
+// incidents table's own origin field was built to replace. Series-filtered
+// drilldown (`vault incidents <fault-id-or-series>`, see vaultIncidents
+// below) still queries playbook_runs directly: it shows per-run
+// fault/diagnosis/remediation/feedback/score detail the incidents table,
+// being a one-row-per-incident summary rather than a per-hop execution log,
+// doesn't carry.
+func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, status, attribution string) {
+	incidents, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, limit, origin, status, attribution)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error fetching incidents: %v\n", err)
+		os.Exit(1)
 	}
-
-	if len(all) == 0 {
+	if len(incidents) == 0 {
 		fmt.Println("No recent incidents found.")
 		fmt.Println("Run `faulttest vault incidents <fault-id>` to filter by fault.")
 		return
 	}
 
-	// Sort by started_at descending.
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].StartedAt > all[j].StartedAt
-	})
-	if len(all) > limit {
-		all = all[:limit]
-	}
-
-	// Optionally fetch per-run narratives for journey count and source detection.
-	type extra struct {
-		journeyCount int
-		source       string // "injected" or "real" or ""
-	}
-	extras := make([]extra, len(all))
+	// Optionally fetch per-run narratives for journey count (origin/status/
+	// bundle/draft already come straight from the incidents table, no extra
+	// call needed for those).
+	journeyCounts := make([]int, len(incidents))
 	if details {
-		fmt.Fprintf(os.Stderr, "Fetching details for %d runs...\n", len(all))
-		for i, run := range all {
-			n, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, run.RunID)
+		fmt.Fprintf(os.Stderr, "Fetching details for %d incidents...\n", len(incidents))
+		for i, inc := range incidents {
+			if inc.EntryRunID == "" {
+				continue
+			}
+			n, err := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, inc.EntryRunID)
 			if err != nil {
 				continue
 			}
-			extras[i].journeyCount = len(n.Journeys)
-			// Detect injected: any journey trace_id starting with "faulttest-".
-			for _, j := range n.Journeys {
-				if strings.HasPrefix(j.TraceID, "faulttest-") {
-					extras[i].source = "injected"
-					break
-				}
-			}
-			if extras[i].source == "" && len(n.Journeys) > 0 {
-				extras[i].source = "real"
-			}
+			journeyCounts[i] = len(n.Journeys)
 		}
 	}
 
-	fmt.Printf("Recent incidents (last %d)", len(all))
-	if details {
-		fmt.Printf(" — SOURCE: injected=faulttest harness, real=human operator")
-	}
-	fmt.Printf("\n\n")
+	fmt.Printf("Recent incidents (last %d)\n\n", len(incidents))
 
 	const (
+		colIncID   = 12
 		colRunID   = 14
-		colSeries  = 28
+		colSeries  = 24
 		colDate    = 16
-		colOutcome = 18 // wide enough for "escalated+resolved"
-		colOp      = 20
+		colOrigin  = 10
+		colStatus  = 11 // wide enough for "escalated"
+		colAttr    = 26
 		colJourney = 8
-		colSource  = 8
+		colBundle  = 8
+		colDraft   = 8
 	)
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+		colIncID, "INCIDENT", colRunID, "ENTRY RUN", colSeries, "SERIES", colDate, "DETECTED",
+		colOrigin, "ORIGIN", colStatus, "STATUS", colAttr, "ATTRIBUTION",
+		colBundle, "BUNDLE", colDraft, "DRAFT")
 	if details {
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED",
-			colOutcome, "OUTCOME", colJourney, "JOURNEYS", colSource, "SOURCE", "OPERATOR")
-		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colJourney+2+colSource+2+colOp))
-	} else {
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
-			colRunID, "RUN ID", colSeries, "SERIES", colDate, "STARTED", colOutcome, "OUTCOME", "OPERATOR")
-		fmt.Println(strings.Repeat("─", colRunID+2+colSeries+2+colDate+2+colOutcome+2+colOp+4))
+		fmt.Printf("  %s", "JOURNEYS")
 	}
+	fmt.Println()
+	sepLen := colIncID + 2 + colRunID + 2 + colSeries + 2 + colDate + 2 + colOrigin + 2 + colStatus + 2 + colAttr + 2 + colBundle + 2 + colDraft
+	if details {
+		sepLen += 2 + colJourney
+	}
+	fmt.Println(strings.Repeat("─", sepLen))
 
-	for i, run := range all {
-		date := run.StartedAt
-		if t, err := time.Parse(time.RFC3339, run.StartedAt); err == nil {
-			date = t.Format("2006-01-02 15:04")
-		} else if len(run.StartedAt) >= 16 {
-			date = run.StartedAt[:16]
-		}
-		series := run.SeriesID
-		if len(series) > colSeries {
+	for i, inc := range incidents {
+		date := inc.DetectedAt.Format("2006-01-02 15:04")
+		series := inc.SeriesID
+		if series == "" {
+			series = "–"
+		} else if len(series) > colSeries {
 			series = series[:colSeries-3] + "..."
 		}
-		op := run.Operator
-		if op == "" {
-			op = "–"
+		origin := inc.Origin
+		if origin == "" {
+			origin = "real"
 		}
+		status := inc.Status
+		if status == "" {
+			status = "open"
+		}
+		attr := inc.Attribution
+		if len(attr) > colAttr {
+			attr = attr[:colAttr-3] + "..."
+		}
+		if attr == "" {
+			attr = "–"
+		}
+		bundle := "no"
+		if inc.BundlePath != "" {
+			bundle = "yes"
+		}
+		draft := "no"
+		if inc.DraftPlaybookID != "" {
+			draft = "yes"
+		}
+		runID := inc.EntryRunID
+		if runID == "" {
+			runID = "–"
+		}
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s",
+			colIncID, inc.IncidentID, colRunID, runID, colSeries, series, colDate, date,
+			colOrigin, origin, colStatus, status, colAttr, attr, colBundle, bundle, colDraft, draft)
 		if details {
 			jc := "–"
-			if extras[i].journeyCount > 0 {
-				jc = fmt.Sprintf("%d", extras[i].journeyCount)
+			if journeyCounts[i] > 0 {
+				jc = fmt.Sprintf("%d", journeyCounts[i])
 			}
-			src := extras[i].source
-			if src == "" {
-				src = "–"
-			}
-			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-				colRunID, run.RunID, colSeries, series, colDate, date,
-				colOutcome, run.Outcome, colJourney, jc, colSource, src, op)
-		} else {
-			fmt.Printf("%-*s  %-*s  %-*s  %-*s  %s\n",
-				colRunID, run.RunID, colSeries, series, colDate, date, colOutcome, run.Outcome, op)
+			fmt.Printf("  %s", jc)
 		}
+		fmt.Println()
 	}
 	fmt.Println()
 	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
-	fmt.Println("  → vault incidents <fault-id>        all runs for a fault")
-	fmt.Println("  → vault incidents --details         show JOURNEYS count and SOURCE")
+	fmt.Println("  → vault incidents <fault-id>        all runs for a fault (per-hop detail)")
+	fmt.Println("  → vault incidents --details         show JOURNEYS count")
+	fmt.Println("  → vault incidents --origin real     real incidents only (excludes faulttest)")
+	fmt.Println("  → vault incidents --status open     only incidents still open")
 }
 
 // Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
+//
+//	[--origin real|faulttest] [--status open|resolved|escalated|abandoned] [--attribution <label>]
+//
+// --origin/--status/--attribution only apply to the no-argument (all-incidents)
+// listing — vaultIncidentsRecent, which reads the v0.29 incidents table
+// directly. The <fault-id-or-series-id> drilldown below queries playbook_runs,
+// not that table, so these flags have nothing to filter there and are silently
+// ignored in that mode rather than erroring — consistent with --details also
+// having no effect in some modes below.
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
 	var details bool
+	var origin, status, attribution string
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
+	fs.StringVar(&origin, "origin", "", "Filter by origin: real or faulttest (all-incidents listing only)")
+	fs.StringVar(&status, "status", "", "Filter by status: open, resolved, escalated, or abandoned (all-incidents listing only)")
+	fs.StringVar(&attribution, "attribution", "", "Filter by root-cause attribution label (all-incidents listing only)")
 	cfg := loadConfig(fs, args)
 
 	if cfg.GatewayURL == "" {
@@ -2380,7 +2389,7 @@ func vaultIncidents(args []string) {
 		os.Exit(1)
 	}
 	if len(fs.Args()) == 0 {
-		vaultIncidentsRecent(cfg, limit, details)
+		vaultIncidentsRecent(cfg, limit, details, origin, status, attribution)
 		return
 	}
 
@@ -2448,20 +2457,41 @@ func vaultIncidents(args []string) {
 
 	fmt.Printf("Incidents for %s (%s) — %d runs\n\n", arg, seriesID, len(runs))
 
+	// One extra call for the whole series (not one per run) to merge in the
+	// incidents table's own origin/bundle/draft fields — see
+	// fetchIncidentsList's docs/INCIDENTS.md reference and
+	// vaultIncidentsRecent's comment for why this table exists alongside
+	// playbook_runs. Deliberately unfiltered (origin/status/attribution all
+	// ""): this builds a run_id -> *Incident lookup map for a client-side
+	// join below, which needs the full set, not a narrowed one.
+	incidentsBySeries, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, 0, "", "", "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not fetch incidents table for origin/bundle/draft columns: %v\n", err)
+	}
+	incByRunID := make(map[string]*audit.Incident, len(incidentsBySeries))
+	for _, inc := range incidentsBySeries {
+		if inc.EntryRunID != "" {
+			incByRunID[inc.EntryRunID] = inc
+		}
+	}
+
 	const (
 		colRunID    = 14
 		colDate     = 16
+		colOrigin   = 9
 		colFault    = 28
 		colDiag     = 18 // wide enough for "escalated+resolved"
 		colRemed    = 24 // wide enough for "escalated+resolved 30.0s"
 		colFeedback = 12
 		colScore    = 5
+		colBundle   = 6
+		colDraft    = 5
 	)
-	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
-		colRunID, "RUN ID", colDate, "STARTED", colFault, "FAULT",
+	fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		colRunID, "RUN ID", colDate, "STARTED", colOrigin, "ORIGIN", colFault, "FAULT",
 		colDiag, "DIAG", colRemed, "REMEDIATION",
-		colFeedback, "FEEDBACK", colScore, "SCORE", "FINDINGS")
-	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+40))
+		colFeedback, "FEEDBACK", colScore, "SCORE", colBundle, "BUNDLE", colDraft, "DRAFT", "FINDINGS")
+	fmt.Println(strings.Repeat("─", colRunID+2+colDate+2+colOrigin+2+colFault+2+colDiag+2+colRemed+2+colFeedback+2+colScore+2+colBundle+2+colDraft+2+40))
 
 	for _, run := range runs {
 		date := run.StartedAt
@@ -2518,14 +2548,41 @@ func vaultIncidents(args []string) {
 			findings = "–"
 		}
 
-		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
+		// No incidents-table row for this run means untracked (predates the
+		// incidents table, or this run was never a genuine entry point) —
+		// not "no bundle/draft exists" and definitely not "origin=real".
+		// Many older runs here are plainly faulttest-injected (see the FAULT
+		// column, extracted from a faulttest-* trace ID) despite having no
+		// row; guessing "real" for a map miss would flatly contradict that.
+		origin := "–"
+		bundleStr := "–"
+		draftStr := "–"
+		if inc := incByRunID[run.RunID]; inc != nil {
+			origin = inc.Origin
+			if origin == "" {
+				origin = "real"
+			}
+			bundleStr = "no"
+			if inc.BundlePath != "" {
+				bundleStr = "yes"
+			}
+			draftStr = "no"
+			if inc.DraftPlaybookID != "" {
+				draftStr = "yes"
+			}
+		}
+
+		fmt.Printf("%-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s\n",
 			colRunID, run.RunID,
 			colDate, date,
+			colOrigin, origin,
 			colFault, faultDisplay,
 			colDiag, diagOutcome,
 			colRemed, remedStr,
 			colFeedback, feedbackStr,
 			colScore, scoreStr,
+			colBundle, bundleStr,
+			colDraft, draftStr,
 			findings,
 		)
 	}
@@ -2883,6 +2940,14 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	if j.RetryCount > 0 {
 		fmt.Printf("  %-18s %d\n", "Retries:", j.RetryCount)
 	}
+	// Layer 1 (docs/AIGOVERNANCE.md §1.1): a mutation tool's own post-action
+	// re-verification found the change didn't stick, or never confirmed it
+	// did within the retry budget. Previously this had no dedicated warning
+	// anywhere — only visible indirectly via the generic Outcome string above.
+	switch j.Outcome {
+	case "verified_warning", "verified_failed", "escalation_required":
+		fmt.Printf("  %-18s ⚠ [%s] post-action re-verification did not confirm the change stuck\n", "Verification:", audit.LayerIntraAgentVerification)
+	}
 
 	if j.UserQuery != "" {
 		sectionJ("QUERY")
@@ -2909,7 +2974,8 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 			fmt.Fprintf(os.Stderr, "  Warning: could not fetch run events: %v\n", err)
 		} else {
 			sectionJ("EXECUTION TRACE")
-			printReasoningTrace(events)
+			printReasoningTrace(filterJourneyEventTypes(events, "agent_reasoning", "tool_execution"))
+			printToolCallIntegrity(events, sectionJ)
 		}
 		// Show the structured FINDINGS from the playbook run's diagnostic_report.
 		// This is the agent's final conclusion that often falls after the last tool
@@ -2943,7 +3009,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasMismatch {
-		sectionJ("FABRICATION WARNING")
+		sectionJ("FABRICATION WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  ! One or more delegations reported success but no matching tool")
 		fmt.Println("    execution was recorded in the audit trail.")
 		fmt.Println("    This may indicate LLM fabrication. Review the agent transcript.")
@@ -2963,7 +3029,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasTargetDrift {
-		sectionJ("TARGET DRIFT WARNING")
+		sectionJ("TARGET DRIFT WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  D A real tool call in this journey used a different connection_string")
 		fmt.Println("    than the run was invoked with. The tool call itself is genuine —")
 		fmt.Println("    HasMismatch may be false — but any diagnosis built on it reflects")
@@ -2998,7 +3064,7 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 	}
 
 	if j.HasProtocolViolation {
-		sectionJ("PROTOCOL VIOLATION WARNING")
+		sectionJ("PROTOCOL VIOLATION WARNING [" + audit.LayerDelegationVerification + "]")
 		fmt.Println("  P A triage-typed playbook's hop resolved without emitting the")
 		fmt.Println("    required TRANSITION_TO/ESCALATE_TO signal at all — not even an")
 		fmt.Println("    explicit \"none\". No gate was forced (no target to gate into);")
@@ -3049,11 +3115,12 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 
 // journeyEvent is a minimal mirror of audit.Event for JSON decoding.
 type journeyEvent struct {
-	EventID        string            `json:"event_id"`
-	Timestamp      string            `json:"timestamp"`
-	EventType      string            `json:"event_type"`
-	ToolExecution  *journeyToolExec  `json:"tool,omitempty"`
-	AgentReasoning *journeyReasoning `json:"agent_reasoning,omitempty"`
+	EventID        string                 `json:"event_id"`
+	Timestamp      string                 `json:"timestamp"`
+	EventType      string                 `json:"event_type"`
+	ToolExecution  *journeyToolExec       `json:"tool,omitempty"`
+	AgentReasoning *journeyReasoning      `json:"agent_reasoning,omitempty"`
+	PolicyDecision *journeyPolicyDecision `json:"policy_decision,omitempty"`
 }
 
 type journeyToolExec struct {
@@ -3064,6 +3131,15 @@ type journeyToolExec struct {
 type journeyReasoning struct {
 	Reasoning string   `json:"reasoning"`
 	ToolCalls []string `json:"tool_calls"`
+}
+
+// journeyPolicyDecision mirrors audit.PolicyDecision's fields relevant to
+// tool_invoked/policy_decision events client-side. ToolName is the field the
+// turn-by-turn tool-call integrity map (printJourneyDetail --detail) needs —
+// it wasn't populated in the audit trail at all until PolicyDecision.ToolName
+// was added server-side; this client-side mirror just makes it visible here.
+type journeyPolicyDecision struct {
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // fetchRunFindings fetches the findings_summary from a single playbook run.
@@ -3099,11 +3175,17 @@ func fetchRunFindings(gatewayURL, apiKey, runID string) string {
 }
 
 // fetchRunEvents calls GET /api/v1/fleet/playbook-runs/{runID}/events and
-// returns tool_execution and agent_reasoning events sorted by timestamp.
+// returns agent_reasoning, tool_invoked, policy_decision, and tool_execution
+// events sorted by timestamp. tool_invoked/policy_decision were added for the
+// turn-by-turn tool-call integrity map (see printJourneyDetail's --detail
+// section) — without them, a declared tool call that got dropped before
+// tool_execution is invisible to this client, even though the gateway's own
+// default type list already includes policy_decision (this client always
+// overrode that default with a narrower list, so it never mattered before).
 func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") +
 		"/api/v1/fleet/playbook-runs/" + runID +
-		"/events?types=agent_reasoning,tool_execution&limit=500"
+		"/events?types=agent_reasoning,tool_invoked,policy_decision,tool_execution&limit=500"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -3125,6 +3207,152 @@ func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
 		return nil, fmt.Errorf("decode events: %w", err)
 	}
 	return events, nil
+}
+
+// filterJourneyEventTypes returns the subset of events matching one of the
+// given types, preserving order. Used to hand printReasoningTrace only the
+// two event types it was built for — fetchRunEvents now also fetches
+// tool_invoked/policy_decision (for buildToolCallTurns below), which
+// printReasoningTrace has no rendering case for and would otherwise throw
+// off its "blank line between groups" adjacency logic (it looks at the very
+// next event in the slice, which would now sometimes be an invisible
+// tool_invoked/policy_decision event instead of the next visible one).
+func filterJourneyEventTypes(events []journeyEvent, types ...string) []journeyEvent {
+	want := make(map[string]bool, len(types))
+	for _, t := range types {
+		want[t] = true
+	}
+	filtered := make([]journeyEvent, 0, len(events))
+	for _, ev := range events {
+		if want[ev.EventType] {
+			filtered = append(filtered, ev)
+		}
+	}
+	return filtered
+}
+
+// toolCallTurn is one model reasoning turn's declared-vs-confirmed tool-call
+// accounting. A turn is everything from one agent_reasoning event up to (but
+// not including) the next — the same timestamp-order grouping
+// printReasoningTrace already assumes; no parent_id/correlation-ID chain
+// exists anywhere in this pipeline to group more precisely (a per-turn ID
+// threaded from agentutil.NewReasoningCallback through ADK's dispatch
+// goroutines would be more exact under concurrent/parallel tool calls, but
+// is a bigger, separate change — not attempted here).
+type toolCallTurn struct {
+	Index         int
+	Declared      []string // agent_reasoning.tool_calls, in order, duplicates preserved
+	InvokedCount  int
+	PolicyCount   int
+	ExecutedCount int
+	executedNames []string // tool_execution.Name values seen in this turn, in order
+	// Missing is Declared minus executedNames as a multiset difference (a
+	// tool declared 3 times with 3 matching executions is never "missing"
+	// even though the names repeat) — this is what actually caught the real
+	// get_config_parameter drop this feature exists because of. Deliberately
+	// diffed against tool_execution names specifically, not tool_invoked/
+	// policy_decision: tool_execution has always carried a name, even in
+	// audit data recorded before PolicyDecision.ToolName existed, so this
+	// naming works on old traces too — InvokedCount/PolicyCount are honest
+	// raw counts either way, but can't be attributed to a specific declared
+	// name on pre-fix data.
+	Missing []string
+}
+
+// buildToolCallTurns groups a trace's events into per-turn declared-vs-
+// confirmed accounting — see toolCallTurn's doc comment for the grouping
+// model and what Missing does and doesn't depend on.
+func buildToolCallTurns(events []journeyEvent) []toolCallTurn {
+	var turns []toolCallTurn
+	var current *toolCallTurn
+	for _, ev := range events {
+		switch ev.EventType {
+		case "agent_reasoning":
+			if ev.AgentReasoning == nil || len(ev.AgentReasoning.ToolCalls) == 0 {
+				current = nil
+				continue
+			}
+			turns = append(turns, toolCallTurn{Index: len(turns) + 1, Declared: ev.AgentReasoning.ToolCalls})
+			current = &turns[len(turns)-1]
+		case "tool_invoked":
+			if current != nil {
+				current.InvokedCount++
+			}
+		case "policy_decision":
+			if current != nil {
+				current.PolicyCount++
+			}
+		case "tool_execution":
+			if current != nil {
+				current.ExecutedCount++
+				if ev.ToolExecution != nil {
+					current.executedNames = append(current.executedNames, ev.ToolExecution.Name)
+				}
+			}
+		}
+	}
+	for i := range turns {
+		turns[i].Missing = multisetDiff(turns[i].Declared, turns[i].executedNames)
+	}
+	return turns
+}
+
+// multisetDiff returns the elements of a not accounted for by b, respecting
+// counts (an element appearing twice in a is only "missing" if it appears
+// fewer than twice in b).
+func multisetDiff(a, b []string) []string {
+	remaining := make(map[string]int, len(b))
+	for _, v := range b {
+		remaining[v]++
+	}
+	var diff []string
+	for _, v := range a {
+		if remaining[v] > 0 {
+			remaining[v]--
+		} else {
+			diff = append(diff, v)
+		}
+	}
+	return diff
+}
+
+// printToolCallIntegrity renders the turn-by-turn declared → invoked →
+// policy-checked → executed map — Layer 2 (docs/AIGOVERNANCE.md §1.1) made
+// visible without a raw DB pull. Built directly from a manual sqlite3
+// investigation this same pipeline required to catch a real, reproducible
+// tool-call drop (get_config_parameter, found live 2026-09-19/20 on 2 of 3
+// deployment platforms — see project_fabrication_detection_followups.md):
+// this turns that one-off DB query into a first-class CLI feature.
+// sectionHeader is called (once, with this section's title) only when there's
+// actually a turn to show — printJourneyDetail's own sectionJ closure, passed
+// in rather than assumed global, so an empty trace doesn't print a bare
+// header with nothing under it.
+func printToolCallIntegrity(events []journeyEvent, sectionHeader func(string)) {
+	turns := buildToolCallTurns(events)
+	if len(turns) == 0 {
+		return
+	}
+	sectionHeader("TOOL CALL INTEGRITY (declared → invoked → policy-checked → executed) [" + audit.LayerDelegationVerification + "]")
+	const (
+		colTurn     = 4
+		colDeclared = 42
+		colCount    = 7
+	)
+	fmt.Printf("  %-*s %-*s %*s %*s %*s  %s\n",
+		colTurn, "TURN", colDeclared, "DECLARED", colCount, "INVOKED", colCount, "POLICY", colCount, "EXECUTED", "VERDICT")
+	for _, t := range turns {
+		declaredStr := strings.Join(t.Declared, ", ")
+		if len(declaredStr) > colDeclared {
+			declaredStr = declaredStr[:colDeclared-3] + "..."
+		}
+		verdict := "✓"
+		if len(t.Missing) > 0 {
+			verdict = fmt.Sprintf("✗ [%s] %s never confirmed", audit.LayerDelegationVerification, strings.Join(t.Missing, ", "))
+		}
+		fmt.Printf("  %-*d %-*s %*d %*d %*d  %s\n",
+			colTurn, t.Index, colDeclared, declaredStr, colCount, t.InvokedCount, colCount, t.PolicyCount, colCount, t.ExecutedCount, verdict)
+	}
+	fmt.Println()
 }
 
 // printReasoningTrace renders agent_reasoning and tool_execution events
@@ -4851,6 +5079,15 @@ type incidentNarrative struct {
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
 	Journeys   []narrativeJourneyRef `json:"journeys,omitempty"`
+	// IncidentRecord is the v0.29 incidents-table row for this run, when one
+	// exists — reuses audit.Incident directly (same as fetchIncidentsList
+	// already does for list mode) rather than a mirrored struct, since
+	// there's no reason to hand-duplicate its fields a second time. nil for
+	// any run that predates the incident-entity redesign, or was never
+	// tracked as an incident. Closes a gap where `vault incidents <plr_id>`'s
+	// deep-dive never showed origin/status/attribution/bundle/draft even
+	// after the gateway started returning them — list mode already did.
+	IncidentRecord *audit.Incident `json:"incident_record,omitempty"`
 }
 
 func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrative, error) {
@@ -4881,6 +5118,60 @@ func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrativ
 	return &n, nil
 }
 
+// fetchIncidentsList calls the v0.29 incident-entity design's GET
+// /api/v1/incidents (repurposed from a legacy LLM-mediated flat-file listing
+// to a real, indexed query over the incidents table — see docs/INCIDENTS.md).
+// limit<=0 omits the query param (server default applies).
+// fetchIncidentsList calls GET /api/v1/incidents, optionally narrowing the
+// query itself via origin/status/attribution (proxied straight through to
+// auditd's GET /v1/incidents — see cmd/auditd/incident_handlers.go's
+// handleList). Empty string means "no filter" for each, matching the
+// server's own convention. limit<=0 omits the query param (server default
+// applies).
+func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, attribution string) ([]*audit.Incident, error) {
+	q := neturl.Values{}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if origin != "" {
+		q.Set("origin", origin)
+	}
+	if status != "" {
+		q.Set("status", status)
+	}
+	if attribution != "" {
+		q.Set("attribution", attribution)
+	}
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/incidents"
+	if encoded := q.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gateway returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Incidents []*audit.Incident `json:"incidents"`
+		Count     int               `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return result.Incidents, nil
+}
+
 func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	n, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
 	if err != nil {
@@ -4902,13 +5193,13 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// attestation either way.
 	printFlags := func(hasMismatch, hasTargetDrift, hasProtocolViolation bool) {
 		if hasMismatch {
-			fmt.Println("           ⚠ unverified — no matching tool execution in the audit trail")
+			fmt.Printf("           ⚠ [%s] unverified — no matching tool execution in the audit trail\n", audit.LayerDelegationVerification)
 		}
 		if hasTargetDrift {
-			fmt.Println("           ⚠ target drift — a tool call used a different connection string")
+			fmt.Printf("           ⚠ [%s] target drift — a tool call used a different connection string\n", audit.LayerDelegationVerification)
 		}
 		if hasProtocolViolation {
-			fmt.Println("           ⚠ protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted")
+			fmt.Printf("           ⚠ [%s] protocol violation — required TRANSITION_TO/ESCALATE_TO signal omitted\n", audit.LayerDelegationVerification)
 		}
 	}
 	// printUnverifiedEvidence surfaces the actual flagged quote(s), not just a
@@ -4923,10 +5214,10 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// visually distinct since it's still the stronger of the two signals.
 	printUnverifiedEvidence := func(primary, secondary []string) {
 		for _, q := range primary {
-			fmt.Printf("           ⚠ unverified evidence (non-blocking) — %s\n", q)
+			fmt.Printf("           ⚠ [%s] unverified evidence (non-blocking) — %s\n", audit.LayerContentProvenance, q)
 		}
 		for _, q := range secondary {
-			fmt.Printf("           ⚠ unverified evidence (secondary, non-blocking) — %s\n", q)
+			fmt.Printf("           ⚠ [%s] unverified evidence (secondary, non-blocking) — %s\n", audit.LayerContentProvenance, q)
 		}
 	}
 	// printObjectiveEvidence surfaces Layer 4 (docs/AIGOVERNANCE.md §1.1) inline,
@@ -4937,10 +5228,10 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	// not as a warning — it's proof the model saw and cited the real data.
 	printObjectiveEvidence := func(confirmed, unconfirmed []string) {
 		if len(unconfirmed) > 0 {
-			fmt.Printf("           ⚠ unconfirmed evidence — %s\n", strings.Join(unconfirmed, ", "))
+			fmt.Printf("           ⚠ [%s] unconfirmed evidence — %s\n", audit.LayerObjectiveEvidence, strings.Join(unconfirmed, ", "))
 		}
 		if len(confirmed) > 0 {
-			fmt.Printf("           ✓ confirmed evidence — %s\n", strings.Join(confirmed, ", "))
+			fmt.Printf("           ✓ [%s] confirmed evidence — %s\n", audit.LayerObjectiveEvidence, strings.Join(confirmed, ", "))
 		}
 	}
 
@@ -4956,6 +5247,32 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 	}
 	if n.TriggerContext != "" {
 		fmt.Printf("Triggered by: %s\n", wordWrap(n.TriggerContext, 70, "              "))
+	}
+	// IncidentRecord fields — fail-open, same as every other section here:
+	// absent means either "no incidents-table row for this run" (pre-v0.29,
+	// or never tracked) or auditd being unreachable, not a positive claim
+	// that these are unset. List mode's own origin-default ("real" when
+	// Origin=="") and status-default ("open" when Status=="") conventions
+	// are mirrored here for consistency between the two views.
+	if n.IncidentRecord != nil {
+		origin := n.IncidentRecord.Origin
+		if origin == "" {
+			origin = "real"
+		}
+		status := n.IncidentRecord.Status
+		if status == "" {
+			status = "open"
+		}
+		fmt.Printf("Origin: %s   Status: %s\n", origin, status)
+		if n.IncidentRecord.Attribution != "" {
+			fmt.Printf("Attribution: %s\n", n.IncidentRecord.Attribution)
+		}
+		if n.IncidentRecord.BundlePath != "" {
+			fmt.Printf("Bundle: %s\n", n.IncidentRecord.BundlePath)
+		}
+		if n.IncidentRecord.DraftPlaybookID != "" {
+			fmt.Printf("Draft playbook: %s\n", n.IncidentRecord.DraftPlaybookID)
+		}
 	}
 	fmt.Printf("%s\n", divider)
 

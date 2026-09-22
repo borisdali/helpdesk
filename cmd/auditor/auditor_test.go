@@ -49,6 +49,9 @@ func TestCheckFabricationMismatch_EmitsCriticalAlert(t *testing.T) {
 	if !strings.Contains(found.Message, "FABRICATION RISK") {
 		t.Errorf("Message = %q, want to contain FABRICATION RISK", found.Message)
 	}
+	if !strings.Contains(found.Message, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("Message = %q, want to contain the %q label", found.Message, "["+audit.LayerDelegationVerification+"]")
+	}
 }
 
 // TestCheckFabricationMismatch_NoAlertOnCleanVerification verifies that a
@@ -129,6 +132,9 @@ func TestCheckFabricationMismatch_NarrationOnly_EmitsWarningNotCritical(t *testi
 	}
 	if narration.Severity != string(AlertWarning) {
 		t.Errorf("Severity = %q, want %q", narration.Severity, AlertWarning)
+	}
+	if !strings.Contains(narration.Message, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("Message = %q, want to contain the %q label", narration.Message, "["+audit.LayerDelegationVerification+"]")
 	}
 }
 

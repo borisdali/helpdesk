@@ -188,6 +188,14 @@ type Outcome struct {
 // PolicyDecision captures the outcome of a policy evaluation.
 // Emitted by PolicyEnforcer before every tool execution, regardless of outcome.
 type PolicyDecision struct {
+	// ToolName is the specific tool being invoked/checked (e.g. "get_pods",
+	// "terminate_idle_connections") — populated by PolicyEnforcer.CheckTool/
+	// CheckResult from agentutil.WithToolName's context value (already
+	// threaded there for policy *matching*; this field is what makes that
+	// same value queryable in the audit_events.tool_name column for
+	// tool_invoked/policy_decision events too, not just tool_execution).
+	// Empty when the caller never set it — see agentutil.toolNameFromContext.
+	ToolName      string   `json:"tool_name,omitempty"`
 	ResourceType  string   `json:"resource_type"`            // "database", "kubernetes"
 	ResourceName  string   `json:"resource_name"`            // db name, namespace, etc.
 	Action        string   `json:"action"`                   // "read", "write", "destructive"

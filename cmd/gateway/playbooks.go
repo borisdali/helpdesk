@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/authz"
 	"helpdesk/internal/decisions"
@@ -321,6 +322,18 @@ type PlaybookRunRequest struct {
 	// set this. Not exposed as a general escape hatch: it does not affect
 	// lowConfidenceForceGate or objectiveEvidenceForceGate, only the trust gate.
 	SkipTrustGate bool `json:"skip_trust_gate,omitempty"`
+
+	// Origin declares who's driving this run, for the incidents table's
+	// origin column (v0.29 incident-entity design, Phase 4 — see
+	// docs/INCIDENTS.md). Self-reported, same trust model as SkipTrustGate
+	// above (no distinctive faulttest service identity exists to infer this
+	// from instead — every faulttest deployment reuses an ordinary gateway
+	// API key). Validated against a closed allow-list (audit.IncidentOriginReal
+	// is the harmless zero-value default); an unrecognized value doesn't
+	// error, it's just treated as unset. faulttest sets this to "faulttest"
+	// unconditionally on every run it triggers (testing/faultlib/runner.go),
+	// the same way it already always sets skip_trust_gate.
+	Origin string `json:"origin,omitempty"`
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -408,7 +421,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator)
+	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator, req.Origin)
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -653,6 +666,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 // to a follow-on playbook when ESCALATE_TO fires and approval_mode permits it.
 func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Request, pb *audit.Playbook, req PlaybookRunRequest, runID string, warnings []string) {
 	primary := g.runAgentPlaybook(r, pb, req, "", runID)
+	g.backfillIncidentTraceID(r.Context(), runID, primary.traceID)
 
 	extra := map[string]any{}
 	if runID != "" {
@@ -1301,7 +1315,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 	// shared function every auto-chained hop goes through.
 	r.Header.Set("X-Purpose", derivedPurpose(nextPB.PlaybookType, req.Purpose))
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"))
+	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"), req.Origin)
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1937,7 +1951,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy, remReq.Origin)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "remediation_series", nextSeriesID,
@@ -2474,9 +2488,23 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
-func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator string) string {
+func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator, origin string) string {
 	if g.auditURL == "" {
 		return ""
+	}
+	// A chained hop inherits the prior run's own EntryRunID (not priorRunID
+	// itself) so a 3+-hop chain still resolves back to the true entry point
+	// in one step, not a walk. Falls back to priorRunID when the fetch fails
+	// or the prior run predates this field — PlaybookRunStore.Record applies
+	// the identical fallback server-side, so this is defense in depth, not
+	// the only place this is handled. See closeIncidentRecord.
+	entryRunID := ""
+	if priorRunID != "" {
+		if priorRun, err := g.fetchPlaybookRun(ctx, priorRunID); err == nil && priorRun != nil && priorRun.EntryRunID != "" {
+			entryRunID = priorRun.EntryRunID
+		} else {
+			entryRunID = priorRunID
+		}
 	}
 	run := audit.PlaybookRun{
 		PlaybookID:       pb.PlaybookID,
@@ -2488,6 +2516,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		Purpose:          purpose,
 		TraceID:          traceID,
 		PriorRunID:       priorRunID,
+		EntryRunID:       entryRunID,
 		TriggerContext:   triggerContext,
 		Operator:         operator,
 	}
@@ -2528,7 +2557,247 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		slog.Error("recordPlaybookRunStart: failed to decode run response", "playbook_id", pb.PlaybookID, "err", err)
 		return ""
 	}
+	if priorRunID == "" {
+		// A genuine entry point (not a chained/remediation continuation) —
+		// this is where the incidents table's one row per user-facing
+		// incident gets created. See docs/INCIDENTS.md and the v0.29
+		// incident-entity design (Phase 1).
+		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID, origin)
+	}
 	return created.RunID
+}
+
+// createIncidentRecord creates the incidents table row for a genuine
+// entry-point playbook run. seriesID is recorded so attribution
+// classification at resolution time (Phase 2) can re-fetch this series'
+// current root_cause_classes without a second playbook_runs round-trip.
+// origin is validated against a closed allow-list (v0.29 incident-entity
+// design, Phase 4) rather than passed through as arbitrary caller-supplied
+// text — anything other than the recognized "faulttest" value is left empty,
+// which IncidentStore.Create already defaults to IncidentOriginReal.
+// Best-effort: a failure here must never block the playbook run itself, so it
+// only logs — recordPlaybookRunStart's caller already has the run ID it needs
+// regardless of whether this succeeds.
+func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID, origin string) {
+	if g.auditURL == "" || runID == "" {
+		return
+	}
+	if origin != audit.IncidentOriginFaulttest {
+		origin = ""
+	}
+	inc := audit.Incident{
+		TraceID:    traceID,
+		EntryRunID: runID,
+		SeriesID:   seriesID,
+		Origin:     origin,
+	}
+	body, err := json.Marshal(inc)
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("createIncidentRecord: request failed — incident not recorded", "run_id", runID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("createIncidentRecord: incident not recorded",
+			"run_id", runID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// fetchIncidentByEntryRunID returns the incidents row whose entry_run_id
+// matches runID, if any. Returns (nil, nil) — not an error — when auditd
+// reports 404: most callers should treat "no incident for this run" (a
+// chained/remediation hop, or a run recorded before this table existed) as a
+// normal, expected case rather than a failure.
+func (g *Gateway) fetchIncidentByEntryRunID(ctx context.Context, runID string) (*audit.Incident, error) {
+	if g.auditURL == "" || runID == "" {
+		return nil, nil
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/by-run/" + runID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var inc audit.Incident
+	if err := json.NewDecoder(resp.Body).Decode(&inc); err != nil {
+		return nil, err
+	}
+	return &inc, nil
+}
+
+// patchIncidentAttribution writes a root-cause classification onto an
+// existing incidents row. Best-effort: failures are logged but never
+// propagated — a missed attribution write must not affect anything else.
+func (g *Gateway) patchIncidentAttribution(ctx context.Context, incidentID, attribution string) {
+	if g.auditURL == "" || incidentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"attribution": attribution})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("patchIncidentAttribution: request failed", "incident_id", incidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("patchIncidentAttribution: unexpected status",
+			"incident_id", incidentID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// patchIncidentTraceID writes the real trace_id onto an existing incidents
+// row. Best-effort: failures are logged but never propagated.
+func (g *Gateway) patchIncidentTraceID(ctx context.Context, incidentID, traceID string) {
+	if g.auditURL == "" || incidentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{"trace_id": traceID})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("patchIncidentTraceID: request failed", "incident_id", incidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("patchIncidentTraceID: unexpected status",
+			"incident_id", incidentID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// backfillIncidentTraceID fills in the incidents row's trace_id once the real
+// one is known, for execution_mode="agent" entry playbooks: at run-start
+// (recordPlaybookRunStart/createIncidentRecord) the real trace_id doesn't
+// exist yet — it's minted by the agent itself and only comes back as an
+// X-Trace-ID response header once the primary hop completes (see traceID at
+// the top of runAgentPlaybook's response parsing). Until this backfill,
+// anything keyed on this incident's trace_id — most importantly
+// create_incident_bundle's automatic /from-trace call and linkDraftToIncident
+// — silently misses this incident (a real gap found via live verification of
+// the v0.29 incident-entity design, not a hypothetical).
+//
+// No-ops quietly when: runID isn't a genuine entry point (no incidents row),
+// traceID is empty, or the row already has a trace_id (never overwrites).
+func (g *Gateway) backfillIncidentTraceID(ctx context.Context, runID, traceID string) {
+	if traceID == "" {
+		return
+	}
+	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	if err != nil {
+		slog.Warn("backfillIncidentTraceID: could not look up incident", "run_id", runID, "err", err)
+		return
+	}
+	if inc == nil || inc.TraceID != "" {
+		return
+	}
+	g.patchIncidentTraceID(ctx, inc.IncidentID, traceID)
+}
+
+// classifyIncidentAttribution is Phase 2 of the v0.29 incident-entity design
+// (see docs/INCIDENTS.md): the same root-cause classifier faulttest already
+// runs at cert time (agentutil.ClassifyAttribution), now run against a real,
+// organically-resolved incident. No-ops quietly (not an error) whenever:
+//   - runID isn't a genuine entry point (no incidents row — e.g. a
+//     chainEscalation per-hop completion; the aggregate finalOutcome call for
+//     the whole chain is keyed by the entry run's own runID and does have a row),
+//   - the entry playbook has no series_id or no root_cause_classes defined
+//     (most playbooks don't declare a taxonomy — nothing to classify against),
+//   - no planner LLM is configured.
+func (g *Gateway) classifyIncidentAttribution(ctx context.Context, runID, responseText string) {
+	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	if err != nil {
+		slog.Warn("classifyIncidentAttribution: could not look up incident", "run_id", runID, "err", err)
+		return
+	}
+	if inc == nil || inc.SeriesID == "" {
+		return
+	}
+	if g.plannerLLM == nil {
+		return
+	}
+	pb, err := g.fetchPlaybookBySeriesID(ctx, inc.SeriesID)
+	if err != nil || pb.RootCauseClasses == nil || len(pb.RootCauseClasses.Classes) == 0 {
+		return
+	}
+	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, pb.RootCauseClasses.Classes)
+	g.patchIncidentAttribution(ctx, inc.IncidentID, label)
 }
 
 // recordPlaybookRunComplete patches an existing run with its final outcome.
@@ -2585,7 +2854,322 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			"status", resp.StatusCode,
 			"auditd_error", strings.TrimSpace(string(body)),
 		)
+		return
 	}
+
+	// Phase 2 (attribution classification) and Phase 3 (status/resolved_at,
+	// bundle auto-trigger) of the v0.29 incident-entity design — see
+	// docs/INCIDENTS.md. If runID isn't a genuine entry point (e.g.
+	// chainEscalation's own per-hop completion), each step's own
+	// fetchIncidentByEntryRunID lookup no-ops harmlessly.
+	if isTerminalIncidentOutcome(outcome) {
+		g.closeIncidentRecord(ctx, runID, outcome)
+	}
+	if isAttributableOutcome(outcome) {
+		responseText := agentTranscript
+		if responseText == "" {
+			responseText = findingsSummary
+		}
+		g.classifyIncidentAttribution(ctx, runID, responseText)
+		g.triggerIncidentBundle(ctx, runID, outcome, findingsSummary)
+	}
+}
+
+// isAttributableOutcome reports whether outcome represents a genuine
+// diagnostic conclusion worth root-cause classification — as opposed to
+// "unknown" (nothing was concluded), "abandoned" (gate denied / step failed),
+// or "gate_pending" (not yet concluded).
+//
+// OutcomeTransitioned (TRANSITION_TO — a same-domain triage→remediation
+// handoff, e.g. connection-triage -> connection-remediate) is included
+// alongside OutcomeEscalated (ESCALATE_TO — a cross-domain handoff, e.g.
+// DB agent -> sysadmin agent): both represent the entry playbook's own
+// diagnostic conclusion being conclusive enough to hand off, the same
+// condition that already makes OutcomeEscalated attributable. Found via
+// live K8s verification of the v0.29 incident-entity design — TRANSITION_TO
+// is actually the *more common* pattern in this codebase's own playbook
+// catalog (most triage playbooks transition to a same-series remediation;
+// ESCALATE_TO is reserved for the less common cross-domain case), so its
+// prior omission here silently skipped classification for the majority of
+// real incidents, not an edge case.
+func isAttributableOutcome(outcome string) bool {
+	switch outcome {
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned:
+		return true
+	default:
+		return false
+	}
+}
+
+// isTerminalIncidentOutcome reports whether outcome means the incident's
+// investigation has concluded — broader than isAttributableOutcome:
+// "abandoned" (gate denied / step failed) is terminal (nothing more will
+// happen on this run) but not attributable (there's no diagnostic conclusion
+// to classify).
+//
+// See isAttributableOutcome's comment on OutcomeTransitioned: without it
+// here, an incident whose entry playbook resolved via TRANSITION_TO was
+// permanently stuck at status="open" in the incidents table — status/
+// resolved_at/attribution/bundle_path/draft_playbook_id never populated,
+// regardless of how the downstream remediation it handed off to eventually
+// resolved (including when that remediation itself failed/was abandoned).
+func isTerminalIncidentOutcome(outcome string) bool {
+	switch outcome {
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned:
+		return true
+	default:
+		return false
+	}
+}
+
+// incidentStatusForOutcome maps a playbook run's outcome to the incidents
+// table's status vocabulary (open | resolved | escalated | abandoned).
+// "escalated+resolved" (a chain that escalated partway through but ultimately
+// resolved) maps to resolved — that's the incident's final state.
+//
+// OutcomeTransitioned reuses the "escalated" status bucket rather than
+// introducing a new status value: both represent "the entry playbook's own
+// diagnosis concluded and handed off elsewhere" — same-domain (TRANSITION_TO)
+// vs. cross-domain (ESCALATE_TO) is a distinction that matters for chaining
+// logic, not for what an operator scanning the incidents list needs to see.
+func incidentStatusForOutcome(outcome string) string {
+	switch outcome {
+	case audit.OutcomeEscalated, audit.OutcomeTransitioned:
+		return audit.IncidentStatusEscalated
+	case audit.OutcomeAbandoned:
+		return audit.IncidentStatusAbandoned
+	default: // OutcomeResolved, OutcomeEscalatedResolved
+		return audit.IncidentStatusResolved
+	}
+}
+
+// resolveEntryRunID returns the entry run_id for the chain runID belongs to
+// — runID itself when the lookup fails or runID has no stored EntryRunID
+// (either it IS the entry point, or it predates this field), or its stored
+// EntryRunID (inherited from the prior run at creation time — see
+// recordPlaybookRunStart) when runID is a downstream hop. Unlike
+// classifyIncidentAttribution/triggerIncidentBundle, which are intentionally
+// scoped to fire only on the entry hop itself (attribution reflects the
+// original diagnosis; bundles are most useful captured while the incident is
+// still live, not after remediation already fixed it), closeIncidentRecord's
+// job is to reflect the chain's LATEST outcome regardless of which hop
+// produced it — so it alone needs to resolve through to the true entry run.
+func (g *Gateway) resolveEntryRunID(ctx context.Context, runID string) string {
+	run, err := g.fetchPlaybookRun(ctx, runID)
+	if err != nil || run == nil || run.EntryRunID == "" {
+		return runID
+	}
+	return run.EntryRunID
+}
+
+// closeIncidentRecord is Phase 3 of the v0.29 incident-entity design (see
+// docs/INCIDENTS.md): patches status/resolved_at on a terminal outcome.
+// Every incident row is permanently status=open until this fires — Phase 1/2
+// deliberately left status/resolved_at untouched. Uses its own
+// fetchIncidentByEntryRunID lookup, independent of classifyIncidentAttribution's
+// — an extra background HTTP GET on a fire-and-forget completion path is a
+// fine trade for keeping these three independently-gated, independently-tested
+// steps from sharing mutable state.
+//
+// Found live (v0.29 host/VM platform testing): a same-domain TRANSITION_TO
+// chain (e.g. connection-triage→connection-remediate) that fully resolved
+// downstream left status permanently stuck at "escalated" — the triage hop's
+// own completion (runID == entry_run_id) patched status once, but the
+// remediation hop's later "resolved" completion (runID != entry_run_id) no-
+// opped, since the lookup only ever matched the entry hop's own run ID.
+// resolveEntryRunID fixes this by resolving runID to its chain's entry point
+// before the lookup, regardless of which hop is completing.
+func (g *Gateway) closeIncidentRecord(ctx context.Context, runID, outcome string) {
+	entryRunID := g.resolveEntryRunID(ctx, runID)
+	inc, err := g.fetchIncidentByEntryRunID(ctx, entryRunID)
+	if err != nil {
+		slog.Warn("closeIncidentRecord: could not look up incident", "run_id", runID, "entry_run_id", entryRunID, "err", err)
+		return
+	}
+	if inc == nil {
+		return
+	}
+	g.patchIncidentStatus(ctx, inc.IncidentID, incidentStatusForOutcome(outcome), time.Now().UTC())
+}
+
+// patchIncidentStatus writes status/resolved_at onto an existing incidents
+// row. Best-effort: failures are logged but never propagated.
+func (g *Gateway) patchIncidentStatus(ctx context.Context, incidentID, status string, resolvedAt time.Time) {
+	if g.auditURL == "" || incidentID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"status":      status,
+		"resolved_at": resolvedAt.Format(time.RFC3339),
+	})
+	if err != nil {
+		return
+	}
+	url := strings.TrimSuffix(g.auditURL, "/") + "/v1/incidents/" + incidentID
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, strings.NewReader(string(body)))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx2)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Error("patchIncidentStatus: request failed", "incident_id", incidentID, "err", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Error("patchIncidentStatus: unexpected status",
+			"incident_id", incidentID,
+			"status", resp.StatusCode,
+			"auditd_error", strings.TrimSpace(string(respBody)),
+		)
+	}
+}
+
+// incidentBundleResult mirrors agents/incident's IncidentBundleResult JSON
+// shape — duplicated rather than imported since cmd/gateway and
+// agents/incident are separate main packages.
+type incidentBundleResult struct {
+	IncidentID    string   `json:"incident_id"`
+	BundlePath    string   `json:"bundle_path"`
+	Timestamp     string   `json:"timestamp"`
+	Layers        []string `json:"layers"`
+	Errors        []string `json:"errors,omitempty"`
+	PlaybookDraft string   `json:"playbook_draft,omitempty"`
+	PlaybookID    string   `json:"playbook_id,omitempty"`
+}
+
+// triggerIncidentBundle is Phase 3 of the v0.29 incident-entity design (see
+// docs/INCIDENTS.md): opt-in (HELPDESK_AUTO_INCIDENT_BUNDLE) auto-creation of
+// a diagnostic bundle for a genuine entry-point run that just resolved or
+// escalated. Uses its own fetchIncidentByEntryRunID lookup, same reasoning as
+// closeIncidentRecord/classifyIncidentAttribution: an extra background HTTP
+// GET is a fine trade for keeping these steps independent.
+//
+// Calls the incident agent's create_incident_bundle tool via its direct
+// POST /tool/{name} endpoint (agentutil.DirectToolRegistry), not the
+// LLM-mediated A2A path g.proxyToAgent uses for a real inbound
+// /api/v1/incidents request — an automated trigger needs bundle_path back as
+// real structured JSON, not something parsed out of LLM prose.
+func (g *Gateway) triggerIncidentBundle(ctx context.Context, runID, outcome, findingsSummary string) {
+	if !g.autoIncidentBundle {
+		return
+	}
+	inc, err := g.fetchIncidentByEntryRunID(ctx, runID)
+	if err != nil {
+		slog.Warn("triggerIncidentBundle: could not look up incident", "run_id", runID, "err", err)
+		return
+	}
+	if inc == nil {
+		return
+	}
+	agentInfo, ok := g.agents[agentNameIncident]
+	if !ok {
+		return
+	}
+
+	description := findingsSummary
+	if description == "" {
+		description = "Auto-generated bundle for " + runID
+	}
+	// create_incident_bundle's own Outcome arg only recognizes "resolved" or
+	// "escalated" (see its shouldGenerateDraft gate in agents/incident/tools.go)
+	// — anything else (including "transitioned") skips draft synthesis
+	// entirely. Normalize the same way incidentStatusForOutcome does: a
+	// same-domain TRANSITION_TO handoff is, from create_incident_bundle's
+	// binary resolved-vs-escalated perspective, an escalation. Found via the
+	// same live K8s verification that surfaced the isAttributableOutcome/
+	// isTerminalIncidentOutcome gap above — without this, a TRANSITION_TO
+	// incident's auto-triggered bundle would never get a draft_playbook_id.
+	bundleOutcome := outcome
+	if bundleOutcome == audit.OutcomeTransitioned {
+		bundleOutcome = audit.OutcomeEscalated
+	}
+	args := map[string]any{
+		"incident_id": inc.IncidentID,
+		"description": description,
+		"outcome":     bundleOutcome,
+	}
+	if inc.SeriesID != "" {
+		// Improvement-mode parity with faulttest's own from-trace call (see
+		// agentutil.RequestPlaybookDraft): pin the auto-synthesized draft to
+		// the entry playbook's own series so it improves that series instead
+		// of always cold-starting a new one.
+		args["series_id"] = inc.SeriesID
+	}
+	// Best-effort: a fetch failure just means the bundle's database layer is
+	// skipped (create_incident_bundle already tolerates partial collection —
+	// see docs/INCIDENTS.md's "Not every layer is populated" note). K8s layer
+	// args are deliberately not populated here — reconstructing a kubectl
+	// context from a PlaybookRun record is a separate, non-trivial lookup;
+	// out of scope for this pass.
+	if run, err := g.fetchPlaybookRun(ctx, runID); err == nil && run.ConnectionString != "" {
+		args["connection_string"] = run.ConnectionString
+	}
+
+	result, err := g.callIncidentDirectTool(ctx, agentInfo.InvokeURL, "create_incident_bundle", args, inc.TraceID)
+	if err != nil {
+		slog.Warn("triggerIncidentBundle: create_incident_bundle call failed", "incident_id", inc.IncidentID, "run_id", runID, "err", err)
+		return
+	}
+	slog.Info("triggerIncidentBundle: bundle created", "incident_id", inc.IncidentID, "run_id", runID, "bundle_path", result.BundlePath)
+}
+
+// callIncidentDirectTool POSTs a structured tool call directly to an agent's
+// /tool/{name} endpoint, bypassing the ADK/LLM layer — the core HTTP
+// mechanics of dispatchDirectTool, without the response-writing/audit-event
+// scaffolding meant for a live inbound gateway request (this is a background
+// trigger with no caller to write an HTTP response to).
+func (g *Gateway) callIncidentDirectTool(ctx context.Context, invokeURL, toolName string, args map[string]any, traceID string) (*incidentBundleResult, error) {
+	baseURL := strings.TrimSuffix(invokeURL, "/invoke")
+	reqBody, err := json.Marshal(directToolReq{TraceID: traceID, Args: args})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/tool/"+toolName, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if g.agentAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.agentAPIKey)
+	}
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("direct tool call: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	var toolResp directToolResp
+	if err := json.Unmarshal(respBytes, &toolResp); err != nil {
+		return nil, fmt.Errorf("decode tool response: %w", err)
+	}
+	if resp.StatusCode >= 400 || toolResp.Error != "" {
+		errText := toolResp.Error
+		if errText == "" {
+			errText = string(respBytes)
+		}
+		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, errText)
+	}
+
+	var result incidentBundleResult
+	if err := json.Unmarshal([]byte(toolResp.Output), &result); err != nil {
+		return nil, fmt.Errorf("decode incident bundle result: %w", err)
+	}
+	return &result, nil
 }
 
 // postAtGateFeedback stores at-gate feedback submitted at gate approval time,

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/client"
 )
 
@@ -81,5 +82,24 @@ func TestFormatVerification_MultipleTools(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("formatVerification() = %q, missing %q", got, want)
 		}
+	}
+}
+
+// TestFormatVerification_Layer2Label pins the "[Layer 2]" label sourced from
+// audit.LayerDelegationVerification on both the no-tools-confirmed warning
+// branch and the confirmed-tools summary branch — the existing tests above
+// only assert on substrings that predate the label, so none of them would
+// catch a regression where the label was dropped or hand-typed differently.
+func TestFormatVerification_Layer2Label(t *testing.T) {
+	noTools := formatVerification(&client.TraceVerification{})
+	if !strings.Contains(noTools, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("formatVerification() = %q, want it to contain the %q label", noTools, "["+audit.LayerDelegationVerification+"]")
+	}
+
+	confirmed := formatVerification(&client.TraceVerification{
+		ToolsConfirmed: []client.ConfirmedTool{{Name: "check_connection", ActionClass: "read"}},
+	})
+	if !strings.Contains(confirmed, "["+audit.LayerDelegationVerification+"]") {
+		t.Errorf("formatVerification() = %q, want it to contain the %q label", confirmed, "["+audit.LayerDelegationVerification+"]")
 	}
 }
