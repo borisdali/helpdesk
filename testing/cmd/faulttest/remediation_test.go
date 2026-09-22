@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,11 +121,21 @@ func TestRemediate_NoAction(t *testing.T) {
 
 // ── runApprovalLoop / ProceedStep ─────────────────────────────────────────────
 
+// newApprovalResponse builds a pending_approval response for tests that
+// exercise the proceed/multi-step/denial mechanics of the approval loop,
+// not approval-mode resolution itself (that's what
+// TestRunApprovalLoop_EffectiveApprovalModeOverride and its sibling clamp
+// test build by hand). EffectiveApprovalMode is set to "force" so these
+// tests auto-approve without hitting the prompt/EOF path — leaving it unset
+// used to silently fall through to auto-approval too (the bug fixed
+// 2026-09-22), which is no longer true now that an unset mode safely
+// defaults to "manual".
 func newApprovalResponse(runID string, stepIndex int, tool string) faultlib.ApproveRunResponse {
 	return faultlib.ApproveRunResponse{
-		RunID:      runID,
-		Status:     "pending_approval",
-		ApprovalID: "apr_test",
+		RunID:                 runID,
+		Status:                "pending_approval",
+		ApprovalID:            "apr_test",
+		EffectiveApprovalMode: "force",
 		Step: &faultlib.ApproveRunStep{
 			Index:  stepIndex,
 			Agent:  "database",
@@ -188,8 +199,12 @@ func TestRunApprovalLoop_Denial(t *testing.T) {
 
 	r := newTestRemediator(t, srv.URL)
 	initial := newApprovalResponse("plr_deny01", 1, "terminate_connection")
-	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
-		t.Error("expected error when step is denied, got nil")
+	err := r.runApprovalLoop(context.Background(), initial)
+	if err == nil {
+		t.Fatal("expected error when step is denied, got nil")
+	}
+	if !strings.Contains(err.Error(), "denied") {
+		t.Errorf("error = %q, want it to mention \"denied\" (a different error, e.g. a prompt/EOF failure, would also make this test pass without actually exercising denial)", err.Error())
 	}
 }
 
@@ -237,6 +252,90 @@ func TestRunApprovalLoop_EffectiveApprovalModeOverride(t *testing.T) {
 	}
 }
 
+// TestRunApprovalLoop_EffectiveApprovalModeClampedToManual_DoesNotAutoApprove
+// is the inverse of TestRunApprovalLoop_EffectiveApprovalModeOverride above,
+// and the real bug found live 2026-09-22: cfg.ApprovalMode is "force" (the
+// CLI flag), but the gateway clamps it down to "manual" (the caller lacks a
+// required approval_override_roles role) and reports that via
+// EffectiveApprovalMode. The loop must honour the clamp and attempt to
+// prompt for this destructive step, not silently auto-approve it — proven
+// the same way the sibling test proves the opposite direction: if the clamp
+// is ignored (mode stays "force"), the step is auto-approved and the proceed
+// endpoint below (which would execute the destructive tool for real) is
+// reached with no error. If honoured, promptStepApproval opens /dev/tty,
+// falls back to os.Stdin, reads EOF in this non-interactive test process,
+// and returns an error — so an error here proves the loop correctly refused
+// to bypass the server's clamp, and the proceed endpoint (which the test
+// server would 500 on) must never be reached.
+func TestRunApprovalLoop_EffectiveApprovalModeClampedToManual_DoesNotAutoApprove(t *testing.T) {
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proceedCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+		ConnStr:       "host=localhost",
+		ApprovalMode:  "force",
+	}})
+	initial := faultlib.ApproveRunResponse{
+		RunID:                 "plr_clamp01",
+		Status:                "pending_approval",
+		ApprovalID:            "apr_clamp",
+		EffectiveApprovalMode: "manual", // gateway clamped "force" -> "manual"
+		Step: &faultlib.ApproveRunStep{
+			Index: 1, Agent: "database", Tool: "terminate_idle_connections",
+			Args: map[string]any{"idle_minutes": 0}, Reason: "Terminate idle connections",
+		},
+	}
+	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
+		t.Fatal("runApprovalLoop returned nil error — the clamp to \"manual\" was ignored and the destructive step was silently auto-approved")
+	}
+	if proceedCalled {
+		t.Error("proceed endpoint was called — the destructive step was submitted for execution despite the gateway's clamp to \"manual\"")
+	}
+}
+
+// TestRunApprovalLoop_NoModeAnywhereDefaultsToManual proves that when
+// neither the gateway's EffectiveApprovalMode nor the CLI's own
+// --approval-mode flag is set, the loop defaults to "manual" (prompts)
+// rather than silently falling through to auto-approval — the safe default
+// when the mode is genuinely unknown.
+func TestRunApprovalLoop_NoModeAnywhereDefaultsToManual(t *testing.T) {
+	proceedCalled := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proceedCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
+		GatewayURL:    srv.URL,
+		GatewayAPIKey: "test-key",
+		ConnStr:       "host=localhost",
+		ApprovalMode:  "", // no CLI flag
+	}})
+	initial := faultlib.ApproveRunResponse{
+		RunID:                 "plr_nomode01",
+		Status:                "pending_approval",
+		ApprovalID:            "apr_nomode",
+		EffectiveApprovalMode: "", // gateway didn't report one either
+		Step: &faultlib.ApproveRunStep{
+			Index: 1, Agent: "database", Tool: "terminate_connection",
+			Args: map[string]any{"pid": 1234}, Reason: "Terminate root blocker",
+		},
+	}
+	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
+		t.Fatal("runApprovalLoop returned nil error — an unknown mode was silently auto-approved instead of defaulting to manual")
+	}
+	if proceedCalled {
+		t.Error("proceed endpoint was called — an unknown mode should default to manual (prompt), not auto-approve")
+	}
+}
+
 func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 	proceedCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,9 +347,10 @@ func TestTriggerPlaybook_AgentApprove_FullLoop(t *testing.T) {
 			})
 		case r.URL.Path == "/api/v1/fleet/playbooks/pb_approve_test/run":
 			json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{ //nolint:errcheck
-				RunID:      "plr_approve01",
-				Status:     "pending_approval",
-				ApprovalID: "apr_001",
+				RunID:                 "plr_approve01",
+				Status:                "pending_approval",
+				ApprovalID:            "apr_001",
+				EffectiveApprovalMode: "force",
 				Step: &faultlib.ApproveRunStep{
 					Index:  1,
 					Agent:  "database",

@@ -196,7 +196,7 @@ See [AUDIT.md](AUDIT.md) for the full event schema, query API and retention conf
   │        │                                                            │
   │        ▼                                                            │
   │   create_incident_bundle(outcome="resolved")                        │
-  │   — manual call or automatic via HELPDESK_AUTO_INCIDENT_BUNDLE     │
+  │   — manual call or automatic via HELPDESK_AUTO_INCIDENT_BUNDLE      │
   │        │                                                            │
   │        ├── Bundle saved (.tar.gz, database/k8s/os/storage layers)   │
   │        │   → bundle_path recorded onto the incidents row            │

@@ -2,15 +2,15 @@
 
 See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and the [v0.29 release](https://github.com/borisdali/helpdesk/releases/tag/v0.29.0) that introduced the new incident-entity design (with the `incidents` table underneath every `vault incidents` listing). What's presented below are four real sample runs. The same `db-max-connections` fault, injected and remediated end to end on aiHelpDesk deployed directly on...
 
-  - [a host/VM](INCIDENTS_SAMPLE.md#hostvm-sample-run)  
-  - [in Docker/Podman containers](INCIDENTS_SAMPLE.md#dockerpodman-sample-run) and  
-  - [on K8s](INCIDENTS_SAMPLE.md#k8s-sample-run)  
+  - [a host/VM](INCIDENTS_SAMPLE.md#1-hostvm-sample-run)  
+  - [in Docker/Podman containers](INCIDENTS_SAMPLE.md#2-dockerpodman-sample-run) and  
+  - [on K8s](INCIDENTS_SAMPLE.md#3-k8s-sample-run)  
 
 Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation.   
 
-A fourth run is different. It is [a real (non-injected) incident](INCIDENTS_SAMPLE.md#a-real-non-injected-incident-side-by-side-with-an-injected-one) that goes through the exact same path with no `faulttest` involvement at all. It shows what actually distinguishes a genuine incident from an injected one in the `incidents` table.
+A fourth run is different. It is [a real (non-injected) incident](INCIDENTS_SAMPLE.md#4-a-real-non-injected-incident-side-by-side-with-an-injected-one) that goes through the exact same path with no `faulttest` involvement at all. It shows what actually distinguishes a genuine incident from an injected one in the `incidents` table.
 
-## Host/VM sample run
+## 1. Host/VM sample run
 
 See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly on a host/VM [here](../deploy/host/README.md#8-fault-injection-testing-faulttest). Start the stack, inject the fault via the gateway and step through the remediation approvals:
 
@@ -199,7 +199,7 @@ Diagnosis:     0.50 (heuristic)   Agent confidence: 99%
   → vault journeys faulttest-ef2fe0ac-db-max-connections
 ```
 
-## Docker/Podman sample run
+## 2. Docker/Podman sample run
 
 See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly in Docker/Podman containers [here](../deploy/docker-compose/README.md#5-fault-injection-testing-faulttest). The same fault, same playbooks, run against a gateway proxied through `docker compose`:
 
@@ -393,7 +393,7 @@ INCIDENT LINK
 
 `get_config_parameter` was declared alongside `get_session_info` in one reasoning turn, but only the latter actually executed against the database — exactly the kind of discrepancy this layer exists to catch, surfaced with the specific tool name, not a generic warning.
 
-## K8s sample run
+## 3. K8s sample run
 
 See the platform deployment specifics of running aiHelpDesk on K8s [here](../deploy/helm/README.md). The gateway is `ClusterIP`-only, so port-forward it first, then run the same fault through it:
 
@@ -485,7 +485,7 @@ inc_a974c306  plr_fbe4968d    pbs_k8s_pod_crash_triage  2026-09-17 20:58  real  
 
 `ORIGIN` distinguishes the fault-injection run just above (`faulttest`) from the three pre-existing production incidents on the same cluster (`real`) — this is the field the v0.29 design added specifically so `vault incidents` no longer has to guess real-vs-injected from a trace-ID naming convention. The three real incidents also show the range of `STATUS` values a genuine incident's lifecycle produces on its own, with no faulttest involved: `open` (never closed out), `escalated` (handed off cross-domain, not yet resolved downstream), alongside the `resolved` fault-injection run above it.
 
-## A real (non-injected) incident, side by side with an injected one
+## 4. A real (non-injected) incident, side by side with an injected one
 
 Every example above went through `faulttest`, which always tags its own requests with `origin: faulttest` on the wire — that's how the `ORIGIN` column above can tell them apart from the three pre-existing real incidents on the K8s cluster. To show what a genuine `origin: real` incident looks like end to end (not just as a pre-existing row from a cluster's own history), the same `db-max-connections` symptom below was triggered directly against the Docker/Podman deployment's gateway API — the same way an operator, `srebot`, or an alerting webhook would — with no `faulttest` involvement anywhere in the request path:
 
