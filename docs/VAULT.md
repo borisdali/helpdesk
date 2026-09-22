@@ -465,6 +465,39 @@ plr_f1b9e3c4   2026-05-14 22:45   unresolved  –                 ✗ wrong     
 
 The `SCORE` column is populated only when faulttest evaluation data has been posted to auditd (i.e., the run was triggered by `faulttest run --gateway`). Real-incident runs triggered from the product UI show `–` unless scores are manually submitted via `POST /api/v1/fleet/playbook-runs/{runID}/evaluation`.
 
+**All-incidents listing (no argument):** omit the fault/series ID entirely to list the most recent incidents across every series, reading the v0.29 incidents table directly (`GET /api/v1/incidents`) rather than `playbook_runs`:
+
+```bash
+faulttest vault incidents \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY \
+  [--limit N] [--origin real|faulttest] [--status open|resolved|escalated|abandoned] [--attribution <label>]
+```
+
+```
+Recent incidents (last 2)
+
+INCIDENT      ENTRY RUN       SERIES                    DETECTED          ORIGIN      STATUS       ATTRIBUTION                 BUNDLE    DRAFT
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+inc_9f2a7b1c  plr_a3f7c1b2    pbs_lock_chain_triage     2026-06-01 14:32  real        resolved     lock_contention             yes       yes
+inc_4c8d1e22  plr_b91e2f04    pbs_connection_triage     2026-06-02 09:15  faulttest   open         –                           no        no
+
+  → vault incidents <plr_*>           full incident narrative
+  → vault incidents <fault-id>        all runs for a fault (per-hop detail)
+  → vault incidents --details         show JOURNEYS count
+  → vault incidents --origin real     real incidents only (excludes faulttest)
+  → vault incidents --status open     only incidents still open
+```
+
+| Column | Source |
+|--------|--------|
+| `INCIDENT` | The incidents-table row's own ID (`inc_*`) — distinct from `ENTRY RUN`, which is the triage playbook's `plr_*` run ID |
+| `ORIGIN` | `real` or `faulttest`; empty on the underlying row displays as `real` (untagged means not faulttest-injected) |
+| `STATUS` | `open`/`resolved`/`escalated`/`abandoned`; empty displays as `open` |
+| `ATTRIBUTION` | Classified root-cause label, `–` when not yet classified |
+| `BUNDLE`/`DRAFT` | `yes`/`no` — whether a diagnostic bundle or a synthesised Playbook draft has been linked to this incident, not the paths/IDs themselves (see the deep-dive view below for those) |
+
+`--origin`/`--status`/`--attribution` narrow the query itself (proxied through to auditd's `GET /v1/incidents?origin=&status=&attribution=`), not a client-side filter over already-fetched rows. `--details` (an extra API call per incident) and `--limit` apply here too. These three filter flags have no effect in the `<fault-id-or-series-id>` drilldown mode below, which queries `playbook_runs` directly rather than the incidents table.
+
 **Deep-dive mode:** pass a `plr_*` run ID instead of a fault or series ID to print the full incident journey for that specific run:
 
 ```bash
@@ -477,6 +510,8 @@ faulttest vault incidents plr_a3f7c1b2 \
 INCIDENT plr_a3f7c1b2
 Started: 2026-06-01 14:32 UTC   Duration: 47s
 Operator: alice
+Origin: real   Status: resolved
+Attribution: lock_contention
 
 ── TRIAGE ──────────────────────────────────────────────────
 Playbook:  pbs_lock_chain_triage
@@ -508,6 +543,8 @@ Remediation:   0.88 (LLM judge)
 ```
 
 The `Score` line matches the `SCORE` column in `vault incidents <series-id>` — it is the `overall_score` from `run_evaluation` (`diagnosis_score × 0.6 + remediation_score × 0.4`). The `Diagnosis` line shows the raw component scores before weighting.
+
+`Origin`/`Status`/`Attribution` (and, once populated, `Bundle`/`Draft playbook`) come from the same incidents-table row the all-incidents listing above reads — see [docs/INCIDENTS.md § The Incident Receipt](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full field reference. Shown only when a row exists for this run; a pre-v0.29 or never-tracked run omits this block entirely rather than showing empty values.
 
 **Verification warnings appear inline, when present.** If a chapter's underlying tool calls
 weren't fully verified — the agent narrated calling a tool that never actually executed, or a real

@@ -3237,7 +3237,7 @@ func TestFetchIncidentsList_Found(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := fetchIncidentsList(srv.URL, "", 10)
+	got, err := fetchIncidentsList(srv.URL, "", 10, "", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3261,9 +3261,58 @@ func TestFetchIncidentsList_PassesLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetchIncidentsList(srv.URL, "", 7) //nolint:errcheck
+	fetchIncidentsList(srv.URL, "", 7, "", "", "") //nolint:errcheck
 	if gotQuery.Get("limit") != "7" {
 		t.Errorf("limit = %q, want 7", gotQuery.Get("limit"))
+	}
+}
+
+// TestFetchIncidentsList_PassesOriginStatusAttribution proves the three new
+// filter params reach the outgoing query string, closing the gap where
+// `vault incidents` could visually show ORIGIN/STATUS/ATTRIBUTION columns
+// but had no way to narrow the query itself before them.
+func TestFetchIncidentsList_PassesOriginStatusAttribution(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 10, "real", "resolved", "connection_pool_saturation") //nolint:errcheck
+
+	cases := map[string]string{
+		"origin":      "real",
+		"status":      "resolved",
+		"attribution": "connection_pool_saturation",
+	}
+	for key, want := range cases {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("query param %q = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestFetchIncidentsList_OmitsFiltersWhenEmpty proves an empty origin/
+// status/attribution sends no corresponding query param at all — not an
+// empty-string param that could be misread server-side as "filter to the
+// empty string" rather than "no filter."
+func TestFetchIncidentsList_OmitsFiltersWhenEmpty(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	fetchIncidentsList(srv.URL, "", 10, "", "", "") //nolint:errcheck
+
+	for _, key := range []string{"origin", "status", "attribution"} {
+		if gotQuery.Has(key) {
+			t.Errorf("query param %q present = %q, want omitted when empty", key, gotQuery.Get(key))
+		}
 	}
 }
 
@@ -3276,7 +3325,7 @@ func TestFetchIncidentsList_OmitsLimitWhenZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetchIncidentsList(srv.URL, "", 0) //nolint:errcheck
+	fetchIncidentsList(srv.URL, "", 0, "", "", "") //nolint:errcheck
 	if gotQuery.Has("limit") {
 		t.Errorf("limit param present = %q, want omitted when limit<=0", gotQuery.Get("limit"))
 	}
@@ -3291,7 +3340,7 @@ func TestFetchIncidentsList_SendsAuth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fetchIncidentsList(srv.URL, "tok-xyz", 10) //nolint:errcheck
+	fetchIncidentsList(srv.URL, "tok-xyz", 10, "", "", "") //nolint:errcheck
 	if gotHeader != "Bearer tok-xyz" {
 		t.Errorf("Authorization = %q, want Bearer tok-xyz", gotHeader)
 	}
@@ -3303,14 +3352,14 @@ func TestFetchIncidentsList_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchIncidentsList(srv.URL, "", 10)
+	_, err := fetchIncidentsList(srv.URL, "", 10, "", "", "")
 	if err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
 }
 
 func TestFetchIncidentsList_NetworkError(t *testing.T) {
-	_, err := fetchIncidentsList("http://127.0.0.1:19997", "", 10)
+	_, err := fetchIncidentsList("http://127.0.0.1:19997", "", 10, "", "", "")
 	if err == nil {
 		t.Error("expected error for unreachable server, got nil")
 	}
@@ -3343,7 +3392,7 @@ func TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false)
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false, "", "", "")
 	})
 
 	for _, want := range []string{
@@ -3352,6 +3401,41 @@ func TestVaultIncidentsRecent_ShowsOriginStatusBundleDraft(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestVaultIncidents_CLIFlags_ForwardOriginStatusAttribution is the
+// end-to-end proof (flag parsing -> vaultIncidentsRecent -> fetchIncidentsList
+// -> HTTP query) that `vault incidents --origin --status --attribution`
+// actually narrows the query, not just that the lower-level functions do in
+// isolation (TestFetchIncidentsList_PassesOriginStatusAttribution above).
+func TestVaultIncidents_CLIFlags_ForwardOriginStatusAttribution(t *testing.T) {
+	var gotQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"incidents": []audit.Incident{}, "count": 0}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	captureStdout(func() {
+		vaultIncidents([]string{
+			"--gateway", srv.URL,
+			"--origin", "real",
+			"--status", "open",
+			"--attribution", "lock_contention",
+		})
+	})
+
+	cases := map[string]string{
+		"origin":      "real",
+		"status":      "open",
+		"attribution": "lock_contention",
+	}
+	for key, want := range cases {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("query param %q = %q, want %q", key, got, want)
 		}
 	}
 }
@@ -3404,7 +3488,7 @@ func TestVaultIncidentsRecent_NoIncidents_PrintsHint(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false)
+		vaultIncidentsRecent(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{GatewayURL: srv.URL}}, 20, false, "", "", "")
 	})
 
 	if !strings.Contains(out, "No recent incidents found.") {

@@ -2249,8 +2249,8 @@ func formatRemediationOutcome(r *incidentRun) string {
 // fault/diagnosis/remediation/feedback/score detail the incidents table,
 // being a one-row-per-incident summary rather than a per-hop execution log,
 // doesn't carry.
-func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool) {
-	incidents, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, limit)
+func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, status, attribution string) {
+	incidents, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, limit, origin, status, attribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching incidents: %v\n", err)
 		os.Exit(1)
@@ -2358,15 +2358,30 @@ func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool) {
 	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
 	fmt.Println("  → vault incidents <fault-id>        all runs for a fault (per-hop detail)")
 	fmt.Println("  → vault incidents --details         show JOURNEYS count")
+	fmt.Println("  → vault incidents --origin real     real incidents only (excludes faulttest)")
+	fmt.Println("  → vault incidents --status open     only incidents still open")
 }
 
 // Usage: faulttest vault incidents <fault-id or series-id> [--limit N]
+//
+//	[--origin real|faulttest] [--status open|resolved|escalated|abandoned] [--attribution <label>]
+//
+// --origin/--status/--attribution only apply to the no-argument (all-incidents)
+// listing — vaultIncidentsRecent, which reads the v0.29 incidents table
+// directly. The <fault-id-or-series-id> drilldown below queries playbook_runs,
+// not that table, so these flags have nothing to filter there and are silently
+// ignored in that mode rather than erroring — consistent with --details also
+// having no effect in some modes below.
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
 	var details bool
+	var origin, status, attribution string
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
+	fs.StringVar(&origin, "origin", "", "Filter by origin: real or faulttest (all-incidents listing only)")
+	fs.StringVar(&status, "status", "", "Filter by status: open, resolved, escalated, or abandoned (all-incidents listing only)")
+	fs.StringVar(&attribution, "attribution", "", "Filter by root-cause attribution label (all-incidents listing only)")
 	cfg := loadConfig(fs, args)
 
 	if cfg.GatewayURL == "" {
@@ -2374,7 +2389,7 @@ func vaultIncidents(args []string) {
 		os.Exit(1)
 	}
 	if len(fs.Args()) == 0 {
-		vaultIncidentsRecent(cfg, limit, details)
+		vaultIncidentsRecent(cfg, limit, details, origin, status, attribution)
 		return
 	}
 
@@ -2446,8 +2461,10 @@ func vaultIncidents(args []string) {
 	// incidents table's own origin/bundle/draft fields — see
 	// fetchIncidentsList's docs/INCIDENTS.md reference and
 	// vaultIncidentsRecent's comment for why this table exists alongside
-	// playbook_runs.
-	incidentsBySeries, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, 0)
+	// playbook_runs. Deliberately unfiltered (origin/status/attribution all
+	// ""): this builds a run_id -> *Incident lookup map for a client-side
+	// join below, which needs the full set, not a narrowed one.
+	incidentsBySeries, err := fetchIncidentsList(cfg.GatewayURL, cfg.GatewayAPIKey, 0, "", "", "")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not fetch incidents table for origin/bundle/draft columns: %v\n", err)
 	}
@@ -5105,10 +5122,29 @@ func fetchIncidentNarrative(gatewayURL, apiKey, runID string) (*incidentNarrativ
 // /api/v1/incidents (repurposed from a legacy LLM-mediated flat-file listing
 // to a real, indexed query over the incidents table — see docs/INCIDENTS.md).
 // limit<=0 omits the query param (server default applies).
-func fetchIncidentsList(gatewayURL, apiKey string, limit int) ([]*audit.Incident, error) {
-	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/incidents"
+// fetchIncidentsList calls GET /api/v1/incidents, optionally narrowing the
+// query itself via origin/status/attribution (proxied straight through to
+// auditd's GET /v1/incidents — see cmd/auditd/incident_handlers.go's
+// handleList). Empty string means "no filter" for each, matching the
+// server's own convention. limit<=0 omits the query param (server default
+// applies).
+func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, attribution string) ([]*audit.Incident, error) {
+	q := neturl.Values{}
 	if limit > 0 {
-		url += fmt.Sprintf("?limit=%d", limit)
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if origin != "" {
+		q.Set("origin", origin)
+	}
+	if status != "" {
+		q.Set("status", status)
+	}
+	if attribution != "" {
+		q.Set("attribution", attribution)
+	}
+	url := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/incidents"
+	if encoded := q.Encode(); encoded != "" {
+		url += "?" + encoded
 	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
