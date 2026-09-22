@@ -1,18 +1,23 @@
 # aiHelpDesk Incidents: sample runs
 
-See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and the [v0.29 release](https://github.com/borisdali/helpdesk/releases/tag/v0.29.0) that introduced the new incident-entity design (with the `incidents` table underneath every `vault incidents` listing). What's presented below are four real sample runs. The same `db-max-connections` fault, injected and remediated end to end on aiHelpDesk deployed directly on...
+See the detailed documentation on aiHelpDesk Incidents [here](INCIDENTS.md) and the [v0.29 release](https://github.com/borisdali/helpdesk/releases/tag/v0.29.0) that introduced the new incident-entity design (with the `incidents` table underneath every `vault incidents` listing). What's presented below are five real sample runs. The same `db-max-connections` fault, injected and remediated end to end on aiHelpDesk deployed directly on...
 
-  - [a host/VM](INCIDENTS_SAMPLE.md#1-hostvm-sample-run)  
-  - [in Docker/Podman containers](INCIDENTS_SAMPLE.md#2-dockerpodman-sample-run) and  
-  - [on K8s](INCIDENTS_SAMPLE.md#3-k8s-sample-run)  
+  - 1. Failure Injected Incident on [a host/VM](INCIDENTS_SAMPLE.md#1-hostvm-sample-run)  
+  - 2. Failure Injected Incident on [in Docker/Podman containers](INCIDENTS_SAMPLE.md#2-dockerpodman-sample-run) and  
+  - 3. Failure Injected Incident on [on K8s](INCIDENTS_SAMPLE.md#3-k8s-sample-run)  
 
 Each run shows the full path from fault injection through triage, human-approved remediation and the resulting `incidents` table row: `origin`, `status`, `attribution` and automatic bundle/draft generation.   
 
 A fourth run is different. It is [a real (non-injected) incident](INCIDENTS_SAMPLE.md#4-a-real-non-injected-incident-side-by-side-with-an-injected-one) that goes through the exact same path with no `faulttest` involvement at all. It shows what actually distinguishes a genuine incident from an injected one in the `incidents` table.
 
+A fifth run pushes that a step further: [the same real symptom, routed with no playbook ID at all](INCIDENTS_SAMPLE.md#5-automatic-playbook-selection-a-real-incident-with-no-playbook-id). This section features aiHelpDesk's playbook auto-selection capability where a Gateway actually picks the right series from a plain-language description, the way a real operator, `srebot` or an alerting webhook would actually call it.
+
+  - 4. Real Incident (not injected) invoked [with the specific Playbook](INCIDENTS_SAMPLE.md#4-a-real-non-injected-incident-side-by-side-with-an-injected-one)  
+  - 5. Real Incident (not injected) invoked [with just a problem/symptom description](INCIDENTS_SAMPLE.md#5-automatic-playbook-selection-a-real-incident-with-no-playbook-id)  
+
 ## 1. Host/VM sample run
 
-See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly on a host/VM [here](../deploy/host/README.md#8-fault-injection-testing-faulttest). Start the stack, inject the fault via the gateway and step through the remediation approvals:
+See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly on a host/VM [here](../deploy/host/README.md#8-fault-injection-testing-faulttest). Start the stack, inject the fault via the Gateway and step through the remediation approvals:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.26.0-darwin-arm64]$ date; time ./faulttest run \
@@ -157,7 +162,7 @@ Hypotheses:
   [PRIMARY  95%] Connection saturation due to idle connections occupying all available slots, exacerbated by disabled idle_session_timeout preventing automatic cleanup.
                  Evidence: "idle_session_timeout = 0"
   [REJECTED 15%] Replication connection lag or stuck WAL sender causing extra connection overhead.
-                 Rejected: The replication sender (PID 13786) is actively streaming, not blocked, and occupies only 1 slot; 15 of the 16 idle application connections are the dominant cause.
+                 Rejected: The replication sender (PID 13786) is actively streaming, not blocked and occupies only 1 slot; 15 of the 16 idle application connections are the dominant cause.
 
 ── GATE
 Decision:  approved
@@ -304,7 +309,7 @@ This is the real, reproducible case the TOOL CALL INTEGRITY table was built for 
 
 ## 2. Docker/Podman sample run
 
-See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly in Docker/Podman containers [here](../deploy/docker-compose/README.md#5-fault-injection-testing-faulttest). The same fault, same playbooks, run against a gateway proxied through `docker compose`:
+See the platform deployment specifics of running aiHelpDesk Fault Injection Tests directly in Docker/Podman containers [here](../deploy/docker-compose/README.md#5-fault-injection-testing-faulttest). The same fault, same playbooks, run against a Gateway proxied through `docker compose`:
 
 ```
 [boris@ ~/helpdesk]$ date; time go run ./testing/cmd/faulttest run \
@@ -498,7 +503,7 @@ INCIDENT LINK
 
 ## 3. K8s sample run
 
-See the platform deployment specifics of running aiHelpDesk on K8s [here](../deploy/helm/README.md). The gateway is `ClusterIP`-only, so port-forward it first, then run the same fault through it:
+See the platform deployment specifics of running aiHelpDesk on K8s [here](../deploy/helm/README.md). The Gateway is `ClusterIP`-only, so port-forward it first, then run the same fault through it:
 
 ```
 [boris@ ~/helpdesk]$ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
@@ -590,7 +595,7 @@ inc_a974c306  plr_fbe4968d    pbs_k8s_pod_crash_triage  2026-09-17 20:58  real  
 
 ## 4. A real (non-injected) incident, side by side with an injected one
 
-Every example above went through `faulttest`, which always tags its own requests with `origin: faulttest` on the wire — that's how the `ORIGIN` column above can tell them apart from the three pre-existing real incidents on the K8s cluster. To show what a genuine `origin: real` incident looks like end to end (not just as a pre-existing row from a cluster's own history), the same `db-max-connections` symptom below was triggered directly against the Docker/Podman deployment's gateway API — the same way an operator, `srebot`, or an alerting webhook would — with no `faulttest` involvement anywhere in the request path:
+Every example above went through `faulttest`, which always tags its own requests with `origin: faulttest` on the wire — that's how the `ORIGIN` column above can tell them apart from the three pre-existing real incidents on the K8s cluster. To show what a genuine `origin: real` incident looks like end to end (not just as a pre-existing row from a cluster's own history), the same `db-max-connections` symptom below was triggered directly against the Docker/Podman deployment's Gateway API — the same way an operator, `srebot` or an alerting webhook would — with no `faulttest` involvement anywhere in the request path:
 
 ```
 $ curl -s -X POST $HELPDESK_GATEWAY_URL/api/v1/fleet/playbooks/pb_a4c9595c/run \
@@ -655,7 +660,7 @@ Steps:     ✓   ✓   ✓   ✓   ✓
   → vault journeys tr_a5ddf21d-8a3
 ```
 
-Two details only a genuine real incident carries: an **`Operator:`** line (`alice@example.com` — whoever approved the gate), which no `faulttest` run in this doc ever shows, and trace IDs in the plain `tr_...` form rather than the `faulttest-<runid>-<fault-id>` shape every injected example above uses. Now the two incidents sit side by side in the same table, distinguished only by the field built for exactly this:
+Two details only a genuine real incident carries: an **`Operator:`** line (`alice@example.com` — whoever approved the gate), which no `faulttest` run in this doc ever shows and trace IDs in the plain `tr_...` form rather than the `faulttest-<runid>-<fault-id>` shape every injected example above uses. Now the two incidents sit side by side in the same table, distinguished only by the field built for exactly this:
 
 ```
 $ go run ./testing/cmd/faulttest vault incidents --gateway $HELPDESK_GATEWAY_URL
@@ -673,7 +678,115 @@ inc_75d61771  plr_34ec7540    pbs_connection_triage     2026-09-20 23:53  faultt
   → vault incidents --details         show JOURNEYS count
 ```
 
-Same symptom, same playbook, same gateway, same outcome — the only thing that tells them apart is `ORIGIN`, because that's the only thing that's actually different between a real operator's incident and a faulttest run: who — or what — sent the request.
+Same symptom, same playbook, same Gateway, same outcome — the only thing that tells them apart is `ORIGIN`, because that's the only thing that's actually different between a real operator's incident and a faulttest run: who — or what — sent the request.
+
+## 5. Automatic playbook selection: a real incident with no playbook ID
+
+Every example above, including the real incident in §4, told the Gateway exactly which playbook to run, e.g. `POST /api/v1/fleet/playbooks/pb_a4c9595c/run`. That's not actually how a real operator, `srebot` or an alerting webhook typically enters the system as they may not know a playbook's internal ID in advance. What they have is a symptom description. `POST /api/v1/query` is built for exactly that. No `agent`, no playbook ID, just a plain-language `message` and the Gateway's own entry-point playbook matcher picks the series.
+
+The same `db-max-connections` symptom, injected directly (bypassing `faulttest`'s own diagnosis path — this step only recreates the real database condition, nothing else) against the same Host/VM stack used in [section §1 above](INCIDENTS_SAMPLE.md#1-hostvm-sample-run):
+
+```
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest inject --id db-max-connections \
+    --conn "host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
+    --agent-conn faulttest-db-local
+time=2026-09-22T13:19:48.990-04:00 level=INFO msg=--conn host=localhost
+time=2026-09-22T13:19:48.990-04:00 level=INFO msg=--agent-conn host=faulttest-db-local
+time=2026-09-22T13:19:48.994-04:00 level=INFO msg="executing injection spec" type=docker_exec phase=inject
+Failure injected: Max connections exhausted
+
+Suggested prompt for the agent:
+Users are getting "too many clients" errors connecting to the database. The connection_string is "faulttest-db-local" — use it verbatim for all tool calls. Please investigate.
+
+
+To tear down: faulttest teardown --id db-max-connections [same flags]
+```
+
+Then, with no `faulttest` involvement anywhere in the request path — a plain `curl`, authenticated as a human operator via `X-User` alone (no Bearer token, no service account):
+
+```bash
+curl -s -X POST "$HELPDESK_GATEWAY_URL/api/v1/query" \
+  -H "Content-Type: application/json" \
+  -H "X-User: alice@example.com" \
+  -H "X-Purpose: diagnostic" \
+  -d '{"message": "Users are getting \"too many clients\" errors connecting to the database. The connection_string is \"host=localhost port=15432 dbname=testdb user=postgres password=testpass\" — use it verbatim for all tool calls. Please investigate."}'
+```
+
+The Gateway's own log is the actual receipt that auto-selection ran, before the agent ever produced a diagnosis:
+
+```
+time=2026-09-22T13:21:25.556-04:00 level=INFO msg="gateway: LLM routing decision" agent=postgres_database_agent confidence=0.95 category=database playbook_series_id=pbs_connection_triage trace_id=tr_1dab1612-5c7
+time=2026-09-22T13:21:26.068-04:00 level=WARN msg="handlePlaybookRun: agent-mode run has no connection_string" playbook=pbs_connection_triage
+```
+
+The `no connection_string` warning is expected, not a bug: `POST /api/v1/query`'s request body has no dedicated `connection_string` field (unlike `POST /api/v1/fleet/playbooks/{id}/run`, which §4 uses) — a symptom description is the whole point here, so the target has to be embedded in the free text and extracted by the agent itself, the same way it always is when a human describes a problem in prose. The agent used it correctly anyway, per its own instruction to use it "verbatim."
+
+The response (trimmed to the fields that matter for auto-selection — the full response also carries the complete diagnostic report and reasoning text, same shape as every other example in this doc):
+
+```json
+{
+  "run_id": "plr_032e40c7",
+  "agent": "postgres_database_agent",
+  "status": "pending_gate",
+  "gate_type": "transition",
+  "gate_reason": "trust_not_earned",
+  "transition_target": "pbs_connection_remediate",
+  "mismatch": true,
+  "narrated_not_confirmed": ["get_config_parameter"],
+  "warnings": ["no connection_string specified — agent will need to ask which database to investigate"]
+}
+```
+
+Note that the `pbs_connection_triage` was never named anywhere in the request. Instead, the Gateway matched it from `category=database` plus the symptom text alone. 
+
+A few other things to note:  
+  - `gate_reason: "trust_not_earned"` is a second, independent governance mechanism: even with a 95%-confidence diagnosis and a properly role-authorized human operator, the Gateway still won't silently auto-chain into remediation for a series that hasn't earned a STABLE+CLEAN fault-stability cert (see [AIGOVERNANCE.md](AIGOVERNANCE.md) and [CONSISTENCY.md](CONSISTENCY.md)). That is, confidence and trust are checked independently.  
+  - And `narrated_not_confirmed: ["get_config_parameter"]` is the same live fabrication pattern §1 caught, on a completely separate run. 
+
+Drilling into the incident record confirms both, plus the origin tagging this whole doc is about:
+
+```
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents plr_032e40c7 --gateway "$HELPDESK_GATEWAY_URL" --api-key "$FAULTTEST_API_KEY"
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: dev  ·  host: $HELPDESK_HOST_NAME
+
+
+════════════════════════════════════════════════════════════
+INCIDENT plr_032e40c7
+Started: 2026-09-22 17:21 UTC
+Operator: alice@example.com
+Triggered by: Users are getting "too many clients" errors connecting to the
+              database. The connection_string is "host=localhost port=15432
+              dbname=testdb user=postgres password=testpass" — use it verbatim for
+              all tool calls. Please investigate.
+Origin: real   Status: open
+════════════════════════════════════════════════════════════
+
+── TRIAGE
+Playbook:  pbs_connection_triage
+Findings:  connections 24/20 (120%); idle=16; blocker=none; recommended=kill_idle
+           ⚠ [Layer 2] unverified — no matching tool execution in the audit trail
+
+Hypotheses:
+  [PRIMARY  95%] Connection saturation from idle connections due to disabled idle_session_timeout
+                 Evidence: "idle_session_timeout | 0 | ms | 0 | default"
+  [REJECTED  5%] Long-running replication transaction preventing connection cleanup
+                 Rejected: WAL sender (pid 31743) is a system process handling replication, not a user transaction blocking connection slots
+
+── GATE
+Decision:  pending
+
+── JOURNEYS
+  WHY = Incident narrative (this view)   WHAT = Audit trail (vault journeys)
+
+  triage:                tr_1dab1612-5c7
+                         reasoning chain, hypothesis building
+
+  → vault journeys tr_1dab1612-5c7
+```
+
+  - `Origin: real` — untagged, correctly not `faulttest`, exactly as in §4.  
+  - `Status: open` (not `resolved`) and `Decision: pending` are both accurate, not a display gap: this incident genuinely hasn't been resolved yet because the trust gate stopped it before remediation and this walkthrough deliberately doesn't push it through the gate, since §1 and §4 already show that mechanics in full.   
+  - `Triggered by:` is the original free-text symptom, unmodified. It is the same string that got auto-routed, still attached to the record it produced. Tearing down afterward (`faulttest teardown --id db-max-connections`, same flags as the inject) is unrelated to any of this because it just removes the idle connections the injection step created.
 
 ## Connection to Other Docs
 
@@ -682,4 +795,5 @@ Same symptom, same playbook, same gateway, same outcome — the only thing that 
 | [INCIDENTS.md](INCIDENTS.md) | The Incident data model, the `incidents` table, real vs. injected paths, the full audit-trail walkthrough |
 | [FAULTTEST_SAMPLE.md](FAULTTEST_SAMPLE.md) | The same 3-platform sample-run format, applied to the broader fault catalog rather than the incidents table specifically |
 | [VAULT.md](VAULT.md) | `vault incidents`, `vault journey` and the rest of the vault CLI reference |
-| [AIGOVERNANCE.md](AIGOVERNANCE.md) | The 4-layer fabrication detection referenced in the Docker/Podman example above |
+| [AIGOVERNANCE.md](AIGOVERNANCE.md) | The 4-layer fabrication detection referenced in the §1, §2 and §5 examples above, including the `[Layer N]` labels and the TOOL CALL INTEGRITY map |
+| [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, gate/approval mechanics referenced throughout and the `/api/v1/query` auto-selection route used in §5 |
