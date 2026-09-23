@@ -252,87 +252,42 @@ func TestRunApprovalLoop_EffectiveApprovalModeOverride(t *testing.T) {
 	}
 }
 
-// TestRunApprovalLoop_EffectiveApprovalModeClampedToManual_DoesNotAutoApprove
-// is the inverse of TestRunApprovalLoop_EffectiveApprovalModeOverride above,
-// and the real bug found live 2026-09-22: cfg.ApprovalMode is "force" (the
-// CLI flag), but the gateway clamps it down to "manual" (the caller lacks a
-// required approval_override_roles role) and reports that via
-// EffectiveApprovalMode. The loop must honour the clamp and attempt to
-// prompt for this destructive step, not silently auto-approve it — proven
-// the same way the sibling test proves the opposite direction: if the clamp
-// is ignored (mode stays "force"), the step is auto-approved and the proceed
-// endpoint below (which would execute the destructive tool for real) is
-// reached with no error. If honoured, promptStepApproval opens /dev/tty,
-// falls back to os.Stdin, reads EOF in this non-interactive test process,
-// and returns an error — so an error here proves the loop correctly refused
-// to bypass the server's clamp, and the proceed endpoint (which the test
-// server would 500 on) must never be reached.
-func TestRunApprovalLoop_EffectiveApprovalModeClampedToManual_DoesNotAutoApprove(t *testing.T) {
-	proceedCalled := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proceedCalled = true
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
-		GatewayURL:    srv.URL,
-		GatewayAPIKey: "test-key",
-		ConnStr:       "host=localhost",
-		ApprovalMode:  "force",
-	}})
-	initial := faultlib.ApproveRunResponse{
-		RunID:                 "plr_clamp01",
-		Status:                "pending_approval",
-		ApprovalID:            "apr_clamp",
-		EffectiveApprovalMode: "manual", // gateway clamped "force" -> "manual"
-		Step: &faultlib.ApproveRunStep{
-			Index: 1, Agent: "database", Tool: "terminate_idle_connections",
-			Args: map[string]any{"idle_minutes": 0}, Reason: "Terminate idle connections",
-		},
+// TestResolveApprovalMode covers the actual bug (mode selection) directly,
+// as a pure function — no I/O, no /dev/tty. An earlier version of this
+// coverage drove the real bug through runApprovalLoop end-to-end, asserting
+// on whether the mock proceed endpoint got hit; that shape has two real
+// problems, both found live via `make cover` on 2026-09-22: (1) reaching a
+// "should prompt" case necessarily calls promptStepApproval, which opens
+// /dev/tty — when go test runs attached to a real interactive terminal
+// (unlike most detached CI runners), /dev/tty succeeds and the test blocks
+// on real keyboard input for however long it takes something to arrive,
+// rather than hitting the EOF-fallback fast-fail a detached run gets; (2)
+// even once something arrives, "proceedCalled" alone can't tell a correct
+// prompt-then-deny flow (which still calls proceed, with resolution=denied)
+// apart from the bug (silent resolution=approved) — both reach the mock
+// server. Testing resolveApprovalMode directly sidesteps both: deterministic,
+// no I/O, and it's the only place the bug actually lived.
+func TestResolveApprovalMode(t *testing.T) {
+	tests := []struct {
+		name          string
+		effectiveMode string
+		cliMode       string
+		want          string
+	}{
+		{"effective force wins over cli manual", "force", "manual", "force"},
+		{"effective manual wins over cli force — the real bug: a clamp must not be ignored", "manual", "force", "manual"},
+		{"effective review wins over cli force", "review", "force", "review"},
+		{"cli mode used when effective is empty", "", "force", "force"},
+		{"manual default when neither is set", "", "", "manual"},
+		{"effective empty, cli manual", "", "manual", "manual"},
 	}
-	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
-		t.Fatal("runApprovalLoop returned nil error — the clamp to \"manual\" was ignored and the destructive step was silently auto-approved")
-	}
-	if proceedCalled {
-		t.Error("proceed endpoint was called — the destructive step was submitted for execution despite the gateway's clamp to \"manual\"")
-	}
-}
-
-// TestRunApprovalLoop_NoModeAnywhereDefaultsToManual proves that when
-// neither the gateway's EffectiveApprovalMode nor the CLI's own
-// --approval-mode flag is set, the loop defaults to "manual" (prompts)
-// rather than silently falling through to auto-approval — the safe default
-// when the mode is genuinely unknown.
-func TestRunApprovalLoop_NoModeAnywhereDefaultsToManual(t *testing.T) {
-	proceedCalled := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proceedCalled = true
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{
-		GatewayURL:    srv.URL,
-		GatewayAPIKey: "test-key",
-		ConnStr:       "host=localhost",
-		ApprovalMode:  "", // no CLI flag
-	}})
-	initial := faultlib.ApproveRunResponse{
-		RunID:                 "plr_nomode01",
-		Status:                "pending_approval",
-		ApprovalID:            "apr_nomode",
-		EffectiveApprovalMode: "", // gateway didn't report one either
-		Step: &faultlib.ApproveRunStep{
-			Index: 1, Agent: "database", Tool: "terminate_connection",
-			Args: map[string]any{"pid": 1234}, Reason: "Terminate root blocker",
-		},
-	}
-	if err := r.runApprovalLoop(context.Background(), initial); err == nil {
-		t.Fatal("runApprovalLoop returned nil error — an unknown mode was silently auto-approved instead of defaulting to manual")
-	}
-	if proceedCalled {
-		t.Error("proceed endpoint was called — an unknown mode should default to manual (prompt), not auto-approve")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveApprovalMode(tt.effectiveMode, tt.cliMode)
+			if got != tt.want {
+				t.Errorf("resolveApprovalMode(%q, %q) = %q, want %q", tt.effectiveMode, tt.cliMode, got, tt.want)
+			}
+		})
 	}
 }
 

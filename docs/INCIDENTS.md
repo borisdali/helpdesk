@@ -84,6 +84,8 @@ The `outcome` field is the trigger for the flywheel:
 
 When `outcome` is `"resolved"` or `"escalated"` and `HELPDESK_GATEWAY_URL` is configured, the gateway's `from-trace` endpoint is called automatically. A Playbook draft is synthesised from the audit trail of every tool call made during the investigation and saved to the Vault as an inactive draft. An optional `series_id` arg pins the draft to an existing series (e.g. `"pbs_vacuum_triage"`) so the draft improves that series instead of starting a new one — the same "improvement mode" `faulttest` already uses for its own draft requests below; both callers share one implementation (`agentutil.RequestPlaybookDraft`). The resulting `playbook_id` is also recorded onto the incident's own row (`draft_playbook_id`) when a tracked `incident_id` was supplied, so a later `GET /api/v1/incidents` listing can show draft status without a separate lookup.
 
+Under an enforcing identity provider (`HELPDESK_IDENTITY_PROVIDER=static`), this outgoing call needs its own credential — `HELPDESK_CLIENT_API_KEY` set on the incident agent's own environment (see [ARCHITECTURE.md § 4.4 Agent-specific](ARCHITECTURE.md#44-agent-specific)). Without it, `from-trace` 401s silently: the bundle itself is still created successfully, `draft_playbook_id` just never gets set — found live, v0.29.0.
+
 The bundle result:
 
 ```json

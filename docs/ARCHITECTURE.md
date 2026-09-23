@@ -229,6 +229,17 @@ export HELPDESK_INFRA_CONFIG="infrastructure.json"
 
 # Incident agent: output directory for bundles (defaults to current directory)
 export HELPDESK_INCIDENT_DIR="/path/to/incidents"
+
+# Incident agent: credential for its own outgoing call to the gateway's
+# from-trace endpoint (POST /api/v1/fleet/playbooks/from-trace) when
+# synthesising a Playbook draft. Only required under an enforcing identity
+# provider (HELPDESK_IDENTITY_PROVIDER=static) — that route requires auth,
+# not anonymous access. Without it, the call 401s silently and no draft is
+# ever synthesised, even though the bundle itself is created successfully
+# (found live, v0.29.0). Same env var CLIENT.md documents for helpdesk-client;
+# the incident agent reads it directly (agents/incident/tools.go), not via a
+# CLI flag.
+export HELPDESK_CLIENT_API_KEY="..."
 ```
 
 The database agent also respects standard PostgreSQL environment variables (`PGHOST`,

@@ -745,13 +745,53 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 	return nil
 }
 
+// resolveApprovalMode picks the approval mode runApprovalLoop actually
+// drives on. effectiveMode (from the gateway's own ApproveRunResponse.
+// EffectiveApprovalMode) is authoritative whenever it's set — its own doc
+// comment says "use instead of requested mode" — since it reflects
+// enforceApprovalOverride clamping the CLI's requested mode down when the
+// caller lacks a required approval_override_roles role
+// (cmd/gateway/playbooks.go). Only falls back to the CLI's own
+// --approval-mode flag when the gateway didn't report one at all (older
+// gateway, or a response path that doesn't set it); falls back to "manual"
+// — never silent auto-approval — if neither is set, so an unknown mode
+// can't accidentally skip prompting.
+//
+// A pure function, deliberately: the bug this fixes was purely in mode
+// selection, not in the prompting/waiting machinery downstream of it, so
+// testing it here — no I/O, no /dev/tty — is both more precise and immune
+// to a class of flakiness a full runApprovalLoop test can't avoid (see
+// TestResolveApprovalMode's own doc comment for what that flakiness looked
+// like in practice).
+//
+// Previously this only special-cased an *upgrade* to "force" and fell back
+// to the CLI flag otherwise, which meant a *downgrade* (CLI asked for
+// "force", server clamped it to "manual") left mode == "force" for the rest
+// of the loop: needsPrompt and the EmitAndWait wait-for-external-approval
+// case are both gated on mode == "manual"/"review", so neither ever fired,
+// and every step — including destructive ones — fell through to the silent
+// default: branch and got auto-approved locally despite the server's
+// explicit clamp. Found live 2026-09-22 running `--approval-mode force`
+// against a database with approval_override_roles set:
+// terminate_idle_connections (a destructive tool) executed for real with no
+// prompt and no wait.
+func resolveApprovalMode(effectiveMode, cliRequestedMode string) string {
+	mode := effectiveMode
+	if mode == "" {
+		mode = cliRequestedMode
+	}
+	if mode == "" {
+		mode = "manual"
+	}
+	return mode
+}
+
 // runApprovalLoop drives the agent_approve step-by-step loop interactively.
 // --approval-mode force:  auto-approves every step — but only when the
 //
 //	gateway actually grants force; a caller lacking a required
 //	approval_override_roles role gets clamped to the playbook's own
-//	default instead (see the mode-resolution comment below), same
-//	as any other mode.
+//	default instead (see resolveApprovalMode), same as any other mode.
 //
 // --approval-mode review: auto-approves read-only steps, prompts for write/destructive.
 // --approval-mode manual: prompts for every step.
@@ -762,34 +802,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial faultlib.Appro
 
 	current := initial
 	const maxSteps = 100
-	// Resolve approval mode: the gateway's EffectiveApprovalMode is
-	// authoritative whenever it's set — its own doc comment says "use
-	// instead of requested mode" — since it reflects enforceApprovalOverride
-	// clamping the CLI's requested mode down when the caller lacks a
-	// required approval_override_roles role (cmd/gateway/playbooks.go).
-	// Only fall back to the CLI's own --approval-mode flag when the gateway
-	// didn't report one at all (older gateway, or a response path that
-	// doesn't set it); fall back to "manual" — never silent auto-approval —
-	// if neither is set, so an unknown mode can't accidentally skip prompting.
-	//
-	// Previously this only special-cased an *upgrade* to "force" and fell
-	// back to the CLI flag otherwise, which meant a *downgrade* (CLI asked
-	// for "force", server clamped it to "manual") left mode == "force" for
-	// the rest of this loop: needsPrompt and the EmitAndWait wait-for-
-	// external-approval case below are both gated on mode == "manual"/
-	// "review", so neither ever fired, and every step — including
-	// destructive ones — fell through to the silent default: branch and
-	// got auto-approved locally despite the server's explicit clamp. Found
-	// live 2026-09-22 running `--approval-mode force` against a database
-	// with approval_override_roles set: terminate_idle_connections (a
-	// destructive tool) executed for real with no prompt and no wait.
-	mode := initial.EffectiveApprovalMode
-	if mode == "" {
-		mode = r.cfg.ApprovalMode
-	}
-	if mode == "" {
-		mode = "manual"
-	}
+	mode := resolveApprovalMode(initial.EffectiveApprovalMode, r.cfg.ApprovalMode)
 
 	for i := 0; i < maxSteps && current.Status == "pending_approval"; i++ {
 		if current.Step == nil {
