@@ -64,6 +64,16 @@ jobs:
         with:
           files: coverage.out
           fail_ci_if_error: false
+          # Required for uploads on a protected branch — tokenless upload's
+          # own log warned "Branch `main` is protected but no token was
+          # provided", which lines up with the dashboard's "commit message
+          # unavailable" / "no base commit found" symptoms: without this,
+          # Codecov can't fully authenticate the upload to link/compare it
+          # server-side, even though the client-side steps report success.
+          # Repo secret must be set first (see CONTRIBUTING.md or Codecov's
+          # own repo settings page for the token value) — this line is a
+          # no-op until CODECOV_TOKEN exists as a secret.
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload logs on failure
         if: failure()
