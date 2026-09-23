@@ -13,6 +13,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Codecov needs real git history to resolve each commit's base/parent
+          # for PR-diff and project-comparison reporting — the default shallow
+          # clone (fetch-depth: 1) only fetches the single commit, which is
+          # exactly what produced "commit message unavailable" / "Unable to
+          # compare commits because no base commit was found" on the Codecov
+          # dashboard. fetch-depth: 0 fetches full history.
+          fetch-depth: 0
 
       - name: Clone adk-go
         run: |

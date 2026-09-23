@@ -4,6 +4,14 @@ coverage:
       default:
         target: auto
         threshold: 2%
+    # New/changed lines in a PR must be well-tested — the check
+    # CONTRIBUTING.md's "coverage only goes up, PR-by-PR" rule actually
+    # relies on. Judges only the lines a PR itself touches, not the
+    # historical coverage of whatever file they happen to live in.
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
 
 ignore:
   # Binary entrypoints — glue code, not library logic
