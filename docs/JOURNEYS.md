@@ -426,6 +426,23 @@ curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e"
 curl "http://localhost:8080/api/v1/governance/events?trace_id=tr_7c2a1b9e&event_type=policy_decision"
 ```
 
+**Or, already formatted, via the Vault CLI:**
+
+```bash
+faulttest vault journey tr_7c2a1b9e --detail --gateway http://gateway:8080 --api-key $KEY
+```
+
+This is the *same* Journey — the same `trace_id`-grouped events this whole section
+describes, not a different or parallel data model — just rendered by the Vault CLI
+instead of raw JSON: a human-readable execution trace (reasoning interleaved with
+each tool call), a TOOL CALL INTEGRITY table naming any declared-but-never-executed
+tool call by name, and every fabrication/evidence warning tagged with which of the
+four detection layers ([AIGOVERNANCE.md §1.1](AIGOVERNANCE.md#11-llm-fabrication-detection))
+caught it. `raw curl` above is still the right tool for scripting or a field you need
+that the CLI doesn't surface; `vault journey --detail` is the right one for a human
+actually reading a trace. See [VAULT.md § vault journey](VAULT.md#vault-journey) for
+the full CLI reference.
+
 For a human-readable policy explanation of any `pol_` event in the trace, use
 `govexplain`:
 
