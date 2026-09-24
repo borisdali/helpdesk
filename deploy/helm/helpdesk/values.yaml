@@ -281,6 +281,23 @@ governance:
     approvalKeyKey: "api-key"
     clientAPIKeySecret: ""
     clientAPIKeyKey: "api-key"
+    # Postgres backend (optional; default is SQLite on the PVC below).
+    # Secret containing a Postgres DSN (postgres://user:pass@host:port/db)
+    # for auditd's own storage. When set, auditd runs with backend=postgres
+    # instead of SQLite, and the audit-data PVC below is not created (only
+    # the runtime notification socket lives under emptyDir).
+    #
+    # IMPORTANT: this DSN must point at an instance dedicated to auditd's
+    # own storage — never one this deployment also monitors or remediates
+    # as a target database. Sharing a server means a target-database
+    # outage can take auditd down with it, which defeats the point of the
+    # DB agent's backup/restore detection work (see docs/HA_DR.md): auditd
+    # has to stay up through exactly that outage to detect it and guide
+    # recovery. Create with:
+    #   kubectl create secret generic helpdesk-auditd-dsn \
+    #     --from-literal=dsn='postgres://user:pass@host:5432/auditd?sslmode=require'
+    dsnSecret: ""
+    dsnSecretKey: "dsn"
 
   # Real-time audit monitoring and alerting
   auditor:

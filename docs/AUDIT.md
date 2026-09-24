@@ -34,7 +34,8 @@ For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
 7. [Event Query Filters](#7-event-query-filters)
 8. [Starting auditd](#8-starting-auditd)
    - [8.1 auditd environment variables](#81-auditd-environment-variables)
-   - [8.2 Agent environment variables](#82-agent-environment-variables)
+   - [8.2 Postgres backend](#82-postgres-backend)
+   - [8.3 Agent environment variables](#83-agent-environment-variables)
 9. [auditor CLI](#9-auditor-cli)
    - [9.1 auditor flags](#91-auditor-flags)
    - [9.2 Security detection patterns](#92-security-detection-patterns)
@@ -598,7 +599,61 @@ go run ./cmd/auditd/ \
 | `SMTP_USER` | — | SMTP username |
 | `SMTP_PASSWORD` | — | SMTP password |
 
-### 8.2 Agent environment variables
+### 8.2 Postgres backend
+
+**Before anything else**: auditd's own storage — SQLite or Postgres — must
+never live on the same server as a target database this deployment monitors
+or remediates. If a target database outage takes auditd down with it, the
+system loses the ability to detect that outage and guide recovery from it —
+exactly the scenario the DB agent's backup/restore detection work exists to
+help with (see [HA_DR.md](HA_DR.md)). This applies whether auditd runs on
+SQLite or Postgres; it's just easier to violate by accident when both happen
+to be Postgres instances that look interchangeable at a glance.
+
+SQLite is the default and remains fully supported — a single-writer
+embedded database with no separate service to run, appropriate for most
+deployments. Postgres is a supported alternative for deployments that need
+more concurrent-write headroom or want auditd's storage on the same
+managed-database infrastructure as the rest of their stack, backed by a
+dedicated Postgres instance of its own.
+
+To use it, set `HELPDESK_AUDIT_DB` (or auditd's `-db` flag) to a
+`postgres://` or `postgresql://` DSN instead of a file path — `internal/audit.NewStore`
+detects the backend from the DSN prefix automatically, no separate flag
+needed:
+
+```bash
+HELPDESK_AUDIT_DB="postgres://user:pass@auditd-db.internal:5432/auditd?sslmode=require" \
+  go run ./cmd/auditd/
+```
+
+On Helm, set `governance.auditd.dsnSecret` to a Secret name containing the
+DSN (key `dsn` by default, overridable via `governance.auditd.dsnSecretKey`)
+instead of setting `HELPDESK_AUDIT_DB` directly:
+
+```bash
+kubectl create secret generic helpdesk-auditd-dsn \
+  --from-literal=dsn='postgres://user:pass@auditd-db.internal:5432/auditd?sslmode=require'
+```
+
+```yaml
+governance:
+  auditd:
+    dsnSecret: helpdesk-auditd-dsn
+```
+
+When `dsnSecret` is set, the chart does not create the `audit-data`
+PersistentVolumeClaim it otherwise would for SQLite — there's nothing
+durable to store locally once the database itself lives on Postgres.
+
+This is validated, not just theoretically wired: every store in
+`internal/audit` has a dedicated Postgres-backend integration test
+(`testing/integration/*_postgres_test.go`, `make integration`) proving its
+schema and migrations are idempotent and that a write survives a fresh
+reopen — the exact thing that broke, repeatedly, the first time this backend
+was actually exercised against real Postgres during v0.30 development.
+
+### 8.3 Agent environment variables
 
 | Variable | Description |
 |----------|-------------|

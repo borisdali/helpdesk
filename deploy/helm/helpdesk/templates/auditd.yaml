@@ -25,7 +25,11 @@ spec:
           command: ["/usr/local/bin/auditd"]
           args:
             - "-listen=:{{ .Values.governance.auditd.port }}"
+            {{- if .Values.governance.auditd.dsnSecret }}
+            - "-db=$(AUDITD_DSN)"
+            {{- else }}
             - "-db=/data/audit/audit.db"
+            {{- end }}
             - "-socket=/data/audit/audit.sock"
             {{- if .Values.governance.approvals.webhook }}
             - "-approval-webhook={{ .Values.governance.approvals.webhook }}"
@@ -45,6 +49,13 @@ spec:
             {{- include "helpdesk.logLevelEnv" . | nindent 12 }}
             - name: HELPDESK_AUDIT_URL
               value: "http://localhost:{{ .Values.governance.auditd.port }}"
+            {{- if .Values.governance.auditd.dsnSecret }}
+            - name: AUDITD_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.governance.auditd.dsnSecret }}
+                  key: {{ .Values.governance.auditd.dsnSecretKey }}
+            {{- end }}
             {{- if .Values.governance.auditd.approvalKeySecret }}
             - name: HELPDESK_APPROVAL_KEY
               valueFrom:
@@ -113,7 +124,12 @@ spec:
             periodSeconds: 10
       volumes:
         - name: audit-data
-          {{- if .Values.governance.auditd.persistence.enabled }}
+          {{- if .Values.governance.auditd.dsnSecret }}
+          # Postgres backend: nothing durable needs to live here — the
+          # directory only backs the runtime notification socket
+          # (-socket=/data/audit/audit.sock), not the audit database itself.
+          emptyDir: {}
+          {{- else if .Values.governance.auditd.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "helpdesk.fullname" . }}-auditd
           {{- else }}
@@ -143,7 +159,7 @@ spec:
   selector:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: auditd
-{{- if .Values.governance.auditd.persistence.enabled }}
+{{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

@@ -1291,3 +1291,59 @@ func TestAutoIncidentBundle_SetWhenEnabled(t *testing.T) {
 		t.Errorf("HELPDESK_AUTO_INCIDENT_BUNDLE = %q, want \"true\" when gateway.autoIncidentBundle=true", env["HELPDESK_AUTO_INCIDENT_BUNDLE"])
 	}
 }
+
+// TestAuditdPostgresDSN_AbsentByDefault verifies auditd still defaults to
+// SQLite-on-PVC when governance.auditd.dsnSecret is unset (v0.30 Postgres
+// backend support must not change existing deployments' behavior).
+func TestAuditdPostgresDSN_AbsentByDefault(t *testing.T) {
+	objects := render(t)
+	dep := objects["Deployment/test-auditd"]
+	container := containerByName(t, dep, "auditd")
+	args := containerArgs(container)
+	found := false
+	for _, a := range args {
+		if a == "-db=/data/audit/audit.db" {
+			found = true
+		}
+		if a == "-db=$(AUDITD_DSN)" {
+			t.Error("args should not reference $(AUDITD_DSN) when dsnSecret is unset")
+		}
+	}
+	if !found {
+		t.Errorf("args = %v, want \"-db=/data/audit/audit.db\" present", args)
+	}
+	if _, ok := objects["PersistentVolumeClaim/test-auditd"]; !ok {
+		t.Error("PersistentVolumeClaim should exist by default (persistence.enabled=true, dsnSecret unset)")
+	}
+}
+
+// TestAuditdPostgresDSN_SetWhenConfigured verifies that setting
+// governance.auditd.dsnSecret switches auditd to the Postgres backend (DSN
+// sourced from a Secret via AUDITD_DSN) and skips creating the audit-data
+// PVC entirely — an external Postgres instance needs no local persistent
+// storage for the SQLite file it will never write.
+func TestAuditdPostgresDSN_SetWhenConfigured(t *testing.T) {
+	objects := render(t, "governance.auditd.dsnSecret=my-auditd-dsn")
+	dep := objects["Deployment/test-auditd"]
+	container := containerByName(t, dep, "auditd")
+
+	args := containerArgs(container)
+	found := false
+	for _, a := range args {
+		if a == "-db=$(AUDITD_DSN)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("args = %v, want \"-db=$(AUDITD_DSN)\" present when dsnSecret is set", args)
+	}
+
+	raw := renderRaw(t, "governance.auditd.dsnSecret=my-auditd-dsn")
+	if !strings.Contains(raw, "name: my-auditd-dsn") {
+		t.Error("AUDITD_DSN secretKeyRef should reference the configured dsnSecret name")
+	}
+
+	if _, ok := objects["PersistentVolumeClaim/test-auditd"]; ok {
+		t.Error("PersistentVolumeClaim should not be created when dsnSecret is set")
+	}
+}
