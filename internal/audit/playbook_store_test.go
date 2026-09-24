@@ -749,9 +749,9 @@ func TestPlaybookStore_PermittedTools_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	pb := &Playbook{
-		Name:          "Auto-restart triage",
-		Description:   "desc",
-		ExecutionMode: "agent_auto",
+		Name:           "Auto-restart triage",
+		Description:    "desc",
+		ExecutionMode:  "agent_auto",
 		PermittedTools: []string{"restart_container", "check_host"},
 	}
 	if err := ps.Create(ctx, pb); err != nil {

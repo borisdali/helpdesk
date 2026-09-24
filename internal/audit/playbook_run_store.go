@@ -120,13 +120,13 @@ type PlaybookVersionStats struct {
 
 // PlaybookRunStore persists playbook execution records.
 type PlaybookRunStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewPlaybookRunStore creates the playbook_runs table (if absent) and returns a
 // ready-to-use PlaybookRunStore.
-func NewPlaybookRunStore(db *sql.DB, isPostgres bool) (*PlaybookRunStore, error) {
+func NewPlaybookRunStore(db *rebindDB, isPostgres bool) (*PlaybookRunStore, error) {
 	s := &PlaybookRunStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create playbook_run schema: %w", err)
@@ -147,8 +147,8 @@ CREATE TABLE IF NOT EXISTS playbook_runs (
     diagnostic_report  TEXT     NOT NULL DEFAULT '',
     context_id         TEXT     NOT NULL DEFAULT '',
     operator           TEXT     NOT NULL DEFAULT '',
-    started_at         DATETIME NOT NULL,
-    completed_at       DATETIME NOT NULL DEFAULT ''
+    started_at         TEXT     NOT NULL,
+    completed_at       TEXT     NOT NULL DEFAULT ''
 )`)
 	if err != nil {
 		return err

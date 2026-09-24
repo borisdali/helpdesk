@@ -113,7 +113,7 @@ func main() {
 	}
 
 	// Create upload store (shares the same database connection)
-	uploadStore, err := audit.NewUploadStore(store.DB())
+	uploadStore, err := audit.NewUploadStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		slog.Error("failed to create upload store", "err", err)
 		os.Exit(1)

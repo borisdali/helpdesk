@@ -13,12 +13,12 @@ import (
 
 // ApprovalSessionStore persists ApprovalSession records in SQLite.
 type ApprovalSessionStore struct {
-	db *sql.DB
+	db *rebindDB
 }
 
 // NewApprovalSessionStore creates the approval_sessions table (if absent) and
 // returns a ready-to-use store.
-func NewApprovalSessionStore(db *sql.DB) (*ApprovalSessionStore, error) {
+func NewApprovalSessionStore(db *rebindDB) (*ApprovalSessionStore, error) {
 	s := &ApprovalSessionStore{db: db}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create approval_sessions schema: %w", err)
@@ -31,8 +31,8 @@ func (s *ApprovalSessionStore) createSchema() error {
 CREATE TABLE IF NOT EXISTS approval_sessions (
     session_id      TEXT     NOT NULL PRIMARY KEY,
     granted_by      TEXT     NOT NULL DEFAULT '',
-    granted_at      DATETIME NOT NULL,
-    expires_at      DATETIME NOT NULL,
+    granted_at      TEXT     NOT NULL,
+    expires_at      TEXT     NOT NULL,
     allowed_classes TEXT     NOT NULL DEFAULT '[]',
     scope           TEXT     NOT NULL DEFAULT '',
     revoked         INTEGER  NOT NULL DEFAULT 0

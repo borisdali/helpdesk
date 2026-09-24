@@ -39,11 +39,11 @@ type Playbook struct {
 	Version          string     `json:"version,omitempty"`
 
 	// Versioning fields (added in Phase 2)
-	SeriesID    string `json:"series_id,omitempty"`    // "pbs_" + uuid[:8]; groups all versions of a playbook concept; stable across renames
-	IsActive    bool   `json:"is_active"`              // exactly one version per series should be active
-	IsSystem    bool   `json:"is_system"`              // true = shipped with aiHelpDesk; read-only via API
-	Source      string `json:"source"`                 // "system" | "imported" | "manual"
-	OriginTrace string `json:"origin_trace,omitempty"` // audit trace or playbook run ID that generated this version
+	SeriesID     string `json:"series_id,omitempty"`     // "pbs_" + uuid[:8]; groups all versions of a playbook concept; stable across renames
+	IsActive     bool   `json:"is_active"`               // exactly one version per series should be active
+	IsSystem     bool   `json:"is_system"`               // true = shipped with aiHelpDesk; read-only via API
+	Source       string `json:"source"`                  // "system" | "imported" | "manual"
+	OriginTrace  string `json:"origin_trace,omitempty"`  // audit trace or playbook run ID that generated this version
 	PlaybookType string `json:"playbook_type,omitempty"` // "triage" | "remediation" | "" (unset = no protocol validation)
 
 	// Triage routing fields
@@ -57,10 +57,10 @@ type Playbook struct {
 	// follow-ons (typically triage → remediation under the same agent).
 	// Validated server-side the same way as EscalatesTo.
 	RequiresEvidence []string `json:"requires_evidence,omitempty"` // log/error patterns expected before selecting this playbook
-	ExecutionMode    string   `json:"execution_mode"`             // "fleet" | "agent" (R/O) | "agent_approve" (mutations+approval) | "agent_auto" (pre-approved mutations)
-	PermittedTools   []string `json:"permitted_tools,omitempty"`  // agent_auto: tools allowed to execute without per-step approval
-	ApprovalMode     string   `json:"approval_mode,omitempty"`    // "auto"|"session"|"manual"; playbook-level default (overridden per run)
-	AgentName        string   `json:"agent_name,omitempty"`       // A2A agent to invoke; defaults to postgres_database_agent
+	ExecutionMode    string   `json:"execution_mode"`              // "fleet" | "agent" (R/O) | "agent_approve" (mutations+approval) | "agent_auto" (pre-approved mutations)
+	PermittedTools   []string `json:"permitted_tools,omitempty"`   // agent_auto: tools allowed to execute without per-step approval
+	ApprovalMode     string   `json:"approval_mode,omitempty"`     // "auto"|"session"|"manual"; playbook-level default (overridden per run)
+	AgentName        string   `json:"agent_name,omitempty"`        // A2A agent to invoke; defaults to postgres_database_agent
 
 	// Judge verdict (recorded when vault diff --judge is run against a draft).
 	// Persisted on the playbook record so vault versions can show whether the
@@ -91,13 +91,13 @@ type RootCauseClassification struct {
 // PlaybookStore persists fleet playbooks.
 // It shares the same *sql.DB connection as the other audit stores.
 type PlaybookStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewPlaybookStore creates the playbooks table (if absent), runs any pending
 // migrations, and returns a ready-to-use PlaybookStore.
-func NewPlaybookStore(db *sql.DB, isPostgres bool) (*PlaybookStore, error) {
+func NewPlaybookStore(db *rebindDB, isPostgres bool) (*PlaybookStore, error) {
 	s := &PlaybookStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create playbook schema: %w", err)
@@ -116,8 +116,8 @@ CREATE TABLE IF NOT EXISTS playbooks (
     description  TEXT        NOT NULL,
     target_hints TEXT        NOT NULL DEFAULT '[]',
     created_by   TEXT        NOT NULL DEFAULT '',
-    created_at   DATETIME    NOT NULL,
-    updated_at   DATETIME    NOT NULL
+    created_at   TEXT        NOT NULL,
+    updated_at   TEXT        NOT NULL
 )`)
 	return err
 }
@@ -285,7 +285,8 @@ func (s *PlaybookStore) Create(ctx context.Context, pb *Playbook) error {
 		     approval_mode, agent_name, transitions_to, origin_trace, playbook_type,
 		     judge_verdict, judge_model, judge_at, root_cause_classes)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy, pb.CreatedAt, pb.UpdatedAt,
+		pb.PlaybookID, pb.Name, pb.Description, string(hintsJSON), pb.CreatedBy,
+		pb.CreatedAt.Format(time.RFC3339Nano), pb.UpdatedAt.Format(time.RFC3339Nano),
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON), string(relatedJSON),
 		pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID, isActiveInt, isSystemInt, pb.Source,
@@ -374,7 +375,7 @@ func (s *PlaybookStore) Update(ctx context.Context, pb *Playbook) error {
 		    entry_point=?, escalates_to=?, requires_evidence=?, execution_mode=?, permitted_tools=?,
 		    approval_mode=?, agent_name=?, transitions_to=?, playbook_type=?
 		 WHERE playbook_id=?`,
-		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt,
+		pb.Name, pb.Description, string(hintsJSON), pb.UpdatedAt.Format(time.RFC3339Nano),
 		pb.ProblemClass, string(symptomsJSON), pb.Guidance, string(escalationJSON),
 		string(relatedJSON), pb.Author, lastValidatedStr, pb.Version,
 		pb.SeriesID,

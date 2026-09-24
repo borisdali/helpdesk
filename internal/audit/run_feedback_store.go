@@ -12,8 +12,8 @@ import (
 // FeedbackTime distinguishes when: "at_gate" (before remediation) or "post_incident" (after recovery).
 type RunFeedback struct {
 	RunID          string    `json:"run_id"`
-	FeedbackType   string    `json:"feedback_type"`             // "triage" | "remediation"
-	FeedbackTime   string    `json:"feedback_time"`             // "at_gate" | "post_incident"
+	FeedbackType   string    `json:"feedback_type"` // "triage" | "remediation"
+	FeedbackTime   string    `json:"feedback_time"` // "at_gate" | "post_incident"
 	SeriesID       string    `json:"series_id"`
 	VerdictCorrect *bool     `json:"verdict_correct,omitempty"` // nil = not yet submitted
 	VerdictNotes   string    `json:"verdict_notes,omitempty"`
@@ -44,24 +44,24 @@ type FeedbackStats struct {
 	PostIncidentAccuracyRate float64 `json:"post_incident_accuracy_rate,omitempty"`
 
 	// Remediation feedback (feedback_type='remediation').
-	RemediationFeedbackCount      int     `json:"remediation_feedback_count"`
-	RemediationCorrectCount       int     `json:"remediation_correct_count"`
-	RemediationAccuracyRate       float64 `json:"remediation_accuracy_rate,omitempty"`
-	RemediationAtGateCount        int     `json:"remediation_at_gate_count"`
-	RemediationAtGateCorrect      int     `json:"remediation_at_gate_correct"`
-	RemediationPostIncidentCount  int     `json:"remediation_post_incident_count"`
-	RemediationPostIncidentCorrect int    `json:"remediation_post_incident_correct"`
+	RemediationFeedbackCount       int     `json:"remediation_feedback_count"`
+	RemediationCorrectCount        int     `json:"remediation_correct_count"`
+	RemediationAccuracyRate        float64 `json:"remediation_accuracy_rate,omitempty"`
+	RemediationAtGateCount         int     `json:"remediation_at_gate_count"`
+	RemediationAtGateCorrect       int     `json:"remediation_at_gate_correct"`
+	RemediationPostIncidentCount   int     `json:"remediation_post_incident_count"`
+	RemediationPostIncidentCorrect int     `json:"remediation_post_incident_correct"`
 }
 
 // RunFeedbackStore persists operator feedback on playbook run quality.
 type RunFeedbackStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewRunFeedbackStore creates (or migrates) the run_feedback table and returns a
 // ready-to-use RunFeedbackStore.
-func NewRunFeedbackStore(db *sql.DB, isPostgres bool) (*RunFeedbackStore, error) {
+func NewRunFeedbackStore(db *rebindDB, isPostgres bool) (*RunFeedbackStore, error) {
 	s := &RunFeedbackStore{db: db, isPostgres: isPostgres}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrate run_feedback schema: %w", err)

@@ -16,7 +16,7 @@ func newUploadTestStore(t *testing.T) *UploadStore {
 		t.Fatalf("NewStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	us, err := NewUploadStore(store.DB())
+	us, err := NewUploadStore(store.DB(), store.IsPostgres())
 	if err != nil {
 		t.Fatalf("NewUploadStore: %v", err)
 	}

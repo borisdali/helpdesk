@@ -2,9 +2,7 @@ package audit
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -37,13 +35,13 @@ type RunEvaluation struct {
 
 // RunEvaluationStore persists automated faulttest evaluation scores.
 type RunEvaluationStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewRunEvaluationStore creates the run_evaluation table if needed and returns
 // a ready-to-use RunEvaluationStore.
-func NewRunEvaluationStore(db *sql.DB, isPostgres bool) (*RunEvaluationStore, error) {
+func NewRunEvaluationStore(db *rebindDB, isPostgres bool) (*RunEvaluationStore, error) {
 	s := &RunEvaluationStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create run_evaluation schema: %w", err)
@@ -87,7 +85,12 @@ CREATE TABLE IF NOT EXISTS run_evaluation (
 				continue
 			}
 		}
-		if _, err := s.db.Exec(col.ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		// SQLite says "duplicate column name: X"; Postgres says "column X of
+		// relation ... already exists". Accept both — this loop always runs
+		// unconditionally on Postgres (the pragma_table_info pre-check above
+		// is SQLite-only), so a column already present in the base schema
+		// above hits this path and must tolerate the resulting error.
+		if _, err := s.db.Exec(col.ddl); err != nil && !containsAny(err.Error(), "duplicate column", "already exists") {
 			return fmt.Errorf("add column %s: %w", col.name, err)
 		}
 	}

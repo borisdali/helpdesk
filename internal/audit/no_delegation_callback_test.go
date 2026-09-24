@@ -91,7 +91,7 @@ var _ agent.CallbackContext = mockCallbackCtx{}
 func textOnlyResponse(text string) *adkmodel.LLMResponse {
 	return &adkmodel.LLMResponse{
 		Content: &genai.Content{
-			Role: "model",
+			Role:  "model",
 			Parts: []*genai.Part{{Text: text}},
 		},
 	}

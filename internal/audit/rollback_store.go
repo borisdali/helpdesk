@@ -14,15 +14,15 @@ import (
 // A RollbackPlan is derived on-the-fly from the original audit event;
 // this record is written when the rollback is actually initiated.
 type RollbackRecord struct {
-	RollbackID      string    `json:"rollback_id"`       // "rbk_" + uuid[:8]
-	OriginalEventID string    `json:"original_event_id"` // the tool_execution being undone
-	OriginalTraceID string    `json:"original_trace_id"`
-	OriginalJobID   string    `json:"original_job_id,omitempty"` // set for fleet rollbacks
+	RollbackID      string `json:"rollback_id"`       // "rbk_" + uuid[:8]
+	OriginalEventID string `json:"original_event_id"` // the tool_execution being undone
+	OriginalTraceID string `json:"original_trace_id"`
+	OriginalJobID   string `json:"original_job_id,omitempty"` // set for fleet rollbacks
 	// Status progression: pending_approval → executing → success | failed | cancelled
-	Status          string    `json:"status"`
-	InitiatedBy     string    `json:"initiated_by"`
-	InitiatedAt     time.Time `json:"initiated_at"`
-	ApprovalID      string    `json:"approval_id,omitempty"`
+	Status      string    `json:"status"`
+	InitiatedBy string    `json:"initiated_by"`
+	InitiatedAt time.Time `json:"initiated_at"`
+	ApprovalID  string    `json:"approval_id,omitempty"`
 	// RollbackTraceID is "tr_" + RollbackID (e.g. "tr_rbk_a1b2c3d4"), mirroring
 	// fleet's "tr_flj_<uuid8>" convention so the trace and record IDs are derivable
 	// from each other without a lookup.
@@ -36,12 +36,12 @@ type RollbackRecord struct {
 
 // FleetRollbackRecord tracks a fleet-level rollback (reversal of a fleet job).
 type FleetRollbackRecord struct {
-	FleetRollbackID string    `json:"fleet_rollback_id"` // "frb_" + uuid[:8]
-	OriginalJobID   string    `json:"original_job_id"`
+	FleetRollbackID string `json:"fleet_rollback_id"` // "frb_" + uuid[:8]
+	OriginalJobID   string `json:"original_job_id"`
 	// Status: pending_approval | executing | success | failed | cancelled
-	Status      string    `json:"status"`
-	InitiatedBy string    `json:"initiated_by"`
-	ApprovalID  string    `json:"approval_id,omitempty"`
+	Status      string `json:"status"`
+	InitiatedBy string `json:"initiated_by"`
+	ApprovalID  string `json:"approval_id,omitempty"`
 	// Scope describes which servers to roll back:
 	// "all" | "canary_only" | "failed_only" | JSON array of server names
 	Scope         string    `json:"scope"`
@@ -63,13 +63,13 @@ type RollbackQueryOptions struct {
 // RollbackStore persists rollback records.
 // It shares the same *sql.DB as the audit Store, ApprovalStore, and FleetStore.
 type RollbackStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewRollbackStore creates the rollback tables (if absent) and returns a ready-to-use
 // RollbackStore using the given shared database connection.
-func NewRollbackStore(db *sql.DB, isPostgres bool) (*RollbackStore, error) {
+func NewRollbackStore(db *rebindDB, isPostgres bool) (*RollbackStore, error) {
 	s := &RollbackStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create rollback schema: %w", err)

@@ -104,9 +104,9 @@ func TestParseA2ARequest_ServicePrincipal(t *testing.T) {
 
 func TestParseA2ARequest_PurposeFields(t *testing.T) {
 	body := makeA2ABody(t, map[string]any{
-		"trace_id":        "tr_purp",
-		"purpose":         "remediation",
-		"purpose_note":    "INC-4567",
+		"trace_id":         "tr_purp",
+		"purpose":          "remediation",
+		"purpose_note":     "INC-4567",
 		"purpose_explicit": true,
 	}, "")
 	d := parseA2ARequest(body)
@@ -355,7 +355,7 @@ func TestTraceMiddlewareWithAudit_EmitsAnchorEvent(t *testing.T) {
 // auditorFunc is a test helper that adapts a function to the Auditor interface.
 type auditorFunc func(context.Context, *Event) error
 
-func (f auditorFunc) Record(ctx context.Context, e *Event) error                          { return f(ctx, e) }
-func (f auditorFunc) RecordOutcome(_ context.Context, _ string, _ *Outcome) error         { return nil }
-func (f auditorFunc) Query(_ context.Context, _ QueryOptions) ([]Event, error)            { return nil, nil }
-func (f auditorFunc) Close() error                                                        { return nil }
+func (f auditorFunc) Record(ctx context.Context, e *Event) error                  { return f(ctx, e) }
+func (f auditorFunc) RecordOutcome(_ context.Context, _ string, _ *Outcome) error { return nil }
+func (f auditorFunc) Query(_ context.Context, _ QueryOptions) ([]Event, error)    { return nil, nil }
+func (f auditorFunc) Close() error                                                { return nil }

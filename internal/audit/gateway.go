@@ -145,27 +145,27 @@ func (a *GatewayAuditor) RecordEvent(ctx context.Context, event *Event) error {
 // GatewayRequest contains the data for a gateway audit event.
 type GatewayRequest struct {
 	RequestID         string
-	TraceID           string                    // end-to-end trace ID
-	ContextID         string                    // agent session context ID (multi-turn continuity)
-	ParentID          string                    // parent event ID (if this is a child event)
-	Principal         string                    // authenticated user or API key (legacy; EffectiveID)
+	TraceID           string                     // end-to-end trace ID
+	ContextID         string                     // agent session context ID (multi-turn continuity)
+	ParentID          string                     // parent event ID (if this is a child event)
+	Principal         string                     // authenticated user or API key (legacy; EffectiveID)
 	ResolvedPrincipal identity.ResolvedPrincipal // full verified identity
-	Purpose           string                    // declared purpose (diagnostic, remediation, …)
-	PurposeNote       string                    // free-text context (e.g. incident ID)
-	Environment       string                    // environment context (e.g., "prod", "staging")
-	Endpoint       string
-	Method         string
-	Agent          string
-	ToolName       string         // specific tool being called (e.g., "check_connection")
-	ToolParameters map[string]any // parameters passed to the tool
-	ActionClass    ActionClass    // read, write, destructive
-	Message        string
-	Response       string // Agent's response text
-	StartTime      time.Time
-	Duration       time.Duration
-	Status         string // "success" or "error"
-	Error          string
-	HTTPCode       int
+	Purpose           string                     // declared purpose (diagnostic, remediation, …)
+	PurposeNote       string                     // free-text context (e.g. incident ID)
+	Environment       string                     // environment context (e.g., "prod", "staging")
+	Endpoint          string
+	Method            string
+	Agent             string
+	ToolName          string         // specific tool being called (e.g., "check_connection")
+	ToolParameters    map[string]any // parameters passed to the tool
+	ActionClass       ActionClass    // read, write, destructive
+	Message           string
+	Response          string // Agent's response text
+	StartTime         time.Time
+	Duration          time.Duration
+	Status            string // "success" or "error"
+	Error             string
+	HTTPCode          int
 }
 
 // toolResultMaxLen bounds how much of a tool's raw output gets persisted into

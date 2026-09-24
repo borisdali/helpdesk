@@ -12,17 +12,17 @@ import (
 // an agent_approve playbook run. Each step is proposed by the re-planning LLM,
 // surfaced to the operator for approval, then executed by the gateway.
 type PlaybookRunStep struct {
-	RunID      string         `json:"run_id"`
-	StepIndex  int            `json:"step_index"`
-	Agent      string         `json:"agent"`
-	Tool       string         `json:"tool"`
-	Args       map[string]any `json:"args"`
-	Reason     string         `json:"reason,omitempty"`
+	RunID     string         `json:"run_id"`
+	StepIndex int            `json:"step_index"`
+	Agent     string         `json:"agent"`
+	Tool      string         `json:"tool"`
+	Args      map[string]any `json:"args"`
+	Reason    string         `json:"reason,omitempty"`
 	// Status lifecycle: proposed → approved|denied → executing → succeeded|failed
-	Status     string `json:"status"`
-	ApprovalID string `json:"approval_id,omitempty"`
-	Result     string `json:"result,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Status     string    `json:"status"`
+	ApprovalID string    `json:"approval_id,omitempty"`
+	Result     string    `json:"result,omitempty"`
+	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
@@ -30,13 +30,13 @@ type PlaybookRunStep struct {
 // PlaybookRunStepStore persists per-step records for agent_approve runs.
 // It shares the same *sql.DB connection as the other audit stores.
 type PlaybookRunStepStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewPlaybookRunStepStore creates the playbook_run_steps table if absent and
 // returns a ready-to-use store.
-func NewPlaybookRunStepStore(db *sql.DB, isPostgres bool) (*PlaybookRunStepStore, error) {
+func NewPlaybookRunStepStore(db *rebindDB, isPostgres bool) (*PlaybookRunStepStore, error) {
 	s := &PlaybookRunStepStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create playbook_run_steps schema: %w", err)
@@ -225,4 +225,3 @@ func scanRunStepFromRows(rows *sql.Rows) (*PlaybookRunStep, error) {
 	step.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updatedAt)
 	return &step, nil
 }
-

@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-
 func newRunEvaluationStore(t *testing.T) *RunEvaluationStore {
 	t.Helper()
 	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})

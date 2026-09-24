@@ -13,16 +13,16 @@ import (
 // FleetJob represents a fleet runner job: a single change applied across
 // a set of infrastructure targets with staged rollout.
 type FleetJob struct {
-	JobID        string    `json:"job_id"`             // "flj_" + uuid[:8]
-	Name         string    `json:"name"`
-	SubmittedBy  string    `json:"submitted_by"`
-	SubmittedAt  time.Time `json:"submitted_at"`
-	Status       string    `json:"status"` // pending, running, completed, failed, aborted
-	JobDef       string    `json:"job_def"` // JSON blob of original job definition
-	Summary      string    `json:"summary,omitempty"` // filled on completion
-	PlanTraceID  string    `json:"plan_trace_id,omitempty"` // links to the NL planner audit event
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	JobID       string    `json:"job_id"` // "flj_" + uuid[:8]
+	Name        string    `json:"name"`
+	SubmittedBy string    `json:"submitted_by"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	Status      string    `json:"status"`                  // pending, running, completed, failed, aborted
+	JobDef      string    `json:"job_def"`                 // JSON blob of original job definition
+	Summary     string    `json:"summary,omitempty"`       // filled on completion
+	PlanTraceID string    `json:"plan_trace_id,omitempty"` // links to the NL planner audit event
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // FleetJobServer tracks the per-server execution status within a fleet job.
@@ -53,13 +53,13 @@ type FleetJobServerStep struct {
 // FleetStore persists fleet jobs and per-server execution status.
 // It shares the same *sql.DB connection as the audit Store and ApprovalStore.
 type FleetStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewFleetStore creates the fleet tables (if absent) and returns a ready-to-use
 // FleetStore using the given shared database connection.
-func NewFleetStore(db *sql.DB, isPostgres bool) (*FleetStore, error) {
+func NewFleetStore(db *rebindDB, isPostgres bool) (*FleetStore, error) {
 	s := &FleetStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create fleet schema: %w", err)
@@ -182,10 +182,10 @@ func (s *FleetStore) GetJob(ctx context.Context, jobID string) (*FleetJob, error
 
 // FleetJobQueryOptions specifies filters for listing fleet jobs.
 type FleetJobQueryOptions struct {
-	Status       string
-	SubmittedBy  string
-	PlanTraceID  string // filter by the planner audit event that generated this job
-	Limit        int
+	Status      string
+	SubmittedBy string
+	PlanTraceID string // filter by the planner audit event that generated this job
+	Limit       int
 }
 
 // ListJobs returns fleet jobs matching the filters, newest first.

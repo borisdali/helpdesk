@@ -109,9 +109,9 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 
 // a2aRequestData holds the fields extracted from an incoming A2A JSON-RPC request.
 type a2aRequestData struct {
-	traceID     string
-	userQuery   string
-	contextID   string
+	traceID   string
+	userQuery string
+	contextID string
 	// Identity and purpose propagated from the upstream gateway/orchestrator:
 	userID          string
 	roles           []string
@@ -209,4 +209,3 @@ func parseA2ARequest(body []byte) a2aRequestData {
 	out.contextID = req.Params.ContextID
 	return out
 }
-

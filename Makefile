@@ -126,7 +126,13 @@ integration:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test -tags integration -timeout 300s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+	# POSTGRES_TEST_DSN: dedicated postgres-auditd service above (port 15434),
+	# never the fault-injection-target postgres service (port 15432) — see
+	# testing/docker/docker-compose.yaml's own comment for why they must stay
+	# separate. Exercises internal/audit's Postgres backend, otherwise never
+	# run anywhere.
+	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+		go test -tags integration -timeout 300s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v
@@ -139,7 +145,8 @@ integration-nocache:
 	@echo "Starting test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml up -d --wait
 	@echo "Running integration tests..."
-	-go test --count=1 -tags integration -timeout 300s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+		go test --count=1 -tags integration -timeout 300s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml down -v

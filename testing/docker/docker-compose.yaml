@@ -47,5 +47,38 @@ services:
       postgres:
         condition: service_healthy
 
+  # Dedicated instance for validating auditd's own Postgres storage backend
+  # (internal/audit's isPostgres/rebind() support). Deliberately a separate
+  # server from `postgres` above, never reused: `postgres` exists to be
+  # broken by faulttest, and auditd must stay up through a target-database
+  # outage to detect and guide recovery from it (see docs/HA_DR.md's backup
+  # detection work) — sharing a server would defeat that. Also deliberately
+  # a newer major version than the fault-injection target's postgres:16, to
+  # get real cross-version coverage on auditd's own backend rather than only
+  # ever testing against whatever version the target happens to pin.
+  postgres-auditd:
+    image: postgres:18
+    container_name: helpdesk-test-pg-auditd
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: auditdtestpass
+      POSTGRES_DB: auditd_test
+    ports:
+      # 15432 is the fault-injection target (postgres, above); 15433 is
+      # taken by docker-compose.repl.yaml's replica service. 15434 avoids
+      # both.
+      - "15434:5432"
+    volumes:
+      # postgres:18+ images expect a single mount at /var/lib/postgresql
+      # (major-version-specific subdirectories underneath), not the old
+      # /var/lib/postgresql/data convention still used by postgres:16 above.
+      - pgdata-auditd:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   pgdata:
+  pgdata-auditd:
