@@ -12,7 +12,8 @@ domain.
 2. [Replica disconnection (the absent-row edge case)](#2-replica-disconnection-the-absent-row-edge-case)
 3. [Replica present but stalled (the reply-lag edge case)](#3-replica-present-but-stalled-the-reply-lag-edge-case)
 4. [SysAdmin-domain escalation: telling a crashed, rejected, and frozen replica apart](#4-sysadmin-domain-escalation-telling-a-crashed-rejected-and-frozen-replica-apart)
-5. [Roadmap](#5-roadmap)
+5. [WAL archiving failure (the backup-taking precondition)](#5-wal-archiving-failure-the-backup-taking-precondition)
+6. [Roadmap](#6-roadmap)
 
 ---
 
@@ -179,7 +180,66 @@ triage → SysAdmin restart), replica genuinely stopped and genuinely restarted,
 independently against `pg_stat_replication` (not just the agent's own self-report) after
 each run.
 
-## 5. Roadmap
+## 5. WAL archiving failure (the backup-taking precondition)
+
+Fault `db-backup-archiving-broken` ([testing/catalog/failures.yaml](../testing/catalog/failures.yaml)), triage playbook
+[`pbs_db_backup_health_triage`](../playbooks/database-backup-health-triage.yaml), remediation
+[`pbs_db_backup_archiving_remediate`](../playbooks/database-backup-archiving-remediate.yaml).
+Previously the honest gap called out in this section's own roadmap (§6 below still lists what
+remains): [`pbs_db_pitr_recovery`](../playbooks/database-pitr-recovery.yaml) covers *restoring*
+from a backup after data loss, but nothing covered backup-*taking* failures — the precondition
+both PITR and most base-backup strategies actually depend on.
+
+**The failure mode**: `archive_command` silently starts failing — a broken script, a bad path,
+a permissions change, a full disk at the archive destination — and nothing in a routine health
+check surfaces it. The database itself is unaffected and keeps serving traffic normally; the
+only symptom is that the WAL archive, which a real recovery would need later, has silently
+stopped growing.
+
+**Why aiHelpDesk doesn't make that mistake**: [`get_backup_status`](../agents/database/tools.go)
+reads Postgres's own `pg_stat_archiver` view directly — `archived_count`, `failed_count`,
+`last_archived_wal`/`time`, `last_failed_wal`/`time` — plus `SHOW archive_mode`, and computes a
+single `archiving_stale` signal in SQL: true only when the most recent archiving event was a
+failure that hasn't since been followed by a success. This is a deliberate, narrower read than
+`failed_count > 0`: `pg_stat_archiver` is a cumulative counter since the last stats reset, so an
+old failure that was retried and later succeeded is not evidence anything is currently wrong —
+only an unresolved *most recent* failure is. The triage playbook is explicit about this
+distinction and about a second one: `archive_mode=off` (archiving never configured) is a policy
+question for the customer, not a diagnosis — it must never be reported the same way as a
+genuine failure.
+
+**A second, independent backstop that doesn't depend on the model getting it right**: same
+mechanism used throughout this document — `backup_archiving_stale`
+(`agents/database/objective_evidence.yaml`), gated on `archive_mode=="on"` so a deployment that
+never configured archiving can never trip it, force-gates the response for human review if the
+model's own conclusion doesn't account for a genuinely stale archiver.
+
+**What's honest about the remediation, not oversold**: `set_archive_command` applies an
+explicit, caller-supplied value — it never guesses a replacement command. The remediation
+playbook's own first move is to look for a pre-failure reading of `archive_command` via
+`get_saved_snapshots` (the tool built for exactly this — see
+[PLAYBOOK_OPS.md §1.1](PLAYBOOK_OPS.md#11-schedule-regular-baselines-required-for-db-down-diagnosis)
+for the scheduled-baseline job this depends on), filtered to a snapshot recorded *before* the
+failure began — reading the most recent snapshot blindly risks picking up a value already
+captured after the break, if `get_pg_settings` happened to be called again during this same
+incident's own triage. If no pre-failure reading exists (no scheduled baseline configured), the
+playbook stops and asks a human for the value rather than inventing one. This playbook also
+does not take a fresh base backup or touch anything beyond `archive_command` itself — a failure
+caused by something else (disk full at the destination, a genuinely different problem) is
+explicitly named as out of scope in its own escalation criteria.
+
+**Verified, not just claimed**: `archive_mode=on` is set once at container startup
+(`testing/docker/docker-compose.yaml`); `archive_command`'s own healthy baseline is set via
+Postgres's `docker-entrypoint-initdb.d` init-script mechanism
+(`testing/docker/init-archive-command.sql`), not a command-line flag — a real bug found live
+during development: a parameter supplied via a command-line `-c` flag at postmaster start is
+immutable for that process's lifetime, and `ALTER SYSTEM` can never override it, which silently
+no-op'd the fault's own injection SQL until this was caught and fixed. Confirmed end-to-end
+against a live container: baseline healthy → injection → real `archive_command` change,
+`failed_count` climbing, `archiving_stale=true` → teardown → restored, a fresh success
+recorded, `archiving_stale=false` again.
+
+## 6. Roadmap
 
 Not yet built — tracked, not forgotten:
 
@@ -195,10 +255,14 @@ Not yet built — tracked, not forgotten:
   PostgreSQL over SQL; nothing talks to Patroni's own REST API or its DCS backend
   (etcd/Consul/ZooKeeper) for leader-election state. This is a new tool category, not
   an incremental addition to existing ones.
-- **`pg_basebackup` / pgBackRest / pgbackup-job health.** Existing coverage
-  (`pbs_db_pitr_recovery`) is about *restoring* from a backup after data loss, but there's presently 
-  no coverage yet of backup-*taking* failures (a scheduled `pg_basebackup` job failing
-  mid-run, disk exhaustion during backup, verification failures).
+- **`pg_basebackup` / pgBackRest job-level health.** §5 above closes the WAL-archiving half of
+  this gap — the precondition for both PITR and base backups — but aiHelpDesk still has no
+  visibility into an external `pg_basebackup`/pgBackRest job itself (a scheduled backup failing
+  mid-run, disk exhaustion during the backup, checksum/verification failures on the completed
+  backup file). That's a fundamentally different kind of signal — an external process's exit
+  status and logs, not anything queryable from inside Postgres — and would need a new
+  integration point (reading a backup tool's own status file or log, or a webhook it posts to),
+  not an extension of `get_backup_status`.
 - **K8s-hosted replica support.** `pbs_sysadmin_replica_connectivity_triage` only
   branches on `runtime=docker`/`podman` today — no `runtime=kubectl` path (mirroring
   `pbs_sysadmin_docker_inspect`'s own `ESCALATE_TO: pbs_k8s_pod_crash_triage`) exists

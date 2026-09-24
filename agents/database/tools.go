@@ -1411,6 +1411,127 @@ func getReplicationStatusTool(ctx agent.ToolContext, args GetReplicationStatusAr
 	return getReplicationStatusImpl(ctx, args)
 }
 
+// GetBackupStatusArgs defines arguments for the get_backup_status tool.
+type GetBackupStatusArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
+}
+
+// GetBackupStatusResult is the structured result for get_backup_status.
+// aiHelpDesk has no visibility into an external pg_basebackup/pgBackRest
+// job unless told where to look, but pg_stat_archiver is real, in-database,
+// and already answers the actual precondition for both PITR and most base
+// backup strategies: is WAL archiving healthy. ArchiveMode=="off" is a
+// distinct, non-alarming case (a policy choice, not a failure) — kept
+// separate from ArchivingStale rather than folded into one bool.
+type GetBackupStatusResult struct {
+	Output           string `json:"output"`
+	ArchiveMode      string `json:"archive_mode,omitempty"`
+	ArchivedCount    int64  `json:"archived_count,omitempty"`
+	LastArchivedWAL  string `json:"last_archived_wal,omitempty"`
+	LastArchivedTime string `json:"last_archived_time,omitempty"`
+	FailedCount      int64  `json:"failed_count,omitempty"`
+	LastFailedWAL    string `json:"last_failed_wal,omitempty"`
+	LastFailedTime   string `json:"last_failed_time,omitempty"`
+	StatsReset       string `json:"stats_reset,omitempty"`
+	// ArchivingStale is true when the most recent archiving event was a
+	// failure that hasn't since been followed by a success — computed in
+	// SQL (last_failed_time > last_archived_time, or a failure with no
+	// success ever) rather than parsed/compared in Go, since pg_stat_archiver
+	// is a cumulative counter view: an old, since-retried-and-succeeded
+	// failure (failed_count > 0 but last_archived_time is more recent) is
+	// not evidence anything is currently wrong, only a genuinely unresolved
+	// most-recent failure is.
+	ArchivingStale bool `json:"archiving_stale,omitempty"`
+}
+
+// BackupArchiverSummary is the single synthesized item get_backup_status'
+// objective_evidence probe thresholds, mirroring ReplicationSummary's own
+// doc comment: ArchivingStale is already a property of the whole
+// pg_stat_archiver row (computed in SQL), not a per-row signal, so this is
+// one item, not a slice keyed by some resource name.
+type BackupArchiverSummary struct {
+	ArchiveMode    string
+	ArchivingStale bool
+	LastFailedWAL  string
+}
+
+// backupArchiverEvidenceSchema declares get_backup_status' probe:
+// archiving_stale, gated on ArchiveMode=="on" so a deployment that never
+// configured archiving in the first place — a policy choice, not a
+// failure — never trips it. See agents/database/objective_evidence.yaml
+// for the active threshold/signal configuration.
+var backupArchiverEvidenceSchema = evidence.NewToolSchema[BackupArchiverSummary]("get_backup_status", func(s BackupArchiverSummary) string {
+	return s.LastFailedWAL
+}).
+	Bool("archiving_stale", func(s BackupArchiverSummary) bool {
+		return s.ArchiveMode == "on" && s.ArchivingStale
+	}).
+	Register()
+
+// backupArchiverEvidenceRules holds the loaded rules for
+// backupArchiverEvidenceSchema, set by main() at startup. See
+// podEvidenceRules' doc comment re: nil/empty.
+var backupArchiverEvidenceRules []evidence.Rule
+
+// parseBackupStatus parses get_backup_status' two-statement psql -x output
+// (archive_mode, then the single pg_stat_archiver row) into typed fields.
+// Same degrade-don't-break convention as parseActiveConnections/
+// parseReplicationStatus: returns the zero-value fields (aside from Output)
+// if output doesn't parse as expected.
+func parseBackupStatus(output string) GetBackupStatusResult {
+	result := GetBackupStatusResult{Output: output}
+	statements := psqlx.ParseExpanded(output)
+	if len(statements) > 0 && len(statements[0]) > 0 {
+		result.ArchiveMode = statements[0][0]["archive_mode"]
+	}
+	if len(statements) > 1 && len(statements[1]) > 0 {
+		row := statements[1][0]
+		result.ArchivedCount = parseInt64Field(row["archived_count"])
+		result.LastArchivedWAL = row["last_archived_wal"]
+		result.LastArchivedTime = row["last_archived_time"]
+		result.FailedCount = parseInt64Field(row["failed_count"])
+		result.LastFailedWAL = row["last_failed_wal"]
+		result.LastFailedTime = row["last_failed_time"]
+		result.StatsReset = row["stats_reset"]
+		result.ArchivingStale = row["archiving_stale"] == "t"
+	}
+	return result
+}
+
+func getBackupStatusImpl(ctx context.Context, args GetBackupStatusArgs) (GetBackupStatusResult, error) {
+	query := `SHOW archive_mode;
+
+	SELECT
+		archived_count,
+		last_archived_wal,
+		last_archived_time,
+		failed_count,
+		last_failed_wal,
+		last_failed_time,
+		stats_reset,
+		(last_failed_time IS NOT NULL AND (last_archived_time IS NULL OR last_failed_time > last_archived_time)) AS archiving_stale
+	FROM pg_stat_archiver;`
+
+	output, err := runPsqlWithToolName(ctx, args.ConnectionString, query, "get_backup_status")
+	if err != nil {
+		return GetBackupStatusResult{Output: errorResult("get_backup_status", args.ConnectionString, err).Output}, nil
+	}
+	result := parseBackupStatus(output)
+	if toolAuditor != nil {
+		summary := []BackupArchiverSummary{{
+			ArchiveMode:    result.ArchiveMode,
+			ArchivingStale: result.ArchivingStale,
+			LastFailedWAL:  result.LastFailedWAL,
+		}}
+		evidence.Evaluate(ctx, toolAuditor, backupArchiverEvidenceSchema, summary, backupArchiverEvidenceRules)
+	}
+	return result, nil
+}
+
+func getBackupStatusTool(ctx agent.ToolContext, args GetBackupStatusArgs) (GetBackupStatusResult, error) {
+	return getBackupStatusImpl(ctx, args)
+}
+
 // GetLockInfoArgs defines arguments for the get_lock_info tool.
 type GetLockInfoArgs struct {
 	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string. If empty, uses environment defaults."`
@@ -1946,6 +2067,39 @@ func resetPgSettingImpl(ctx context.Context, args ResetPgSettingArgs) (PsqlResul
 
 func resetPgSettingTool(ctx agent.ToolContext, args ResetPgSettingArgs) (PsqlResult, error) {
 	return resetPgSettingImpl(ctx, args)
+}
+
+// SetArchiveCommandArgs defines arguments for the set_archive_command tool.
+type SetArchiveCommandArgs struct {
+	ConnectionString string `json:"connection_string,omitempty" jsonschema:"PostgreSQL connection string or server ID from infrastructure config."`
+	Command          string `json:"command" jsonschema:"required,The exact archive_command value to set via ALTER SYSTEM SET, followed by pg_reload_conf(). Must be an explicit, known-correct value — e.g. one confirmed from a get_saved_snapshots reading recorded before the failure, or one an operator supplied directly. Never guess or invent a plausible-looking command."`
+}
+
+// setArchiveCommandImpl is deliberately narrower than reset_pg_setting: it
+// sets a specific, caller-supplied value rather than resetting to Postgres's
+// compiled-in default (which, for archive_command, is an empty string —
+// itself a broken configuration under archive_mode=on, not a fix). See
+// pbs_db_backup_archiving_remediate's guidance for where Command is
+// expected to come from.
+func setArchiveCommandImpl(ctx context.Context, args SetArchiveCommandArgs) (PsqlResult, error) {
+	escaped := strings.ReplaceAll(args.Command, "'", "''")
+	sql := fmt.Sprintf("ALTER SYSTEM SET archive_command = '%s';", escaped)
+
+	out1, err := runPsqlAs(ctx, args.ConnectionString, sql, "set_archive_command", policy.ActionWrite,
+		fmt.Sprintf("Set archive_command to %q and reload configuration", args.Command))
+	if err != nil {
+		return errorResult("set_archive_command", args.ConnectionString, err), nil
+	}
+	out2, err := runPsqlAs(ctx, args.ConnectionString, "SELECT pg_reload_conf();", "set_archive_command", policy.ActionWrite,
+		fmt.Sprintf("Set archive_command to %q and reload configuration", args.Command))
+	if err != nil {
+		return errorResult("set_archive_command", args.ConnectionString, err), nil
+	}
+	return PsqlResult{Output: out1 + "\n" + out2}, nil
+}
+
+func setArchiveCommandTool(ctx agent.ToolContext, args SetArchiveCommandArgs) (PsqlResult, error) {
+	return setArchiveCommandImpl(ctx, args)
 }
 
 // ResetCacheStatsArgs defines arguments for the reset_cache_stats tool.
@@ -3014,6 +3168,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 		result, _ := getReplicationStatusImpl(ctx, a)
 		return result.Output, nil
 	})
+	r.Register("get_backup_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetBackupStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := getBackupStatusImpl(ctx, a)
+		return result.Output, nil
+	})
 	r.Register("get_lock_info", func(ctx context.Context, args map[string]any) (string, error) {
 		a, err := argsToStruct[GetLockInfoArgs](args)
 		if err != nil {
@@ -3204,6 +3366,14 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := resetPgSettingImpl(ctx, a)
+		return result.Output, nil
+	})
+	r.Register("set_archive_command", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[SetArchiveCommandArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, _ := setArchiveCommandImpl(ctx, a)
 		return result.Output, nil
 	})
 	r.Register("reset_cache_stats", func(ctx context.Context, args map[string]any) (string, error) {

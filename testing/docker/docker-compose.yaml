@@ -27,8 +27,23 @@ services:
       - log_directory=log
       - -c
       - log_filename=postgresql.log
+      - -c
+      # archive_mode needs a full restart to change, so it's set here, once,
+      # at container startup — db-backup-archiving-broken (and any future
+      # backup-domain fault) only ever needs to flip archive_command, a
+      # reloadable (context=sighup) parameter. archive_command's own
+      # baseline is deliberately NOT set here via another -c flag: a
+      # command-line-supplied parameter is immutable for the life of the
+      # postmaster process — ALTER SYSTEM can never override it — which
+      # would make every fault's ALTER SYSTEM SET archive_command a silent
+      # no-op (confirmed live during v0.30 development). Set instead via
+      # init-archive-command.sql below, which runs once through Postgres's
+      # normal docker-entrypoint-initdb.d mechanism and writes to
+      # postgresql.auto.conf the ordinary (mutable) way.
+      - archive_mode=on
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./init-archive-command.sql:/docker-entrypoint-initdb.d/init-archive-command.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s

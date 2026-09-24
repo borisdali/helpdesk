@@ -1,0 +1,80 @@
+series_id: pbs_db_backup_archiving_remediate
+name: WAL Archiving Failing — Restore archive_command
+version: "1.0"
+playbook_type: remediation
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Restore WAL archiving after archive_command has been confirmed broken by
+  pbs_db_backup_health_triage. Deliberately narrow: this only fixes
+  archive_command pointing at something that fails outright (a broken
+  script, wrong path, bad permissions) — it does not take a fresh base
+  backup, and it never guesses a replacement command. The value applied
+  must be confirmed correct: either a pre-failure reading from
+  get_saved_snapshots, or one an operator supplies directly. If neither is
+  available, this playbook stops and asks for one rather than proceeding
+  with a guess.
+symptoms:
+  - "pbs_db_backup_health_triage identified archiving_stale=true"
+  - "pg_stat_archiver shows the most recent archiving attempt failed with no later success"
+  - "WAL archiving was working and has since started failing outright"
+guidance: |
+  Step 1 — Confirm the diagnosis is still current:
+  Call get_backup_status. If archiving_stale is no longer true (someone
+  already fixed it, or it recovered on its own), stop here — there is
+  nothing to remediate. Report that and finish; do not apply any change.
+
+  Step 2 — Find the correct archive_command value:
+  Call get_saved_snapshots with tool_name="get_pg_settings" and limit=5 (or
+  higher if needed) to fetch several historical readings. get_pg_settings'
+  output lists non-default settings, which includes archive_command
+  whenever it's been set to anything other than Postgres's compiled default
+  (an empty string). Find the most recent snapshot whose recorded_at is
+  BEFORE get_backup_status' own last_failed_time — that snapshot's
+  archive_command value is the one to restore. Do NOT use a snapshot
+  recorded AFTER last_failed_time — it may have captured the already-broken
+  value, especially if get_pg_settings was called again during this same
+  incident's own triage.
+
+  If no snapshot exists from before the failure (e.g. no scheduled baseline
+  job is configured — see docs/PLAYBOOK_OPS.md §1.1 for why that's
+  recommended), you cannot determine the correct value yourself. Stop and
+  escalate for a human to supply it; do not invent or guess a
+  plausible-looking command.
+
+  Step 3 — Apply and verify:
+  Once you have a confirmed-correct value, call set_archive_command with it
+  (this requires operator approval — the call will pause for that). After
+  approval and execution, call get_backup_status again to confirm
+  archiving_stale is now false before reporting success. If it's still
+  true, the value you applied did not fix it — do not report success;
+  escalate instead.
+
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. Three mutually exclusive endings:
+
+  Ending A — already healthy, nothing to do:
+  HYPOTHESIS_1: <what you found> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: archiving_stale=false on re-check — already resolved, no action taken
+  ESCALATE_TO: none
+
+  Ending B — fixed and verified:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: restored archive_command from a pre-failure get_saved_snapshots reading (recorded <timestamp>); archiving_stale=false confirmed after reload
+  ESCALATE_TO: none
+
+  Ending C — no confirmed-correct value available:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: no pre-failure archive_command reading found in get_saved_snapshots history; cannot safely restore without a human-supplied value
+  ESCALATE_TO: none
+escalation:
+  - "no pre-failure archive_command value can be found — never guess a replacement"
+  - "set_archive_command was applied but get_backup_status still shows archiving_stale=true afterward"
+  - "the failure appears to be something other than a broken command (e.g. disk full at the archive destination, permissions) — this playbook only fixes the command value itself"
+target_hints: []

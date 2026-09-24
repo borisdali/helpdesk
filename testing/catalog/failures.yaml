@@ -385,6 +385,67 @@ failures:
       verify_timeout: "60s"
     timeout: 60s
 
+  - id: db-backup-archiving-broken
+    name: "WAL archiving failing"
+    category: database
+    severity: high
+    description: >
+      archive_command is broken — every archiving attempt fails. This is
+      the precondition failure for both PITR and most base-backup
+      strategies: recovery from a real data-loss event depends on a
+      complete, unbroken WAL archive, and a silently failing archiver
+      means that assumption is false the whole time no one is looking.
+    external_compat: true
+    inject:
+      type: sql
+      script: sql/inject_backup_archiving_broken.sql
+    teardown:
+      type: sql
+      script: sql/teardown_backup_archiving_broken.sql
+    external_inject:
+      type: sql
+      script_inline: |
+        SELECT pg_stat_reset_shared('archiver');
+        ALTER SYSTEM SET archive_command = '/bin/false';
+        SELECT pg_reload_conf();
+        SELECT pg_switch_wal();
+        SELECT pg_sleep(1);
+        SELECT pg_switch_wal();
+        SELECT pg_sleep(1);
+    external_teardown:
+      type: sql
+      script_inline: |
+        ALTER SYSTEM SET archive_command = '/bin/true';
+        SELECT pg_reload_conf();
+        SELECT pg_switch_wal();
+        SELECT pg_sleep(1);
+    diagnosis_playbook_series_id: pbs_db_backup_health_triage
+    prompt: >
+      Monitoring flagged that WAL archiving may not be keeping up on this
+      database. The connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. Please investigate backup/archiving
+      health and determine whether there's an actual problem.
+    evaluation:
+      expected_tools:
+        - get_backup_status
+      expected_keywords:
+        any_of:
+          - "archiv"
+          - "archive_command"
+          - "pg_stat_archiver"
+          - "failed"
+          - "WAL"
+      expected_diagnosis:
+        category: "backup_archiving"
+        narrative: "The agent should identify from pg_stat_archiver that the most recent WAL archiving attempt failed and has not since been followed by a success, correctly distinguishing this from archiving simply being unconfigured (archive_mode=off), and recommend investigating/fixing archive_command rather than assuming a transient blip."
+    remediation:
+      playbook_id: pbs_db_backup_archiving_remediate
+      verify_sql: >
+        SELECT NOT (last_failed_time IS NOT NULL AND (last_archived_time IS NULL OR last_failed_time > last_archived_time))
+        FROM pg_stat_archiver
+      verify_timeout: "60s"
+    timeout: 60s
+
   - id: db-connection-refused
     name: "Database connection refused"
     category: database
