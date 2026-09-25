@@ -589,6 +589,51 @@ func TestCatalog_DiagnosisPlaybookSeriesIDs_Exist(t *testing.T) {
 	}
 }
 
+// TestCatalog_RemediationPlaybookIDs_Exist mirrors
+// TestCatalog_DiagnosisPlaybookSeriesIDs_Exist above but for
+// remediation.playbook_id — the same class of regression (a renamed or
+// missing playbook) but on the remediation side, which had no coverage at
+// all until this test (found answering "do we need additional test
+// coverage?" after v0.30 Part B shipped its own remediation.playbook_id
+// reference).
+func TestCatalog_RemediationPlaybookIDs_Exist(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	entries, err := playbooks.FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading playbooks FS: %v", err)
+	}
+	known := make(map[string]bool)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, readErr := playbooks.FS.ReadFile(entry.Name())
+		if readErr != nil {
+			t.Fatalf("reading playbook %s: %v", entry.Name(), readErr)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "series_id:") {
+				known[strings.TrimSpace(strings.TrimPrefix(line, "series_id:"))] = true
+				break
+			}
+		}
+	}
+
+	for _, f := range cat.Failures {
+		if f.Remediation.PlaybookID == "" {
+			continue
+		}
+		if !known[f.Remediation.PlaybookID] {
+			t.Errorf("fault %q: remediation.playbook_id=%q not found in playbooks/",
+				f.ID, f.Remediation.PlaybookID)
+		}
+	}
+}
+
 // TestReorderArgs verifies that reorderArgs separates positional arguments from
 // flag arguments so that Go's flag.FlagSet can handle mixed ordering.
 func TestReorderArgs(t *testing.T) {
