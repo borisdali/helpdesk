@@ -14,6 +14,8 @@ var ToolPatterns = map[string][]string{
 	"get_database_stats":     {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
 	"get_config_parameter":   {"setting", "parameter", "configuration"},
 	"get_replication_status": {"replication", "wal", "replay", "standby", "lag"},
+	"get_backup_status":      {"archive_mode", "archiving", "pg_stat_archiver", "archive_command", "archived_count"},
+	"set_archive_command":    {"archive_command", "alter system", "pg_reload_conf"},
 	"get_lock_info":          {"lock", "pg_locks", "granted", "waiting", "blocked"},
 	"get_table_stats":        {"n_dead_tup", "n_live_tup", "dead tuples", "autovacuum", "vacuum"},
 	"get_pods":               {"pod", "Running", "Pending", "CrashLoopBackOff", "ImagePull"},
