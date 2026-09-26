@@ -16,6 +16,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
@@ -68,6 +69,12 @@ type resolvedHost struct {
 	Runtime       string // container runtime binary: "docker", "podman", or "" (systemd/k8s)
 	ContainerName string // from DBServer.ContainerName (docker/podman only)
 	SystemdUnit   string // from DBServer.SystemdUnit (systemd only)
+	// SSH fields — populated from the VM entry, empty unless the VM has SSHUser
+	// set. See runOnHost (sshexec.go) for the local-vs-SSH dispatch this enables.
+	VMAddress  string
+	SSHUser    string
+	SSHPort    int
+	SSHKeyPath string
 	// Kubernetes fields
 	K8sContext     string // kubectl --context value
 	K8sNamespace   string // pod namespace
@@ -204,6 +211,10 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		Runtime:       vm.Runtime,
 		ContainerName: db.ContainerName,
 		SystemdUnit:   db.SystemdUnit,
+		VMAddress:     vm.Address,
+		SSHUser:       vm.SSHUser,
+		SSHPort:       vm.SSHPort,
+		SSHKeyPath:    vm.SSHKeyPath,
 		Tags:          db.Tags,
 		Sensitivity:   db.Sensitivity,
 	}
@@ -1115,6 +1126,272 @@ func restartServiceTool(ctx agent.ToolContext, args RestartServiceArgs) (Restart
 	return restartServiceImpl(ctx, args)
 }
 
+// ── get_pgbackrest_status ───────────────────────────────────────────────────
+
+// defaultPgBackRestMaxAgeHours is the default staleness bound applied when
+// MaxAgeHours is unset: one day plus a real margin, not an arbitrary round
+// number — matches this project's convention of justifying thresholds (see
+// e.g. replica_stalled's 20s-with-margin-below-a-60s-ceiling) rather than
+// picking one for its own sake. A daily backup is the most common cadence;
+// callers with a different real schedule (hourly, weekly) should pass their
+// own MaxAgeHours rather than rely on this default.
+const defaultPgBackRestMaxAgeHours = 25
+
+// GetPgBackRestStatusArgs defines arguments for the get_pgbackrest_status tool.
+type GetPgBackRestStatusArgs struct {
+	Target      string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs pgbackrest on the agent host directly."`
+	Stanza      string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+	MaxAgeHours int    `json:"max_age_hours,omitempty" jsonschema:"How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule."`
+}
+
+// PgBackRestBackup is one entry from pgBackRest's own "backup" array — one
+// real backup attempt that completed (a hard failure that never completes
+// adds no entry here at all; see GetPgBackRestStatusResult's own doc comment
+// for why staleness, not this Error field, is the primary health signal).
+type PgBackRestBackup struct {
+	Label     string    `json:"label"`
+	Type      string    `json:"type"` // full, diff, incr
+	Error     bool      `json:"error"`
+	StartTime time.Time `json:"start_time"`
+	StopTime  time.Time `json:"stop_time"`
+}
+
+// GetPgBackRestStatusResult is the structured result for get_pgbackrest_status.
+// Schema verified directly against a real pgBackRest 2.59.1 install (not
+// assumed from documentation alone) — see project memory for the full
+// captured `info --output=json` example this parser is built against.
+//
+// BackupStale, not the most recent backup's own Error field, is the primary
+// health signal: a hard failure (repo unreachable, permission denied) exits
+// nonzero and adds NO entry to pgBackRest's own backup array at all —
+// confirmed live by attempting a backup with a broken archive_command and
+// observing no new entry appeared. Error=true on an entry that DID complete
+// most likely marks a softer, file-level issue (e.g. a checksum problem),
+// not "the last attempt failed to run" — that case shows up as staleness
+// instead, since no successful completion ever updates LastBackupTime.
+type GetPgBackRestStatusResult struct {
+	Output          string             `json:"output"`
+	Stanza          string             `json:"stanza,omitempty"`
+	StatusCode      int                `json:"status_code"`
+	StatusMessage   string             `json:"status_message,omitempty"`
+	Backups         []PgBackRestBackup `json:"backups,omitempty"`
+	LastBackupLabel string             `json:"last_backup_label,omitempty"`
+	LastBackupTime  string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
+	LastBackupError bool               `json:"last_backup_error,omitempty"`
+	// BackupStale is true when a most-recent backup exists and is older than
+	// the requested (or default) MaxAgeHours. Deliberately false, not true,
+	// when no backup has EVER succeeded (LastBackupTime == "") — "never
+	// backed up" and "backed up too long ago" are different findings, and
+	// callers must check LastBackupTime == "" for the former rather than
+	// relying on this field alone.
+	BackupStale bool `json:"backup_stale,omitempty"`
+}
+
+// PgBackRestSummary is the single synthesized item get_pgbackrest_status'
+// objective_evidence probe thresholds — mirrors BackupArchiverSummary's own
+// doc comment in agents/database/tools.go (v0.30 Part B): one item, since
+// stanza health is a property of the whole result, not a per-row signal.
+type PgBackRestSummary struct {
+	StatusCode      int
+	BackupStale     bool
+	NeverBackedUp   bool
+	LastBackupLabel string
+}
+
+// pgbackrestEvidenceSchema declares get_pgbackrest_status' probe:
+// backup_unhealthy, true when the stanza itself reports a non-ok status, the
+// most recent backup is stale, or no backup has ever succeeded. See
+// agents/sysadmin/objective_evidence.yaml for the active configuration.
+var pgbackrestEvidenceSchema = evidence.NewToolSchema[PgBackRestSummary]("get_pgbackrest_status", func(s PgBackRestSummary) string {
+	return s.LastBackupLabel
+}).
+	Bool("backup_unhealthy", func(s PgBackRestSummary) bool {
+		return s.StatusCode != 0 || s.BackupStale || s.NeverBackedUp
+	}).
+	Register()
+
+// pgbackrestEvidenceRules holds the loaded rules for pgbackrestEvidenceSchema,
+// set by main() at startup. See loadDBEvidenceRules's sibling in
+// agents/database/main.go for the nil/empty convention this mirrors.
+var pgbackrestEvidenceRules []evidence.Rule
+
+// pgBackRestRawStanza/pgBackRestRawBackup/pgBackRestRawStatus mirror pgBackRest's
+// own `info --output=json` schema exactly as verified live (2026-09-26) — see
+// GetPgBackRestStatusResult's doc comment. Unexported: these are a parsing
+// detail, never returned directly.
+type pgBackRestRawStanza struct {
+	Name   string `json:"name"`
+	Status struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"status"`
+	Backup []pgBackRestRawBackup `json:"backup"`
+}
+
+type pgBackRestRawBackup struct {
+	Label     string `json:"label"`
+	Type      string `json:"type"`
+	Error     bool   `json:"error"`
+	Timestamp struct {
+		Start int64 `json:"start"`
+		Stop  int64 `json:"stop"`
+	} `json:"timestamp"`
+}
+
+// parsePgBackRestInfo parses `pgbackrest info --output=json` output (an
+// array of stanzas — confirmed correct even for a single-stanza instance,
+// live, 2026-09-26) and computes staleness for the requested stanza.
+// wantStanza == "" matches whichever single stanza is present; more than one
+// stanza with wantStanza == "" is an error rather than a silent guess.
+func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPgBackRestStatusResult, error) {
+	var raw []pgBackRestRawStanza
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return GetPgBackRestStatusResult{}, fmt.Errorf("parsing pgbackrest info JSON: %w", err)
+	}
+
+	var stanza *pgBackRestRawStanza
+	if wantStanza != "" {
+		for i := range raw {
+			if raw[i].Name == wantStanza {
+				stanza = &raw[i]
+				break
+			}
+		}
+		if stanza == nil {
+			return GetPgBackRestStatusResult{}, fmt.Errorf("stanza %q not found in pgbackrest info output", wantStanza)
+		}
+	} else {
+		if len(raw) != 1 {
+			names := make([]string, len(raw))
+			for i := range raw {
+				names[i] = raw[i].Name
+			}
+			return GetPgBackRestStatusResult{}, fmt.Errorf("no stanza specified and %d stanzas present (%s) — pass one explicitly", len(raw), strings.Join(names, ", "))
+		}
+		stanza = &raw[0]
+	}
+
+	result := GetPgBackRestStatusResult{
+		Stanza:        stanza.Name,
+		StatusCode:    stanza.Status.Code,
+		StatusMessage: stanza.Status.Message,
+	}
+	for _, b := range stanza.Backup {
+		result.Backups = append(result.Backups, PgBackRestBackup{
+			Label:     b.Label,
+			Type:      b.Type,
+			Error:     b.Error,
+			StartTime: time.Unix(b.Timestamp.Start, 0).UTC(),
+			StopTime:  time.Unix(b.Timestamp.Stop, 0).UTC(),
+		})
+	}
+
+	// Most recent by StopTime, not array position — pgBackRest's own
+	// documentation examples (backup[-1]) confirm array order is
+	// chronological, but comparing explicitly costs nothing and removes the
+	// assumption entirely.
+	var last *PgBackRestBackup
+	for i := range result.Backups {
+		if last == nil || result.Backups[i].StopTime.After(last.StopTime) {
+			last = &result.Backups[i]
+		}
+	}
+	if last != nil {
+		result.LastBackupLabel = last.Label
+		result.LastBackupTime = last.StopTime.Format(time.RFC3339)
+		result.LastBackupError = last.Error
+		if maxAge > 0 {
+			result.BackupStale = time.Since(last.StopTime) > maxAge
+		}
+	}
+	return result, nil
+}
+
+func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	cmdArgs := []string{"info", "--output=json"}
+	if args.Stanza != "" {
+		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
+	}
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return GetPgBackRestStatusResult{}, err
+		}
+		switch host.Runtime {
+		case "docker", "podman":
+			// pgBackRest checks PGDATA ownership; run as the postgres OS
+			// user inside the container rather than docker exec's default
+			// (root), matching how pgBackRest expects to be invoked.
+			// shellCommand (sshexec.go) already exists for safe single-string
+			// quoting — reused here rather than writing a second quoter.
+			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
+		default:
+			// SSH or bare local — runOnHost's own dispatch (sshexec.go)
+			// decides between them. The configured SSHUser (for SSH) or the
+			// agent process's own OS user (for local) is expected to already
+			// have PGDATA-appropriate permissions; unlike the docker/podman
+			// case above, there's no docker-exec default-user problem to
+			// work around here.
+			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
+		}
+	default:
+		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
+	}
+	if err != nil {
+		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w: %s", err, out)
+	}
+
+	maxAgeHours := args.MaxAgeHours
+	if maxAgeHours <= 0 {
+		maxAgeHours = defaultPgBackRestMaxAgeHours
+	}
+	result, parseErr := parsePgBackRestInfo(out, args.Stanza, time.Duration(maxAgeHours)*time.Hour)
+	if parseErr != nil {
+		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w", parseErr)
+	}
+	result.Output = out
+
+	if toolAuditor != nil {
+		summary := []PgBackRestSummary{{
+			StatusCode:      result.StatusCode,
+			BackupStale:     result.BackupStale,
+			NeverBackedUp:   result.LastBackupTime == "",
+			LastBackupLabel: result.LastBackupLabel,
+		}}
+		evidence.Evaluate(ctx, toolAuditor, pgbackrestEvidenceSchema, summary, pgbackrestEvidenceRules)
+	}
+	return result, nil
+}
+
+func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	start := time.Now()
+	result, err := getPgBackRestStatusImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "get_pgbackrest_status", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_pgbackrest_status",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
 // ── DirectToolRegistry ───────────────────────────────────────────────────────
 
 // marshalResult marshals a value to JSON string for the direct tool registry.
@@ -1209,6 +1486,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := restartServiceImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("get_pgbackrest_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgBackRestStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getPgBackRestStatusImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

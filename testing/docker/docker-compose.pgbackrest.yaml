@@ -1,0 +1,44 @@
+# Opt-in overlay for pgBackRest faults (v0.30 Part C) — mirrors
+# docker-compose.repl.yaml's own convention (a separate compose file, only
+# referenced by the specific faults/Makefile targets that actually need it)
+# rather than living in the base docker-compose.yaml every other test target
+# already brings up. Deliberately a separate container/volume from
+# docker-compose.yaml's own `postgres` service: pgBackRest refuses to back
+# up unless archive_command actually invokes it, which conflicts directly
+# with db-backup-archiving-broken's own archive_command manipulation on
+# `postgres` — confirmed live: "archive_command '/bin/true' must contain
+# pgbackrest". Sharing a target was rejected for exactly this reason.
+#
+# Usage: docker compose -f testing/docker/docker-compose.yaml \
+#          -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
+services:
+  postgres-pgbackrest:
+    build:
+      context: .
+      dockerfile: Dockerfile.pgbackrest
+    container_name: helpdesk-test-pg-pgbackrest
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    ports:
+      # 15432/15433/15434 are already taken (see docker-compose.yaml and
+      # docker-compose.repl.yaml's own comments). 15435 avoids all of them.
+      - "15435:5432"
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+    volumes:
+      - pgdata-pgbackrest:/var/lib/postgresql/data
+      - pgbackrest-repo:/var/lib/pgbackrest
+      - ./init-pgbackrest.sh:/docker-entrypoint-initdb.d/init-pgbackrest.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata-pgbackrest:
+  pgbackrest-repo:

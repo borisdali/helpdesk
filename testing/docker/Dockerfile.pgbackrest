@@ -1,0 +1,15 @@
+# Postgres target dedicated to pgBackRest faults (v0.30 Part C), kept as a
+# separate image/container/volume from the plain `postgres` target used by
+# db-backup-archiving-broken (Part B) — both faults want to control
+# archive_command on their own terms, and pgBackRest itself refuses to back
+# up unless archive_command actually invokes it (confirmed live: "archive_command
+# '/bin/true' must contain pgbackrest"), so they cannot share a target.
+#
+# pgBackRest is baked into the image at build time rather than installed via
+# a container-startup script — faster and more reliable for repeated CI runs
+# than an `apt-get install` on every container start.
+FROM postgres:16
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pgbackrest \
+    && rm -rf /var/lib/apt/lists/*
