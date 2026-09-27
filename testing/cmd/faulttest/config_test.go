@@ -634,6 +634,33 @@ func TestCatalog_RemediationPlaybookIDs_Exist(t *testing.T) {
 	}
 }
 
+// TestCatalog_ExpectedTools_HaveToolPatterns guards against a real bug class
+// found twice now (first during v0.30 Part B, again while auditing Part C's
+// own coverage): a fault's evaluation.expected_tools entry with no matching
+// faultlib.ToolPatterns entry silently scores 0 tool-evidence on the
+// text-based fallback path (cmd/faulttest/evaluator.go's Option B, used when
+// structured tool_call_summary data is unavailable — the gateway path or a
+// non-ADK agent). The primary structured-tool-call path doesn't need
+// ToolPatterns at all, so this gap is invisible in a normal live run and
+// only surfaces on that fallback — exactly why it slipped in twice without
+// a test catching it either time.
+func TestCatalog_ExpectedTools_HaveToolPatterns(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	for _, f := range cat.Failures {
+		for _, tool := range f.Evaluation.ExpectedTools {
+			if _, ok := faultlib.ToolPatterns[tool]; !ok {
+				t.Errorf("fault %q: expected_tools includes %q, which has no faultlib.ToolPatterns entry — "+
+					"add one or the fallback text-matching evaluator will silently score 0 tool-evidence for it",
+					f.ID, tool)
+			}
+		}
+	}
+}
+
 // TestReorderArgs verifies that reorderArgs separates positional arguments from
 // flag arguments so that Go's flag.FlagSet can handle mixed ordering.
 func TestReorderArgs(t *testing.T) {

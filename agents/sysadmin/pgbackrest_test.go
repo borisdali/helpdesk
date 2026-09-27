@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/evidence"
+	"helpdesk/internal/infra"
 )
 
 // realPgBackRestInfoJSON is the exact output captured from a real pgBackRest
@@ -317,6 +319,212 @@ func TestGetPgBackRestStatusTool_Success(t *testing.T) {
 	}
 	if result.Stanza != "main" || result.LastBackupLabel != "20260926-040922F" {
 		t.Errorf("got %+v, want stanza=main last_backup_label=20260926-040922F", result)
+	}
+}
+
+// withPgBackRestDockerInfra sets up a fake infraConfig with a Docker-hosted
+// pgBackRest target, mirroring tools_test.go's own withDockerInfra (kept
+// separate rather than reusing it directly since the target/container names
+// here are pgBackRest-specific, not the generic "prod_db"/"alloydb-omni"
+// pair the shared helper uses elsewhere in this package).
+func withPgBackRestDockerInfra(t *testing.T) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"pgbackrest_db": {
+				Name:             "pgbackrest_db",
+				ConnectionString: "host=localhost",
+				VMName:           "pgbackrest-vm",
+				ContainerName:    "helpdesk-test-pg-pgbackrest",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"pgbackrest-vm": {
+				Name:    "pgbackrest-vm",
+				Address: "localhost",
+				Runtime: "docker",
+			},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// TestGetPgBackRestStatusTool_DockerDispatch verifies the docker/podman
+// dispatch path builds the exact command form pgBackRest requires: run as
+// the postgres OS user (pgBackRest checks PGDATA ownership, so it can't run
+// as docker exec's default root) via a single safely-quoted shell command
+// string, not raw argv — this is the same "su postgres -c '...'" shape
+// manually verified live against the real container during development.
+func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	capture := &sequencedRunner{outputs: []string{realPgBackRestInfoJSON}}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := mockToolContext{context.Background()}
+	result, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest_db"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.Stanza != "main" {
+		t.Errorf("Stanza = %q, want main", result.Stanza)
+	}
+	if len(capture.calls) != 1 {
+		t.Fatalf("expected 1 docker exec call, got %d: %v", len(capture.calls), capture.calls)
+	}
+	args := capture.calls[0]
+	if len(args) < 2 || args[0] != "exec" || args[1] != "helpdesk-test-pg-pgbackrest" {
+		t.Fatalf("docker args = %v, want [exec helpdesk-test-pg-pgbackrest ...]", args)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "su") || !strings.Contains(joined, "postgres") {
+		t.Errorf("docker args = %v, want it to run as the postgres OS user via su", args)
+	}
+	if !strings.Contains(joined, "pgbackrest") || !strings.Contains(joined, "info") || !strings.Contains(joined, "--output=json") {
+		t.Errorf("docker args = %v, want a quoted pgbackrest info --output=json invocation", args)
+	}
+}
+
+// TestGetPgBackRestStatusTool_UnknownTarget_ReturnsResolveHostError verifies
+// resolveHost's own "server not found" error propagates rather than being
+// swallowed or misreported as a parse failure.
+func TestGetPgBackRestStatusTool_UnknownTarget_ReturnsResolveHostError(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	ctx := mockToolContext{context.Background()}
+	_, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "nonexistent"})
+	if err == nil {
+		t.Fatal("getPgBackRestStatusTool() error = nil, want an error for an unknown target")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %v, want resolveHost's own \"not found\" message", err)
+	}
+}
+
+// TestRunPgBackRestBackupTool_DockerDispatch mirrors
+// TestGetPgBackRestStatusTool_DockerDispatch for the write-side tool: with an
+// explicit stanza (isolating this test to the dispatch shape, not stanza
+// resolution — that's covered separately by
+// TestRunPgBackRestBackupTool_DefaultsToFullType), confirms the docker
+// exec + su postgres -c invocation carries the right pgbackrest backup args.
+func TestRunPgBackRestBackupTool_DockerDispatch(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	capture := &sequencedRunner{outputs: []string{"backup command end: completed successfully (100ms)\n"}}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := mockToolContext{context.Background()}
+	if _, err := runPgBackRestBackupTool(ctx, RunPgBackRestBackupArgs{Target: "pgbackrest_db", Stanza: "main"}); err != nil {
+		t.Fatalf("runPgBackRestBackupTool() error = %v", err)
+	}
+	if len(capture.calls) != 1 {
+		t.Fatalf("expected 1 docker exec call, got %d: %v", len(capture.calls), capture.calls)
+	}
+	args := capture.calls[0]
+	if len(args) < 2 || args[0] != "exec" || args[1] != "helpdesk-test-pg-pgbackrest" {
+		t.Fatalf("docker args = %v, want [exec helpdesk-test-pg-pgbackrest ...]", args)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "su") || !strings.Contains(joined, "postgres") {
+		t.Errorf("docker args = %v, want it to run as the postgres OS user via su", args)
+	}
+	if !strings.Contains(joined, "--stanza=main") || !strings.Contains(joined, "--type=full") || !strings.Contains(joined, "backup") {
+		t.Errorf("docker args = %v, want a quoted pgbackrest --stanza=main --type=full backup invocation", args)
+	}
+}
+
+// withPgBackRestSSHInfra sets up a fake infraConfig with an SSH-reachable
+// pgBackRest target pointed at a real in-process SSH server (srv/keyPath),
+// proving get_pgbackrest_status/run_pgbackrest_backup correctly reach C1's
+// SSH capability end to end — the first real consumer of runOnHost, not
+// just sshexec_test.go's own generic exercise of the SSH mechanism itself.
+// A non-empty SystemdUnit is required only because resolveHost's own
+// validation demands one for any non-docker/podman VM runtime (systemd is
+// the assumed use case there); it plays no role in the SSH dispatch itself.
+func withPgBackRestSSHInfra(t *testing.T, addr string, port int, keyPath string) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"pgbackrest_db": {
+				Name:             "pgbackrest_db",
+				ConnectionString: "host=localhost",
+				VMName:           "pgbackrest-vm",
+				SystemdUnit:      "postgresql-16",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"pgbackrest-vm": {
+				Name:       "pgbackrest-vm",
+				Address:    addr,
+				SSHUser:    "testuser",
+				SSHPort:    port,
+				SSHKeyPath: keyPath,
+			},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// TestGetPgBackRestStatusTool_SSHDispatch proves get_pgbackrest_status
+// reaches a real remote host over a real SSH round trip (real TCP, real
+// handshake, real public-key auth, real exec channel) when the resolved
+// host has no docker/podman runtime but does carry SSH connection details —
+// mirroring sshexec_test.go's own real-server pattern rather than mocking
+// the SSH layer away.
+func TestGetPgBackRestStatusTool_SSHDispatch(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
+		if !strings.Contains(cmd, "pgbackrest") || !strings.Contains(cmd, "info") || !strings.Contains(cmd, "--output=json") {
+			return "unexpected command: " + cmd, 1
+		}
+		return realPgBackRestInfoJSON, 0
+	})
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
+	os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, srv.addr, srv.hostPub)) //nolint:errcheck
+
+	addr, port := hostPortOf(t, srv.addr)
+	withPgBackRestSSHInfra(t, addr, port, keyPath)
+
+	ctx := mockToolContext{context.Background()}
+	result, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest_db"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.Stanza != "main" {
+		t.Errorf("Stanza = %q, want main", result.Stanza)
+	}
+}
+
+// TestRunPgBackRestBackupTool_SSHDispatch mirrors
+// TestGetPgBackRestStatusTool_SSHDispatch for the write-side tool.
+func TestRunPgBackRestBackupTool_SSHDispatch(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
+		if !strings.Contains(cmd, "pgbackrest") || !strings.Contains(cmd, "--stanza=main") || !strings.Contains(cmd, "backup") {
+			return "unexpected command: " + cmd, 1
+		}
+		return "backup command end: completed successfully (100ms)\n", 0
+	})
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
+	os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, srv.addr, srv.hostPub)) //nolint:errcheck
+
+	addr, port := hostPortOf(t, srv.addr)
+	withPgBackRestSSHInfra(t, addr, port, keyPath)
+
+	ctx := mockToolContext{context.Background()}
+	result, err := runPgBackRestBackupTool(ctx, RunPgBackRestBackupArgs{Target: "pgbackrest_db", Stanza: "main"})
+	if err != nil {
+		t.Fatalf("runPgBackRestBackupTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "completed successfully") {
+		t.Errorf("Output = %q, want it to contain completed successfully", result.Output)
 	}
 }
 
