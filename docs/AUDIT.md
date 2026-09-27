@@ -605,8 +605,8 @@ go run ./cmd/auditd/ \
 never live on the same server as a target database this deployment monitors
 or remediates. If a target database outage takes auditd down with it, the
 system loses the ability to detect that outage and guide recovery from it —
-exactly the scenario the DB agent's backup/restore detection work exists to
-help with (see [HA_DR.md](HA_DR.md)). This applies whether auditd runs on
+exactly the scenario the backup/restore detection work exists to
+help with (see [BACKUP.md](BACKUP.md)). This applies whether auditd runs on
 SQLite or Postgres; it's just easier to violate by accident when both happen
 to be Postgres instances that look interchangeable at a glance.
 

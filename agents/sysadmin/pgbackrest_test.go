@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
@@ -636,6 +637,61 @@ func TestRunPgBackRestBackupTool_DefaultsToFullType(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--stanza=main") {
 		t.Errorf("backup call args = %v, want the resolved stanza name from the info call", capture.calls[1])
+	}
+}
+
+// newDenyHostWriteEnforcer mirrors tools_test.go's own
+// newDenyHostDestructiveEnforcer, for the write action class specifically —
+// run_pgbackrest_backup is ActionWrite, not ActionDestructive (see
+// docs/SYSADMIN_AGENT.md §4.2), so a destructive-only deny rule would not
+// exercise its policy check at all.
+func newDenyHostWriteEnforcer(t *testing.T) *agentutil.PolicyEnforcer {
+	t.Helper()
+	const yaml = `
+version: "1"
+policies:
+  - name: deny-host-write
+    resources:
+      - type: host
+    rules:
+      - action: write
+        effect: deny
+        message: "host write operations are not permitted in this test"
+`
+	path := writeTempSysadminPolicyFile(t, yaml)
+	engine, err := agentutil.InitPolicyEngine(agentutil.Config{
+		PolicyEnabled: true,
+		PolicyFile:    path,
+		DefaultPolicy: "allow",
+	})
+	if err != nil {
+		t.Fatalf("InitPolicyEngine: %v", err)
+	}
+	return agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{Engine: engine})
+}
+
+// TestRunPgBackRestBackupTool_PolicyDenied is a regression test for a real
+// gap found documenting this tool: unlike restart_container/restart_service,
+// runPgBackRestBackupImpl called no policyEnforcer.CheckTool at all when
+// first written — a real write action bypassing operating-mode and
+// tag-based policy rules entirely, with only the remediation playbook's own
+// approval_mode=manual standing between a proposal and execution. Fixed by
+// adding the same CheckTool call restart_container/restart_service already
+// make, with ActionWrite in place of ActionDestructive.
+func TestRunPgBackRestBackupTool_PolicyDenied(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	defer withMockRunner("", nil)()
+	defer withSysadminPolicyEnforcer(newDenyHostWriteEnforcer(t))()
+
+	_, err := runPgBackRestBackupImpl(context.Background(), RunPgBackRestBackupArgs{
+		Target: "pgbackrest_db",
+		Stanza: "main",
+	})
+	if err == nil {
+		t.Fatal("expected policy denial, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("error %q should mention 'not permitted'", err.Error())
 	}
 }
 

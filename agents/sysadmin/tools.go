@@ -1486,6 +1486,14 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 		if err != nil {
 			return RunPgBackRestBackupResult{}, err
 		}
+		if policyEnforcer != nil {
+			policyCtx := agentutil.WithToolName(ctx, "run_pgbackrest_backup")
+			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+				policy.ActionWrite, host.Tags, "run pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
+				slog.Warn("policy denied pgbackrest backup", "target", args.Target, "err", err)
+				return RunPgBackRestBackupResult{}, err
+			}
+		}
 		switch host.Runtime {
 		case "docker", "podman":
 			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
