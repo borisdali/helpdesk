@@ -225,7 +225,7 @@ func ClassifyDelegation(agent, message string) ActionClass {
 	writeKeywords := []string{
 		"scale", "restart", "update", "modify", "change", "alter",
 		"create", "insert", "set", "patch", "apply", "rollout",
-		"cordon", "uncordon", "vacuum", "reindex", "cancel",
+		"cordon", "uncordon", "vacuum", "reindex", "cancel", "backup",
 	}
 	for _, kw := range writeKeywords {
 		if strings.Contains(msg, kw) {

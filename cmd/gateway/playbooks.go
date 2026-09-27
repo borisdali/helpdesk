@@ -2210,9 +2210,22 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 			// including pure-diagnosis hops that never attempt one — which in turn
 			// made a genuine, corroborated decline on those hops indistinguishable
 			// from a real write-absence mismatch.
+			//
+			// pbs_pgbackrest_health_triage/pbs_pgbackrest_backup_remediate get
+			// their own hints for the same reason: found tracing the live
+			// faulttest call path for v0.30 Part C — every OTHER sysadmin
+			// playbook fell into the "check_host" default, which would have
+			// actively steered the model toward the wrong tool (check_host
+			// doesn't exist for pgBackRest's own condition) on the very first
+			// line, ahead of the correct guidance in the playbook body.
 			toolHint := "check_host"
-			if pb.SeriesID == "pbs_db_restart_action" {
+			switch pb.SeriesID {
+			case "pbs_db_restart_action":
 				toolHint = "check_host and restart_container"
+			case "pbs_pgbackrest_health_triage":
+				toolHint = "get_pgbackrest_status"
+			case "pbs_pgbackrest_backup_remediate":
+				toolHint = "get_pgbackrest_status and run_pgbackrest_backup"
 			}
 			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use %s as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString, toolHint)
 		} else {

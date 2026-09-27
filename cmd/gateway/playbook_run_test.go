@@ -250,6 +250,33 @@ func TestAssembleTriagePrompt_SysadminRestartHint(t *testing.T) {
 	}
 }
 
+// TestAssembleTriagePrompt_PgBackRestHints is a regression test found tracing
+// the live faulttest call path for v0.30 Part C: without a case for the two
+// new pgbackrest series IDs, both fell into the generic "check_host" default
+// (same class of bug TestAssembleTriagePrompt_SysadminRestartHint guards
+// against) — actively wrong for pbs_pgbackrest_health_triage (check_host
+// doesn't diagnose pgBackRest's own condition at all) and incomplete for
+// pbs_pgbackrest_backup_remediate (never mentioned the write tool it
+// actually calls).
+func TestAssembleTriagePrompt_PgBackRestHints(t *testing.T) {
+	req := PlaybookRunRequest{ConnectionString: "host=localhost port=15435"}
+
+	triagePB := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: "pbs_pgbackrest_health_triage"}
+	triageFirstLine := strings.SplitN(assembleTriagePrompt(triagePB, req, ""), "\n", 2)[0]
+	if !strings.Contains(triageFirstLine, "get_pgbackrest_status") {
+		t.Errorf("pbs_pgbackrest_health_triage's first line = %q, want it to mention get_pgbackrest_status", triageFirstLine)
+	}
+	if strings.Contains(triageFirstLine, "check_host") {
+		t.Errorf("pbs_pgbackrest_health_triage's first line = %q, want no mention of check_host (wrong tool for this condition)", triageFirstLine)
+	}
+
+	remediatePB := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: "pbs_pgbackrest_backup_remediate"}
+	remediateFirstLine := strings.SplitN(assembleTriagePrompt(remediatePB, req, ""), "\n", 2)[0]
+	if !strings.Contains(remediateFirstLine, "get_pgbackrest_status") || !strings.Contains(remediateFirstLine, "run_pgbackrest_backup") {
+		t.Errorf("pbs_pgbackrest_backup_remediate's first line = %q, want it to mention both get_pgbackrest_status and run_pgbackrest_backup", remediateFirstLine)
+	}
+}
+
 func TestAssembleTriagePrompt_NoEscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{Name: "PITR Recovery"}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
