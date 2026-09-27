@@ -29,7 +29,7 @@ Other playbooks in this category deal with the failure scenarios that cover *res
 There are multiple reasons for a backup to fail. This particular one deals with the `archive_command` silently failing due to a broken script, a bad path, a permissions change, a full disk at the archive destination or similar reasons. Nothing in a routine health check may surface it. The database itself is unaffected and keeps serving traffic normally and the only symptom is that the WAL archive, which a recovery would need later, has silently stopped growing.
 
 **Why aiHelpDesk doesn't make that mistake**:   
-[`get_backup_status`](../agents/database/tools.go) reads Postgres's own `pg_stat_archiver` view directly. In particular, the `archived_count`, `failed_count`, `last_archived_wal`/`time`, `last_failed_wal`/`time`, plus `SHOW archive_mode` and compute a single `archiving_stale` signal in SQL. It's `true` only when the most recent archiving event was a failure that hasn't since been followed by a success.  
+[`get_backup_status`](https://github.com/borisdali/helpdesk/blob/2a597237643e386a0b0920ac9e58437107bf1087/agents/database/tools.go#L1414) reads Postgres's own `pg_stat_archiver` view directly. In particular, the `archived_count`, `failed_count`, `last_archived_wal`/`time`, `last_failed_wal`/`time`, plus `SHOW archive_mode` and compute a single `archiving_stale` signal in SQL. It's `true` only when the most recent archiving event was a failure that hasn't since been followed by a success.  
 
 This is a deliberate, narrower read than `failed_count > 0`: `pg_stat_archiver` is a cumulative counter since the last stats reset, so an
 old failure that was retried and later succeeded is not evidence anything is currently wrong,
@@ -71,7 +71,7 @@ recorded, `archiving_stale=false` again.
 
 ## 2. pgBackRest job-level backup health
 
-Fault: [`db-pgbackrest-repo-unreadable`](https://github.com/borisdali/helpdesk/blob/cae8f37cc0606e5e545915b5f8fdf2ed1d9336a9/testing/catalog/failures.yaml#L449)
+Fault: [`db-pgbackrest-repo-unreadable`](https://github.com/borisdali/helpdesk/blob/cae8f37cc0606e5e545915b5f8fdf2ed1d9336a9/testing/catalog/failures.yaml#L449)  
 Triage playbook: [`pbs_pgbackrest_health_triage`](../playbooks/pgbackrest-health-triage.yaml)  
 Remediation playbook: [`pbs_pgbackrest_backup_remediate`](../playbooks/pgbackrest-backup-remediate.yaml)  
 
