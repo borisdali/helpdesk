@@ -14,64 +14,67 @@ const builtinMinimum = 33
 
 // TestObjectiveEvidenceSignal_MatchesRealAgentRules cross-validates every
 // fault's expected_diagnosis.objective_evidence_signal against the real
-// signal names defined in the corresponding agent's own objective_evidence.yaml.
+// signal names defined across all agents' objective_evidence.yaml files.
 // Nothing else in the test suite catches this: EvidenceSignalConfirmed/
 // evidenceSignalConfirmed are unit tested against hardcoded example strings,
-// not the catalog's actual values, so a typo or drift between the catalog
-// and either agents/database/objective_evidence.yaml or
-// agents/k8s/objective_evidence.yaml would otherwise silently make the gate
-// fail every run of that fault (evidenceSignalConfirmed never finds a match),
-// surfacing only as a confusing live-test failure instead of here.
+// not the catalog's actual values, so a typo or drift would otherwise
+// silently make the gate fail every run of that fault (evidenceSignalConfirmed
+// never finds a match), surfacing only as a confusing live-test failure
+// instead of here.
 //
-// Parses the rules file's signal names directly with yaml.Unmarshal rather
+// Deliberately a union across all agents, not a strict fault-category→one-file
+// mapping: a fault's topical category (e.g. "database") does not imply its
+// diagnosis stays within that agent — db-pgbackrest-repo-unreadable is
+// category=database but diagnoses via the sysadmin agent's
+// get_pgbackrest_status/objective_evidence.yaml, the same cross-agent
+// pattern several database-category faults already use for
+// ESCALATE_TO-driven multi-hop diagnosis (e.g. db-replica-stalled →
+// pbs_sysadmin_replica_connectivity_triage). A category→file mapping would
+// have wrongly rejected the first fault to cross that boundary.
+//
+// Parses each rules file's signal names directly with yaml.Unmarshal rather
 // than evidence.LoadRules — LoadRules validates each rule's tool/probe
 // against internal/evidence's schema registry, which is only populated by
-// the agent's own package (agents/database, agents/k8s) registering its
-// ToolSchemas at startup; a bare test in this package never triggers that,
-// and this check only needs the signal names anyway, not full rule validity
-// (that's exercised by every live run this session already did).
+// the agent's own package (agents/database, agents/k8s, agents/sysadmin)
+// registering its ToolSchemas at startup; a bare test in this package never
+// triggers that, and this check only needs the signal names anyway, not
+// full rule validity (that's exercised by every live run this session
+// already did).
 func TestObjectiveEvidenceSignal_MatchesRealAgentRules(t *testing.T) {
 	cat, err := LoadBuiltinCatalog()
 	if err != nil {
 		t.Fatalf("LoadBuiltinCatalog: %v", err)
 	}
 
-	rulesPathByCategory := map[string]string{
-		"database":   filepath.Join("..", "..", "agents", "database", "objective_evidence.yaml"),
-		"kubernetes": filepath.Join("..", "..", "agents", "k8s", "objective_evidence.yaml"),
+	rulesPaths := []string{
+		filepath.Join("..", "..", "agents", "database", "objective_evidence.yaml"),
+		filepath.Join("..", "..", "agents", "k8s", "objective_evidence.yaml"),
+		filepath.Join("..", "..", "agents", "sysadmin", "objective_evidence.yaml"),
 	}
-	signalsByCategory := map[string]map[string]bool{}
+	allSignals := map[string]bool{}
+	for _, path := range rulesPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		var rules []struct {
+			Signal string `yaml:"signal"`
+		}
+		if err := yaml.Unmarshal(data, &rules); err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		for _, r := range rules {
+			allSignals[r.Signal] = true
+		}
+	}
 
 	for _, f := range cat.Failures {
 		sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal
 		if sig == "" {
 			continue
 		}
-		signals, ok := signalsByCategory[f.Category]
-		if !ok {
-			path, known := rulesPathByCategory[f.Category]
-			if !known {
-				t.Errorf("fault %q declares objective_evidence_signal %q but category %q has no known objective_evidence.yaml", f.ID, sig, f.Category)
-				continue
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading %s: %v", path, err)
-			}
-			var rules []struct {
-				Signal string `yaml:"signal"`
-			}
-			if err := yaml.Unmarshal(data, &rules); err != nil {
-				t.Fatalf("parsing %s: %v", path, err)
-			}
-			signals = map[string]bool{}
-			for _, r := range rules {
-				signals[r.Signal] = true
-			}
-			signalsByCategory[f.Category] = signals
-		}
-		if !signals[sig] {
-			t.Errorf("fault %q declares objective_evidence_signal %q, but no rule in %s defines that signal — check for a typo or drift between the catalog and the agent's own rules", f.ID, sig, rulesPathByCategory[f.Category])
+		if !allSignals[sig] {
+			t.Errorf("fault %q declares objective_evidence_signal %q, but no rule in any agent's objective_evidence.yaml defines that signal — check for a typo or drift", f.ID, sig)
 		}
 	}
 }

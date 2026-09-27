@@ -1170,14 +1170,21 @@ type PgBackRestBackup struct {
 // not "the last attempt failed to run" — that case shows up as staleness
 // instead, since no successful completion ever updates LastBackupTime.
 type GetPgBackRestStatusResult struct {
-	Output          string             `json:"output"`
-	Stanza          string             `json:"stanza,omitempty"`
-	StatusCode      int                `json:"status_code"`
-	StatusMessage   string             `json:"status_message,omitempty"`
-	Backups         []PgBackRestBackup `json:"backups,omitempty"`
-	LastBackupLabel string             `json:"last_backup_label,omitempty"`
-	LastBackupTime  string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
-	LastBackupError bool               `json:"last_backup_error,omitempty"`
+	Output        string `json:"output"`
+	Stanza        string `json:"stanza,omitempty"`
+	StatusCode    int    `json:"status_code"`
+	StatusMessage string `json:"status_message,omitempty"`
+	// RepoStatusMessage, when non-empty, is a more specific error than
+	// StatusMessage — verified live: a broken repo path leaves StatusMessage
+	// as a generic "other" but RepoStatusMessage holds the real detail (e.g.
+	// a PathOpenError naming the exact path and errno). Always prefer this
+	// over StatusMessage when both are present.
+	RepoStatusCode    int                `json:"repo_status_code,omitempty"`
+	RepoStatusMessage string             `json:"repo_status_message,omitempty"`
+	Backups           []PgBackRestBackup `json:"backups,omitempty"`
+	LastBackupLabel   string             `json:"last_backup_label,omitempty"`
+	LastBackupTime    string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
+	LastBackupError   bool               `json:"last_backup_error,omitempty"`
 	// BackupStale is true when a most-recent backup exists and is older than
 	// the requested (or default) MaxAgeHours. Deliberately false, not true,
 	// when no backup has EVER succeeded (LastBackupTime == "") — "never
@@ -1225,6 +1232,19 @@ type pgBackRestRawStanza struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"status"`
+	// Repo carries a second, often more specific status than the top-level
+	// one above — verified live (2026-09-26): a permission-denied repo path
+	// produced Name="[invalid]", top-level status {99, "other"}, but
+	// Repo[0].Status.Message held the real detail:
+	// "[PathOpenError] unable to list file info for path
+	// '/var/lib/pgbackrest/backup': [13] Permission denied". Always prefer
+	// this message when present; it's what a human actually needs to see.
+	Repo []struct {
+		Status struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"status"`
+	} `json:"repo"`
 	Backup []pgBackRestRawBackup `json:"backup"`
 }
 
@@ -1241,8 +1261,11 @@ type pgBackRestRawBackup struct {
 // parsePgBackRestInfo parses `pgbackrest info --output=json` output (an
 // array of stanzas — confirmed correct even for a single-stanza instance,
 // live, 2026-09-26) and computes staleness for the requested stanza.
-// wantStanza == "" matches whichever single stanza is present; more than one
-// stanza with wantStanza == "" is an error rather than a silent guess.
+// wantStanza matches by exact name; when that fails (including when
+// wantStanza is empty), a single remaining entry is used regardless of its
+// name — see the name-resolution block below for why a broken stanza's own
+// reported name can't be relied on. More than one candidate with no exact
+// match is an error rather than a silent guess.
 func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPgBackRestStatusResult, error) {
 	var raw []pgBackRestRawStanza
 	if err := json.Unmarshal([]byte(output), &raw); err != nil {
@@ -1257,24 +1280,40 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 				break
 			}
 		}
-		if stanza == nil {
-			return GetPgBackRestStatusResult{}, fmt.Errorf("stanza %q not found in pgbackrest info output", wantStanza)
-		}
-	} else {
-		if len(raw) != 1 {
+	}
+	if stanza == nil {
+		// No exact name match (or none was requested). A single entry is
+		// used regardless of its name/whether one was requested — verified
+		// live that a critically broken stanza can report Name="[invalid]"
+		// rather than its configured name, and that's exactly the case
+		// callers most need surfaced, not silently turned into a generic
+		// "not found" error that discards the real diagnostic detail sitting
+		// right there in the same response.
+		switch len(raw) {
+		case 0:
+			return GetPgBackRestStatusResult{}, fmt.Errorf("pgbackrest info returned no stanzas at all — repo1-path likely doesn't exist or isn't reachable")
+		case 1:
+			stanza = &raw[0]
+		default:
 			names := make([]string, len(raw))
 			for i := range raw {
 				names[i] = raw[i].Name
 			}
+			if wantStanza != "" {
+				return GetPgBackRestStatusResult{}, fmt.Errorf("stanza %q not found among %d present (%s)", wantStanza, len(raw), strings.Join(names, ", "))
+			}
 			return GetPgBackRestStatusResult{}, fmt.Errorf("no stanza specified and %d stanzas present (%s) — pass one explicitly", len(raw), strings.Join(names, ", "))
 		}
-		stanza = &raw[0]
 	}
 
 	result := GetPgBackRestStatusResult{
 		Stanza:        stanza.Name,
 		StatusCode:    stanza.Status.Code,
 		StatusMessage: stanza.Status.Message,
+	}
+	if len(stanza.Repo) > 0 {
+		result.RepoStatusCode = stanza.Repo[0].Status.Code
+		result.RepoStatusMessage = stanza.Repo[0].Status.Message
 	}
 	for _, b := range stanza.Backup {
 		result.Backups = append(result.Backups, PgBackRestBackup{
@@ -1392,6 +1431,100 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 	return result, err
 }
 
+// ── run_pgbackrest_backup ────────────────────────────────────────────────────
+
+// RunPgBackRestBackupArgs defines arguments for the run_pgbackrest_backup tool.
+type RunPgBackRestBackupArgs struct {
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs pgbackrest on the agent host directly."`
+	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+	Type   string `json:"type,omitempty" jsonschema:"Backup type: full, diff, or incr. Default full — always valid regardless of backup history, unlike diff/incr which require a prior full backup to reference."`
+}
+
+// RunPgBackRestBackupResult is the result of run_pgbackrest_backup.
+type RunPgBackRestBackupResult struct {
+	Output string `json:"output"`
+}
+
+// runPgBackRestBackupImpl is deliberately narrow: it exists ONLY to remediate
+// pbs_pgbackrest_health_triage's Ending C (a stale backup on an otherwise
+// healthy repo) by taking a fresh one — the same action a human would take,
+// no value-guessing involved. It does not attempt to fix Ending B (a broken
+// repo/stanza): permissions, ownership, and mount problems have no
+// confirmed-correct value to restore (unlike set_archive_command's
+// get_saved_snapshots pattern in agents/database/tools.go), so that case
+// stays a human escalation by design — see
+// pbs_pgbackrest_backup_remediate's own guidance for the explicit check
+// that refuses to run this against a broken repo.
+func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) (RunPgBackRestBackupResult, error) {
+	backupType := args.Type
+	if backupType == "" {
+		backupType = "full"
+	}
+
+	// Unlike `pgbackrest info`, the `backup` subcommand has no
+	// auto-detect-the-only-stanza behavior — it errors outright with
+	// "backup command requires option: stanza" if omitted. Confirmed live
+	// (2026-09-27) against a real single-stanza install. Resolve the same
+	// way get_pgbackrest_status's own single-stanza fallback does, rather
+	// than pushing that requirement onto every caller.
+	stanza := args.Stanza
+	if stanza == "" {
+		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		if err != nil {
+			return RunPgBackRestBackupResult{}, fmt.Errorf("run_pgbackrest_backup: resolving stanza name: %w", err)
+		}
+		stanza = status.Stanza
+	}
+	cmdArgs := []string{"--stanza=" + stanza, "--type=" + backupType, "backup"}
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return RunPgBackRestBackupResult{}, err
+		}
+		switch host.Runtime {
+		case "docker", "podman":
+			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
+		default:
+			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
+		}
+	default:
+		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
+	}
+	if err != nil {
+		return RunPgBackRestBackupResult{Output: out}, fmt.Errorf("run_pgbackrest_backup: %w: %s", err, out)
+	}
+	return RunPgBackRestBackupResult{Output: out}, nil
+}
+
+func runPgBackRestBackupTool(ctx agent.ToolContext, args RunPgBackRestBackupArgs) (RunPgBackRestBackupResult, error) {
+	start := time.Now()
+	result, err := runPgBackRestBackupImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "run_pgbackrest_backup", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "run_pgbackrest_backup",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza, "type": args.Type},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
 // ── DirectToolRegistry ───────────────────────────────────────────────────────
 
 // marshalResult marshals a value to JSON string for the direct tool registry.
@@ -1498,6 +1631,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := getPgBackRestStatusImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("run_pgbackrest_backup", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RunPgBackRestBackupArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := runPgBackRestBackupImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

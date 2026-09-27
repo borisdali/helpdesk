@@ -239,6 +239,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	runPgBackRestBackupToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "run_pgbackrest_backup",
+		Description: "Take a fresh pgBackRest backup (default type=full). Requires operator approval (Write action). Use only to remediate a STALE backup on an otherwise-healthy repo (get_pgbackrest_status status_code=0, backup_stale=true) — never against a broken repo/stanza (status_code != 0), which needs human investigation, not a new backup attempt.",
+	}, runPgBackRestBackupTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkHostToolDef,
 		getHostLogsToolDef,
@@ -248,6 +256,7 @@ func createTools() ([]tool.Tool, error) {
 		restartContainerToolDef,
 		restartServiceToolDef,
 		getPgBackRestStatusToolDef,
+		runPgBackRestBackupToolDef,
 	}, nil
 }
 

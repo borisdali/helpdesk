@@ -446,6 +446,62 @@ failures:
       verify_timeout: "60s"
     timeout: 60s
 
+  - id: db-pgbackrest-repo-unreadable
+    name: "pgBackRest repo unreadable"
+    category: database
+    severity: high
+    description: >
+      pgBackRest's own repository directory becomes unreadable (permission
+      denial after a host-level change, a bad mount, an ownership drift) —
+      the backup-taking precondition itself, distinct from WAL-archiving
+      health (db-backup-archiving-broken). pgBackRest cannot even determine
+      its own stanza's status once this happens.
+    prerequisites: |
+      Requires the dedicated pgBackRest target
+      (testing/docker/docker-compose.pgbackrest.yaml), not the plain
+      `postgres` target — pgBackRest refuses to back up unless
+      archive_command actually invokes it, which conflicts directly with
+      db-backup-archiving-broken's own archive_command manipulation on
+      `postgres` (confirmed live: "archive_command '/bin/true' must contain
+      pgbackrest"). Also requires an initial backup already taken via
+      testing/docker/setup-pgbackrest-backup.sh — a stanza with zero backups
+      ever taken is its own, different finding ("never backed up"), not this
+      fault's.
+
+      Docker-only: this fault needs a container it can chmod into, unlike
+      db-backup-archiving-broken's pure-SQL mechanism. No external_compat
+      variant is offered for the same reason db-replica-container-stopped
+      doesn't have one — there's no SQL-only way to reproduce a real
+      filesystem-permission failure on an arbitrary external target.
+    inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: chmod 000 /var/lib/pgbackrest
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: chmod 700 /var/lib/pgbackrest
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      Monitoring flagged that pgBackRest may not be able to report backup
+      status for this database. Please investigate backup health and
+      determine whether there's an actual problem.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "permission"
+          - "pgbackrest"
+          - "repo"
+          - "unreadable"
+          - "unable to"
+      expected_diagnosis:
+        category: "pgbackrest_repo_unreadable"
+        objective_evidence_signal: pgbackrest_backup_unhealthy
+        narrative: "The agent should identify from get_pgbackrest_status that pgBackRest cannot access its own repository (a non-ok stanza status, likely reporting the stanza as \"[invalid]\" with a permission-denied detail in the repo-level status message), correctly distinguishing this filesystem-level failure from WAL-archiving health or a simple stale-backup finding, and recommend investigating the repo path's permissions/ownership rather than assuming a transient blip."
+    timeout: 60s
+
   - id: db-connection-refused
     name: "Database connection refused"
     category: database
