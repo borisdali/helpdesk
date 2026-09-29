@@ -13,3 +13,17 @@ FROM postgres:16
 RUN apt-get update \
     && apt-get install -y --no-install-recommends pgbackrest \
     && rm -rf /var/lib/apt/lists/*
+
+# /etc/pgbackrest.conf is baked in at build time, not written by
+# init-pgbackrest.sh's docker-entrypoint-initdb.d script — that script only
+# runs on a genuinely empty PGDATA (first-ever bring-up). A container
+# recreated against an already-populated pgdata-pgbackrest volume (e.g. a
+# plain `docker compose down` + `up`, no `-v`) skips every init script,
+# leaving /etc/pgbackrest.conf at the stock apt-package default — which has
+# pg1-path commented out. `pgbackrest info` still works in that state (it
+# only reads the persisted repo), which is exactly what let this go
+# unnoticed until a real `backup` was attempted and failed with "[037]:
+# backup command requires option: pg1-path". Confirmed live 2026-09-29 —
+# baking the config here makes it correct regardless of volume state, no
+# runtime dependency at all.
+COPY pgbackrest.conf /etc/pgbackrest.conf

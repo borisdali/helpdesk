@@ -20,15 +20,16 @@
 # healthy, not container-init.
 set -euo pipefail
 
+# /etc/pgbackrest.conf is baked into the image at build time
+# (Dockerfile.pgbackrest COPYs it in) rather than written here — this script
+# only runs on a genuinely empty PGDATA, so anything it wrote to a path
+# outside a volume would silently vanish on the next container recreation
+# against an already-populated data volume. Confirmed live 2026-09-29: that
+# exact gap left pg1-path unset after a plain `docker compose down`+`up`,
+# breaking `pgbackrest backup` (though not `info`, which masked it) until
+# fixed. mkdir here is still needed: /var/lib/pgbackrest is a volume mount,
+# and stanza-create needs the directory to exist under postgres's ownership.
 mkdir -p /var/lib/pgbackrest
-cat > /etc/pgbackrest.conf <<'EOF'
-[global]
-repo1-path=/var/lib/pgbackrest
-repo1-retention-full=2
-
-[main]
-pg1-path=/var/lib/postgresql/data
-EOF
 
 pgbackrest --stanza=main --log-level-console=info stanza-create
 
