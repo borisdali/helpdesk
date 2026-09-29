@@ -6,6 +6,7 @@ package authz
 var DefaultAuditdPermissions = map[string]Permission{
 	// ── Public ────────────────────────────────────────────────────────────────
 	"GET /health": {AllowAnonymous: true},
+	"GET /ready":  {AllowAnonymous: true},
 
 	// ── Authenticated reads: any verified user ────────────────────────────────
 	"GET /v1/events":                                        {AdminBypass: true},

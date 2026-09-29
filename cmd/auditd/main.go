@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -395,6 +396,7 @@ func main() {
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", auth("GET /health", srv.handleHealth))
+	mux.HandleFunc("GET /ready", auth("GET /ready", srv.handleReady))
 
 	httpServer := &http.Server{
 		Addr:         cfg.listenAddr,
@@ -684,6 +686,42 @@ func (s *server) handleVerifyChain(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "version": buildinfo.Version})
+}
+
+// handleReady is a real readiness check, distinct from handleHealth's static
+// liveness response on purpose: a liveness-probe failure restarts the
+// process, which does nothing to fix a broken database, so liveness must
+// stay dependency-free. Readiness is exactly the place a real DB/schema
+// check belongs — found live 2026-09-29 when auditd's own process kept
+// running (and /health kept returning 200) against a Postgres backend whose
+// volume had been recreated empty out from under it: the process was alive,
+// but every real query failed with "relation \"audit_events\" does not
+// exist" until the process was restarted to re-run schema creation. A
+// readiness probe wired to this endpoint would have caught that immediately
+// instead of surfacing as a downstream 500 through the gateway.
+func (s *server) handleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := s.store.DB().PingContext(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": "database unreachable: " + err.Error()})
+		return
+	}
+
+	// A successful Ping only proves the connection works, not that the
+	// schema is loaded — a fresh, empty database pings fine. Query the most
+	// foundational table (created first, by the base Store, before any
+	// specialized store) to confirm schema creation actually ran.
+	var dummy int
+	if err := s.store.DB().QueryRowContext(ctx, "SELECT 1 FROM audit_events LIMIT 1").Scan(&dummy); err != nil && err != sql.ErrNoRows {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": "schema not loaded: " + err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": "ready", "version": buildinfo.Version})
 }
 
 // envOrDefault returns the value of the environment variable named by key,

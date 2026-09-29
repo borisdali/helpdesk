@@ -62,7 +62,7 @@ services:
       - ./demo/infrastructure.json:/etc/helpdesk/infrastructure.json:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:1299/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:1299/ready"]
       interval: 5s
       timeout: 3s
       retries: 12
