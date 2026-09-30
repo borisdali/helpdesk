@@ -98,6 +98,19 @@ func TestGetPgBackRestStatusTool_BrokenRepo_RecordsObjectiveEvidence(t *testing.
 	if events[0].ObjectiveEvidence == nil || events[0].ObjectiveEvidence.Signal != "pgbackrest_backup_unhealthy" {
 		t.Errorf("ObjectiveEvidence = %+v, want signal=pgbackrest_backup_unhealthy", events[0].ObjectiveEvidence)
 	}
+	// Regression test for a real gap found live 2026-09-30: the resource
+	// extractor used to return LastBackupLabel, which is empty for a broken
+	// repo (no backup was ever recorded) — since resource_named_in_quote's
+	// confirmation probe treats an empty Resource as automatically
+	// unconfirmed, this made confirmation structurally impossible for this
+	// exact ending, regardless of how well the model's response engaged
+	// with the real status_code/repo_status_message. realPgBackRestBrokenRepoJSON
+	// reports its stanza as literally "[invalid]" — confirm that's what
+	// gets recorded as Resource now, not an empty string.
+	if events[0].ObjectiveEvidence.Resource != "[invalid]" {
+		t.Errorf("ObjectiveEvidence.Resource = %q, want %q (the broken repo's own reported stanza name, not an empty LastBackupLabel)",
+			events[0].ObjectiveEvidence.Resource, "[invalid]")
+	}
 }
 
 func TestParsePgBackRestInfo_RealCapturedSchema(t *testing.T) {

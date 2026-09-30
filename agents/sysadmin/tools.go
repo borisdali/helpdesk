@@ -1199,6 +1199,7 @@ type GetPgBackRestStatusResult struct {
 // doc comment in agents/database/tools.go (v0.30 Part B): one item, since
 // stanza health is a property of the whole result, not a per-row signal.
 type PgBackRestSummary struct {
+	Stanza          string
 	StatusCode      int
 	BackupStale     bool
 	NeverBackedUp   bool
@@ -1209,8 +1210,21 @@ type PgBackRestSummary struct {
 // backup_unhealthy, true when the stanza itself reports a non-ok status, the
 // most recent backup is stale, or no backup has ever succeeded. See
 // agents/sysadmin/objective_evidence.yaml for the active configuration.
+//
+// The resource extractor deliberately returns Stanza, not LastBackupLabel —
+// found live 2026-09-30: backup_unhealthy is an OR of three conditions
+// (StatusCode != 0, BackupStale, NeverBackedUp), but LastBackupLabel is only
+// guaranteed non-empty for one of them (a stale-but-taken backup). For the
+// other two — a broken repo (confirmed live: reports stanza "[invalid]",
+// LastBackupLabel empty) and never-backed-up (LastBackupLabel empty by
+// definition) — resource_named_in_quote's own `if ev.Resource == ""
+// { return false }` guard made confirmation structurally impossible
+// regardless of how thoroughly the model engaged with the real
+// status_code/repo_status_message data. Stanza is populated in every one of
+// parsePgBackRestInfo's resolution outcomes (including "[invalid]" for a
+// broken repo), so it's always a real, quotable string to check for.
 var pgbackrestEvidenceSchema = evidence.NewToolSchema[PgBackRestSummary]("get_pgbackrest_status", func(s PgBackRestSummary) string {
-	return s.LastBackupLabel
+	return s.Stanza
 }).
 	Bool("backup_unhealthy", func(s PgBackRestSummary) bool {
 		return s.StatusCode != 0 || s.BackupStale || s.NeverBackedUp
@@ -1417,6 +1431,7 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 
 	if toolAuditor != nil {
 		summary := []PgBackRestSummary{{
+			Stanza:          result.Stanza,
 			StatusCode:      result.StatusCode,
 			BackupStale:     result.BackupStale,
 			NeverBackedUp:   result.LastBackupTime == "",
