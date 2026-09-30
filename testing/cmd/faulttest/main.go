@@ -484,10 +484,21 @@ func cmdRun(args []string) {
 
 			// Query audit trail for tool evidence if --audit-url is set.
 			var auditTools []string
+			var auditToolErrors map[string]string
 			if cfg.AuditURL != "" {
-				auditTools = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
+				auditTools, auditToolErrors = auditQueryTools(ctx, cfg.AuditURL, cfg.GatewayAPIKey, callStart)
 				if len(auditTools) > 0 {
 					slog.Info("audit evidence", "failure", f.ID, "tools", auditTools)
+				}
+				// Surface a tool's own recorded error immediately, live, rather
+				// than leaving it discoverable only by reading the full JSON
+				// report's response_text after the fact — found live 2026-09-29:
+				// get_pgbackrest_status erroring with "pgbackrest: command not
+				// found" (agent pointed at the wrong target) produced no signal
+				// in the terminal output at all until this was added, only an
+				// unexplained EVIDENCE COVERAGE GAP later.
+				for tool, errMsg := range auditToolErrors {
+					fmt.Printf("  ⚠  TOOL ERROR: %s failed: %q\n", tool, errMsg)
 				}
 			}
 
@@ -582,7 +593,15 @@ func cmdRun(args []string) {
 					case coverageGap:
 						evalResult.EvidenceCoverageGap = true
 						evalResult.Passed = false
-						fmt.Printf("  ⚠  EVIDENCE COVERAGE GAP: expected signal %q never fired — agent's tool calls never reached this evidence path — failing regardless of keyword/category score\n", sig)
+						reason := "agent's tool calls never reached this evidence path"
+						if len(auditToolErrors) > 0 {
+							// A tool erroring out (see TOOL ERROR line(s) above) is a
+							// different, more specific root cause than "never called
+							// at all" — name it here rather than leaving the two
+							// facts to be connected by the reader.
+							reason = fmt.Sprintf("the tool call(s) that would confirm it errored — see TOOL ERROR line(s) above (%d tool(s) recorded an error)", len(auditToolErrors))
+						}
+						fmt.Printf("  ⚠  EVIDENCE COVERAGE GAP: expected signal %q never fired — %s — failing regardless of keyword/category score\n", sig, reason)
 					case unconfirmed:
 						evalResult.EvidenceRequiredButUnconfirmed = true
 						evalResult.Passed = false
