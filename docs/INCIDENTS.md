@@ -195,6 +195,13 @@ HELPDESK_AUDIT_API_KEY=incident-agent-api-key \
 agent with no governance env vars at all — it's the simplest possible path, not a
 governance-enabled one. This section is the one to follow once auditd enforces auth.)
 
+**Policy enforcement** (`HELPDESK_POLICY_ENABLED`/`HELPDESK_POLICY_FILE`) gates
+`create_incident_bundle` — this agent's one `ActionWrite`-classified tool — the same
+way it gates a write tool on any other agent: operating mode, tag-based rules, and
+blast-radius bounds all apply before a bundle is created. The check uses `"incident"`
+as its policy resource type and the call's `infra_key` (or `"unknown"` when omitted)
+as the resource name.
+
 ---
 
 ## From Incident to Vault: the Full Path
