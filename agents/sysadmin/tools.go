@@ -1139,7 +1139,7 @@ const defaultPgBackRestMaxAgeHours = 25
 
 // GetPgBackRestStatusArgs defines arguments for the get_pgbackrest_status tool.
 type GetPgBackRestStatusArgs struct {
-	Target      string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs pgbackrest on the agent host directly."`
+	Target      string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
 	Stanza      string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
 	MaxAgeHours int    `json:"max_age_hours,omitempty" jsonschema:"How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule."`
 }
@@ -1379,7 +1379,26 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 			// work around here.
 			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
 		}
+	case infraConfig != nil:
+		// infraConfig is loaded (a real deployment with db_servers defined),
+		// but no target was given — this is a resolution failure, not a
+		// deliberate choice. Falling through to bare-local dispatch here
+		// would silently run pgbackrest against the agent's own host
+		// instead of any real target, which is never correct once infra
+		// config exists at all. Confirmed live 2026-09-30: a model given a
+		// connection_string that genuinely didn't match any known
+		// infrastructure entry reasoned its way into omitting target rather
+		// than escalating, producing a Go-level "executable not found"
+		// error that read like "pgBackRest isn't installed" when the real
+		// problem was "this agent process was never told about this
+		// target." Refuse loudly instead of letting that ambiguity through.
+		return GetPgBackRestStatusResult{}, fmt.Errorf(
+			"get_pgbackrest_status: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
 	default:
+		// No infra config loaded at all — the only sensible reading is a
+		// genuinely colocated deployment, where this agent process runs on
+		// the same host as the pgBackRest repo it's checking.
 		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
 	}
 	if err != nil {
@@ -1435,7 +1454,7 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 
 // RunPgBackRestBackupArgs defines arguments for the run_pgbackrest_backup tool.
 type RunPgBackRestBackupArgs struct {
-	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. When omitted, runs pgbackrest on the agent host directly."`
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
 	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
 	Type   string `json:"type,omitempty" jsonschema:"Backup type: full, diff, or incr. Default full — always valid regardless of backup history, unlike diff/incr which require a prior full backup to reference."`
 }
@@ -1501,6 +1520,15 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 		default:
 			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
 		}
+	case infraConfig != nil:
+		// Same reasoning as get_pgbackrest_status's own identical branch —
+		// infra config is loaded, so an empty target is a resolution
+		// failure, not a valid colocated-deployment request. Refuse rather
+		// than silently running a real backup command against the agent's
+		// own host.
+		return RunPgBackRestBackupResult{}, fmt.Errorf(
+			"run_pgbackrest_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
 	default:
 		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
 	}

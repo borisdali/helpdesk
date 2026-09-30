@@ -402,6 +402,29 @@ func TestGetPgBackRestStatusTool_UnknownTarget_ReturnsResolveHostError(t *testin
 	}
 }
 
+// TestGetPgBackRestStatusTool_EmptyTargetWithInfraConfig_Errors is a
+// regression test for a real gap found live 2026-09-30: a model given a
+// connection_string that didn't match any known infrastructure entry
+// reasoned its way into omitting target rather than escalating, which
+// silently ran pgbackrest against the agent's own host (no Docker/SSH
+// involved at all) instead of erroring. Once infrastructure config is
+// loaded, an empty target must be treated as a resolution failure, not a
+// valid "run locally" request — that request is still supported when no
+// infrastructure config exists at all (see
+// TestGetPgBackRestStatusTool_Success, which deliberately leaves
+// infraConfig nil).
+func TestGetPgBackRestStatusTool_EmptyTargetWithInfraConfig_Errors(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	ctx := mockToolContext{context.Background()}
+	_, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{})
+	if err == nil {
+		t.Fatal("getPgBackRestStatusTool() error = nil, want an error when infraConfig is loaded but target is empty")
+	}
+	if !strings.Contains(err.Error(), "target is required") {
+		t.Errorf("error = %v, want it to explain target is required when infra config is loaded", err)
+	}
+}
+
 // TestRunPgBackRestBackupTool_DockerDispatch mirrors
 // TestGetPgBackRestStatusTool_DockerDispatch for the write-side tool: with an
 // explicit stanza (isolating this test to the dispatch shape, not stanza
@@ -692,6 +715,24 @@ func TestRunPgBackRestBackupTool_PolicyDenied(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not permitted") {
 		t.Errorf("error %q should mention 'not permitted'", err.Error())
+	}
+}
+
+// TestRunPgBackRestBackupTool_EmptyTargetWithInfraConfig_Errors mirrors
+// TestGetPgBackRestStatusTool_EmptyTargetWithInfraConfig_Errors for the
+// write-side tool. Explicit Stanza isolates this to the backup-dispatch
+// switch itself, not the stanza-resolution call (which reuses
+// getPgBackRestStatusImpl and would otherwise hit the same error one layer
+// up, via a different call path, before this function's own switch is ever
+// reached).
+func TestRunPgBackRestBackupTool_EmptyTargetWithInfraConfig_Errors(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	_, err := runPgBackRestBackupImpl(context.Background(), RunPgBackRestBackupArgs{Stanza: "main"})
+	if err == nil {
+		t.Fatal("runPgBackRestBackupImpl() error = nil, want an error when infraConfig is loaded but target is empty")
+	}
+	if !strings.Contains(err.Error(), "target is required") {
+		t.Errorf("error = %v, want it to explain target is required when infra config is loaded", err)
 	}
 }
 
