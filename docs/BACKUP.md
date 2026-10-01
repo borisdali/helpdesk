@@ -177,7 +177,7 @@ silently fell into the SSH-or-local `default` branch and ran `pgbackrest` as a b
 on the *agent's own host*, not an error and not the real target. Confirmed live with a capturing
 test runner before the fix (`cmdRunner.Run` called with `name="pgbackrest"` against a K8s-only
 `infraConfig` entry). Fixed by refusing loudly instead of guessing — see
-[§3](#3-roadmap) for why the real fix isn't "add `kubectl exec`" here.
+[§3](#3-roadmap) for why the real fix isn't simply "add `kubectl exec`" here.
 
 ## 3. Roadmap
 
@@ -205,15 +205,29 @@ Not yet built — tracked, not forgotten:
 - **CloudNativePG (and similar K8s operator-managed) backup visibility.**   
   §2's `get_pgbackrest_status`/`run_pgbackrest_backup` now refuse outright (rather than silently
   running against the wrong host) when a target resolves to a Kubernetes pod — see §2's own
-  "Verified, not just claimed" callout. That refusal is permanent by design, not a stopgap: CNPG
-  doesn't run pgBackRest inside its pods at all, it has its own native backup mechanism (Barman
-  Cloud, pushing WAL/base backups to object storage). Planned remote-host pgBackRest reach
-  (v0.31, SSH to a repo/PG host that isn't colocated with the agent) does **not** close this gap
-  either — the blocker was never "pgBackRest can't reach a remote host," it's that a CNPG pod
-  doesn't expose `sshd` or `pgbackrest`, and customizing a customer's CNPG image to add them
-  would fight CNPG's own operational model. The real fix is a different, CNPG-native tool
-  reading the `Backup`/`ScheduledBackup` custom resource's own status via the K8s API — not an
-  extension of anything in §2 — and isn't built yet.
+  "Verified, not just claimed" callout.  
+
+  That refusal is permanent by design, not a stopgap, but the reason is more precise than "CNPG doesn't run pgBackRest": CNPG's own *native* backup path
+  is Barman Cloud (itself being moved out of the core operator into an official plugin as of
+  1.26+), and the CNPG maintainers have explicitly declined to add pgBackRest support directly
+  to the operator — not an oversight, a stated preference for Kubernetes-native primitives
+  (volume snapshots) over wrapping external tools, plus supportability concerns about bugs in an
+  external tool being magnified in a concurrent K8s environment ([cloudnative-pg/cloudnative-pg
+  discussion #3145](https://github.com/cloudnative-pg/cloudnative-pg/discussions/3145)).  
+
+  Community-maintained pgBackRest support *does* exist via CNPG's newer generic plugin interface
+  (CNPG-I — experimental third-party plugins from Dalibo and Opera Software), so "CNPG never uses
+  pgBackRest" isn't strictly true. But CNPG-I plugins integrate over **gRPC** (a sidecar
+  container or a standalone in-namespace Deployment), never SSH — so even a CNPG cluster running
+  one of those plugins isn't reachable through this project's planned remote-host pgBackRest
+  reach (v0.31, SSH to a repo/PG host that isn't colocated with the agent).   
+
+  That's the real, durable reason this gap doesn't close in v0.31: the access pattern is fundamentally different
+  (a gRPC plugin protocol, not a `pgbackrest` CLI reachable over SSH), not merely "no sshd in the
+  pod today." The real fix is a CNPG-native integration — reading the `Backup`/`ScheduledBackup`
+  custom resource's own status via the K8s API for the Barman Cloud path, or the relevant
+  plugin's own status surface for a third-party one — architecturally unrelated to anything in
+  §2, and not built yet.
 
 - **Cloud-managed backup visibility**   
   (RDS/Cloud SQL/AlloyDB automated backups). Zero coverage
