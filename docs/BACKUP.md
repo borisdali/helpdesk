@@ -69,6 +69,39 @@ against a live container: baseline healthy → injection → real `archive_comma
 `failed_count` climbing, `archiving_stale=true` → teardown → restored, a fresh success
 recorded, `archiving_stale=false` again.
 
+**A real, architectural incompatibility found testing against a real CloudNativePG cluster**:   
+This fault and `set_archive_command` are `external_compat: true`, i.e.  structurally portable pure SQL, working against any Postgres reachable over libpq. Tested
+against a real CNPG-managed cluster to confirm that in practice, not just in theory and it...
+genuinely does not work there. The reason?   
+
+The CNPG `app` user isn't a superuser, so the first attempt failed with
+`permission denied for function pg_stat_reset_shared` / `permission denied to set parameter
+"archive_command"`, which is a plausible, privilege-shaped explanation.  
+
+Enabling CNPG's `enableSuperuserAccess` and retrying with real `postgres` superuser credentials (confirmed via
+`usesuper=t`) failed identically, but with a different error:  
+
+  `could not open file "postgresql.auto.conf": Permission denied`.   
+
+Checking directly inside the Pod reveals...   
+... the file `ALTER SYSTEM` writes to postgresql.auto.conf and its mode is set to `-r--------` (400, read-only even for its own owning OS user).   
+
+Not only that but the container runs with `readOnlyRootFilesystem: true`.   
+
+This is clearly CNPG's deliberate design where Postgres configuration is strictly reconciled from the `Cluster` CR itself... and the file is locked down specifically so
+nothing, not even a real superuser, can write to it out-of-band and drift from what the operator expects.   
+
+So this is not a privilege problem at all. No privilege level change can fix it.
+
+**Practical implication**: `db-backup-archiving-broken`'s fault injection and
+`set_archive_command`'s remediation are both architecturally incompatible with CNPG as written —
+this isn't a gap in test coverage, it's a real limitation of the *capability* against any
+CNPG-managed customer deployment. The correct way to change `archive_command` on CNPG is a
+`Cluster` CR write (a K8s API operation reconciled by the operator), not SQL — the same shape of
+conclusion as §2's CNPG/pgBackRest finding, for an entirely different, independent reason. A
+CNPG-native remediation path (patching the `Cluster` CR instead of running `ALTER SYSTEM`) is a
+distinct, unbuilt future capability, not an extension of `set_archive_command` itself.
+
 ## 2. pgBackRest job-level backup health
 
 Fault: [`db-pgbackrest-repo-unreadable`](https://github.com/borisdali/helpdesk/blob/cae8f37cc0606e5e545915b5f8fdf2ed1d9336a9/testing/catalog/failures.yaml#L449)  
@@ -231,6 +264,17 @@ Not yet built — tracked, not forgotten:
   misconfigured `pgbackrest.conf` setting with a known-good prior reading, mirroring §1's
   `set_archive_command`/`get_saved_snapshots` pattern — is a candidate for later expansion, once
   a real customer-reported case justifies it.
+
+- **CloudNativePG-native WAL-archiving remediation.**   
+  §1's `set_archive_command` cannot act
+  against a real CNPG-managed cluster, at any privilege level — see §1's own "Verified, not just
+  claimed" callout for the direct evidence (`postgresql.auto.conf` is mode 400, read-only even
+  for the Postgres superuser, and the container runs `readOnlyRootFilesystem: true`). This is
+  CNPG's own deliberate design, not fixable by granting more access. A CNPG-native remediation
+  path — patching the `Cluster` custom resource's own `archive_command` field (a K8s API write,
+  reconciled by the operator) instead of running SQL — is a distinct, unbuilt capability, not an
+  extension of `set_archive_command` itself. Diagnosis (`get_backup_status`, pure `SHOW`/`SELECT`)
+  is unaffected and already works against CNPG's own unprivileged `app` user.
 
 - **CloudNativePG (and similar K8s operator-managed) backup visibility.**   
   §2's `get_pgbackrest_status`/`run_pgbackrest_backup` now refuse outright (rather than silently
