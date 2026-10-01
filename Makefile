@@ -124,7 +124,13 @@ SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n
 
 integration:
 	@echo "Starting test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
+	# Real initial backup, taken as an explicit step after the container
+	# reports healthy — see init-pgbackrest.sh's own comment for why this
+	# can't happen during container init. Without it,
+	# TestIntegration_GetPgBackRestStatus_OverRealSSH's LastBackupTime check
+	# would fail on every fresh (-v wiped) volume.
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
 	# POSTGRES_TEST_DSN: dedicated postgres-auditd service above (port 15434),
 	# never the fault-injection-target postgres service (port 15432) — see
@@ -135,7 +141,7 @@ integration:
 		go test -tags integration -timeout 300s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml down -v
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Integration tests (requires Docker) - same as above, but with "nocache"
@@ -143,13 +149,14 @@ integration:
 # Target to force a fresh run by bypassing the cache
 integration-nocache:
 	@echo "Starting test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml up -d --wait
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
 	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
 		go test --count=1 -tags integration -timeout 300s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
-	docker compose -f testing/docker/docker-compose.yaml down -v
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
 
 # ---------------------------------------------------------------------------
 # Fault injection tests (requires Docker + agents + LLM API key)
