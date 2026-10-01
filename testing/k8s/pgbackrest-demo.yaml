@@ -1,0 +1,100 @@
+# Ad hoc K8s showcase manifest (not part of the standard kustomize base/overlays
+# fault-injection set) — a self-managed (non-operator) Postgres+pgBackRest pod,
+# reusing the exact image already built and live-verified for the Docker-based
+# SSH dispatch work (testing/docker/Dockerfile.pgbackrest). Exists to prove
+# agents/sysadmin's pgBackRest tools genuinely work against a real K8s pod via
+# both dispatch paths — kubectl exec (no port exposure) and SSH (needs a
+# reachable port) — not just a Docker container reached two different ways.
+#
+# Apply: kubectl apply -f testing/k8s/pgbackrest-demo.yaml
+# Image: docker-postgres-pgbackrest:latest, loaded via `minikube image load`
+#   (not pulled from any registry — must be present in the cluster's own
+#   image cache first).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbackrest-demo
+  namespace: helpdesk-test
+  labels:
+    app: pgbackrest-demo
+spec:
+  selector:
+    app: pgbackrest-demo
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+    - name: ssh
+      port: 22
+      targetPort: 22
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pgbackrest-demo
+  namespace: helpdesk-test
+  labels:
+    app: pgbackrest-demo
+spec:
+  serviceName: pgbackrest-demo
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pgbackrest-demo
+  template:
+    metadata:
+      labels:
+        app: pgbackrest-demo
+    spec:
+      containers:
+        - name: postgres
+          image: docker-postgres-pgbackrest:latest
+          imagePullPolicy: Never # loaded directly into the cluster's image cache, not pulled
+          ports:
+            - containerPort: 5432
+              name: postgres
+            - containerPort: 22
+              name: ssh
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: testpass
+            - name: POSTGRES_DB
+              value: testdb
+          args:
+            - postgres
+            - -c
+            - archive_mode=on
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+            - name: pgbackrest-repo
+              mountPath: /var/lib/pgbackrest
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: pgbackrest-repo
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

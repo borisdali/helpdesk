@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -88,8 +89,24 @@ func sshRun(ctx context.Context, host resolvedHost, name string, args []string, 
 	}
 	done := make(chan result, 1)
 	go func() {
-		output, runErr := session.CombinedOutput(command)
-		done <- result{output: string(output), err: runErr}
+		// Separate stdout/stderr, not CombinedOutput — mirrors execRunner.Run's
+		// identical fix (tools.go): on success, stdout alone is the real
+		// output; stderr noise (a remote command's own non-fatal warnings)
+		// must never corrupt a JSON-parsing caller. Combined only on
+		// failure, where stderr usually carries the real diagnostic detail
+		// every "%w: %s" error-formatting call site already expects.
+		var stdout, stderr bytes.Buffer
+		session.Stdout = &stdout
+		session.Stderr = &stderr
+		runErr := session.Run(command)
+		if runErr != nil {
+			done <- result{output: stdout.String() + stderr.String(), err: runErr}
+			return
+		}
+		if stderr.Len() > 0 {
+			slog.Debug("ssh command succeeded with stderr output", "host", host.VMAddress, "stderr", stderr.String())
+		}
+		done <- result{output: stdout.String(), err: nil}
 	}()
 
 	select {

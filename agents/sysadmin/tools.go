@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,8 +41,33 @@ func (execRunner) Run(ctx context.Context, name string, args []string, env []str
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		// Preserve the historical combined-output shape on failure: the
+		// real diagnostic detail for most CLI tools lives on stderr, and
+		// every "%w: %s" error-formatting call site across this package
+		// already expects it folded in here.
+		return stdout.String() + stderr.String(), err
+	}
+	if stderr.Len() > 0 {
+		slog.Debug("command succeeded with stderr output", "name", name, "stderr", stderr.String())
+	}
+	// On success, stdout alone is the real output — not combined with
+	// stderr. Found live, not hypothetical: kubectl-exec dispatch against a
+	// real K8s pod broke get_pgbackrest_status's JSON parse
+	// ("invalid character 'P' looking for beginning of value") because
+	// pgBackRest wrote non-fatal env-var warnings to stderr (Kubernetes
+	// auto-injects a `<SERVICE_NAME>_*` env var per Service in the
+	// namespace, and pgBackRest warns about any that happen to look like
+	// one of its own `PGBACKREST_*`-prefixed options) on an otherwise
+	// perfectly healthy run. Docker-based testing never exercised this
+	// path — Docker doesn't auto-inject Service-derived env vars the way
+	// Kubernetes does, so stderr was always empty there regardless of
+	// CombinedOutput's merging.
+	return stdout.String(), nil
 }
 
 // cmdRunner is the active command runner. Override in tests.
@@ -1287,6 +1313,29 @@ type pgBackRestRawBackup struct {
 	} `json:"timestamp"`
 }
 
+// jsonArrayPrefix strips any non-JSON preamble before the first `[`,
+// returning output unchanged if none is found (letting json.Unmarshal
+// produce its own clear error rather than masking a genuinely different
+// problem). pgbackrest writes its own non-fatal `WARN:`/`INFO:` lines to
+// *stdout*, ahead of the real JSON array, whenever it has something to
+// complain about on an otherwise healthy run — confirmed live against a
+// real Kubernetes pod: Kubernetes auto-injects a `<SERVICE_NAME>_*` env var
+// per Service in the namespace, and pgbackrest warns about any that happen
+// to resemble one of its own `PGBACKREST_*`-prefixed options
+// ("WARN: environment contains invalid option 'demo-service-port'"),
+// breaking a naive json.Unmarshal of the raw combined output. This is
+// pgbackrest's own stdout behavior, not a stdout/stderr-mixing artifact of
+// this codebase's own dispatch layer (that was the first, wrong hypothesis
+// — both streams were checked directly, live, before writing this). Docker-
+// based testing never exercised this because Docker doesn't auto-inject
+// Service-derived env vars the way Kubernetes does.
+func jsonArrayPrefix(output string) string {
+	if idx := strings.IndexByte(output, '['); idx >= 0 {
+		return output[idx:]
+	}
+	return output
+}
+
 // parsePgBackRestInfo parses `pgbackrest info --output=json` output (an
 // array of stanzas — confirmed correct even for a single-stanza instance,
 // live, 2026-09-26) and computes staleness for the requested stanza.
@@ -1297,7 +1346,7 @@ type pgBackRestRawBackup struct {
 // match is an error rather than a silent guess.
 func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPgBackRestStatusResult, error) {
 	var raw []pgBackRestRawStanza
-	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+	if err := json.Unmarshal([]byte(jsonArrayPrefix(output)), &raw); err != nil {
 		return GetPgBackRestStatusResult{}, fmt.Errorf("parsing pgbackrest info JSON: %w", err)
 	}
 
@@ -1390,32 +1439,24 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 		if err != nil {
 			return GetPgBackRestStatusResult{}, err
 		}
-		// Kubernetes-resolved hosts have no docker/podman/systemd runtime
-		// and no SSH fields — resolveHost never populates those on the K8s
-		// path (see checkHostImpl's identical guard). Without this check,
-		// a K8s-configured target would silently fall into the `default`
-		// branch below and run `pgbackrest` as a bare local command on the
-		// agent's own host — confirmed live, a real agent process with
-		// nothing named "pgbackrest" nearby would misreport, not error.
-		// There's no kubectl-exec dispatch for pgBackRest here (unlike
-		// check_host/restart_container): most managed K8s Postgres
-		// operators (e.g. CloudNativePG) don't run pgBackRest inside the
-		// pod at all — they have their own native backup mechanism — so a
-		// real fix isn't "add kubectl exec," it's a different, operator-
-		// specific tool this codebase doesn't have yet. Refuse loudly
-		// instead of guessing.
-		if host.K8sPodSelector != "" {
-			return GetPgBackRestStatusResult{}, fmt.Errorf(
-				"get_pgbackrest_status: target %q resolves to a Kubernetes pod, which this tool cannot reach — "+
-					"pgBackRest has no Kubernetes dispatch support (most managed K8s Postgres operators use their own native backup mechanism instead); escalate rather than guessing", args.Target)
-		}
-		switch host.Runtime {
-		case "docker", "podman":
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
 			// pgBackRest checks PGDATA ownership; run as the postgres OS
-			// user inside the container rather than docker exec's default
-			// (root), matching how pgBackRest expects to be invoked.
-			// shellCommand (sshexec.go) already exists for safe single-string
-			// quoting — reused here rather than writing a second quoter.
+			// user inside the container/pod rather than docker-exec's or
+			// kubectl-exec's own default (root), matching how pgBackRest
+			// expects to be invoked. shellCommand (sshexec.go) already
+			// exists for safe single-string quoting — reused here rather
+			// than writing a second quoter. execInProcess already knows how
+			// to route a Kubernetes-resolved host through `kubectl exec`
+			// (resolveHost leaves Runtime empty and K8sPodSelector set on
+			// that path — see checkHostImpl's identical branch) — this is
+			// the one targeted at a Postgres pod that is self-managed
+			// (plain Deployment, pgBackRest installed in the image), not an
+			// operator-managed one: CloudNativePG and similar operators
+			// don't run pgBackRest inside their pods at all, so resolving a
+			// CNPG-style target here would just fail with a real, honest
+			// "pgbackrest: command not found" from inside that pod, not a
+			// misleading silent-local-exec the way it used to.
 			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
 			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
 		default:
@@ -1554,15 +1595,6 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 		if err != nil {
 			return RunPgBackRestBackupResult{}, err
 		}
-		// Same guard as get_pgbackrest_status's identical check — reached
-		// directly here (not only via the stanza-resolution call above)
-		// whenever the caller supplies an explicit Stanza, which skips that
-		// nested call entirely.
-		if host.K8sPodSelector != "" {
-			return RunPgBackRestBackupResult{}, fmt.Errorf(
-				"run_pgbackrest_backup: target %q resolves to a Kubernetes pod, which this tool cannot reach — "+
-					"pgBackRest has no Kubernetes dispatch support (most managed K8s Postgres operators use their own native backup mechanism instead); escalate rather than guessing", args.Target)
-		}
 		if policyEnforcer != nil {
 			policyCtx := agentutil.WithToolName(ctx, "run_pgbackrest_backup")
 			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
@@ -1571,8 +1603,8 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 				return RunPgBackRestBackupResult{}, err
 			}
 		}
-		switch host.Runtime {
-		case "docker", "podman":
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
 			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
 			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
 		default:

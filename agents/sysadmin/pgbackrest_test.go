@@ -818,56 +818,144 @@ func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *test
 	}
 }
 
-// TestGetPgBackRestStatusTool_K8sTarget_RefusesRatherThanRunningLocally is a
-// regression test for a real bug found live 2026-10-01 while auditing v0.30's
-// cross-platform coverage: resolveHost never populates Runtime/SSHUser on
-// its Kubernetes-resolved path (checkHostImpl and every other sysadmin tool
-// explicitly guard on host.K8sPodSelector for exactly this reason), but
-// get_pgbackrest_status's own dispatch switch didn't — a K8s-configured
-// target silently fell into the SSH-or-local `default` branch and executed
-// `pgbackrest` as a bare local command on the agent's own host, not an
-// error and not the real target. Confirmed live with a capturing runner
-// before the fix: cmdRunner.Run was called with name="pgbackrest" against a
-// K8s-only infraConfig entry. Assert it now refuses instead.
-func TestGetPgBackRestStatusTool_K8sTarget_RefusesRatherThanRunningLocally(t *testing.T) {
+// TestGetPgBackRestStatusTool_K8sDispatch verifies the kubectl-exec dispatch
+// path for a self-managed (non-operator) Postgres pod with pgBackRest
+// installed in its image. A real bug (fixed 2026-10-01, found auditing
+// v0.30's cross-platform coverage) used to make a K8s-configured target
+// silently fall into the SSH-or-local `default` branch and run `pgbackrest`
+// as a bare local command on the agent's own host — this now routes through
+// execInProcess's existing kubectl-exec branch (shared with check_host/
+// restart_container), the same `su postgres -c '...'` wrapping the
+// docker/podman path already uses. Operator-managed targets (CloudNativePG
+// and similar, which don't run pgBackRest inside their pods at all) aren't
+// specially rejected anymore — they'd now fail with a real, honest
+// "pgbackrest: command not found" from inside that pod instead, which is
+// more informative than a hardcoded refusal naming one specific operator.
+func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
 	withK8sInfra(t)
-	capture := &sequencedRunner{outputs: []string{realPgBackRestInfoJSON}}
+	capture := &sequencedRunner{outputs: []string{"pg-prod-db-0\n", realPgBackRestInfoJSON}}
 	old := cmdRunner
 	cmdRunner = capture
 	defer func() { cmdRunner = old }()
 
 	ctx := mockToolContext{context.Background()}
-	_, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "prod_db"})
-	if err == nil {
-		t.Fatal("expected an error for a Kubernetes-resolved target, got nil")
+	result, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "prod_db"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "Kubernetes") {
-		t.Errorf("error = %q, want it to explain the Kubernetes dispatch gap", err.Error())
+	if result.Stanza != "main" {
+		t.Errorf("Stanza = %q, want main", result.Stanza)
 	}
-	if len(capture.calls) != 0 {
-		t.Errorf("expected 0 local/SSH dispatch calls, got %d: %v — tool ran against the wrong target instead of refusing", len(capture.calls), capture.calls)
+	if len(capture.calls) != 2 {
+		t.Fatalf("expected 2 kubectl calls (get pod, exec), got %d: %v", len(capture.calls), capture.calls)
+	}
+	// Both calls carry the configured --context prefix (gke_project_region_prod-cluster),
+	// so "get"/"exec" aren't necessarily at index 0 — search for them instead.
+	if !containsSeq(capture.calls[0], "get", "pod") {
+		t.Errorf("call[0] = %v, want a `kubectl get pod` pod-name resolution", capture.calls[0])
+	}
+	execCall := capture.calls[1]
+	if !containsSeq(execCall, "exec", "pg-prod-db-0") {
+		t.Fatalf("call[1] = %v, want `kubectl exec pg-prod-db-0 ...`", execCall)
+	}
+	joined := strings.Join(execCall, " ")
+	if !strings.Contains(joined, "su postgres -c") {
+		t.Errorf("exec call = %q, want it to run as the postgres OS user (su postgres -c ...)", joined)
 	}
 }
 
-// TestRunPgBackRestBackupTool_K8sTarget_RefusesRatherThanRunningLocally
-// covers run_pgbackrest_backup's identical guard, reached directly (not via
-// the nested stanza-resolution call) when an explicit Stanza is supplied.
-func TestRunPgBackRestBackupTool_K8sTarget_RefusesRatherThanRunningLocally(t *testing.T) {
+// containsSeq reports whether want appears as a contiguous subsequence
+// within got, starting at any index.
+func containsSeq(got []string, want ...string) bool {
+	for i := 0; i+len(want) <= len(got); i++ {
+		match := true
+		for j, w := range want {
+			if got[i+j] != w {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunPgBackRestBackupTool_K8sDispatch covers run_pgbackrest_backup's
+// identical kubectl-exec dispatch, with an explicit Stanza to skip the
+// nested stanza-resolution call and isolate the dispatch path itself.
+func TestRunPgBackRestBackupTool_K8sDispatch(t *testing.T) {
 	withK8sInfra(t)
-	capture := &sequencedRunner{outputs: []string{"backup command end: completed successfully"}}
+	capture := &sequencedRunner{outputs: []string{"pg-prod-db-0\n", "backup command end: completed successfully"}}
 	old := cmdRunner
 	cmdRunner = capture
 	defer func() { cmdRunner = old }()
 
 	ctx := mockToolContext{context.Background()}
 	_, err := runPgBackRestBackupTool(ctx, RunPgBackRestBackupArgs{Target: "prod_db", Stanza: "main"})
-	if err == nil {
-		t.Fatal("expected an error for a Kubernetes-resolved target, got nil")
+	if err != nil {
+		t.Fatalf("runPgBackRestBackupTool() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "Kubernetes") {
-		t.Errorf("error = %q, want it to explain the Kubernetes dispatch gap", err.Error())
+	if len(capture.calls) != 2 {
+		t.Fatalf("expected 2 kubectl calls (get pod, exec), got %d: %v", len(capture.calls), capture.calls)
 	}
-	if len(capture.calls) != 0 {
-		t.Errorf("expected 0 local/SSH dispatch calls, got %d: %v — tool ran against the wrong target instead of refusing", len(capture.calls), capture.calls)
+	execCall := capture.calls[1]
+	joined := strings.Join(execCall, " ")
+	if !strings.Contains(joined, "su postgres -c") {
+		t.Errorf("exec call = %q, want it to run as the postgres OS user (su postgres -c ...)", joined)
+	}
+	if !strings.Contains(joined, "--stanza=main") || !strings.Contains(joined, "backup") {
+		t.Errorf("exec call = %q, want the pgbackrest backup command embedded", joined)
+	}
+}
+
+// realPgBackRestK8sWarnPreambleJSON is the exact raw output captured live
+// (2026-10-01) from `pgbackrest info --output=json` run via kubectl exec
+// against a real K8s pod: Kubernetes auto-injects a `<SERVICE_NAME>_*` env
+// var per Service in the namespace, and pgBackRest writes a non-fatal WARN
+// line to *stdout* (not stderr — checked directly, live, before concluding
+// this) for each one that resembles its own `PGBACKREST_*`-prefixed
+// options, ahead of the real JSON array, on an otherwise perfectly healthy
+// run. A naive json.Unmarshal of this exact string fails with "invalid
+// character 'P' looking for beginning of value".
+const realPgBackRestK8sWarnPreambleJSON = "P00   WARN: environment contains invalid option 'demo-service-port'\n" +
+	"P00   WARN: environment contains invalid option 'demo-port-5432-tcp-proto'\n" +
+	"P00   WARN: environment contains invalid option 'demo-service-host'\n" +
+	realPgBackRestInfoJSON
+
+// TestParsePgBackRestInfo_K8sWarnPreamble_StillParses is a regression test
+// for a real bug found live against a genuine Kubernetes pod (not a
+// hypothetical): the initial fix attempt (separating stdout/stderr capture
+// in execRunner.Run/sshRun) did NOT resolve this, because the WARN lines
+// are on stdout, not stderr — confirmed by checking both streams
+// independently before writing the real fix (jsonArrayPrefix, locating the
+// first `[` rather than assuming the raw output is pure JSON).
+func TestParsePgBackRestInfo_K8sWarnPreamble_StillParses(t *testing.T) {
+	result, err := parsePgBackRestInfo(realPgBackRestK8sWarnPreambleJSON, "main", 25*time.Hour)
+	if err != nil {
+		t.Fatalf("parsePgBackRestInfo() with a WARN preamble error = %v, want it to parse past the preamble", err)
+	}
+	if result.Stanza != "main" || result.StatusCode != 0 {
+		t.Errorf("got %+v, want stanza=main status_code=0", result)
+	}
+}
+
+func TestJSONArrayPrefix(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no preamble", `[{"a":1}]`, `[{"a":1}]`},
+		{"warn preamble", "WARN: noise\n" + `[{"a":1}]`, `[{"a":1}]`},
+		{"no bracket at all", "not json at all", "not json at all"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := jsonArrayPrefix(c.input); got != c.want {
+				t.Errorf("jsonArrayPrefix(%q) = %q, want %q", c.input, got, c.want)
+			}
+		})
 	}
 }

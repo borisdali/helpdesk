@@ -5,7 +5,7 @@ PostgreSQL backup-taking failures. What's certified today and what's on the road
 
 Backup health is table-stakes, not an advanced feature. It's kept in its own page,
 separate from [HA_DR.md](HA_DR.md) (streaming replication, failover, etc.), because it's a
-different concern (data durability vs. availability) with its own, and growing, set of
+different concern (data durability vs. availability) with its own and growing, set of
 failure modes and tools. This page is expected to expand substantially as backup
 scenarios beyond WAL archiving and pgBackRest are added.
 
@@ -75,7 +75,7 @@ Fault: [`db-pgbackrest-repo-unreadable`](https://github.com/borisdali/helpdesk/b
 Triage playbook: [`pbs_pgbackrest_health_triage`](../playbooks/pgbackrest-health-triage.yaml)  
 Remediation playbook: [`pbs_pgbackrest_backup_remediate`](../playbooks/pgbackrest-backup-remediate.yaml)  
 
-The WAL-*archiving* failure scenario above covers half of the backup-*taking* precondition, but says nothing about whether an actual backup-*taking* **job** (pgBackRest) is itself healthy. Things can, and in reality, do often go south, be it a stale schedule, a broken repo or backups that were never configured in the first place.
+The WAL-*archiving* failure scenario above covers half of the backup-*taking* precondition, but says nothing about whether an actual backup-*taking* **job** (pgBackRest) is itself healthy. Things can and in reality, do often go south, be it a stale schedule, a broken repo or backups that were never configured in the first place.
 
 **The failure mode**:   
 pgBackRest's own repo/stanza becomes unreadable: permissions, ownership or a mount problem at the repo destination. This in turn leads to the next scheduled backup silently fail to run or the repo state itself becomes unqueryable.  
@@ -172,12 +172,42 @@ container isn't up) — rather than relying on this live run being repeated by h
 user**:   
 Every *other* SysAdmin-domain tool (`check_host`, `restart_container`, …) explicitly
 checks `host.K8sPodSelector` and dispatches via `kubectl exec` when a target resolves to a
-Kubernetes pod. `get_pgbackrest_status`/`run_pgbackrest_backup` didn't — a K8s-configured target
+Kubernetes Pod. `get_pgbackrest_status`/`run_pgbackrest_backup` didn't — a K8s-configured target
 silently fell into the SSH-or-local `default` branch and ran `pgbackrest` as a bare local command
 on the *agent's own host*, not an error and not the real target. Confirmed live with a capturing
 test runner before the fix (`cmdRunner.Run` called with `name="pgbackrest"` against a K8s-only
-`infraConfig` entry). Fixed by refusing loudly instead of guessing — see
-[§3](#3-roadmap) for why the real fix isn't simply "add `kubectl exec`" here.
+`infraConfig` entry). First fixed by refusing loudly rather than guessing; then genuinely closed
+by routing the K8s case through `execInProcess`'s existing `kubectl exec` branch (already shared
+by `check_host`/`restart_container`) — the same `su postgres -c '...'` wrapping the docker/podman
+path already uses, not new plumbing.  
+
+This only helps a **self-managed** Postgres Pod (a plain
+`Deployment`, pgBackRest installed in the image) — an operator-managed one like CloudNativePG,
+which doesn't run `pgbackrest` inside its Pod at all, now fails with a real, honest "command not
+found" from inside that Pod instead of a hardcoded refusal naming one specific operator. See
+[§3](#3-roadmap) for the separate, still-open question of operator-managed (CNPG-style) backup
+visibility, which this change does not address.
+
+**A real parsing bug found live against an actual K8s Pod — and an initial wrong hypothesis,
+corrected before shipping a fix that wouldn't have worked**:   
+Deploying a self-managed Postgres+pgBackRest Pod to a real K8s cluster to prove the `kubectl exec` path above (not
+just unit-test it) surfaced `get_pgbackrest_status: parsing pgbackrest info JSON: invalid
+character 'P' looking for beginning of value`.  
+
+First hypothesis: `execRunner.Run`'s `cmd.CombinedOutput()` merges stdout and stderr for every dispatch mode and K8s
+auto-injects a `<SERVICE_NAME>_*` env var per Service in the namespace — pgBackRest warns about
+any that resemble its own `PGBACKREST_*`-prefixed options, so a Service literally named
+`pgbackrest-demo` produced several. That fix (separating stdout/stderr capture in
+`execRunner.Run` and `sshRun`, kept regardless — it's a real improvement on its own merits) did
+**not** resolve the failure.   
+
+Checking both streams independently, live, rather than trusting the
+first plausible explanation: the WARN lines are on **stdout**, not stderr — pgBackRest writes
+them there itself, ahead of the real JSON array, on an otherwise healthy run. The actual fix is
+`jsonArrayPrefix` (`agents/sysadmin/tools.go`): locate the first `[` in the raw output before
+unmarshaling, rather than assuming the whole string is JSON. Verified fixed against the real Pod
+with the Service-link env-var injection deliberately left in place (not worked around) — a
+regression test captures the exact live preamble.
 
 ## 3. Roadmap
 
@@ -204,12 +234,12 @@ Not yet built — tracked, not forgotten:
 
 - **CloudNativePG (and similar K8s operator-managed) backup visibility.**   
   §2's `get_pgbackrest_status`/`run_pgbackrest_backup` now refuse outright (rather than silently
-  running against the wrong host) when a target resolves to a Kubernetes pod — see §2's own
+  running against the wrong host) when a target resolves to a Kubernetes Pod — see §2's own
   "Verified, not just claimed" callout.  
 
   That refusal is permanent by design, not a stopgap, but the reason is more precise than "CNPG doesn't run pgBackRest": CNPG's own *native* backup path
   is Barman Cloud (itself being moved out of the core operator into an official plugin as of
-  1.26+), and the CNPG maintainers have explicitly declined to add pgBackRest support directly
+  1.26+) and the CNPG maintainers have explicitly declined to add pgBackRest support directly
   to the operator — not an oversight, a stated preference for Kubernetes-native primitives
   (volume snapshots) over wrapping external tools, plus supportability concerns about bugs in an
   external tool being magnified in a concurrent K8s environment ([cloudnative-pg/cloudnative-pg
@@ -224,10 +254,10 @@ Not yet built — tracked, not forgotten:
 
   That's the real, durable reason this gap doesn't close in v0.31: the access pattern is fundamentally different
   (a gRPC plugin protocol, not a `pgbackrest` CLI reachable over SSH), not merely "no sshd in the
-  pod today." The real fix is a CNPG-native integration — reading the `Backup`/`ScheduledBackup`
-  custom resource's own status via the K8s API for the Barman Cloud path, or the relevant
+  Pod today." The real fix is a CNPG-native integration — reading the `Backup`/`ScheduledBackup`
+  custom resource's own status via the K8s API for the Barman Cloud path or the relevant
   plugin's own status surface for a third-party one — architecturally unrelated to anything in
-  §2, and not built yet.
+  §2 and not built yet.
 
 - **Cloud-managed backup visibility**   
   (RDS/Cloud SQL/AlloyDB automated backups). Zero coverage
