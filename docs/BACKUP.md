@@ -145,27 +145,82 @@ This was found by checking the actual code against a doc paragraph about to clai
 Fixed by adding the same `CheckTool` call the two restart tools already make, with `ActionWrite` in place of `ActionDestructive`. 
 A policy-denial regression test (`TestRunPgBackRestBackupTool_PolicyDenied`) confirms the check actually fires.
 
+**The SSH dispatch path itself, also live-verified against a real remote host, not just a synthetic one**:   
+Every prior test of `agents/sysadmin/sshexec.go` (the agent's SSH-or-local remote-host-reach
+capability referenced above) ran against an in-process synthetic SSH server — real enough to
+prove the Go client logic, but not real `sshd`. A second, genuinely remote-reachable container
+(real `openssh-server`, a pinned host key, `testing/docker/docker-compose.pgbackrest.yaml`'s own
+`15436:22` mapping) surfaced three bugs a synthetic server never could:   
+  - the upstream Postgres image ships its home directory world-writable, which `sshd`'s
+`StrictModes` silently rejects a key against — no error, just "Permission denied"   
+  - the OS package auto-generates RSA/ECDSA host keys alongside the one actually pinned, so a
+real SSH client's default algorithm negotiation could pick a key the pinned `known_hosts` entry
+never matches, "knownhosts: key mismatch," even though the right key was present and correct   
+  - reusing the same connection-string port across two `db_servers` entries (one for
+docker-exec, one for SSH, same underlying container) would have made target resolution
+genuinely ambiguous for a real agent session, not just a hypothetical   
+
+With those fixed, the SSH path was verified at every layer: raw `ssh` against the pinned
+`known_hosts`, then a full live run through the real gateway/playbook/LLM pipeline
+(`faulttest run --agent-conn pgbackrest-db-ssh --remediate --gate-escalation`) reaching the
+identical correct diagnosis the docker-exec path reaches, with `objective_evidence_confirmed`
+firing. A permanent regression test now guards this path going forward —
+`agents/sysadmin/pgbackrest_ssh_integration_test.go` (`make integration`, skips cleanly if the
+container isn't up) — rather than relying on this live run being repeated by hand.
+
+**A Kubernetes-dispatch safety bug, found auditing cross-platform coverage, not reported by a
+user**:   
+Every *other* SysAdmin-domain tool (`check_host`, `restart_container`, …) explicitly
+checks `host.K8sPodSelector` and dispatches via `kubectl exec` when a target resolves to a
+Kubernetes pod. `get_pgbackrest_status`/`run_pgbackrest_backup` didn't — a K8s-configured target
+silently fell into the SSH-or-local `default` branch and ran `pgbackrest` as a bare local command
+on the *agent's own host*, not an error and not the real target. Confirmed live with a capturing
+test runner before the fix (`cmdRunner.Run` called with `name="pgbackrest"` against a K8s-only
+`infraConfig` entry). Fixed by refusing loudly instead of guessing — see
+[§3](#3-roadmap) for why the real fix isn't "add `kubectl exec`" here.
+
 ## 3. Roadmap
 
 Not yet built — tracked, not forgotten:
 
-- **`pg_basebackup` job-level health.** §2 above closes this gap for pgBackRest specifically —
+- **`pg_basebackup` job-level health.**   
+  §2 above closes this gap for pgBackRest specifically —
   the more common production backup tool for self-managed Postgres. A bare `pg_basebackup`
   (no pgBackRest/wal-g/similar wrapper) has no equivalent status command to poll at all; covering
   it would need a different integration point (reading a cron job's own exit status/log or a
   wrapper script's own status file), not an extension of `get_pgbackrest_status`.
-- **wal-g job-level health.** Same shape of gap as `pg_basebackup` above, for the other common
+
+- **wal-g job-level health.**   
+  Same shape of gap as `pg_basebackup` above, for the other common
   self-managed backup tool — not yet built.
-- **pgBackRest remediation beyond stale-backup.** §2's `run_pgbackrest_backup` deliberately
+
+- **pgBackRest remediation beyond stale-backup.**   
+  §2's `run_pgbackrest_backup` deliberately
   refuses to act on a broken repo/stanza (permissions, ownership, mount problems have no
   confirmed-correct value to restore). A narrower, safely-automatable subset of those — e.g. a
   misconfigured `pgbackrest.conf` setting with a known-good prior reading, mirroring §1's
   `set_archive_command`/`get_saved_snapshots` pattern — is a candidate for later expansion, once
   a real customer-reported case justifies it.
-- **Cloud-managed backup visibility** (RDS/Cloud SQL/AlloyDB automated backups). Zero coverage
+
+- **CloudNativePG (and similar K8s operator-managed) backup visibility.**   
+  §2's `get_pgbackrest_status`/`run_pgbackrest_backup` now refuse outright (rather than silently
+  running against the wrong host) when a target resolves to a Kubernetes pod — see §2's own
+  "Verified, not just claimed" callout. That refusal is permanent by design, not a stopgap: CNPG
+  doesn't run pgBackRest inside its pods at all, it has its own native backup mechanism (Barman
+  Cloud, pushing WAL/base backups to object storage). Planned remote-host pgBackRest reach
+  (v0.31, SSH to a repo/PG host that isn't colocated with the agent) does **not** close this gap
+  either — the blocker was never "pgBackRest can't reach a remote host," it's that a CNPG pod
+  doesn't expose `sshd` or `pgbackrest`, and customizing a customer's CNPG image to add them
+  would fight CNPG's own operational model. The real fix is a different, CNPG-native tool
+  reading the `Backup`/`ScheduledBackup` custom resource's own status via the K8s API — not an
+  extension of anything in §2 — and isn't built yet.
+
+- **Cloud-managed backup visibility**   
+  (RDS/Cloud SQL/AlloyDB automated backups). Zero coverage
   today — those platforms expose backup status via their own control-plane APIs, not anything
   queryable from inside Postgres or a host-level CLI; a genuinely different integration point
-  from either of §1/§2.
+  from either of §1/§2. (Same shape of gap as CNPG above — a managed-platform control plane, not
+  a host-level CLI or SQL view.)
 
 ---
 

@@ -1390,6 +1390,25 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 		if err != nil {
 			return GetPgBackRestStatusResult{}, err
 		}
+		// Kubernetes-resolved hosts have no docker/podman/systemd runtime
+		// and no SSH fields — resolveHost never populates those on the K8s
+		// path (see checkHostImpl's identical guard). Without this check,
+		// a K8s-configured target would silently fall into the `default`
+		// branch below and run `pgbackrest` as a bare local command on the
+		// agent's own host — confirmed live, a real agent process with
+		// nothing named "pgbackrest" nearby would misreport, not error.
+		// There's no kubectl-exec dispatch for pgBackRest here (unlike
+		// check_host/restart_container): most managed K8s Postgres
+		// operators (e.g. CloudNativePG) don't run pgBackRest inside the
+		// pod at all — they have their own native backup mechanism — so a
+		// real fix isn't "add kubectl exec," it's a different, operator-
+		// specific tool this codebase doesn't have yet. Refuse loudly
+		// instead of guessing.
+		if host.K8sPodSelector != "" {
+			return GetPgBackRestStatusResult{}, fmt.Errorf(
+				"get_pgbackrest_status: target %q resolves to a Kubernetes pod, which this tool cannot reach — "+
+					"pgBackRest has no Kubernetes dispatch support (most managed K8s Postgres operators use their own native backup mechanism instead); escalate rather than guessing", args.Target)
+		}
 		switch host.Runtime {
 		case "docker", "podman":
 			// pgBackRest checks PGDATA ownership; run as the postgres OS
@@ -1534,6 +1553,15 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 		host, err = resolveHost(args.Target)
 		if err != nil {
 			return RunPgBackRestBackupResult{}, err
+		}
+		// Same guard as get_pgbackrest_status's identical check — reached
+		// directly here (not only via the stanza-resolution call above)
+		// whenever the caller supplies an explicit Stanza, which skips that
+		// nested call entirely.
+		if host.K8sPodSelector != "" {
+			return RunPgBackRestBackupResult{}, fmt.Errorf(
+				"run_pgbackrest_backup: target %q resolves to a Kubernetes pod, which this tool cannot reach — "+
+					"pgBackRest has no Kubernetes dispatch support (most managed K8s Postgres operators use their own native backup mechanism instead); escalate rather than guessing", args.Target)
 		}
 		if policyEnforcer != nil {
 			policyCtx := agentutil.WithToolName(ctx, "run_pgbackrest_backup")

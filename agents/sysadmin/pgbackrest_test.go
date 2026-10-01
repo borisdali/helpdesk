@@ -817,3 +817,57 @@ func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *test
 		t.Errorf("marshaled JSON = %s, want it to explicitly contain \"last_backup_error\":false, not omit it", raw)
 	}
 }
+
+// TestGetPgBackRestStatusTool_K8sTarget_RefusesRatherThanRunningLocally is a
+// regression test for a real bug found live 2026-10-01 while auditing v0.30's
+// cross-platform coverage: resolveHost never populates Runtime/SSHUser on
+// its Kubernetes-resolved path (checkHostImpl and every other sysadmin tool
+// explicitly guard on host.K8sPodSelector for exactly this reason), but
+// get_pgbackrest_status's own dispatch switch didn't — a K8s-configured
+// target silently fell into the SSH-or-local `default` branch and executed
+// `pgbackrest` as a bare local command on the agent's own host, not an
+// error and not the real target. Confirmed live with a capturing runner
+// before the fix: cmdRunner.Run was called with name="pgbackrest" against a
+// K8s-only infraConfig entry. Assert it now refuses instead.
+func TestGetPgBackRestStatusTool_K8sTarget_RefusesRatherThanRunningLocally(t *testing.T) {
+	withK8sInfra(t)
+	capture := &sequencedRunner{outputs: []string{realPgBackRestInfoJSON}}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := mockToolContext{context.Background()}
+	_, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "prod_db"})
+	if err == nil {
+		t.Fatal("expected an error for a Kubernetes-resolved target, got nil")
+	}
+	if !strings.Contains(err.Error(), "Kubernetes") {
+		t.Errorf("error = %q, want it to explain the Kubernetes dispatch gap", err.Error())
+	}
+	if len(capture.calls) != 0 {
+		t.Errorf("expected 0 local/SSH dispatch calls, got %d: %v — tool ran against the wrong target instead of refusing", len(capture.calls), capture.calls)
+	}
+}
+
+// TestRunPgBackRestBackupTool_K8sTarget_RefusesRatherThanRunningLocally
+// covers run_pgbackrest_backup's identical guard, reached directly (not via
+// the nested stanza-resolution call) when an explicit Stanza is supplied.
+func TestRunPgBackRestBackupTool_K8sTarget_RefusesRatherThanRunningLocally(t *testing.T) {
+	withK8sInfra(t)
+	capture := &sequencedRunner{outputs: []string{"backup command end: completed successfully"}}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := mockToolContext{context.Background()}
+	_, err := runPgBackRestBackupTool(ctx, RunPgBackRestBackupArgs{Target: "prod_db", Stanza: "main"})
+	if err == nil {
+		t.Fatal("expected an error for a Kubernetes-resolved target, got nil")
+	}
+	if !strings.Contains(err.Error(), "Kubernetes") {
+		t.Errorf("error = %q, want it to explain the Kubernetes dispatch gap", err.Error())
+	}
+	if len(capture.calls) != 0 {
+		t.Errorf("expected 0 local/SSH dispatch calls, got %d: %v — tool ran against the wrong target instead of refusing", len(capture.calls), capture.calls)
+	}
+}
