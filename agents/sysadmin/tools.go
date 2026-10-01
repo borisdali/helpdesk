@@ -1141,7 +1141,7 @@ const defaultPgBackRestMaxAgeHours = 25
 type GetPgBackRestStatusArgs struct {
 	Target      string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
 	Stanza      string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
-	MaxAgeHours int    `json:"max_age_hours,omitempty" jsonschema:"How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule."`
+	MaxAgeHours int    `json:"max_age_hours,omitempty" jsonschema:"How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule. Zero or negative values fall back to the default; there is no way to force an immediate backup to read as stale via this parameter."`
 }
 
 // PgBackRestBackup is one entry from pgBackRest's own "backup" array — one
@@ -1184,14 +1184,29 @@ type GetPgBackRestStatusResult struct {
 	Backups           []PgBackRestBackup `json:"backups,omitempty"`
 	LastBackupLabel   string             `json:"last_backup_label,omitempty"`
 	LastBackupTime    string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
-	LastBackupError   bool               `json:"last_backup_error,omitempty"`
+	// LastBackupError deliberately has no `omitempty` — unlike LastBackupTime
+	// (where "absent" and "empty" are the same real state: no backup ever
+	// succeeded), false here is a meaningful, distinct answer from "not
+	// computed," and omitempty would silently drop it from the JSON the
+	// model reads. See BackupStale's own comment below for the live
+	// confusion this exact pattern caused for that field.
+	LastBackupError bool `json:"last_backup_error"`
 	// BackupStale is true when a most-recent backup exists and is older than
 	// the requested (or default) MaxAgeHours. Deliberately false, not true,
 	// when no backup has EVER succeeded (LastBackupTime == "") — "never
 	// backed up" and "backed up too long ago" are different findings, and
 	// callers must check LastBackupTime == "" for the former rather than
 	// relying on this field alone.
-	BackupStale bool `json:"backup_stale,omitempty"`
+	//
+	// No `omitempty`: found live 2026-09-30 that a model reading this result
+	// treated the field's *absence* (the omitempty-dropped false case) as
+	// ambiguous — "maybe stale" — rather than confidently reading it as a
+	// definite "no," and proceeded to call run_pgbackrest_backup on an
+	// already-current backup rather than following its own playbook's
+	// Ending A ("already healthy, nothing to do"). A write action should
+	// never hinge on whether the model correctly reconstructs a boolean from
+	// its absence.
+	BackupStale bool `json:"backup_stale"`
 }
 
 // PgBackRestSummary is the single synthesized item get_pgbackrest_status'

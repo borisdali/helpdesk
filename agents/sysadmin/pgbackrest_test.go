@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -789,5 +790,30 @@ func TestGetPgBackRestStatusTool_HealthyBackup_NoObjectiveEvidence(t *testing.T)
 	}
 	if len(events) != 0 {
 		t.Errorf("expected 0 objective_evidence events for a healthy, fresh backup, got %d", len(events))
+	}
+}
+
+// TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly is a
+// regression test for a real governance gap found live 2026-09-30: with
+// `omitempty` on BackupStale's JSON tag, a healthy/fresh backup's
+// backup_stale=false was silently dropped from the tool's JSON output. A
+// model reading that result couldn't tell "confirmed not stale" apart from
+// "field not computed," and reasoned its way into calling
+// run_pgbackrest_backup on an already-current backup instead of following
+// its own playbook's Ending A ("already healthy, nothing to do"). A write
+// action should never hinge on the model correctly reconstructing a boolean
+// from its absence — assert the field is always present in the raw JSON,
+// not just correct in the Go struct.
+func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *testing.T) {
+	result := GetPgBackRestStatusResult{Stanza: "main", StatusCode: 0, BackupStale: false, LastBackupError: false}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"backup_stale":false`) {
+		t.Errorf("marshaled JSON = %s, want it to explicitly contain \"backup_stale\":false, not omit it", raw)
+	}
+	if !strings.Contains(string(raw), `"last_backup_error":false`) {
+		t.Errorf("marshaled JSON = %s, want it to explicitly contain \"last_backup_error\":false, not omit it", raw)
 	}
 }
