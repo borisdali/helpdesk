@@ -25,6 +25,12 @@ services:
       # 15432/15433/15434 are already taken (see docker-compose.yaml and
       # docker-compose.repl.yaml's own comments). 15435 avoids all of them.
       - "15435:5432"
+      # SSH, for testing agents/sysadmin's SSH-dispatch path against
+      # pgBackRest specifically (see Dockerfile.pgbackrest's own comment) —
+      # a separate port from Postgres's own, on the same container, so both
+      # dispatch paths (docker-exec and SSH) can be tested against the
+      # identical real pgBackRest install and state.
+      - "15436:22"
     command:
       - postgres
       - -c

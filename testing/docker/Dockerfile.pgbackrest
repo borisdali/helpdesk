@@ -11,8 +11,65 @@
 FROM postgres:16
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pgbackrest \
+    && apt-get install -y --no-install-recommends pgbackrest openssh-server \
+    && mkdir -p /var/run/sshd \
     && rm -rf /var/lib/apt/lists/*
+
+# Real SSH reachability for testing agents/sysadmin's SSH-dispatch path
+# against pgBackRest specifically — the docker-exec path is already covered
+# by db-pgbackrest-repo-unreadable, but the SSH path (agents/sysadmin/
+# sshexec.go, used when a VM entry has ssh_user/ssh_key_path set) had only
+# ever been exercised against a synthetic in-process test SSH server
+# (sshexec_test.go), never a real second connection path with real pgBackRest
+# behind it. A fixed, baked-in host key (not freshly generated per build) is
+# used so host-key verification can be tested for real against a pinned
+# testing/docker/ssh/pgbackrest_test_known_hosts entry, rather than silently
+# falling back to InsecureIgnoreHostKey. The openssh-server package
+# auto-generates RSA/ECDSA host keys too (at install time, independent of
+# our COPY below) — removed below, since leaving them in place lets sshd
+# offer a key type golang.org/x/crypto/ssh's default algorithm negotiation
+# may prefer over ed25519, which our pinned known_hosts entry can't match
+# (confirmed live: "knownhosts: key mismatch" even though the right ed25519
+# key was present — the server was actually offering RSA).
+COPY ssh/pgbackrest_test_host_key /etc/ssh/ssh_host_ed25519_key
+COPY ssh/pgbackrest_test_host_key.pub /etc/ssh/ssh_host_ed25519_key.pub
+RUN chmod 600 /etc/ssh/ssh_host_ed25519_key \
+    && chmod 644 /etc/ssh/ssh_host_ed25519_key.pub \
+    && rm -f /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key.pub \
+             /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key.pub
+
+# The upstream postgres image leaves /var/lib/postgresql (the postgres OS
+# user's home dir) world-writable (drwxrwxrwt) by design, so an arbitrary
+# bind-mounted volume subpath can be created without a prior chown. sshd's
+# StrictModes (on by default) silently rejects public-key auth whenever the
+# user's home directory is group/other-writable — confirmed live: the
+# client offered its key, the server never even responded to the pubkey
+# packet, "Permission denied (publickey)" with nothing in auth.log. Tighten
+# just the home dir itself; the actual data volume is a separate mount
+# (/var/lib/postgresql/data) unaffected by this.
+RUN chmod 751 /var/lib/postgresql
+
+# agents/sysadmin's SSH dispatch connects AS the target user directly (no
+# `su postgres -c` wrapping the way the docker-exec path needs, since
+# docker exec's own default user is root) — authorize the test client key
+# for the postgres OS user itself, so pgbackrest can access PGDATA with
+# correct ownership immediately.
+RUN mkdir -p /var/lib/postgresql/.ssh \
+    && chown postgres:postgres /var/lib/postgresql/.ssh \
+    && chmod 700 /var/lib/postgresql/.ssh
+COPY ssh/pgbackrest_test_client_key.pub /var/lib/postgresql/.ssh/authorized_keys
+RUN chown postgres:postgres /var/lib/postgresql/.ssh/authorized_keys \
+    && chmod 600 /var/lib/postgresql/.ssh/authorized_keys
+
+RUN { \
+      echo "PasswordAuthentication no"; \
+      echo "PermitRootLogin no"; \
+      echo "AllowUsers postgres"; \
+    } >> /etc/ssh/sshd_config
+
+COPY start-with-sshd.sh /usr/local/bin/start-with-sshd.sh
+RUN chmod +x /usr/local/bin/start-with-sshd.sh
+ENTRYPOINT ["start-with-sshd.sh"]
 
 # /etc/pgbackrest.conf is baked in at build time, not written by
 # init-pgbackrest.sh's docker-entrypoint-initdb.d script — that script only
