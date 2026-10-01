@@ -635,3 +635,40 @@ func TestWaitForChildRunComplete_EmptyOutcomeEventuallyTerminal(t *testing.T) {
 		t.Errorf("childRunID = %q, want plr_child2", got)
 	}
 }
+
+// TestRunGateLoop_ForceMode_SendsRemediationPurpose is a regression test for
+// a real bug found live (2026-10-01): none of this file's three "approved"
+// ProceedEscalationRequest call sites (force-mode, interactive TTY,
+// emit-and-wait force-mode) set Purpose — unlike every other
+// Purpose-forwarding request in testing/faultlib/remediation.go
+// (TriggerPlaybookRun/ProceedStep/triggerAgent all set X-Purpose directly).
+// The gateway's own ProceedEscalationRequest has carried a Purpose field
+// (with a documented fallback to the triage run's own recorded purpose) the
+// whole time, but this CLI-side mirror of that struct never had the field
+// populated on any approval path, so the remediation phase's first tool
+// call was denied by policy with purpose="" — confirmed live against a real
+// gateway/agent stack: diagnosis succeeded, remediation's own first read
+// was denied, "Purpose \"\" is not in the allowed list [...]". Also found,
+// separately: the triage run's own recorded Purpose was empty too, so the
+// gateway's fallback couldn't have saved this either — the fix has to be
+// sending Purpose explicitly on the approval request itself.
+func TestRunGateLoop_ForceMode_SendsRemediationPurpose(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := &Remediator{
+		inner: faultlib.NewRemediator(&faultlib.HarnessConfig{GatewayURL: srv.URL, GatewayAPIKey: "test-key"}),
+		cfg:   &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ApprovalMode: "force"}},
+	}
+	if err := r.runGateLoop(context.Background(), faultlib.ApproveRunResponse{RunID: "plr_gate01"}); err != nil {
+		t.Fatalf("runGateLoop: %v", err)
+	}
+	if gotBody["purpose"] != "remediation" {
+		t.Errorf("proceed-escalation body purpose = %v, want \"remediation\" — remediation's first tool call will be denied by policy otherwise", gotBody["purpose"])
+	}
+}

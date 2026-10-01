@@ -620,6 +620,12 @@ func TestRunGateLoop_AutoApprovesAndComplete(t *testing.T) {
 	if gotBody["approval_mode"] != "auto" {
 		t.Errorf("approval_mode = %v, want auto (default when HarnessConfig.ApprovalMode is empty)", gotBody["approval_mode"])
 	}
+	// Regression check for a real bug found live (2026-10-01): this call
+	// never set Purpose, so remediation's first tool call was denied by
+	// policy with purpose="" even though diagnosis had just succeeded.
+	if gotBody["purpose"] != "remediation" {
+		t.Errorf("purpose = %v, want \"remediation\" — remediation's first tool call will be denied by policy otherwise", gotBody["purpose"])
+	}
 }
 
 func TestRunGateLoop_DrivesApprovalLoopOnPendingApproval(t *testing.T) {
