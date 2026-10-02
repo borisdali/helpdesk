@@ -171,15 +171,60 @@ func ResolveServerID(connStr, infraConfigPath string) string {
 	return key
 }
 
+// resolveConnAlias resolves alias against infraConfigPath's db_servers
+// entries, returning its ResolvedConnectionString(). If alias already looks
+// like a DSN (contains "=" or "://"), or the infra config/entry can't be
+// loaded/found, alias is returned unchanged — callers that need to detect an
+// unresolved alias should compare the result against the input.
+func resolveConnAlias(infraConfigPath, alias string) string {
+	if infraConfigPath == "" || alias == "" {
+		return alias
+	}
+	if strings.Contains(alias, "=") || strings.Contains(alias, "://") {
+		return alias
+	}
+	cfg, err := infra.Load(infraConfigPath)
+	if err != nil {
+		return alias
+	}
+	srv, ok := cfg.DBServers[alias]
+	if !ok {
+		return alias
+	}
+	return srv.ResolvedConnectionString()
+}
+
+// ResolvedAgentConnStr returns the connection string a fault's agent-facing
+// prompt/request should use: f.AgentConnOverride (resolved as an
+// infrastructure.json alias) when set, otherwise the harness-wide
+// AgentConnStr/ConnStr every other fault in the sweep shares. Exists so one
+// fault in a full catalog run (e.g. db-pgbackrest-repo-unreadable) can target
+// its own dedicated container without every other database-category fault
+// needing the same override.
+//
+// When AgentConnOverride is set but doesn't resolve (bad InfraConfigPath, no
+// matching db_servers entry), the raw override string is returned rather
+// than silently falling back to the shared connStr — an unresolved alias
+// used verbatim as a connection string fails loudly downstream (a clearly
+// invalid DSN), which is preferable to silently diagnosing the wrong target.
+func ResolvedAgentConnStr(cfg *HarnessConfig, f Failure) string {
+	if f.AgentConnOverride != "" {
+		return resolveConnAlias(cfg.InfraConfigPath, f.AgentConnOverride)
+	}
+	if cfg.AgentConnStr != "" {
+		return cfg.AgentConnStr
+	}
+	return cfg.ConnStr
+}
+
 // ResolvePrompt replaces template variables in the failure prompt.
 // AgentConnStr overrides ConnStr for {{connection_string}} substitution — use
 // it when the agent runs in a different network context than the test runner
 // (e.g. Docker agent uses host.docker.internal while the runner uses localhost).
-func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
-	connStr := cfg.ConnStr
-	if cfg.AgentConnStr != "" {
-		connStr = cfg.AgentConnStr
-	}
+// f's own AgentConnOverride, when set, takes precedence over both — see
+// ResolvedAgentConnStr.
+func ResolvePrompt(prompt string, cfg *HarnessConfig, f Failure) string {
+	connStr := ResolvedAgentConnStr(cfg, f)
 	r := strings.NewReplacer(
 		"{{connection_string}}", connStr,
 		"{{replica_connection_string}}", cfg.ReplicaConnStr,

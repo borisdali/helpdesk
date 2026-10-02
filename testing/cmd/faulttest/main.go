@@ -1110,7 +1110,7 @@ func cmdInject(args []string) {
 		os.Exit(1)
 	}
 
-	prompt := ResolvePrompt(f.Prompt, cfg)
+	prompt := ResolvePrompt(f.Prompt, cfg, *f)
 	fmt.Printf("Failure injected: %s\n\n", f.Name)
 	fmt.Printf("Suggested prompt for the agent:\n%s\n", prompt)
 	fmt.Printf("\nTo tear down: faulttest teardown --id %s [same flags]\n", f.ID)

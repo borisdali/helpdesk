@@ -169,11 +169,13 @@ integration-nocache:
 #   FAULTTEST_K8S_AGENT_URL      e.g. http://localhost:1104  (k8s agent, optional)
 # ---------------------------------------------------------------------------
 faulttest:
-	@echo "Starting test infrastructure (primary + replica)..."
+	@echo "Starting test infrastructure (primary + replica + pgBackRest)..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		up -d --wait
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	go test -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
@@ -182,15 +184,18 @@ faulttest:
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		down -v
 
 # Target to force a fresh run by bypassing the Go test cache
 faulttest-nocache:
-	@echo "Starting test infrastructure (primary + replica)..."
+	@echo "Starting test infrastructure (primary + replica + pgBackRest)..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		up -d --wait
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running fault tests..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	go test --count=1 -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
@@ -199,6 +204,7 @@ faulttest-nocache:
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		down -v
 
 # ---------------------------------------------------------------------------
@@ -209,11 +215,13 @@ faulttest-nocache:
 # or faulttest-memory-pressure to exercise just the slow one in isolation.
 # ---------------------------------------------------------------------------
 faulttest-fast:
-	@echo "Starting test infrastructure (primary + replica)..."
+	@echo "Starting test infrastructure (primary + replica + pgBackRest)..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		up -d --wait
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
@@ -223,15 +231,18 @@ faulttest-fast:
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		down -v
 
 # Target to force a fresh run by bypassing the Go test cache
 faulttest-fast-nocache:
-	@echo "Starting test infrastructure (primary + replica)..."
+	@echo "Starting test infrastructure (primary + replica + pgBackRest)..."
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		up -d --wait
+	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
@@ -241,6 +252,7 @@ faulttest-fast-nocache:
 	docker compose \
 		-f testing/docker/docker-compose.yaml \
 		-f testing/docker/docker-compose.repl.yaml \
+		-f testing/docker/docker-compose.pgbackrest.yaml \
 		down -v
 
 # ---------------------------------------------------------------------------

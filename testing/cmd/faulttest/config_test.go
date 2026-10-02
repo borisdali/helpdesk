@@ -470,7 +470,7 @@ func TestResolvePrompt(t *testing.T) {
 	}}
 
 	prompt := "Connect to {{connection_string}} and check replica at {{replica_connection_string}} in context {{kube_context}}"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	expected := "Connect to host=db.example.com port=5432 dbname=prod and check replica at host=replica.example.com port=5432 dbname=prod in context gke_prod"
 	if result != expected {
@@ -488,7 +488,7 @@ func TestResolvePrompt_ServerID(t *testing.T) {
 	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ServerID: "test-db"}}
 
 	prompt := "The database server '{{server_id}}' is not responding."
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	expected := "The database server 'test-db' is not responding."
 	if result != expected {
@@ -500,7 +500,7 @@ func TestResolvePrompt_NoPlaceholders(t *testing.T) {
 	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ConnStr: "host=db.example.com"}}
 
 	prompt := "Simple prompt with no placeholders"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	if result != prompt {
 		t.Errorf("ResolvePrompt changed text unexpectedly: %s", result)

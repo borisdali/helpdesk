@@ -127,11 +127,13 @@ func FilterFailures(catalog *Catalog, cfg *HarnessConfig) []Failure {
 }
 
 // ResolvePrompt replaces template variables in the failure prompt.
-// {{connection_string}} resolves to AgentConnStr when set, falling back to ConnStr.
-// This allows --agent-conn to decouple the injection DSN (used by psql) from
-// the identifier sent to the agent (which may be a registered alias like "test-db").
-func ResolvePrompt(prompt string, cfg *HarnessConfig) string {
-	return faultlib.ResolvePrompt(prompt, &cfg.HarnessConfig)
+// {{connection_string}} resolves to AgentConnStr when set, falling back to ConnStr
+// — or to f's own AgentConnOverride when set, taking precedence over both (see
+// faultlib.ResolvedAgentConnStr). This allows --agent-conn to decouple the
+// injection DSN (used by psql) from the identifier sent to the agent (which
+// may be a registered alias like "test-db").
+func ResolvePrompt(prompt string, cfg *HarnessConfig, f faultlib.Failure) string {
+	return faultlib.ResolvePrompt(prompt, &cfg.HarnessConfig, f)
 }
 
 // resolveConnAlias and checkTargetSafety load infrastructure.json via

@@ -456,6 +456,16 @@ failures:
       the backup-taking precondition itself, distinct from WAL-archiving
       health (db-backup-archiving-broken). pgBackRest cannot even determine
       its own stanza's status once this happens.
+    # A full-catalog sweep (make faulttest) applies one shared connection
+    # string to every database-category fault — but this one needs its own
+    # dedicated pgBackRest-equipped container, not whatever Postgres
+    # instance the other 23 database faults in the same run share. Resolved
+    # against the harness's own infrastructure.json (testing/testing.infra.json
+    # by default, or FAULTTEST_INFRA_CONFIG) — "pgbackrest-db" is already
+    # registered there. Found live, 2026-10-01: without this, the fault ran
+    # against a plain postgres container with no pgBackRest installed at
+    # all, failing outright rather than skipping cleanly.
+    agent_conn_override: pgbackrest-db
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml), not the plain

@@ -63,7 +63,7 @@ func TestResolvePrompt_ReplicaHostPortSubstitution(t *testing.T) {
 		ConnStr:        "host=primary port=5432 dbname=testdb",
 		ReplicaConnStr: "host=host.docker.internal port=15433 dbname=testdb user=postgres password=testpass",
 	}
-	got := ResolvePrompt("target: {{replica_host_port}}", cfg)
+	got := ResolvePrompt("target: {{replica_host_port}}", cfg, Failure{})
 	want := "target: host.docker.internal:15433"
 	if got != want {
 		t.Errorf("ResolvePrompt() = %q, want %q", got, want)
@@ -72,7 +72,7 @@ func TestResolvePrompt_ReplicaHostPortSubstitution(t *testing.T) {
 
 func TestResolvePrompt_ReplicaHostPort_NoReplicaConfigured(t *testing.T) {
 	cfg := &HarnessConfig{ConnStr: "host=primary port=5432 dbname=testdb"}
-	got := ResolvePrompt("target: {{replica_host_port}}", cfg)
+	got := ResolvePrompt("target: {{replica_host_port}}", cfg, Failure{})
 	want := "target: "
 	if got != want {
 		t.Errorf("ResolvePrompt() = %q, want %q (empty substitution when no replica configured)", got, want)

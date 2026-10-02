@@ -538,11 +538,69 @@ func TestResolvePrompt(t *testing.T) {
 	}
 
 	prompt := "Connect to {{connection_string}} in context {{kube_context}}"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, Failure{})
 
 	expected := "Connect to host=db.example.com port=5432 in context gke_prod"
 	if result != expected {
 		t.Errorf("ResolvePrompt = %q, want %q", result, expected)
+	}
+}
+
+// TestResolvedAgentConnStr_FaultOverrideTakesPrecedence is a regression test
+// for a real gap found live (2026-10-01): a full-catalog sweep
+// (`make faulttest`) applies one shared FAULTTEST_CONN_STR to every
+// database-category fault, so db-pgbackrest-repo-unreadable was always
+// diagnosed against whatever plain Postgres container the other 23
+// database faults shared — one with no pgBackRest installed at all — never
+// its own dedicated pgBackRest-equipped target. AgentConnOverride lets one
+// fault's catalog entry name a different infrastructure.json alias than the
+// rest of the sweep.
+func TestResolvedAgentConnStr_FaultOverrideTakesPrecedence(t *testing.T) {
+	testingDir := findTestingDirForTest(t)
+	cfg := &HarnessConfig{
+		ConnStr:         "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
+		InfraConfigPath: filepath.Join(testingDir, "testing.infra.json"),
+	}
+	f := Failure{ID: "db-pgbackrest-repo-unreadable", AgentConnOverride: "pgbackrest-db"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	want := "host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+	if got != want {
+		t.Errorf("ResolvedAgentConnStr() = %q, want %q (testing.infra.json's pgbackrest-db entry, not the shared ConnStr)", got, want)
+	}
+}
+
+// TestResolvedAgentConnStr_NoOverride_FallsBackToSharedConnStr confirms every
+// other fault (no AgentConnOverride set) is unaffected by this change.
+func TestResolvedAgentConnStr_NoOverride_FallsBackToSharedConnStr(t *testing.T) {
+	cfg := &HarnessConfig{ConnStr: "host=localhost port=15432 dbname=testdb user=postgres password=testpass"}
+	f := Failure{ID: "db-max-connections"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	if got != cfg.ConnStr {
+		t.Errorf("ResolvedAgentConnStr() = %q, want cfg.ConnStr %q unchanged", got, cfg.ConnStr)
+	}
+}
+
+// TestResolvedAgentConnStr_UnresolvableOverride_FailsLoudNotSilentFallback
+// confirms a bad override (no matching infra config entry) surfaces as an
+// obviously-wrong value downstream rather than silently reusing the shared
+// ConnStr — which would reintroduce the exact "diagnosed the wrong target"
+// bug this mechanism exists to close.
+func TestResolvedAgentConnStr_UnresolvableOverride_FailsLoudNotSilentFallback(t *testing.T) {
+	testingDir := findTestingDirForTest(t)
+	cfg := &HarnessConfig{
+		ConnStr:         "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
+		InfraConfigPath: filepath.Join(testingDir, "testing.infra.json"),
+	}
+	f := Failure{ID: "some-fault", AgentConnOverride: "no-such-alias"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	if got == cfg.ConnStr {
+		t.Error("ResolvedAgentConnStr() silently fell back to the shared ConnStr for an unresolvable override — want the raw alias returned instead, so it fails loudly as an invalid DSN")
+	}
+	if got != "no-such-alias" {
+		t.Errorf("ResolvedAgentConnStr() = %q, want the raw unresolved alias %q", got, "no-such-alias")
 	}
 }
 

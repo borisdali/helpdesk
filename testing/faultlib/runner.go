@@ -62,16 +62,13 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 		return r.runViaGatewayQuery(ctx, f)
 	}
 
-	prompt := ResolvePrompt(f.Prompt, r.cfg)
+	prompt := ResolvePrompt(f.Prompt, r.cfg, f)
 	agentURL := r.agentURL(f.Category)
 	if agentURL == "" {
 		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL configured for category %q", f.Category)}
 	}
 
-	agentConn := r.cfg.AgentConnStr
-	if agentConn == "" {
-		agentConn = r.cfg.ConnStr
-	}
+	agentConn := ResolvedAgentConnStr(r.cfg, f)
 	slog.Info("sending prompt to agent",
 		"failure", f.ID,
 		"category", f.Category,
@@ -100,12 +97,9 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 // ViaGateway=true but the fault has no DiagnosisPlaybookSeriesID.
 func (r *Runner) runViaGatewayQuery(ctx context.Context, f Failure) testutil.AgentResponse {
 	agentName := categoryToGatewayAgent(f.Category)
-	prompt := ResolvePrompt(f.Prompt, r.cfg)
+	prompt := ResolvePrompt(f.Prompt, r.cfg, f)
 
-	agentConn := r.cfg.AgentConnStr
-	if agentConn == "" {
-		agentConn = r.cfg.ConnStr
-	}
+	agentConn := ResolvedAgentConnStr(r.cfg, f)
 	slog.Info("sending prompt via gateway query",
 		"failure", f.ID, "category", f.Category, "agent", agentName, "gateway", r.cfg.GatewayURL, "agent-conn", agentConn)
 
@@ -129,10 +123,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		}
 	}
 
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
+	connStr := ResolvedAgentConnStr(r.cfg, f)
 	// Kubernetes-category faults have no connection_string concept at the
 	// triage level — the target is the namespace/node named in the prompt
 	// text, not a DB connection. --conn is sometimes still supplied for
@@ -156,7 +147,7 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 		"agent-conn", connStr,
 	)
 	reqBody := map[string]any{
-		"context": ResolvePrompt(f.Prompt, r.cfg),
+		"context": ResolvePrompt(f.Prompt, r.cfg, f),
 		// faulttest traffic is evaluation, never a real incident — and a
 		// --repeat calibration run is specifically trying to *establish* a
 		// fault-stability cert, so it can't be gated on one already existing.
