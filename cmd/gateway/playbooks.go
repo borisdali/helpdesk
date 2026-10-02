@@ -1984,10 +1984,24 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 	if g.auditor == nil {
 		return
 	}
+	// An informed gate fires for both cross-domain ESCALATE_TO hops and
+	// same-domain TRANSITION_TO hops (e.g. triage → remediation within one
+	// agent's own domain) — a playbook's guidance emits exactly one of the
+	// two per response, never both. Prefer EscalatedTo to preserve existing
+	// behavior for the (older, more common) escalation case; fall back to
+	// TransitionedTo so a transition-driven gate's Decision.Agent isn't left
+	// empty. Found live: an empty Agent here isn't just cosmetic — the
+	// auditor's "unknown agent" check has no way to recognize an empty
+	// string as a legitimate pbs_*-series target the way it already skips a
+	// populated one (checkAgentCategory, cmd/auditor/main.go).
+	gateTarget := run.EscalatedTo
+	if gateTarget == "" {
+		gateTarget = run.TransitionedTo
+	}
 	reasoningChain := []string{
 		"operator " + resolvedBy + " acknowledged informed gate for run " + run.RunID,
 		"resolution: " + resolution,
-		"escalation_target: " + run.EscalatedTo,
+		"escalation_target: " + gateTarget,
 	}
 	if approvalMode != "" {
 		reasoningChain = append(reasoningChain, "chosen approval_mode: "+approvalMode)
@@ -2007,10 +2021,10 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 			UserQuery: "gate acknowledged for triage run " + run.RunID,
 		},
 		Decision: &audit.Decision{
-			Agent:           run.EscalatedTo,
+			Agent:           gateTarget,
 			RequestCategory: audit.CategoryIncident,
 			Confidence:      1.0,
-			UserIntent:      resolution + " gate for escalation to " + run.EscalatedTo,
+			UserIntent:      resolution + " gate for escalation to " + gateTarget,
 			ReasoningChain:  reasoningChain,
 		},
 		Output:  &audit.Output{Response: reason},
@@ -2196,9 +2210,22 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 			// including pure-diagnosis hops that never attempt one — which in turn
 			// made a genuine, corroborated decline on those hops indistinguishable
 			// from a real write-absence mismatch.
+			//
+			// pbs_pgbackrest_health_triage/pbs_pgbackrest_backup_remediate get
+			// their own hints for the same reason: found tracing the live
+			// faulttest call path for v0.30 Part C — every OTHER sysadmin
+			// playbook fell into the "check_host" default, which would have
+			// actively steered the model toward the wrong tool (check_host
+			// doesn't exist for pgBackRest's own condition) on the very first
+			// line, ahead of the correct guidance in the playbook body.
 			toolHint := "check_host"
-			if pb.SeriesID == "pbs_db_restart_action" {
+			switch pb.SeriesID {
+			case "pbs_db_restart_action":
 				toolHint = "check_host and restart_container"
+			case "pbs_pgbackrest_health_triage":
+				toolHint = "get_pgbackrest_status"
+			case "pbs_pgbackrest_backup_remediate":
+				toolHint = "get_pgbackrest_status and run_pgbackrest_backup"
 			}
 			fmt.Fprintf(&b, "Your target is connection_string=%q. Follow the Expert Guidance below — use %s as instructed. Do not call check_connection (that is a DB-agent tool, not available here).\n", req.ConnectionString, toolHint)
 		} else {

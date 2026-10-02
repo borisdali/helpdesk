@@ -27,7 +27,7 @@ const sqliteTimeFormat = "2006-01-02T15:04:05.000000000Z"
 
 // Store persists audit events to SQLite or PostgreSQL and notifies listeners.
 type Store struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool // true when connected to PostgreSQL
 	socketPath string
 	listeners  []net.Conn
@@ -142,7 +142,7 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	}
 
 	s := &Store{
-		db:         db,
+		db:         newRebindDB(db, isPostgres),
 		isPostgres: isPostgres,
 		socketPath: cfg.SocketPath,
 		lastHash:   GenesisHash,
@@ -1187,7 +1187,7 @@ func (s *Store) GetLastHash() string {
 }
 
 // DB returns the underlying database connection for shared access.
-func (s *Store) DB() *sql.DB {
+func (s *Store) DB() *rebindDB {
 	return s.db
 }
 

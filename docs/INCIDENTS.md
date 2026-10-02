@@ -173,6 +173,35 @@ curl -s "http://localhost:1199/v1/events?trace_id=tr_a3f9b2c1&limit=50" \
 
 See [AUDIT.md](AUDIT.md) for the full event schema, query API and retention configuration.
 
+### Running the incident agent against a governed auditd
+
+The incident agent needs its own credential to *write* to auditd — separate from
+`HELPDESK_AUDIT_URL` (which just points at where auditd is). Once auditd enforces
+identity (`HELPDESK_IDENTITY_PROVIDER=static` or similar), every write the incident
+agent makes — recording tool-execution events, patching an incident's `bundle_path`
+after `create_incident_bundle` runs — needs `HELPDESK_AUDIT_API_KEY` set, or every one
+of those calls fails with `401: authentication required`, silently in the incident
+agent's own log rather than surfacing as a hard error anywhere else. `users.example.yaml`
+already ships a ready-made credential for exactly this:
+
+```bash
+HELPDESK_AUDIT_ENABLED=true \
+HELPDESK_AUDIT_URL=http://localhost:1199 \
+HELPDESK_AUDIT_API_KEY=incident-agent-api-key \
+  go run ./agents/incident/
+```
+
+(`docs/ARCHITECTURE.md`'s own multi-terminal quickstart deliberately starts every
+agent with no governance env vars at all — it's the simplest possible path, not a
+governance-enabled one. This section is the one to follow once auditd enforces auth.)
+
+**Policy enforcement** (`HELPDESK_POLICY_ENABLED`/`HELPDESK_POLICY_FILE`) gates
+`create_incident_bundle` — this agent's one `ActionWrite`-classified tool — the same
+way it gates a write tool on any other agent: operating mode, tag-based rules, and
+blast-radius bounds all apply before a bundle is created. The check uses `"incident"`
+as its policy resource type and the call's `infra_key` (or `"unknown"` when omitted)
+as the resource name.
+
 ---
 
 ## From Incident to Vault: the Full Path

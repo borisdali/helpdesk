@@ -1,0 +1,33 @@
+# Objective-evidence rules for the sysadmin agent.
+#
+# Each rule says: for a given tool's result, threshold a named probe and, if
+# it matches, force a human-reviewed gate with the given signal — regardless
+# of what the diagnosing model concludes or chooses to mention. See
+# internal/evidence's package doc, agents/database/objective_evidence.yaml
+# (the same mechanism's first user), and docs/AIGOVERNANCE.md for the full
+# rationale (objectiveEvidenceForceGate, cmd/gateway/playbooks.go).
+#
+# Probes (what fields exist, and how they're read) are Go code, registered
+# in agents/sysadmin/tools.go — adding a genuinely new field to threshold
+# needs a small code change there. Everything below — which probes are
+# active, what threshold triggers them, what the resulting signal/detail
+# text is — is authored here and takes effect on the next agent restart, no
+# other code change required. A rule naming an unregistered probe (e.g. a
+# typo) fails the agent's startup loudly; it never silently just does
+# nothing.
+
+# backup_unhealthy (v0.30 Part C): true when pgBackRest's own stanza status
+# is non-ok, the most recent backup is older than the requested/default
+# staleness bound, or no backup has ever succeeded. Deliberately a single
+# combined bool rather than three separate probes — the triage playbook's
+# own guidance is responsible for distinguishing which of the three actually
+# applies from GetPgBackRestStatusResult's own StatusMessage/BackupStale/
+# LastBackupTime fields; this gate only needs to know "is there something a
+# human should look at," not which specific sub-case.
+- tool: get_pgbackrest_status
+  probe: backup_unhealthy
+  operator: "=="
+  threshold: true
+  signal: pgbackrest_backup_unhealthy
+  detail: "pgBackRest backup unhealthy — most recent backup: %s"
+  confirmation_probe: resource_named_in_quote

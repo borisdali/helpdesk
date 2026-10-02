@@ -68,9 +68,9 @@ func main() {
 	// project otherwise warns loudly about (see HELPDESK_MODEL_NAME's
 	// trust-gate warning in cmd/gateway/main.go).
 	if rulesPath := os.Getenv("HELPDESK_DB_EVIDENCE_RULES"); rulesPath != "" {
-		activeConnectionEvidenceRules, replicationEvidenceRules = loadDBEvidenceRules(rulesPath)
+		activeConnectionEvidenceRules, replicationEvidenceRules, backupArchiverEvidenceRules = loadDBEvidenceRules(rulesPath)
 	} else {
-		slog.Warn("HELPDESK_DB_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_active_connections/get_replication_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
+		slog.Warn("HELPDESK_DB_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_active_connections/get_replication_status/get_backup_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
 
 	// Initialize audit store if enabled
@@ -376,6 +376,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getBackupStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_backup_status",
+		Description: "Get WAL archiving health from pg_stat_archiver: whether archive_mode is on, and whether the most recent archiving attempt succeeded or is stuck failing. This is the precondition for PITR and most base-backup strategies — it does not check an external pg_basebackup/pgBackRest job directly.",
+	}, getBackupStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
 	getLockInfoToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_lock_info",
 		Description: "Find blocking locks and which queries are waiting on which other queries.",
@@ -568,6 +576,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	setArchiveCommandToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "set_archive_command",
+		Description: "Set archive_command to a specific, explicit value via ALTER SYSTEM SET, then pg_reload_conf() to apply it without a restart. Requires operator approval (Write action). Unlike reset_pg_setting, this does not reset to a compiled default — archive_command's default is an empty string, itself broken under archive_mode=on. The value must be confirmed correct (e.g. from a pre-failure get_saved_snapshots reading, or supplied directly by an operator), never guessed.",
+	}, setArchiveCommandTool)
+	if err != nil {
+		return nil, err
+	}
+
 	resetCacheStatsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "reset_cache_stats",
 		Description: "Reset buffer cache statistics by calling pg_stat_reset(), clearing blks_hit and blks_read counters in pg_stat_database. Use after resolving a cache miss condition to verify the ratio recovers with normal traffic. Requires operator approval (Write action).",
@@ -585,6 +601,7 @@ func createTools() ([]tool.Tool, error) {
 		getDatabaseStatsToolDef,
 		getConfigParameterToolDef,
 		getReplicationStatusToolDef,
+		getBackupStatusToolDef,
 		getLockInfoToolDef,
 		getTableStatsToolDef,
 		getSessionInfoToolDef,
@@ -609,6 +626,7 @@ func createTools() ([]tool.Tool, error) {
 		runVacuumToolDef,
 		dropReplicationSlotToolDef,
 		resetPgSettingToolDef,
+		setArchiveCommandToolDef,
 		resetCacheStatsToolDef,
 	}, nil
 }
@@ -631,14 +649,14 @@ func envInt(key string, fallback int) int {
 // main() so it's directly unit-testable — mirrors agents/k8s/main.go's
 // loadK8sEvidenceRules exactly, including its non-fatal, Error-logged
 // failure behavior; see that function's doc comment for the full rationale.
-func loadDBEvidenceRules(path string) (activeConnRules, replicationRules []evidence.Rule) {
+func loadDBEvidenceRules(path string) (activeConnRules, replicationRules, backupArchiverRules []evidence.Rule) {
 	rulesByTool, err := evidence.LoadRules(path)
 	if err != nil {
-		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_active_connections/get_replication_status until this is fixed", "path", path, "err", err)
-		return nil, nil
+		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_active_connections/get_replication_status/get_backup_status until this is fixed", "path", path, "err", err)
+		return nil, nil, nil
 	}
-	activeConnRules, replicationRules = rulesByTool["get_active_connections"], rulesByTool["get_replication_status"]
-	slog.Info("objective_evidence rules loaded", "path", path, "get_active_connections_rules", len(activeConnRules), "get_replication_status_rules", len(replicationRules))
-	return activeConnRules, replicationRules
+	activeConnRules, replicationRules, backupArchiverRules = rulesByTool["get_active_connections"], rulesByTool["get_replication_status"], rulesByTool["get_backup_status"]
+	slog.Info("objective_evidence rules loaded", "path", path, "get_active_connections_rules", len(activeConnRules), "get_replication_status_rules", len(replicationRules), "get_backup_status_rules", len(backupArchiverRules))
+	return activeConnRules, replicationRules, backupArchiverRules
 }
 

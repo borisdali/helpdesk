@@ -1,0 +1,89 @@
+series_id: pbs_pgbackrest_health_triage
+name: pgBackRest Backup-Job Health Triage
+version: "1.0"
+playbook_type: triage
+entry_point: true
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+# Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
+# The gateway validates emitted TRANSITION_TO directives against this list and
+# coerces anything outside it to requires_operator_approval — preventing the
+# model from inventing playbook names. Only Ending C (stale) transitions;
+# Ending B (repo broken) has no safe automated remediation — see
+# pbs_pgbackrest_backup_remediate's own description for why.
+transitions_to:
+  - pbs_pgbackrest_backup_remediate
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Assess pgBackRest backup-job health — the backup-taking precondition,
+  distinct from the database agent's WAL-archiving triage
+  (pbs_db_backup_health_triage). Distinguishes four conditions that all look
+  ambiguous without a tool: never backed up (a policy question, not a
+  failure), the repo/stanza itself broken (a filesystem/permissions
+  problem), a stale backup (schedule/retention problem, repo itself is
+  fine), and healthy.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - pgbackrest-never-backed-up
+    - pgbackrest-repo-unreadable
+    - pgbackrest-backup-stale
+symptoms:
+  - "monitoring alert: pgBackRest may not be reporting backup status"
+  - "get_pgbackrest_status reports a non-ok stanza status"
+  - "unsure whether the most recent backup is still within schedule"
+guidance: |
+  Use get_pgbackrest_status. It reports the stanza's own status_code/
+  status_message, a more specific repo_status_message when the stanza-level
+  message is generic, the most recent backup's label/time, and a computed
+  backup_stale flag (true only when a most-recent backup exists and is
+  older than the requested/default staleness bound).
+
+  Three fields, three different conclusions — do not conflate them:
+  - status_code != 0 means pgBackRest itself cannot determine backup state
+    at all (a filesystem/permissions/config problem with the repo). The
+    stanza name may show as "[invalid]" in this case — that is itself
+    diagnostic, not a tool bug.
+  - backup_stale=true with status_code=0 means the repo is fine but the
+    most recent successful backup is older than expected — a
+    scheduling/retention problem, not a filesystem one.
+  - last_backup_time being empty (no LastBackupTime) with status_code=0
+    means backups were never taken at all — distinct from "stale," and not
+    necessarily a failure: it may just mean backups were never configured
+    for this instance.
+
+  Four mutually exclusive endings, pick exactly one based on what you found:
+
+  Ending A — never backed up (status_code=0, no backup has ever succeeded):
+  This is a policy question for the customer, not a diagnosis. Do not
+  recommend enabling backups as if it were an obvious fix; report the
+  finding and let a human decide.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: pgBackRest stanza has no backups on record; no backup-taking capability exists for this instance until an operator configures and runs one
+  ESCALATE_TO: none
+
+  Ending B — repo/stanza broken (status_code != 0):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: status_code=<N>; status_message=<message>; repo_status_message=<message, if more specific than status_message>
+  ESCALATE_TO: none
+
+  Ending C — backup stale (status_code=0, backup_stale=true):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: status_code=0; backup_stale=true; last_backup_label=<label>; last_backup_time=<timestamp>
+  TRANSITION_TO: pbs_pgbackrest_backup_remediate
+
+  Ending D — healthy (status_code=0, backup_stale=false, a backup has succeeded):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: status_code=0; backup_stale=false; last_backup_label=<label>; last_backup_time=<timestamp>; no action needed
+  ESCALATE_TO: none
+escalation:
+  - "status_code != 0 — pgBackRest cannot determine its own backup state"
+  - "backup_stale=true — the most recent successful backup is older than expected"
+target_hints: []

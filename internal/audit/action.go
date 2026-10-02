@@ -38,6 +38,7 @@ var ToolClassification = map[string]ActionClass{
 	"get_database_stats":         ActionRead,
 	"get_config_parameter":       ActionRead,
 	"get_replication_status":     ActionRead,
+	"get_backup_status":          ActionRead,
 	"get_lock_info":              ActionRead,
 	"get_table_stats":            ActionRead,
 	"get_session_info":           ActionRead,
@@ -48,6 +49,7 @@ var ToolClassification = map[string]ActionClass{
 	"run_vacuum":                 ActionWrite,
 	"drop_replication_slot":      ActionDestructive,
 	"reset_pg_setting":           ActionWrite,
+	"set_archive_command":        ActionWrite,
 	"reset_cache_stats":          ActionWrite,
 	"get_status_summary":         ActionRead,
 	"get_pg_settings":            ActionRead,
@@ -101,6 +103,9 @@ var ToolClassification = map[string]ActionClass{
 	"check_memory":      ActionRead,
 	"restart_container": ActionDestructive,
 	"restart_service":   ActionDestructive,
+
+	"get_pgbackrest_status": ActionRead,
+	"run_pgbackrest_backup": ActionWrite,
 }
 
 // ClassifyTool returns the action class for a given tool name.
@@ -220,7 +225,7 @@ func ClassifyDelegation(agent, message string) ActionClass {
 	writeKeywords := []string{
 		"scale", "restart", "update", "modify", "change", "alter",
 		"create", "insert", "set", "patch", "apply", "rollout",
-		"cordon", "uncordon", "vacuum", "reindex", "cancel",
+		"cordon", "uncordon", "vacuum", "reindex", "cancel", "backup",
 	}
 	for _, kw := range writeKeywords {
 		if strings.Contains(msg, kw) {

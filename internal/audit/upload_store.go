@@ -30,12 +30,13 @@ type Upload struct {
 // UploadStore persists operator-uploaded files (e.g. PostgreSQL log files).
 // It shares the same *sql.DB connection as the other audit stores.
 type UploadStore struct {
-	db *sql.DB
+	db         *rebindDB
+	isPostgres bool
 }
 
 // NewUploadStore creates the uploads table if absent and returns a ready store.
-func NewUploadStore(db *sql.DB) (*UploadStore, error) {
-	s := &UploadStore{db: db}
+func NewUploadStore(db *rebindDB, isPostgres bool) (*UploadStore, error) {
+	s := &UploadStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create upload schema: %w", err)
 	}
@@ -43,15 +44,22 @@ func NewUploadStore(db *sql.DB) (*UploadStore, error) {
 }
 
 func (s *UploadStore) createSchema() error {
-	_, err := s.db.Exec(`
+	// BLOB is SQLite's binary type; Postgres has no BLOB type and uses BYTEA
+	// instead. content is always bound/scanned as a plain Go []byte either
+	// way, so only the declared column type needs to differ.
+	blobType := "BLOB"
+	if s.isPostgres {
+		blobType = "BYTEA"
+	}
+	_, err := s.db.Exec(fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS uploads (
     upload_id   TEXT    PRIMARY KEY,
     filename    TEXT    NOT NULL,
-    content     BLOB    NOT NULL,
+    content     %s      NOT NULL,
     size        INTEGER NOT NULL,
     uploaded_at TEXT    NOT NULL,
     expires_at  TEXT    NOT NULL
-)`)
+)`, blobType))
 	return err
 }
 

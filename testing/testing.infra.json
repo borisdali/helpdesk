@@ -9,6 +9,21 @@
       "vm_name": "faulttest-vm",
       "container_name": "helpdesk-test-pg",
       "tags": ["development", "chaos"]
+    },
+    "pgbackrest-db": {
+      "name": "pgBackRest Fault Test Database",
+      "connection_string": "host=localhost port=15435 dbname=testdb user=postgres password=testpass",
+      "vm_name": "pgbackrest-vm",
+      "container_name": "helpdesk-test-pg-pgbackrest",
+      "tags": ["development", "chaos"]
+    },
+    "pgbackrest-db-ssh": {
+      "_comment": "Same real container as pgbackrest-db, reached over SSH instead of docker exec — tests agents/sysadmin's SSH-dispatch path for pgBackRest specifically, not just the generic SSH mechanism (already covered by sshexec_test.go's synthetic server). connection_string's port is the SSH port (15436), not the Postgres port (15435, same as pgbackrest-db) — deliberately distinct so port-based target resolution can't confuse the two entries; nothing here actually dials this port via psql, it's only used for infra-config matching. systemd_unit below is a placeholder only: resolveHost requires it for any non-docker/podman VM runtime, but pgBackRest's own SSH dispatch never reads it.",
+      "name": "pgBackRest Fault Test Database (SSH)",
+      "connection_string": "host=localhost port=15436 dbname=testdb user=postgres password=testpass",
+      "vm_name": "pgbackrest-vm-ssh",
+      "systemd_unit": "postgresql",
+      "tags": ["development", "chaos"]
     }
   },
 
@@ -25,6 +40,20 @@
       "name": "Fault Test VM",
       "address": "localhost",
       "runtime": "docker"
+    },
+    "pgbackrest-vm": {
+      "name": "pgBackRest Fault Test VM",
+      "address": "localhost",
+      "runtime": "docker"
+    },
+    "pgbackrest-vm-ssh": {
+      "_comment": "Same container as pgbackrest-vm, reached over real SSH (port 15436) instead of docker exec — exercises agents/sysadmin's SSH-dispatch path (sshexec.go) against real pgBackRest for the first time outside sshexec_test.go's synthetic server.",
+      "name": "pgBackRest Fault Test VM (SSH)",
+      "address": "localhost",
+      "runtime": "",
+      "ssh_user": "postgres",
+      "ssh_port": 15436,
+      "ssh_key_path": "testing/docker/ssh/pgbackrest_test_client_key"
     }
   }
 }

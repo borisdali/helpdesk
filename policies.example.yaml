@@ -199,6 +199,29 @@ policies:
         effect: deny
         message: "Automated services cannot perform destructive operations"
 
+  # Incident bundle creation (agents/incident's create_incident_bundle) — its
+  # action class is ActionWrite (it creates a tarball and records audit
+  # events), but it never mutates any target system's state, the same shape
+  # as the K8s agent's debug_node_dmesg (see docs/MUTATION_TOOLS.md: "this
+  # one is diagnostic, not remedial"). Without an explicit rule here, every
+  # new resource type falls through to deny-by-default when nothing matches
+  # — correct, secure behavior in general, but it silently blocks the
+  # gateway's own auto-triggered bundle creation after a resolved/escalated
+  # playbook run (found live 2026-09-30, right after policy enforcement was
+  # first wired up for this agent). Allowed broadly rather than gated by
+  # tags/purpose, since there is no real-world risk profile to restrict here
+  # the way there is for an actual database/host/kubernetes mutation.
+  - name: incident-bundle-diagnostic
+    description: Incident bundle creation is diagnostic data collection, not a real mutation
+    priority: 50
+
+    resources:
+      - type: incident
+
+    rules:
+      - action: [read, write]
+        effect: allow
+
   # ── Identity & Access: sensitivity-based policies ────────────────────────────
   # Resources are tagged with sensitivity classes in infra.yaml:
   #   db_servers:

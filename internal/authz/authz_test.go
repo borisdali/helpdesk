@@ -607,6 +607,7 @@ var auditdRoutes = []string{
 	"POST /v1/tool-results",
 	"GET /v1/tool-results",
 	"GET /health",
+	"GET /ready",
 	// Rollback & Undo
 	"POST /v1/rollbacks",
 	"GET /v1/rollbacks",

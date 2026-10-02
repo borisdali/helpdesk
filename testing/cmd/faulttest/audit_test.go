@@ -10,7 +10,7 @@ import (
 )
 
 func TestAuditQueryTools_EmptyURL(t *testing.T) {
-	result := auditQueryTools(context.Background(), "", "", time.Now())
+	result, _ := auditQueryTools(context.Background(), "", "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil for empty URL, got %v", result)
 	}
@@ -30,7 +30,7 @@ func TestAuditQueryTools_Success(t *testing.T) {
 	defer srv.Close()
 
 	since := time.Now().Add(-time.Minute)
-	result := auditQueryTools(context.Background(), srv.URL, "", since)
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", since)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 tools, got %d: %v", len(result), result)
@@ -58,7 +58,7 @@ func TestAuditQueryTools_Deduplication(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if len(result) != 2 {
 		t.Errorf("expected 2 unique tools, got %d: %v", len(result), result)
 	}
@@ -75,7 +75,7 @@ func TestAuditQueryTools_SkipsEventsWithoutTool(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if len(result) != 0 {
 		t.Errorf("expected empty result when no valid tool names, got %v", result)
 	}
@@ -88,7 +88,7 @@ func TestAuditQueryTools_NonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil on non-200 status, got %v", result)
 	}
@@ -101,7 +101,7 @@ func TestAuditQueryTools_InvalidJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	if result != nil {
 		t.Errorf("expected nil on invalid JSON, got %v", result)
 	}
@@ -114,10 +114,53 @@ func TestAuditQueryTools_EmptyList(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	result, _ := auditQueryTools(context.Background(), srv.URL, "", time.Now())
 	// Empty list is nil (no tools found — caller treats nil and empty the same way).
 	if len(result) != 0 {
 		t.Errorf("expected empty result, got %v", result)
+	}
+}
+
+// TestAuditQueryTools_CapturesToolErrors is a regression test for the real
+// gap found 2026-09-29: get_pgbackrest_status erroring with "pgbackrest:
+// command not found" (the agent had been pointed at the wrong target)
+// produced no signal in the terminal output at all — the error was only
+// visible by reading the full JSON report's response_text after the fact.
+// auditQueryTools now decodes each event's own error field, not just its
+// name, precisely so a caller can surface this live.
+func TestAuditQueryTools_CapturesToolErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[
+			{"event_type": "tool_execution", "tool": {"name": "check_host"}},
+			{"event_type": "tool_execution", "tool": {"name": "get_pgbackrest_status", "error": "pgbackrest: command not found"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	names, toolErrors := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+
+	if len(names) != 2 {
+		t.Fatalf("expected 2 tool names, got %d: %v", len(names), names)
+	}
+	if toolErrors["get_pgbackrest_status"] != "pgbackrest: command not found" {
+		t.Errorf("toolErrors[get_pgbackrest_status] = %q, want the recorded error", toolErrors["get_pgbackrest_status"])
+	}
+	if _, ok := toolErrors["check_host"]; ok {
+		t.Errorf("toolErrors should not have an entry for a tool with no error, got %v", toolErrors)
+	}
+}
+
+func TestAuditQueryTools_NoErrorsWhenNoneRecorded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{"event_type": "tool_execution", "tool": {"name": "check_host"}}]`))
+	}))
+	defer srv.Close()
+
+	_, toolErrors := auditQueryTools(context.Background(), srv.URL, "", time.Now())
+	if toolErrors != nil {
+		t.Errorf("expected nil toolErrors when no tool recorded an error, got %v", toolErrors)
 	}
 }
 

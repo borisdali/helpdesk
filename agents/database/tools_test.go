@@ -1423,6 +1423,220 @@ lag_bytes       | 100
 	}
 }
 
+func TestGetBackupStatusTool_ParsesTypedFields(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]+--
+archive_mode | on
+
+-[ RECORD 1 ]----+----------------------------
+archived_count   | 42
+last_archived_wal| 000000010000000000000001
+last_archived_time| 2026-09-24 12:00:00.000000+00
+failed_count     | 3
+last_failed_wal  | 000000010000000000000000
+last_failed_time | 2026-09-24 11:00:00.000000+00
+stats_reset      | 2026-09-01 00:00:00.000000+00
+archiving_stale  | f
+`
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := getBackupStatusTool(ctx, GetBackupStatusArgs{ConnectionString: "host=localhost"})
+	if err != nil {
+		t.Fatalf("getBackupStatusTool() error = %v, want nil", err)
+	}
+	if result.ArchiveMode != "on" {
+		t.Errorf("ArchiveMode = %q, want on", result.ArchiveMode)
+	}
+	if result.ArchivedCount != 42 || result.FailedCount != 3 {
+		t.Errorf("got ArchivedCount=%d FailedCount=%d, want 42/3", result.ArchivedCount, result.FailedCount)
+	}
+	if result.LastArchivedWAL != "000000010000000000000001" {
+		t.Errorf("LastArchivedWAL = %q, want 000000010000000000000001", result.LastArchivedWAL)
+	}
+	if result.ArchivingStale {
+		t.Error("ArchivingStale = true, want false (most recent success is after the most recent failure)")
+	}
+}
+
+// withBackupArchiverEvidenceRules installs a real archiving-stale rule for
+// the duration of the calling test, mirroring withReplicationEvidenceRules.
+func withBackupArchiverEvidenceRules(t *testing.T) {
+	t.Helper()
+	orig := backupArchiverEvidenceRules
+	backupArchiverEvidenceRules = []evidence.Rule{
+		{Tool: "get_backup_status", Probe: "archiving_stale", Operator: "==", Threshold: true, Signal: "backup_archiving_stale", Detail: "WAL archiving failing — most recent attempt (%s) has not been followed by a success"},
+	}
+	t.Cleanup(func() { backupArchiverEvidenceRules = orig })
+}
+
+func getBackupStatusWithEvidence(t *testing.T, mockOutput string) []audit.Event {
+	t.Helper()
+	withBackupArchiverEvidenceRules(t)
+	defer withMockRunner(mockOutput, nil)()
+
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "backup_evidence_test.db")})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	origAuditor := toolAuditor
+	toolAuditor = audit.NewToolAuditor(store, "database_agent", "sess_backup", "trace_backup")
+	t.Cleanup(func() { toolAuditor = origAuditor })
+
+	ctx := newTestContext()
+	if _, err := getBackupStatusTool(ctx, GetBackupStatusArgs{ConnectionString: "host=localhost"}); err != nil {
+		t.Fatalf("getBackupStatusTool() error = %v, want nil", err)
+	}
+
+	events, queryErr := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if queryErr != nil {
+		t.Fatalf("Query: %v", queryErr)
+	}
+	return events
+}
+
+// TestGetBackupStatusTool_StaleArchiving_RecordsObjectiveEvidence is the
+// scenario db-backup-archiving-broken (v0.30) produces: the most recent
+// archiving attempt failed and no later success has occurred.
+func TestGetBackupStatusTool_StaleArchiving_RecordsObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]+--
+archive_mode | on
+
+-[ RECORD 1 ]----+----------------------------
+archived_count   | 10
+last_archived_wal| 000000010000000000000001
+last_archived_time| 2026-09-24 11:00:00.000000+00
+failed_count     | 4
+last_failed_wal  | 000000010000000000000005
+last_failed_time | 2026-09-24 12:00:00.000000+00
+stats_reset      | 2026-09-01 00:00:00.000000+00
+archiving_stale  | t
+`
+	events := getBackupStatusWithEvidence(t, mockOutput)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 objective_evidence event, got %d", len(events))
+	}
+	ev := events[0].ObjectiveEvidence
+	if ev == nil {
+		t.Fatal("ObjectiveEvidence field is nil")
+	}
+	if ev.Signal != "backup_archiving_stale" {
+		t.Errorf("Signal = %q, want backup_archiving_stale", ev.Signal)
+	}
+	if ev.Resource != "000000010000000000000005" {
+		t.Errorf("Resource = %q, want last_failed_wal 000000010000000000000005", ev.Resource)
+	}
+	if ev.Tool != "get_backup_status" {
+		t.Errorf("Tool = %q, want get_backup_status", ev.Tool)
+	}
+}
+
+// TestGetBackupStatusTool_HealthyArchiving_NoObjectiveEvidence verifies a
+// historical failure that's since been followed by a success does not fire
+// — pg_stat_archiver is a cumulative counter, not a "has this ever failed"
+// flag, and this is the case that distinction exists for.
+func TestGetBackupStatusTool_HealthyArchiving_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]+--
+archive_mode | on
+
+-[ RECORD 1 ]----+----------------------------
+archived_count   | 50
+last_archived_wal| 00000001000000000000000A
+last_archived_time| 2026-09-24 13:00:00.000000+00
+failed_count     | 4
+last_failed_wal  | 000000010000000000000005
+last_failed_time | 2026-09-24 12:00:00.000000+00
+stats_reset      | 2026-09-01 00:00:00.000000+00
+archiving_stale  | f
+`
+	events := getBackupStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events when the last failure was since followed by a success, got %d", len(events))
+	}
+}
+
+// TestGetBackupStatusTool_ArchivingNotConfigured_NoObjectiveEvidence
+// verifies archive_mode=off never fires this signal even if a raw
+// archiving_stale computation would otherwise be true — not configuring
+// archiving at all is a policy choice, not a failure to report on.
+func TestGetBackupStatusTool_ArchivingNotConfigured_NoObjectiveEvidence(t *testing.T) {
+	mockOutput := `-[ RECORD 1 ]+---
+archive_mode | off
+
+-[ RECORD 1 ]----+----------------------------
+archived_count   | 0
+last_archived_wal|
+last_archived_time|
+failed_count     | 0
+last_failed_wal  |
+last_failed_time |
+stats_reset      | 2026-09-01 00:00:00.000000+00
+archiving_stale  | f
+`
+	events := getBackupStatusWithEvidence(t, mockOutput)
+	if len(events) != 0 {
+		t.Errorf("expected 0 objective_evidence events when archive_mode=off, got %d", len(events))
+	}
+}
+
+func TestSetArchiveCommandTool_Success(t *testing.T) {
+	mockOutput := "ALTER SYSTEM\n"
+	defer withMockRunner(mockOutput, nil)()
+
+	ctx := newTestContext()
+	result, err := setArchiveCommandTool(ctx, SetArchiveCommandArgs{
+		ConnectionString: "host=localhost",
+		Command:          "/usr/bin/wal-archive %p %f",
+	})
+	if err != nil {
+		t.Fatalf("setArchiveCommandTool() unexpected Go error: %v", err)
+	}
+	if !strings.Contains(result.Output, "ALTER SYSTEM") {
+		t.Errorf("setArchiveCommandTool() output = %q, want to contain ALTER SYSTEM", result.Output)
+	}
+}
+
+// allCallsCapturingRunner is like capturingRunner but keeps every call's
+// args, not just the last — needed here because setArchiveCommandImpl makes
+// two sequential psql invocations (ALTER SYSTEM SET, then
+// SELECT pg_reload_conf()) and the escaping under test is only in the
+// first one.
+type allCallsCapturingRunner struct {
+	calls [][]string
+}
+
+func (m *allCallsCapturingRunner) Run(_ context.Context, _ string, args []string, _ []string) (string, error) {
+	m.calls = append(m.calls, args)
+	return "ALTER SYSTEM\n", nil
+}
+
+// TestSetArchiveCommandTool_EscapesSingleQuotes guards against SQL
+// injection via a command value containing a single quote — a real
+// possibility here, unlike drop_replication_slot's alphanumeric-only slot
+// names, since a shell command can legitimately contain any character.
+func TestSetArchiveCommandTool_EscapesSingleQuotes(t *testing.T) {
+	capture := &allCallsCapturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	ctx := newTestContext()
+	_, err := setArchiveCommandTool(ctx, SetArchiveCommandArgs{
+		ConnectionString: "host=localhost",
+		Command:          "echo 'test' && cp %p /archive/%f",
+	})
+	if err != nil {
+		t.Fatalf("setArchiveCommandTool() unexpected Go error: %v", err)
+	}
+	if len(capture.calls) == 0 {
+		t.Fatal("expected at least one psql invocation")
+	}
+	joined := strings.Join(capture.calls[0], " ")
+	if !strings.Contains(joined, `echo ''test''`) {
+		t.Errorf("first psql call args = %v, want single quotes in Command doubled for safe embedding", capture.calls[0])
+	}
+}
+
 // Test error handling for all tools
 // Note: Errors are now returned in the output text (not as Go errors)
 // so that the LLM can see them when orchestrator calls sub-agents.

@@ -1,0 +1,72 @@
+series_id: pbs_pgbackrest_backup_remediate
+name: pgBackRest Stale Backup — Take a Fresh Backup
+version: "1.0"
+playbook_type: remediation
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Remediate a stale pgBackRest backup on an otherwise-healthy repo by taking
+  a fresh one — the same action a human would take, no value-guessing
+  involved. Deliberately narrow: this does NOT attempt to fix a broken
+  repo/stanza (permissions, ownership, mount problems) — there is no
+  confirmed-correct value to restore for those, unlike a misconfigured
+  setting with a known-good prior reading. If the repo itself is broken,
+  this playbook refuses to run a backup against it and escalates instead.
+symptoms:
+  - "pbs_pgbackrest_health_triage identified backup_stale=true with status_code=0"
+  - "get_pgbackrest_status shows the most recent successful backup is older than expected, but the repo itself reports healthy"
+guidance: |
+  Step 1 — Confirm the diagnosis is still current and the repo is actually
+  healthy (not just stale):
+  Call get_pgbackrest_status. If status_code != 0, STOP — the repo itself is
+  broken (permissions, ownership, mount). Do NOT run a backup against a
+  broken repo; escalate for human investigation instead (Ending C below).
+  If backup_stale is no longer true (someone already took a backup, or a
+  scheduled one completed on its own), stop here too — there is nothing to
+  remediate (Ending A).
+
+  Step 2 — Take a fresh backup:
+  Call run_pgbackrest_backup with type=full (the default — always valid
+  regardless of backup history, unlike diff/incr which need a prior full
+  backup to reference). This requires operator approval; the call will
+  pause for it.
+
+  Step 3 — Verify:
+  After approval and execution, call get_pgbackrest_status again to confirm
+  backup_stale is now false. If it's still true or status_code is now
+  non-zero, the backup did not fix the problem — do not report success;
+  escalate instead (Ending D).
+
+  Required output — write these exact lines at the end of your response,
+  no markdown, no extra text on any line. Four mutually exclusive endings:
+
+  Ending A — already healthy, nothing to do:
+  HYPOTHESIS_1: <what you found> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: backup_stale=false on re-check — already resolved, no action taken
+  ESCALATE_TO: none
+
+  Ending B — fixed and verified:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: took a fresh full backup (label=<label>); backup_stale=false confirmed on re-check
+  ESCALATE_TO: none
+
+  Ending C — repo is broken, refusing to run a backup against it:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: status_code=<N> (not 0) — repo itself is broken, not merely stale; refusing to run a backup against it without human investigation
+  ESCALATE_TO: none
+
+  Ending D — backup ran but did not resolve staleness:
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: ran run_pgbackrest_backup but get_pgbackrest_status still shows backup_stale=true or a non-zero status_code afterward
+  ESCALATE_TO: none
+escalation:
+  - "status_code != 0 — never run a backup against a repo that reports itself broken"
+  - "run_pgbackrest_backup completed but get_pgbackrest_status still shows an unhealthy result afterward"
+target_hints: []

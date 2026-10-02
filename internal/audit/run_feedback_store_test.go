@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func newRunFeedbackStore(t *testing.T) (*RunFeedbackStore, *sql.DB) {
+func newRunFeedbackStore(t *testing.T) (*RunFeedbackStore, *rebindDB) {
 	t.Helper()
 	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
@@ -286,10 +286,10 @@ func TestRunFeedbackStore_StatsBySeries_RemediationFields(t *testing.T) {
 
 	// Two remediation/post_incident entries (1 correct, 1 wrong) + one at_gate (correct).
 	entries := []struct {
-		runID    string
-		fbType   string
-		fbTime   string
-		correct  bool
+		runID   string
+		fbType  string
+		fbTime  string
+		correct bool
 	}{
 		{"plr_r1", "remediation", "post_incident", true},
 		{"plr_r2", "remediation", "post_incident", false},

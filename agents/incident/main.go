@@ -42,7 +42,31 @@ func main() {
 		slog.Info("tool auditing enabled", "session_id", sessionID)
 	}
 
-	slog.Info("governance", "audit", cfg.AuditEnabled, "policy", false)
+	// Initialize policy engine if configured — was entirely absent until
+	// 2026-09-30, when this whole block didn't exist and the line below read
+	// a hardcoded "policy": false literal instead of cfg.PolicyEnabled.
+	// Mirrors agents/database and agents/sysadmin's own policy wiring.
+	policyEngine, err := agentutil.InitPolicyEngine(cfg)
+	if err != nil {
+		slog.Error("failed to initialize policy engine", "err", err)
+		os.Exit(1)
+	}
+
+	approvalClient := agentserve.InitApprovalClient(cfg)
+
+	policyEnforcer = agentutil.NewPolicyEnforcerWithConfig(agentutil.PolicyEnforcerConfig{
+		Engine:                     policyEngine,
+		PolicyCheckURL:             cfg.PolicyCheckURL,
+		PolicyCheckAPIKey:          cfg.AuditAPIKey,
+		TraceStore:                 traceStore,
+		ApprovalClient:             approvalClient,
+		ApprovalTimeout:            cfg.ApprovalTimeout,
+		AgentName:                  "incident_agent",
+		ToolAuditor:                toolAuditor,
+		RequirePurposeForSensitive: os.Getenv("HELPDESK_REQUIRE_PURPOSE_FOR_SENSITIVE") == "true",
+	})
+
+	slog.Info("governance", "audit", cfg.AuditEnabled, "policy", cfg.PolicyEnabled)
 
 	llmModel, err := agentutil.NewLLM(ctx, cfg)
 	if err != nil {

@@ -14,64 +14,67 @@ const builtinMinimum = 33
 
 // TestObjectiveEvidenceSignal_MatchesRealAgentRules cross-validates every
 // fault's expected_diagnosis.objective_evidence_signal against the real
-// signal names defined in the corresponding agent's own objective_evidence.yaml.
+// signal names defined across all agents' objective_evidence.yaml files.
 // Nothing else in the test suite catches this: EvidenceSignalConfirmed/
 // evidenceSignalConfirmed are unit tested against hardcoded example strings,
-// not the catalog's actual values, so a typo or drift between the catalog
-// and either agents/database/objective_evidence.yaml or
-// agents/k8s/objective_evidence.yaml would otherwise silently make the gate
-// fail every run of that fault (evidenceSignalConfirmed never finds a match),
-// surfacing only as a confusing live-test failure instead of here.
+// not the catalog's actual values, so a typo or drift would otherwise
+// silently make the gate fail every run of that fault (evidenceSignalConfirmed
+// never finds a match), surfacing only as a confusing live-test failure
+// instead of here.
 //
-// Parses the rules file's signal names directly with yaml.Unmarshal rather
+// Deliberately a union across all agents, not a strict fault-category→one-file
+// mapping: a fault's topical category (e.g. "database") does not imply its
+// diagnosis stays within that agent — db-pgbackrest-repo-unreadable is
+// category=database but diagnoses via the sysadmin agent's
+// get_pgbackrest_status/objective_evidence.yaml, the same cross-agent
+// pattern several database-category faults already use for
+// ESCALATE_TO-driven multi-hop diagnosis (e.g. db-replica-stalled →
+// pbs_sysadmin_replica_connectivity_triage). A category→file mapping would
+// have wrongly rejected the first fault to cross that boundary.
+//
+// Parses each rules file's signal names directly with yaml.Unmarshal rather
 // than evidence.LoadRules — LoadRules validates each rule's tool/probe
 // against internal/evidence's schema registry, which is only populated by
-// the agent's own package (agents/database, agents/k8s) registering its
-// ToolSchemas at startup; a bare test in this package never triggers that,
-// and this check only needs the signal names anyway, not full rule validity
-// (that's exercised by every live run this session already did).
+// the agent's own package (agents/database, agents/k8s, agents/sysadmin)
+// registering its ToolSchemas at startup; a bare test in this package never
+// triggers that, and this check only needs the signal names anyway, not
+// full rule validity (that's exercised by every live run this session
+// already did).
 func TestObjectiveEvidenceSignal_MatchesRealAgentRules(t *testing.T) {
 	cat, err := LoadBuiltinCatalog()
 	if err != nil {
 		t.Fatalf("LoadBuiltinCatalog: %v", err)
 	}
 
-	rulesPathByCategory := map[string]string{
-		"database":   filepath.Join("..", "..", "agents", "database", "objective_evidence.yaml"),
-		"kubernetes": filepath.Join("..", "..", "agents", "k8s", "objective_evidence.yaml"),
+	rulesPaths := []string{
+		filepath.Join("..", "..", "agents", "database", "objective_evidence.yaml"),
+		filepath.Join("..", "..", "agents", "k8s", "objective_evidence.yaml"),
+		filepath.Join("..", "..", "agents", "sysadmin", "objective_evidence.yaml"),
 	}
-	signalsByCategory := map[string]map[string]bool{}
+	allSignals := map[string]bool{}
+	for _, path := range rulesPaths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		var rules []struct {
+			Signal string `yaml:"signal"`
+		}
+		if err := yaml.Unmarshal(data, &rules); err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		for _, r := range rules {
+			allSignals[r.Signal] = true
+		}
+	}
 
 	for _, f := range cat.Failures {
 		sig := f.Evaluation.ExpectedDiagnosis.ObjectiveEvidenceSignal
 		if sig == "" {
 			continue
 		}
-		signals, ok := signalsByCategory[f.Category]
-		if !ok {
-			path, known := rulesPathByCategory[f.Category]
-			if !known {
-				t.Errorf("fault %q declares objective_evidence_signal %q but category %q has no known objective_evidence.yaml", f.ID, sig, f.Category)
-				continue
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading %s: %v", path, err)
-			}
-			var rules []struct {
-				Signal string `yaml:"signal"`
-			}
-			if err := yaml.Unmarshal(data, &rules); err != nil {
-				t.Fatalf("parsing %s: %v", path, err)
-			}
-			signals = map[string]bool{}
-			for _, r := range rules {
-				signals[r.Signal] = true
-			}
-			signalsByCategory[f.Category] = signals
-		}
-		if !signals[sig] {
-			t.Errorf("fault %q declares objective_evidence_signal %q, but no rule in %s defines that signal — check for a typo or drift between the catalog and the agent's own rules", f.ID, sig, rulesPathByCategory[f.Category])
+		if !allSignals[sig] {
+			t.Errorf("fault %q declares objective_evidence_signal %q, but no rule in any agent's objective_evidence.yaml defines that signal — check for a typo or drift", f.ID, sig)
 		}
 	}
 }
@@ -535,11 +538,69 @@ func TestResolvePrompt(t *testing.T) {
 	}
 
 	prompt := "Connect to {{connection_string}} in context {{kube_context}}"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, Failure{})
 
 	expected := "Connect to host=db.example.com port=5432 in context gke_prod"
 	if result != expected {
 		t.Errorf("ResolvePrompt = %q, want %q", result, expected)
+	}
+}
+
+// TestResolvedAgentConnStr_FaultOverrideTakesPrecedence is a regression test
+// for a real gap found live (2026-10-01): a full-catalog sweep
+// (`make faulttest`) applies one shared FAULTTEST_CONN_STR to every
+// database-category fault, so db-pgbackrest-repo-unreadable was always
+// diagnosed against whatever plain Postgres container the other 23
+// database faults shared — one with no pgBackRest installed at all — never
+// its own dedicated pgBackRest-equipped target. AgentConnOverride lets one
+// fault's catalog entry name a different infrastructure.json alias than the
+// rest of the sweep.
+func TestResolvedAgentConnStr_FaultOverrideTakesPrecedence(t *testing.T) {
+	testingDir := findTestingDirForTest(t)
+	cfg := &HarnessConfig{
+		ConnStr:         "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
+		InfraConfigPath: filepath.Join(testingDir, "testing.infra.json"),
+	}
+	f := Failure{ID: "db-pgbackrest-repo-unreadable", AgentConnOverride: "pgbackrest-db"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	want := "host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+	if got != want {
+		t.Errorf("ResolvedAgentConnStr() = %q, want %q (testing.infra.json's pgbackrest-db entry, not the shared ConnStr)", got, want)
+	}
+}
+
+// TestResolvedAgentConnStr_NoOverride_FallsBackToSharedConnStr confirms every
+// other fault (no AgentConnOverride set) is unaffected by this change.
+func TestResolvedAgentConnStr_NoOverride_FallsBackToSharedConnStr(t *testing.T) {
+	cfg := &HarnessConfig{ConnStr: "host=localhost port=15432 dbname=testdb user=postgres password=testpass"}
+	f := Failure{ID: "db-max-connections"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	if got != cfg.ConnStr {
+		t.Errorf("ResolvedAgentConnStr() = %q, want cfg.ConnStr %q unchanged", got, cfg.ConnStr)
+	}
+}
+
+// TestResolvedAgentConnStr_UnresolvableOverride_FailsLoudNotSilentFallback
+// confirms a bad override (no matching infra config entry) surfaces as an
+// obviously-wrong value downstream rather than silently reusing the shared
+// ConnStr — which would reintroduce the exact "diagnosed the wrong target"
+// bug this mechanism exists to close.
+func TestResolvedAgentConnStr_UnresolvableOverride_FailsLoudNotSilentFallback(t *testing.T) {
+	testingDir := findTestingDirForTest(t)
+	cfg := &HarnessConfig{
+		ConnStr:         "host=localhost port=15432 dbname=testdb user=postgres password=testpass",
+		InfraConfigPath: filepath.Join(testingDir, "testing.infra.json"),
+	}
+	f := Failure{ID: "some-fault", AgentConnOverride: "no-such-alias"}
+
+	got := ResolvedAgentConnStr(cfg, f)
+	if got == cfg.ConnStr {
+		t.Error("ResolvedAgentConnStr() silently fell back to the shared ConnStr for an unresolvable override — want the raw alias returned instead, so it fails loudly as an invalid DSN")
+	}
+	if got != "no-such-alias" {
+		t.Errorf("ResolvedAgentConnStr() = %q, want the raw unresolved alias %q", got, "no-such-alias")
 	}
 }
 

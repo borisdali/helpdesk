@@ -20,6 +20,7 @@ import (
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/buildinfo"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
 )
@@ -43,12 +44,23 @@ func main() {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
 			dbKeys := make([]string, 0, len(infraConfig.DBServers))
-		for k := range infraConfig.DBServers {
-			dbKeys = append(dbKeys, k)
+			for k := range infraConfig.DBServers {
+				dbKeys = append(dbKeys, k)
+			}
+			sort.Strings(dbKeys)
+			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
-		sort.Strings(dbKeys)
-		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
-		}
+	}
+
+	// Load objective_evidence rules if available. Same convention as
+	// agents/database/main.go's loadDBEvidenceRules: a loud warning when the
+	// env var is simply unset, not a silent disable — see that file's own
+	// comment for the live incident (2026-09-07) this convention exists to
+	// prevent from recurring.
+	if rulesPath := os.Getenv("HELPDESK_SYSADMIN_EVIDENCE_RULES"); rulesPath != "" {
+		pgbackrestEvidenceRules = loadSysadminEvidenceRules(rulesPath)
+	} else {
+		slog.Warn("HELPDESK_SYSADMIN_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_pgbackrest_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
 
 	// Initialize audit store if enabled.
@@ -134,19 +146,22 @@ func main() {
 		Version:  buildinfo.Version,
 		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
 		SkillTags: map[string][]string{
-			agentName:                         {"host", "infrastructure", "diagnostics"},
-			agentName + "-check_host":         {"host", "container", "status"},
-			agentName + "-get_host_logs":      {"host", "container", "logs"},
-			agentName + "-check_disk":          {"host", "storage", "diagnostics"},
-			agentName + "-check_memory":        {"host", "memory", "diagnostics"},
-			agentName + "-read_pg_log_file":    {"host", "postgres", "logs", "diagnostics"},
-			agentName + "-restart_container":   {"host", "container", "remediation"},
-			agentName + "-restart_service":    {"host", "systemd", "remediation"},
+			agentName:                            {"host", "infrastructure", "diagnostics"},
+			agentName + "-check_host":            {"host", "container", "status"},
+			agentName + "-get_host_logs":         {"host", "container", "logs"},
+			agentName + "-check_disk":            {"host", "storage", "diagnostics"},
+			agentName + "-check_memory":          {"host", "memory", "diagnostics"},
+			agentName + "-read_pg_log_file":      {"host", "postgres", "logs", "diagnostics"},
+			agentName + "-restart_container":     {"host", "container", "remediation"},
+			agentName + "-restart_service":       {"host", "systemd", "remediation"},
+			agentName + "-get_pgbackrest_status": {"host", "backup", "diagnostics"},
+			agentName + "-run_pgbackrest_backup": {"host", "backup", "remediation"},
 		},
 		SkillExamples: map[string][]string{
-			agentName + "-check_host":        {"Is the alloydb-omni container running?"},
-			agentName + "-get_host_logs":     {"Show the last 200 log lines from the prod_db container"},
-			agentName + "-restart_container": {"Restart the prod_db container — crash loop detected"},
+			agentName + "-check_host":            {"Is the alloydb-omni container running?"},
+			agentName + "-get_host_logs":         {"Show the last 200 log lines from the prod_db container"},
+			agentName + "-restart_container":     {"Restart the prod_db container — crash loop detected"},
+			agentName + "-get_pgbackrest_status": {"Check whether pgBackRest's last backup for prod_db is stale"},
 		},
 		SkillAutoRemediationEligible: map[string]bool{
 			agentName + "-restart_container": true,
@@ -219,6 +234,22 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	getPgBackRestStatusToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "get_pgbackrest_status",
+		Description: "Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, and whether it's stale relative to the expected schedule. This is the backup-taking precondition — distinct from the database agent's get_backup_status, which checks WAL archiving health via pg_stat_archiver.",
+	}, getPgBackRestStatusTool)
+	if err != nil {
+		return nil, err
+	}
+
+	runPgBackRestBackupToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "run_pgbackrest_backup",
+		Description: "Take a fresh pgBackRest backup (default type=full). Requires operator approval (Write action). Use only to remediate a STALE backup on an otherwise-healthy repo (get_pgbackrest_status status_code=0, backup_stale=true) — never against a broken repo/stanza (status_code != 0), which needs human investigation, not a new backup attempt.",
+	}, runPgBackRestBackupTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkHostToolDef,
 		getHostLogsToolDef,
@@ -227,5 +258,23 @@ func createTools() ([]tool.Tool, error) {
 		readPgLogFileToolDef,
 		restartContainerToolDef,
 		restartServiceToolDef,
+		getPgBackRestStatusToolDef,
+		runPgBackRestBackupToolDef,
 	}, nil
+}
+
+// loadSysadminEvidenceRules loads agents/sysadmin/objective_evidence.yaml-shaped
+// rules from path. Mirrors agents/database/main.go's loadDBEvidenceRules, sized
+// down to this agent's one rule set so far (get_pgbackrest_status) — extend the
+// same way (one more named return + one more rulesByTool[...] lookup) if a
+// second sysadmin tool ever needs its own objective-evidence probe.
+func loadSysadminEvidenceRules(path string) (pgbackrestRules []evidence.Rule) {
+	rulesByTool, err := evidence.LoadRules(path)
+	if err != nil {
+		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pgbackrest_status until this is fixed", "path", path, "err", err)
+		return nil
+	}
+	pgbackrestRules = rulesByTool["get_pgbackrest_status"]
+	slog.Info("objective_evidence rules loaded", "path", path, "get_pgbackrest_status_rules", len(pgbackrestRules))
+	return pgbackrestRules
 }

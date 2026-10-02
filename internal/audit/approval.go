@@ -92,7 +92,7 @@ type ApprovalRule struct {
 
 	// Decision when rule matches.
 	RequireApproval bool   `json:"require_approval"`
-	AutoApprove     bool   `json:"auto_approve"` // auto-approve if true and require_approval is false
+	AutoApprove     bool   `json:"auto_approve"`            // auto-approve if true and require_approval is false
 	ApproverRole    string `json:"approver_role,omitempty"` // who can approve (e.g., "admin", "dba")
 }
 
@@ -281,7 +281,7 @@ func (r *ApprovalRule) matches(req ApprovalRequest) bool {
 
 // ApprovalManager handles approval requests and decisions.
 type ApprovalManager struct {
-	policy          *ApprovalPolicy
+	policy           *ApprovalPolicy
 	pendingApprovals map[string]*PendingApproval // keyed by event ID
 }
 
@@ -301,7 +301,7 @@ func NewApprovalManager(policy *ApprovalPolicy) *ApprovalManager {
 		policy = DefaultPolicy()
 	}
 	return &ApprovalManager{
-		policy:          policy,
+		policy:           policy,
 		pendingApprovals: make(map[string]*PendingApproval),
 	}
 }

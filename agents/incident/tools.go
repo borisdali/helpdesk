@@ -23,11 +23,23 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/policy"
 )
 
 // toolAuditor records tool execution events to the audit store.
 // Set during initialization when auditing is enabled.
 var toolAuditor *audit.ToolAuditor
+
+// policyEnforcer gates create_incident_bundle (this agent's one
+// ActionWrite-classified tool) — set during initialization when a policy
+// engine is configured. Was entirely absent until 2026-09-30: found live
+// that main.go hardcoded its own governance log line to "policy": false
+// rather than reading cfg.PolicyEnabled, and this package had no
+// PolicyEnforcer/CheckTool call anywhere — HELPDESK_POLICY_ENABLED/
+// HELPDESK_POLICY_FILE were silently ignored regardless of what an operator
+// set them to. Mirrors agents/database and agents/sysadmin's own
+// policyEnforcer pattern.
+var policyEnforcer *agentutil.PolicyEnforcer
 
 // currentTraceStore holds the active trace ID for each A2A request.
 // Set during initialization and shared with ServeWithTracing.
@@ -399,6 +411,15 @@ func createIncidentBundleImpl(ctx context.Context, args CreateIncidentBundleArgs
 	}
 	if args.Description == "" {
 		args.Description = "Diagnostic bundle"
+	}
+
+	if policyEnforcer != nil {
+		policyCtx := agentutil.WithToolName(ctx, "create_incident_bundle")
+		if err := policyEnforcer.CheckTool(policyCtx, "incident", args.InfraKey,
+			policy.ActionWrite, nil, "create incident bundle: "+args.Description, nil); err != nil {
+			slog.Warn("policy denied incident bundle creation", "infra_key", args.InfraKey, "err", err)
+			return IncidentBundleResult{}, err
+		}
 	}
 
 	namespace := args.K8sNamespace

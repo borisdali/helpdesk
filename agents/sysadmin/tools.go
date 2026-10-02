@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
 )
@@ -39,8 +41,33 @@ func (execRunner) Run(ctx context.Context, name string, args []string, env []str
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		// Preserve the historical combined-output shape on failure: the
+		// real diagnostic detail for most CLI tools lives on stderr, and
+		// every "%w: %s" error-formatting call site across this package
+		// already expects it folded in here.
+		return stdout.String() + stderr.String(), err
+	}
+	if stderr.Len() > 0 {
+		slog.Debug("command succeeded with stderr output", "name", name, "stderr", stderr.String())
+	}
+	// On success, stdout alone is the real output — not combined with
+	// stderr. Found live, not hypothetical: kubectl-exec dispatch against a
+	// real K8s pod broke get_pgbackrest_status's JSON parse
+	// ("invalid character 'P' looking for beginning of value") because
+	// pgBackRest wrote non-fatal env-var warnings to stderr (Kubernetes
+	// auto-injects a `<SERVICE_NAME>_*` env var per Service in the
+	// namespace, and pgBackRest warns about any that happen to look like
+	// one of its own `PGBACKREST_*`-prefixed options) on an otherwise
+	// perfectly healthy run. Docker-based testing never exercised this
+	// path — Docker doesn't auto-inject Service-derived env vars the way
+	// Kubernetes does, so stderr was always empty there regardless of
+	// CombinedOutput's merging.
+	return stdout.String(), nil
 }
 
 // cmdRunner is the active command runner. Override in tests.
@@ -68,6 +95,12 @@ type resolvedHost struct {
 	Runtime       string // container runtime binary: "docker", "podman", or "" (systemd/k8s)
 	ContainerName string // from DBServer.ContainerName (docker/podman only)
 	SystemdUnit   string // from DBServer.SystemdUnit (systemd only)
+	// SSH fields — populated from the VM entry, empty unless the VM has SSHUser
+	// set. See runOnHost (sshexec.go) for the local-vs-SSH dispatch this enables.
+	VMAddress  string
+	SSHUser    string
+	SSHPort    int
+	SSHKeyPath string
 	// Kubernetes fields
 	K8sContext     string // kubectl --context value
 	K8sNamespace   string // pod namespace
@@ -204,6 +237,10 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		Runtime:       vm.Runtime,
 		ContainerName: db.ContainerName,
 		SystemdUnit:   db.SystemdUnit,
+		VMAddress:     vm.Address,
+		SSHUser:       vm.SSHUser,
+		SSHPort:       vm.SSHPort,
+		SSHKeyPath:    vm.SSHKeyPath,
 		Tags:          db.Tags,
 		Sensitivity:   db.Sensitivity,
 	}
@@ -1115,6 +1152,505 @@ func restartServiceTool(ctx agent.ToolContext, args RestartServiceArgs) (Restart
 	return restartServiceImpl(ctx, args)
 }
 
+// ── get_pgbackrest_status ───────────────────────────────────────────────────
+
+// defaultPgBackRestMaxAgeHours is the default staleness bound applied when
+// MaxAgeHours is unset: one day plus a real margin, not an arbitrary round
+// number — matches this project's convention of justifying thresholds (see
+// e.g. replica_stalled's 20s-with-margin-below-a-60s-ceiling) rather than
+// picking one for its own sake. A daily backup is the most common cadence;
+// callers with a different real schedule (hourly, weekly) should pass their
+// own MaxAgeHours rather than rely on this default.
+const defaultPgBackRestMaxAgeHours = 25
+
+// GetPgBackRestStatusArgs defines arguments for the get_pgbackrest_status tool.
+type GetPgBackRestStatusArgs struct {
+	Target      string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
+	Stanza      string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+	MaxAgeHours int    `json:"max_age_hours,omitempty" jsonschema:"How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule. Zero or negative values fall back to the default; there is no way to force an immediate backup to read as stale via this parameter."`
+}
+
+// PgBackRestBackup is one entry from pgBackRest's own "backup" array — one
+// real backup attempt that completed (a hard failure that never completes
+// adds no entry here at all; see GetPgBackRestStatusResult's own doc comment
+// for why staleness, not this Error field, is the primary health signal).
+type PgBackRestBackup struct {
+	Label     string    `json:"label"`
+	Type      string    `json:"type"` // full, diff, incr
+	Error     bool      `json:"error"`
+	StartTime time.Time `json:"start_time"`
+	StopTime  time.Time `json:"stop_time"`
+}
+
+// GetPgBackRestStatusResult is the structured result for get_pgbackrest_status.
+// Schema verified directly against a real pgBackRest 2.59.1 install (not
+// assumed from documentation alone) — see project memory for the full
+// captured `info --output=json` example this parser is built against.
+//
+// BackupStale, not the most recent backup's own Error field, is the primary
+// health signal: a hard failure (repo unreachable, permission denied) exits
+// nonzero and adds NO entry to pgBackRest's own backup array at all —
+// confirmed live by attempting a backup with a broken archive_command and
+// observing no new entry appeared. Error=true on an entry that DID complete
+// most likely marks a softer, file-level issue (e.g. a checksum problem),
+// not "the last attempt failed to run" — that case shows up as staleness
+// instead, since no successful completion ever updates LastBackupTime.
+type GetPgBackRestStatusResult struct {
+	Output        string `json:"output"`
+	Stanza        string `json:"stanza,omitempty"`
+	StatusCode    int    `json:"status_code"`
+	StatusMessage string `json:"status_message,omitempty"`
+	// RepoStatusMessage, when non-empty, is a more specific error than
+	// StatusMessage — verified live: a broken repo path leaves StatusMessage
+	// as a generic "other" but RepoStatusMessage holds the real detail (e.g.
+	// a PathOpenError naming the exact path and errno). Always prefer this
+	// over StatusMessage when both are present.
+	RepoStatusCode    int                `json:"repo_status_code,omitempty"`
+	RepoStatusMessage string             `json:"repo_status_message,omitempty"`
+	Backups           []PgBackRestBackup `json:"backups,omitempty"`
+	LastBackupLabel   string             `json:"last_backup_label,omitempty"`
+	LastBackupTime    string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
+	// LastBackupError deliberately has no `omitempty` — unlike LastBackupTime
+	// (where "absent" and "empty" are the same real state: no backup ever
+	// succeeded), false here is a meaningful, distinct answer from "not
+	// computed," and omitempty would silently drop it from the JSON the
+	// model reads. See BackupStale's own comment below for the live
+	// confusion this exact pattern caused for that field.
+	LastBackupError bool `json:"last_backup_error"`
+	// BackupStale is true when a most-recent backup exists and is older than
+	// the requested (or default) MaxAgeHours. Deliberately false, not true,
+	// when no backup has EVER succeeded (LastBackupTime == "") — "never
+	// backed up" and "backed up too long ago" are different findings, and
+	// callers must check LastBackupTime == "" for the former rather than
+	// relying on this field alone.
+	//
+	// No `omitempty`: found live 2026-09-30 that a model reading this result
+	// treated the field's *absence* (the omitempty-dropped false case) as
+	// ambiguous — "maybe stale" — rather than confidently reading it as a
+	// definite "no," and proceeded to call run_pgbackrest_backup on an
+	// already-current backup rather than following its own playbook's
+	// Ending A ("already healthy, nothing to do"). A write action should
+	// never hinge on whether the model correctly reconstructs a boolean from
+	// its absence.
+	BackupStale bool `json:"backup_stale"`
+}
+
+// PgBackRestSummary is the single synthesized item get_pgbackrest_status'
+// objective_evidence probe thresholds — mirrors BackupArchiverSummary's own
+// doc comment in agents/database/tools.go (v0.30 Part B): one item, since
+// stanza health is a property of the whole result, not a per-row signal.
+type PgBackRestSummary struct {
+	Stanza          string
+	StatusCode      int
+	BackupStale     bool
+	NeverBackedUp   bool
+	LastBackupLabel string
+}
+
+// pgbackrestEvidenceSchema declares get_pgbackrest_status' probe:
+// backup_unhealthy, true when the stanza itself reports a non-ok status, the
+// most recent backup is stale, or no backup has ever succeeded. See
+// agents/sysadmin/objective_evidence.yaml for the active configuration.
+//
+// The resource extractor deliberately returns Stanza, not LastBackupLabel —
+// found live 2026-09-30: backup_unhealthy is an OR of three conditions
+// (StatusCode != 0, BackupStale, NeverBackedUp), but LastBackupLabel is only
+// guaranteed non-empty for one of them (a stale-but-taken backup). For the
+// other two — a broken repo (confirmed live: reports stanza "[invalid]",
+// LastBackupLabel empty) and never-backed-up (LastBackupLabel empty by
+// definition) — resource_named_in_quote's own `if ev.Resource == ""
+// { return false }` guard made confirmation structurally impossible
+// regardless of how thoroughly the model engaged with the real
+// status_code/repo_status_message data. Stanza is populated in every one of
+// parsePgBackRestInfo's resolution outcomes (including "[invalid]" for a
+// broken repo), so it's always a real, quotable string to check for.
+var pgbackrestEvidenceSchema = evidence.NewToolSchema[PgBackRestSummary]("get_pgbackrest_status", func(s PgBackRestSummary) string {
+	return s.Stanza
+}).
+	Bool("backup_unhealthy", func(s PgBackRestSummary) bool {
+		return s.StatusCode != 0 || s.BackupStale || s.NeverBackedUp
+	}).
+	Register()
+
+// pgbackrestEvidenceRules holds the loaded rules for pgbackrestEvidenceSchema,
+// set by main() at startup. See loadDBEvidenceRules's sibling in
+// agents/database/main.go for the nil/empty convention this mirrors.
+var pgbackrestEvidenceRules []evidence.Rule
+
+// pgBackRestRawStanza/pgBackRestRawBackup/pgBackRestRawStatus mirror pgBackRest's
+// own `info --output=json` schema exactly as verified live (2026-09-26) — see
+// GetPgBackRestStatusResult's doc comment. Unexported: these are a parsing
+// detail, never returned directly.
+type pgBackRestRawStanza struct {
+	Name   string `json:"name"`
+	Status struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"status"`
+	// Repo carries a second, often more specific status than the top-level
+	// one above — verified live (2026-09-26): a permission-denied repo path
+	// produced Name="[invalid]", top-level status {99, "other"}, but
+	// Repo[0].Status.Message held the real detail:
+	// "[PathOpenError] unable to list file info for path
+	// '/var/lib/pgbackrest/backup': [13] Permission denied". Always prefer
+	// this message when present; it's what a human actually needs to see.
+	Repo []struct {
+		Status struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"status"`
+	} `json:"repo"`
+	Backup []pgBackRestRawBackup `json:"backup"`
+}
+
+type pgBackRestRawBackup struct {
+	Label     string `json:"label"`
+	Type      string `json:"type"`
+	Error     bool   `json:"error"`
+	Timestamp struct {
+		Start int64 `json:"start"`
+		Stop  int64 `json:"stop"`
+	} `json:"timestamp"`
+}
+
+// jsonArrayPrefix strips any non-JSON preamble before the first `[`,
+// returning output unchanged if none is found (letting json.Unmarshal
+// produce its own clear error rather than masking a genuinely different
+// problem). pgbackrest writes its own non-fatal `WARN:`/`INFO:` lines to
+// *stdout*, ahead of the real JSON array, whenever it has something to
+// complain about on an otherwise healthy run — confirmed live against a
+// real Kubernetes pod: Kubernetes auto-injects a `<SERVICE_NAME>_*` env var
+// per Service in the namespace, and pgbackrest warns about any that happen
+// to resemble one of its own `PGBACKREST_*`-prefixed options
+// ("WARN: environment contains invalid option 'demo-service-port'"),
+// breaking a naive json.Unmarshal of the raw combined output. This is
+// pgbackrest's own stdout behavior, not a stdout/stderr-mixing artifact of
+// this codebase's own dispatch layer (that was the first, wrong hypothesis
+// — both streams were checked directly, live, before writing this). Docker-
+// based testing never exercised this because Docker doesn't auto-inject
+// Service-derived env vars the way Kubernetes does.
+func jsonArrayPrefix(output string) string {
+	if idx := strings.IndexByte(output, '['); idx >= 0 {
+		return output[idx:]
+	}
+	return output
+}
+
+// parsePgBackRestInfo parses `pgbackrest info --output=json` output (an
+// array of stanzas — confirmed correct even for a single-stanza instance,
+// live, 2026-09-26) and computes staleness for the requested stanza.
+// wantStanza matches by exact name; when that fails (including when
+// wantStanza is empty), a single remaining entry is used regardless of its
+// name — see the name-resolution block below for why a broken stanza's own
+// reported name can't be relied on. More than one candidate with no exact
+// match is an error rather than a silent guess.
+func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPgBackRestStatusResult, error) {
+	var raw []pgBackRestRawStanza
+	if err := json.Unmarshal([]byte(jsonArrayPrefix(output)), &raw); err != nil {
+		return GetPgBackRestStatusResult{}, fmt.Errorf("parsing pgbackrest info JSON: %w", err)
+	}
+
+	var stanza *pgBackRestRawStanza
+	if wantStanza != "" {
+		for i := range raw {
+			if raw[i].Name == wantStanza {
+				stanza = &raw[i]
+				break
+			}
+		}
+	}
+	if stanza == nil {
+		// No exact name match (or none was requested). A single entry is
+		// used regardless of its name/whether one was requested — verified
+		// live that a critically broken stanza can report Name="[invalid]"
+		// rather than its configured name, and that's exactly the case
+		// callers most need surfaced, not silently turned into a generic
+		// "not found" error that discards the real diagnostic detail sitting
+		// right there in the same response.
+		switch len(raw) {
+		case 0:
+			return GetPgBackRestStatusResult{}, fmt.Errorf("pgbackrest info returned no stanzas at all — repo1-path likely doesn't exist or isn't reachable")
+		case 1:
+			stanza = &raw[0]
+		default:
+			names := make([]string, len(raw))
+			for i := range raw {
+				names[i] = raw[i].Name
+			}
+			if wantStanza != "" {
+				return GetPgBackRestStatusResult{}, fmt.Errorf("stanza %q not found among %d present (%s)", wantStanza, len(raw), strings.Join(names, ", "))
+			}
+			return GetPgBackRestStatusResult{}, fmt.Errorf("no stanza specified and %d stanzas present (%s) — pass one explicitly", len(raw), strings.Join(names, ", "))
+		}
+	}
+
+	result := GetPgBackRestStatusResult{
+		Stanza:        stanza.Name,
+		StatusCode:    stanza.Status.Code,
+		StatusMessage: stanza.Status.Message,
+	}
+	if len(stanza.Repo) > 0 {
+		result.RepoStatusCode = stanza.Repo[0].Status.Code
+		result.RepoStatusMessage = stanza.Repo[0].Status.Message
+	}
+	for _, b := range stanza.Backup {
+		result.Backups = append(result.Backups, PgBackRestBackup{
+			Label:     b.Label,
+			Type:      b.Type,
+			Error:     b.Error,
+			StartTime: time.Unix(b.Timestamp.Start, 0).UTC(),
+			StopTime:  time.Unix(b.Timestamp.Stop, 0).UTC(),
+		})
+	}
+
+	// Most recent by StopTime, not array position — pgBackRest's own
+	// documentation examples (backup[-1]) confirm array order is
+	// chronological, but comparing explicitly costs nothing and removes the
+	// assumption entirely.
+	var last *PgBackRestBackup
+	for i := range result.Backups {
+		if last == nil || result.Backups[i].StopTime.After(last.StopTime) {
+			last = &result.Backups[i]
+		}
+	}
+	if last != nil {
+		result.LastBackupLabel = last.Label
+		result.LastBackupTime = last.StopTime.Format(time.RFC3339)
+		result.LastBackupError = last.Error
+		if maxAge > 0 {
+			result.BackupStale = time.Since(last.StopTime) > maxAge
+		}
+	}
+	return result, nil
+}
+
+func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	cmdArgs := []string{"info", "--output=json"}
+	if args.Stanza != "" {
+		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
+	}
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return GetPgBackRestStatusResult{}, err
+		}
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+			// pgBackRest checks PGDATA ownership; run as the postgres OS
+			// user inside the container/pod rather than docker-exec's or
+			// kubectl-exec's own default (root), matching how pgBackRest
+			// expects to be invoked. shellCommand (sshexec.go) already
+			// exists for safe single-string quoting — reused here rather
+			// than writing a second quoter. execInProcess already knows how
+			// to route a Kubernetes-resolved host through `kubectl exec`
+			// (resolveHost leaves Runtime empty and K8sPodSelector set on
+			// that path — see checkHostImpl's identical branch) — this is
+			// the one targeted at a Postgres pod that is self-managed
+			// (plain Deployment, pgBackRest installed in the image), not an
+			// operator-managed one: CloudNativePG and similar operators
+			// don't run pgBackRest inside their pods at all, so resolving a
+			// CNPG-style target here would just fail with a real, honest
+			// "pgbackrest: command not found" from inside that pod, not a
+			// misleading silent-local-exec the way it used to.
+			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
+		default:
+			// SSH or bare local — runOnHost's own dispatch (sshexec.go)
+			// decides between them. The configured SSHUser (for SSH) or the
+			// agent process's own OS user (for local) is expected to already
+			// have PGDATA-appropriate permissions; unlike the docker/podman
+			// case above, there's no docker-exec default-user problem to
+			// work around here.
+			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
+		}
+	case infraConfig != nil:
+		// infraConfig is loaded (a real deployment with db_servers defined),
+		// but no target was given — this is a resolution failure, not a
+		// deliberate choice. Falling through to bare-local dispatch here
+		// would silently run pgbackrest against the agent's own host
+		// instead of any real target, which is never correct once infra
+		// config exists at all. Confirmed live 2026-09-30: a model given a
+		// connection_string that genuinely didn't match any known
+		// infrastructure entry reasoned its way into omitting target rather
+		// than escalating, producing a Go-level "executable not found"
+		// error that read like "pgBackRest isn't installed" when the real
+		// problem was "this agent process was never told about this
+		// target." Refuse loudly instead of letting that ambiguity through.
+		return GetPgBackRestStatusResult{}, fmt.Errorf(
+			"get_pgbackrest_status: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+	default:
+		// No infra config loaded at all — the only sensible reading is a
+		// genuinely colocated deployment, where this agent process runs on
+		// the same host as the pgBackRest repo it's checking.
+		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
+	}
+	if err != nil {
+		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w: %s", err, out)
+	}
+
+	maxAgeHours := args.MaxAgeHours
+	if maxAgeHours <= 0 {
+		maxAgeHours = defaultPgBackRestMaxAgeHours
+	}
+	result, parseErr := parsePgBackRestInfo(out, args.Stanza, time.Duration(maxAgeHours)*time.Hour)
+	if parseErr != nil {
+		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w", parseErr)
+	}
+	result.Output = out
+
+	if toolAuditor != nil {
+		summary := []PgBackRestSummary{{
+			Stanza:          result.Stanza,
+			StatusCode:      result.StatusCode,
+			BackupStale:     result.BackupStale,
+			NeverBackedUp:   result.LastBackupTime == "",
+			LastBackupLabel: result.LastBackupLabel,
+		}}
+		evidence.Evaluate(ctx, toolAuditor, pgbackrestEvidenceSchema, summary, pgbackrestEvidenceRules)
+	}
+	return result, nil
+}
+
+func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	start := time.Now()
+	result, err := getPgBackRestStatusImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "get_pgbackrest_status", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "get_pgbackrest_status",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
+// ── run_pgbackrest_backup ────────────────────────────────────────────────────
+
+// RunPgBackRestBackupArgs defines arguments for the run_pgbackrest_backup tool.
+type RunPgBackRestBackupArgs struct {
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
+	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+	Type   string `json:"type,omitempty" jsonschema:"Backup type: full, diff, or incr. Default full — always valid regardless of backup history, unlike diff/incr which require a prior full backup to reference."`
+}
+
+// RunPgBackRestBackupResult is the result of run_pgbackrest_backup.
+type RunPgBackRestBackupResult struct {
+	Output string `json:"output"`
+}
+
+// runPgBackRestBackupImpl is deliberately narrow: it exists ONLY to remediate
+// pbs_pgbackrest_health_triage's Ending C (a stale backup on an otherwise
+// healthy repo) by taking a fresh one — the same action a human would take,
+// no value-guessing involved. It does not attempt to fix Ending B (a broken
+// repo/stanza): permissions, ownership, and mount problems have no
+// confirmed-correct value to restore (unlike set_archive_command's
+// get_saved_snapshots pattern in agents/database/tools.go), so that case
+// stays a human escalation by design — see
+// pbs_pgbackrest_backup_remediate's own guidance for the explicit check
+// that refuses to run this against a broken repo.
+func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) (RunPgBackRestBackupResult, error) {
+	backupType := args.Type
+	if backupType == "" {
+		backupType = "full"
+	}
+
+	// Unlike `pgbackrest info`, the `backup` subcommand has no
+	// auto-detect-the-only-stanza behavior — it errors outright with
+	// "backup command requires option: stanza" if omitted. Confirmed live
+	// (2026-09-27) against a real single-stanza install. Resolve the same
+	// way get_pgbackrest_status's own single-stanza fallback does, rather
+	// than pushing that requirement onto every caller.
+	stanza := args.Stanza
+	if stanza == "" {
+		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		if err != nil {
+			return RunPgBackRestBackupResult{}, fmt.Errorf("run_pgbackrest_backup: resolving stanza name: %w", err)
+		}
+		stanza = status.Stanza
+	}
+	cmdArgs := []string{"--stanza=" + stanza, "--type=" + backupType, "backup"}
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return RunPgBackRestBackupResult{}, err
+		}
+		if policyEnforcer != nil {
+			policyCtx := agentutil.WithToolName(ctx, "run_pgbackrest_backup")
+			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+				policy.ActionWrite, host.Tags, "run pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
+				slog.Warn("policy denied pgbackrest backup", "target", args.Target, "err", err)
+				return RunPgBackRestBackupResult{}, err
+			}
+		}
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+			pgbrCmd := shellCommand("pgbackrest", cmdArgs, nil)
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", pgbrCmd})
+		default:
+			out, err = runOnHost(ctx, host, "pgbackrest", cmdArgs, nil)
+		}
+	case infraConfig != nil:
+		// Same reasoning as get_pgbackrest_status's own identical branch —
+		// infra config is loaded, so an empty target is a resolution
+		// failure, not a valid colocated-deployment request. Refuse rather
+		// than silently running a real backup command against the agent's
+		// own host.
+		return RunPgBackRestBackupResult{}, fmt.Errorf(
+			"run_pgbackrest_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+	default:
+		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
+	}
+	if err != nil {
+		return RunPgBackRestBackupResult{Output: out}, fmt.Errorf("run_pgbackrest_backup: %w: %s", err, out)
+	}
+	return RunPgBackRestBackupResult{Output: out}, nil
+}
+
+func runPgBackRestBackupTool(ctx agent.ToolContext, args RunPgBackRestBackupArgs) (RunPgBackRestBackupResult, error) {
+	start := time.Now()
+	result, err := runPgBackRestBackupImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "run_pgbackrest_backup", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "run_pgbackrest_backup",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza, "type": args.Type},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
 // ── DirectToolRegistry ───────────────────────────────────────────────────────
 
 // marshalResult marshals a value to JSON string for the direct tool registry.
@@ -1209,6 +1745,30 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := restartServiceImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("get_pgbackrest_status", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[GetPgBackRestStatusArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := getPgBackRestStatusImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("run_pgbackrest_backup", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RunPgBackRestBackupArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := runPgBackRestBackupImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

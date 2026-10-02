@@ -584,6 +584,14 @@ governance:
     maxEventsPerMinute: 100
 ```
 
+The `persistence` block above backs `auditd`'s default SQLite storage. Postgres is a
+fully-supported alternative backend (more concurrent-write headroom, or to keep auditd's storage
+on the same managed-database infrastructure as the rest of your stack) — set
+`governance.auditd.dsnSecret` instead, which also skips creating the SQLite PVC. See
+[docs/AUDIT.md §8.2](../../docs/AUDIT.md#82-postgres-backend) for the full setup, including a
+deployable reference Postgres manifest and the requirement that auditd's own storage never share
+a server with a target database this deployment monitors or remediates.
+
 ### 9.3 Governed Operating Modes
 
 Both governed modes (`readonly-governed` and `fix`) require audit and policy to be active before any agent will start. An agent that detects a missing or misconfigured module logs the violation and exits — it cannot be used until the gap is resolved.

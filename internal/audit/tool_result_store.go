@@ -2,7 +2,6 @@ package audit
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -15,8 +14,8 @@ type PersistedToolResult struct {
 	ResultID   string    `json:"result_id"`
 	ServerName string    `json:"server_name"`
 	ToolName   string    `json:"tool_name"`
-	ToolArgs   string    `json:"tool_args"`   // JSON-encoded args
-	Output     string    `json:"output"`      // raw tool output
+	ToolArgs   string    `json:"tool_args"` // JSON-encoded args
+	Output     string    `json:"output"`    // raw tool output
 	TraceID    string    `json:"trace_id,omitempty"`
 	JobID      string    `json:"job_id,omitempty"`
 	RecordedBy string    `json:"recorded_by"`
@@ -26,13 +25,13 @@ type PersistedToolResult struct {
 
 // ToolResultStore persists tool execution results for trend analysis and triage.
 type ToolResultStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewToolResultStore creates the tool_results table (if absent) and returns a
 // ready-to-use ToolResultStore.
-func NewToolResultStore(db *sql.DB, isPostgres bool) (*ToolResultStore, error) {
+func NewToolResultStore(db *rebindDB, isPostgres bool) (*ToolResultStore, error) {
 	s := &ToolResultStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create tool_result schema: %w", err)
@@ -51,7 +50,7 @@ CREATE TABLE IF NOT EXISTS tool_results (
     trace_id    TEXT     NOT NULL DEFAULT '',
     job_id      TEXT     NOT NULL DEFAULT '',
     recorded_by TEXT     NOT NULL DEFAULT '',
-    recorded_at DATETIME NOT NULL,
+    recorded_at TEXT     NOT NULL,
     success     INTEGER  NOT NULL DEFAULT 1
 )`)
 	if err != nil {
@@ -84,7 +83,7 @@ func (s *ToolResultStore) Record(ctx context.Context, r *PersistedToolResult) er
 		    (result_id, server_name, tool_name, tool_args, output, trace_id, job_id, recorded_by, recorded_at, success)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ResultID, r.ServerName, r.ToolName, r.ToolArgs, r.Output,
-		r.TraceID, r.JobID, r.RecordedBy, r.RecordedAt, successInt,
+		r.TraceID, r.JobID, r.RecordedBy, r.RecordedAt.Format("2006-01-02 15:04:05"), successInt,
 	)
 	return err
 }

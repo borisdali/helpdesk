@@ -42,6 +42,18 @@ type Failure struct {
 	// (e.g. CNPG-specific GRANT or cluster patch commands). Informational only.
 	Prerequisites string `yaml:"prerequisites,omitempty"`
 
+	// AgentConnOverride names an infrastructure.json db_servers alias (not a
+	// raw DSN) that this fault's agent-facing prompt/request must use instead
+	// of the harness-wide AgentConnStr/ConnStr. Exists because a full catalog
+	// sweep (e.g. `make faulttest`) applies one shared connection string to
+	// every database-category fault, but some faults need a genuinely
+	// different, dedicated target — db-pgbackrest-repo-unreadable needs its
+	// own pgBackRest-equipped container, not whatever Postgres instance the
+	// other 23 database faults in the same run share. Resolved via
+	// ResolvedAgentConnStr against HarnessConfig.InfraConfigPath; most faults
+	// leave this empty and are unaffected.
+	AgentConnOverride string `yaml:"agent_conn_override,omitempty"`
+
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.

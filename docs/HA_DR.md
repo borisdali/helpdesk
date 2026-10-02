@@ -1,10 +1,14 @@
 # aiHelpDesk High Availability / Disaster Recovery
 
-This document describes how aiHelpDesk diagnoses PostgreSQL HA/DR and, in particular, the streaming-replication failures. What's certified
-today and what's on the roadmap. This page is the dedicated home for a domain that
-doesn't fit [FAULTTEST.md](FAULTTEST.md#6-fault-catalog)'s catalog table, which is
-organized by injection mechanism (Docker, SSH, Kubernetes, pure-SQL), not by failure
-domain.
+This document describes how aiHelpDesk diagnoses PostgreSQL HA/DR and, in particular, the
+streaming-replication failures. What's certified today and what's on the roadmap. This page is
+the dedicated home for a domain that doesn't fit [FAULTTEST.md](FAULTTEST.md#6-fault-catalog)'s
+catalog table, which is organized by injection mechanism (Docker, SSH, Kubernetes, pure-SQL),
+not by failure domain.
+
+Backup-taking health (WAL archiving, pgBackRest) is documented separately in
+[BACKUP.md](BACKUP.md) — a different concern (data durability vs. availability) with its own,
+growing set of failure modes, not an advanced/optional feature the way replication/failover is.
 
 ## Table of Contents
 
@@ -195,10 +199,6 @@ Not yet built — tracked, not forgotten:
   PostgreSQL over SQL; nothing talks to Patroni's own REST API or its DCS backend
   (etcd/Consul/ZooKeeper) for leader-election state. This is a new tool category, not
   an incremental addition to existing ones.
-- **`pg_basebackup` / pgBackRest / pgbackup-job health.** Existing coverage
-  (`pbs_db_pitr_recovery`) is about *restoring* from a backup after data loss, but there's presently 
-  no coverage yet of backup-*taking* failures (a scheduled `pg_basebackup` job failing
-  mid-run, disk exhaustion during backup, verification failures).
 - **K8s-hosted replica support.** `pbs_sysadmin_replica_connectivity_triage` only
   branches on `runtime=docker`/`podman` today — no `runtime=kubectl` path (mirroring
   `pbs_sysadmin_docker_inspect`'s own `ESCALATE_TO: pbs_k8s_pod_crash_triage`) exists
@@ -206,7 +206,8 @@ Not yet built — tracked, not forgotten:
 
 ---
 
-See also: [FAULTTEST.md](FAULTTEST.md) for the fault injection CLI and full catalog
+See also: [BACKUP.md](BACKUP.md) for backup-taking health (WAL archiving, pgBackRest),
+[FAULTTEST.md](FAULTTEST.md) for the fault injection CLI and full catalog
 reference, [PLAYBOOKS.md](PLAYBOOKS.md) for the playbook schema and escalation
 mechanics, [CONSISTENCY.md](CONSISTENCY.md) for how a playbook earns a stability
 certification before entering live rotation.

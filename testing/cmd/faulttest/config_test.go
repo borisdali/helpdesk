@@ -470,7 +470,7 @@ func TestResolvePrompt(t *testing.T) {
 	}}
 
 	prompt := "Connect to {{connection_string}} and check replica at {{replica_connection_string}} in context {{kube_context}}"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	expected := "Connect to host=db.example.com port=5432 dbname=prod and check replica at host=replica.example.com port=5432 dbname=prod in context gke_prod"
 	if result != expected {
@@ -488,7 +488,7 @@ func TestResolvePrompt_ServerID(t *testing.T) {
 	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ServerID: "test-db"}}
 
 	prompt := "The database server '{{server_id}}' is not responding."
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	expected := "The database server 'test-db' is not responding."
 	if result != expected {
@@ -500,7 +500,7 @@ func TestResolvePrompt_NoPlaceholders(t *testing.T) {
 	cfg := &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{ConnStr: "host=db.example.com"}}
 
 	prompt := "Simple prompt with no placeholders"
-	result := ResolvePrompt(prompt, cfg)
+	result := ResolvePrompt(prompt, cfg, faultlib.Failure{})
 
 	if result != prompt {
 		t.Errorf("ResolvePrompt changed text unexpectedly: %s", result)
@@ -585,6 +585,78 @@ func TestCatalog_DiagnosisPlaybookSeriesIDs_Exist(t *testing.T) {
 		if !known[f.DiagnosisPlaybookSeriesID] {
 			t.Errorf("fault %q: diagnosis_playbook_series_id=%q not found in playbooks/",
 				f.ID, f.DiagnosisPlaybookSeriesID)
+		}
+	}
+}
+
+// TestCatalog_RemediationPlaybookIDs_Exist mirrors
+// TestCatalog_DiagnosisPlaybookSeriesIDs_Exist above but for
+// remediation.playbook_id — the same class of regression (a renamed or
+// missing playbook) but on the remediation side, which had no coverage at
+// all until this test (found answering "do we need additional test
+// coverage?" after v0.30 Part B shipped its own remediation.playbook_id
+// reference).
+func TestCatalog_RemediationPlaybookIDs_Exist(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	entries, err := playbooks.FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading playbooks FS: %v", err)
+	}
+	known := make(map[string]bool)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, readErr := playbooks.FS.ReadFile(entry.Name())
+		if readErr != nil {
+			t.Fatalf("reading playbook %s: %v", entry.Name(), readErr)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "series_id:") {
+				known[strings.TrimSpace(strings.TrimPrefix(line, "series_id:"))] = true
+				break
+			}
+		}
+	}
+
+	for _, f := range cat.Failures {
+		if f.Remediation.PlaybookID == "" {
+			continue
+		}
+		if !known[f.Remediation.PlaybookID] {
+			t.Errorf("fault %q: remediation.playbook_id=%q not found in playbooks/",
+				f.ID, f.Remediation.PlaybookID)
+		}
+	}
+}
+
+// TestCatalog_ExpectedTools_HaveToolPatterns guards against a real bug class
+// found twice now (first during v0.30 Part B, again while auditing Part C's
+// own coverage): a fault's evaluation.expected_tools entry with no matching
+// faultlib.ToolPatterns entry silently scores 0 tool-evidence on the
+// text-based fallback path (cmd/faulttest/evaluator.go's Option B, used when
+// structured tool_call_summary data is unavailable — the gateway path or a
+// non-ADK agent). The primary structured-tool-call path doesn't need
+// ToolPatterns at all, so this gap is invisible in a normal live run and
+// only surfaces on that fallback — exactly why it slipped in twice without
+// a test catching it either time.
+func TestCatalog_ExpectedTools_HaveToolPatterns(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	for _, f := range cat.Failures {
+		for _, tool := range f.Evaluation.ExpectedTools {
+			if _, ok := faultlib.ToolPatterns[tool]; !ok {
+				t.Errorf("fault %q: expected_tools includes %q, which has no faultlib.ToolPatterns entry — "+
+					"add one or the fallback text-matching evaluator will silently score 0 tool-evidence for it",
+					f.ID, tool)
+			}
 		}
 	}
 }

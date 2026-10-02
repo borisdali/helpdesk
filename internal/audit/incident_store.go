@@ -71,13 +71,13 @@ type IncidentUpdate struct {
 
 // IncidentStore persists Incident rows.
 type IncidentStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewIncidentStore creates the incidents table (if absent) and returns a
 // ready-to-use IncidentStore.
-func NewIncidentStore(db *sql.DB, isPostgres bool) (*IncidentStore, error) {
+func NewIncidentStore(db *rebindDB, isPostgres bool) (*IncidentStore, error) {
 	s := &IncidentStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create incidents schema: %w", err)
@@ -97,10 +97,10 @@ CREATE TABLE IF NOT EXISTS incidents (
     attribution               TEXT     NOT NULL DEFAULT '',
     external_correlation_id   TEXT     NOT NULL DEFAULT '',
     bundle_path               TEXT     NOT NULL DEFAULT '',
-    detected_at               DATETIME NOT NULL,
-    resolved_at               DATETIME NOT NULL DEFAULT '',
-    created_at                DATETIME NOT NULL,
-    updated_at                DATETIME NOT NULL
+    detected_at               TEXT     NOT NULL,
+    resolved_at               TEXT     NOT NULL DEFAULT '',
+    created_at                TEXT     NOT NULL,
+    updated_at                TEXT     NOT NULL
 )`)
 	if err != nil {
 		return err

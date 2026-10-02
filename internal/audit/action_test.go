@@ -212,6 +212,22 @@ func TestClassifyDelegation(t *testing.T) {
 			message:  "Cancel the idle backend that is blocking the table",
 			expected: ActionWrite,
 		},
+		{
+			// Regression: the sysadmin-playbook first-line tool hint for
+			// pbs_pgbackrest_backup_remediate names run_pgbackrest_backup, a
+			// real write action (internal/audit/action.go's own
+			// ToolClassification agrees) — but before "backup" was added to
+			// writeKeywords, this line classified as ActionRead (matches
+			// "status"/"get" from readKeywords), which weakens
+			// ClassifyDelegation-based fabrication detection for this
+			// playbook's actual write step. Found tracing the live
+			// faulttest call path for v0.30 Part C, not from a written
+			// spec.
+			name:     "pgbackrest backup remediation hint",
+			agent:    "sysadmin_agent",
+			message:  "Follow the Expert Guidance below — use get_pgbackrest_status and run_pgbackrest_backup as instructed.",
+			expected: ActionWrite,
+		},
 
 		// Destructive operations
 		{

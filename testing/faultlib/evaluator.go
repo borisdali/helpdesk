@@ -14,6 +14,8 @@ var ToolPatterns = map[string][]string{
 	"get_database_stats":     {"cache hit", "blks_hit", "blks_read", "tup_returned", "hit ratio"},
 	"get_config_parameter":   {"setting", "parameter", "configuration"},
 	"get_replication_status": {"replication", "wal", "replay", "standby", "lag"},
+	"get_backup_status":      {"archive_mode", "archiving", "pg_stat_archiver", "archive_command", "archived_count"},
+	"set_archive_command":    {"archive_command", "alter system", "pg_reload_conf"},
 	"get_lock_info":          {"lock", "pg_locks", "granted", "waiting", "blocked"},
 	"get_table_stats":        {"n_dead_tup", "n_live_tup", "dead tuples", "autovacuum", "vacuum"},
 	"get_pods":               {"pod", "Running", "Pending", "CrashLoopBackOff", "ImagePull"},
@@ -42,11 +44,16 @@ var ToolPatterns = map[string][]string{
 	// scale_deployment is used in k8s-scale-to-zero; patterns reference output text.
 	"scale_deployment": {"scaled", "replicas", "scale"},
 	// Sysadmin agent tools.
-	"check_host":       {"status", "runtime", "container", "stopped", "running", "exited"},
-	"get_host_logs":    {"log", "logs", "stderr", "stdout"},
-	"check_disk":       {"disk", "filesystem", "available", "used"},
-	"check_memory":     {"memory", "mem", "available", "used"},
-	"read_pg_log_file": {"postgresql", "log", "fatal", "panic", "crash", "error"},
+	"check_host":            {"status", "runtime", "container", "stopped", "running", "exited"},
+	"get_host_logs":         {"log", "logs", "stderr", "stdout"},
+	"check_disk":            {"disk", "filesystem", "available", "used"},
+	"check_memory":          {"memory", "mem", "available", "used"},
+	"read_pg_log_file":      {"postgresql", "log", "fatal", "panic", "crash", "error"},
+	"get_pgbackrest_status": {"pgbackrest", "stanza", "backup_stale", "status_code", "repo"},
+	"run_pgbackrest_backup": {"pgbackrest", "backup", "stanza"},
+	// K8s agent tools.
+	"read_pod_file":    {"panic", "fatal", "no space left on device", "pg_wal", "is empty or not found"},
+	"debug_node_dmesg": {"dmesg", "oom", "out of memory", "killed process", "kernel"},
 }
 
 // ToolOrderingPatterns overrides ToolPatterns for the tool-ordering check only.

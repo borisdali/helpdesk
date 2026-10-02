@@ -19,20 +19,20 @@ const GenesisHash = "00000000000000000000000000000000000000000000000000000000000
 func ComputeEventHash(event *Event) string {
 	// Create a copy without the hash field for consistent hashing
 	hashInput := struct {
-		EventID     string      `json:"event_id"`
-		Timestamp   string      `json:"timestamp"`
-		EventType   EventType   `json:"event_type"`
-		TraceID     string      `json:"trace_id,omitempty"`
-		ParentID    string      `json:"parent_id,omitempty"`
-		ActionClass ActionClass `json:"action_class,omitempty"`
-		PrevHash    string      `json:"prev_hash,omitempty"`
-		Session     Session     `json:"session"`
-		Input       Input       `json:"input"`
-		Output      *Output     `json:"output,omitempty"`
+		EventID     string         `json:"event_id"`
+		Timestamp   string         `json:"timestamp"`
+		EventType   EventType      `json:"event_type"`
+		TraceID     string         `json:"trace_id,omitempty"`
+		ParentID    string         `json:"parent_id,omitempty"`
+		ActionClass ActionClass    `json:"action_class,omitempty"`
+		PrevHash    string         `json:"prev_hash,omitempty"`
+		Session     Session        `json:"session"`
+		Input       Input          `json:"input"`
+		Output      *Output        `json:"output,omitempty"`
 		Tool        *ToolExecution `json:"tool,omitempty"`
-		Approval    *Approval   `json:"approval,omitempty"`
-		Decision    *Decision   `json:"decision,omitempty"`
-		Outcome     *Outcome    `json:"outcome,omitempty"`
+		Approval    *Approval      `json:"approval,omitempty"`
+		Decision    *Decision      `json:"decision,omitempty"`
+		Outcome     *Outcome       `json:"outcome,omitempty"`
 	}{
 		EventID:     event.EventID,
 		Timestamp:   event.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"),
@@ -112,8 +112,8 @@ func VerifyChain(events []Event) (int, error) {
 type ChainStatus struct {
 	Valid        bool   `json:"valid"`
 	TotalEvents  int    `json:"total_events"`
-	HashedEvents int    `json:"hashed_events"` // Events with hash chains
-	LegacyEvents int    `json:"legacy_events"` // Events without hashes
+	HashedEvents int    `json:"hashed_events"`       // Events with hash chains
+	LegacyEvents int    `json:"legacy_events"`       // Events without hashes
 	BrokenAt     int    `json:"broken_at,omitempty"` // Index of first break (-1 if valid)
 	Error        string `json:"error,omitempty"`
 	FirstEventID string `json:"first_event_id,omitempty"`

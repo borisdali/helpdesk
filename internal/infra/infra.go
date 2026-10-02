@@ -52,6 +52,22 @@ type VM struct {
 	Name    string `json:"name"`
 	Address string `json:"address"`          // hostname or IP address
 	Runtime string `json:"runtime,omitempty"` // container runtime: "docker", "podman", or "" (systemd/direct)
+
+	// SSH fields (all optional): when SSHUser and SSHKeyPath are both set, sysadmin
+	// tools that need to reach this host run their command over SSH instead of the
+	// local exec.CommandContext path. Absent (the default), behavior is unchanged
+	// from before these fields existed — local-exec only.
+	//
+	// This project never manages SSH key material or its rotation — SSHKeyPath is a
+	// reference (mirroring DBServer.PasswordEnv's own "env var name, not the secret"
+	// philosophy), read fresh on every connection, never cached. A key that happens
+	// to be a short-lived credential (e.g. a Vault SSH secrets engine lease, a
+	// companion SSHKeyPath+"-cert.pub" certificate refreshed by a Vault Agent
+	// sidecar) works transparently for the same reason: this code has no opinion
+	// about expiry, it just reads whatever is at that path right now.
+	SSHUser    string `json:"ssh_user,omitempty"`
+	SSHPort    int    `json:"ssh_port,omitempty"`     // default 22 when SSHUser is set
+	SSHKeyPath string `json:"ssh_key_path,omitempty"` // private key path; a sibling "<path>-cert.pub" enables certificate auth
 }
 
 // Config holds the infrastructure inventory.

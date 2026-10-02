@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -11,36 +10,36 @@ import (
 // audit store. All govbot instances (across teams/gateways) can write to the
 // same database; the Gateway field distinguishes their origin.
 type GovbotRun struct {
-	ID                   int64     `json:"id,omitempty"`
-	RunAt                time.Time `json:"run_at"`
-	Window               string    `json:"window"`
-	Gateway              string    `json:"gateway"`
-	Status               string    `json:"status"` // healthy | warnings | alerts
-	AlertCount           int       `json:"alert_count"`
-	WarningCount         int       `json:"warning_count"`
-	Alerts               []string  `json:"alerts"`
-	Warnings             []string  `json:"warnings"`
-	ChainValid           bool      `json:"chain_valid"`
-	PolicyDenies         int       `json:"policy_denies"`
-	PolicyNoMatch        int       `json:"policy_no_match"`
-	MutationsTotal       int       `json:"mutations_total"`
-	MutationsDestructive int       `json:"mutations_destructive"`
-	PendingApprovals     int       `json:"pending_approvals"`
-	StaleApprovals         int    `json:"stale_approvals"`
-	DecisionsByResource    string `json:"decisions_by_resource,omitempty"`
-	InvocationsByResource  string `json:"invocations_by_resource,omitempty"`
+	ID                    int64     `json:"id,omitempty"`
+	RunAt                 time.Time `json:"run_at"`
+	Window                string    `json:"window"`
+	Gateway               string    `json:"gateway"`
+	Status                string    `json:"status"` // healthy | warnings | alerts
+	AlertCount            int       `json:"alert_count"`
+	WarningCount          int       `json:"warning_count"`
+	Alerts                []string  `json:"alerts"`
+	Warnings              []string  `json:"warnings"`
+	ChainValid            bool      `json:"chain_valid"`
+	PolicyDenies          int       `json:"policy_denies"`
+	PolicyNoMatch         int       `json:"policy_no_match"`
+	MutationsTotal        int       `json:"mutations_total"`
+	MutationsDestructive  int       `json:"mutations_destructive"`
+	PendingApprovals      int       `json:"pending_approvals"`
+	StaleApprovals        int       `json:"stale_approvals"`
+	DecisionsByResource   string    `json:"decisions_by_resource,omitempty"`
+	InvocationsByResource string    `json:"invocations_by_resource,omitempty"`
 }
 
 // GovbotStore persists GovbotRun snapshots. It shares the same *sql.DB
 // connection as the audit Store and ApprovalStore.
 type GovbotStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewGovbotStore creates the govbot_runs table (if absent) and returns a
 // ready-to-use GovbotStore using the given shared database connection.
-func NewGovbotStore(db *sql.DB, isPostgres bool) (*GovbotStore, error) {
+func NewGovbotStore(db *rebindDB, isPostgres bool) (*GovbotStore, error) {
 	s := &GovbotStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create govbot schema: %w", err)
@@ -49,6 +48,11 @@ func NewGovbotStore(db *sql.DB, isPostgres bool) (*GovbotStore, error) {
 }
 
 func (s *GovbotStore) createSchema() error {
+	// "window" is double-quoted everywhere it appears as a column identifier
+	// in this file: WINDOW is a reserved SQL keyword (the WINDOW clause) and
+	// Postgres rejects it unquoted — SQLite is permissive about reserved
+	// words and let this slip through untested until Postgres-backend
+	// validation caught it (v0.30).
 	pk := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if s.isPostgres {
 		pk = "BIGSERIAL PRIMARY KEY"
@@ -57,7 +61,7 @@ func (s *GovbotStore) createSchema() error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS govbot_runs (
     id                    %s,
     run_at                TEXT    NOT NULL,
-    window                TEXT    NOT NULL,
+    "window"              TEXT    NOT NULL,
     gateway               TEXT    NOT NULL,
     status                TEXT    NOT NULL,
     alert_count           INTEGER NOT NULL DEFAULT 0,
@@ -75,7 +79,7 @@ func (s *GovbotStore) createSchema() error {
     invocations_by_resource TEXT
 )`, pk),
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_run_at ON govbot_runs(run_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_window  ON govbot_runs(window)`,
+		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_window  ON govbot_runs("window")`,
 		`CREATE INDEX IF NOT EXISTS idx_govbot_runs_gateway ON govbot_runs(gateway)`,
 	}
 	for _, stmt := range stmts {
@@ -102,7 +106,7 @@ func (s *GovbotStore) SaveRun(run GovbotRun) error {
 		chainInt = 1
 	}
 	q := rebind(s.isPostgres, `INSERT INTO govbot_runs
-		(run_at, window, gateway, status,
+		(run_at, "window", gateway, status,
 		 alert_count, warning_count, alerts_json, warnings_json,
 		 chain_valid, policy_denies, policy_no_match,
 		 mutations_total, mutations_destructive,
@@ -143,7 +147,7 @@ func (s *GovbotStore) Prune(gateway string, retain int) error {
 // RecentRuns returns the last limit runs, newest first. Pass window="" to
 // return runs across all windows. Pass gateway="" to return all gateways.
 func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun, error) {
-	cols := `id, run_at, window, gateway, status,
+	cols := `id, run_at, "window", gateway, status,
 		alert_count, warning_count, alerts_json, warnings_json,
 		chain_valid, policy_denies, policy_no_match,
 		mutations_total, mutations_destructive,
@@ -154,7 +158,7 @@ func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun
 	var where []string
 	var args []any
 	if window != "" {
-		where = append(where, "window = ?")
+		where = append(where, `"window" = ?`)
 		args = append(args, window)
 	}
 	if gateway != "" {
@@ -194,7 +198,7 @@ func (s *GovbotStore) RecentRuns(window, gateway string, limit int) ([]GovbotRun
 		}
 		r.RunAt, _ = time.Parse(time.RFC3339, runAtStr)
 		r.ChainValid = chainInt != 0
-		json.Unmarshal([]byte(alertsJSON), &r.Alerts)   //nolint:errcheck
+		json.Unmarshal([]byte(alertsJSON), &r.Alerts)     //nolint:errcheck
 		json.Unmarshal([]byte(warningsJSON), &r.Warnings) //nolint:errcheck
 		runs = append(runs, r)
 	}

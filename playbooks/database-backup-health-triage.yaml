@@ -1,0 +1,77 @@
+series_id: pbs_db_backup_health_triage
+name: Database Backup / WAL Archiving Health Triage
+version: "1.0"
+playbook_type: triage
+entry_point: true
+execution_mode: agent
+agent_name: postgres_database_agent
+approval_mode: manual
+# Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
+# The gateway validates emitted TRANSITION_TO directives against this list and
+# coerces anything outside it to requires_operator_approval — preventing the
+# model from inventing playbook names.
+transitions_to:
+  - pbs_db_backup_archiving_remediate
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Assess whether PostgreSQL WAL archiving is healthy. Distinguishes three
+  different conditions that all look ambiguous without a tool: archiving
+  never configured at all (a policy choice, not a failure), archiving
+  configured and healthy, and archiving configured but currently failing —
+  the precondition failure for both point-in-time recovery and most base
+  backup strategies.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - backup-archiving-not-configured
+    - backup-archiving-command-failing
+symptoms:
+  - "monitoring alert: WAL archiving may not be keeping up"
+  - "pg_stat_archiver shows a recent failed_count increase"
+  - "unsure whether backups/PITR are currently viable"
+  - "disk usage growing in pg_wal — possible archiving backlog"
+guidance: |
+  Use get_backup_status. It reports archive_mode (on/off) and, when on, the
+  most recent archiving activity from pg_stat_archiver: archived_count,
+  last_archived_wal/time, failed_count, last_failed_wal/time, and a
+  computed archiving_stale flag.
+
+  archiving_stale is already the correct signal, not a raw count: it's true
+  only when the most recent archiving event was a failure that hasn't since
+  been followed by a success. pg_stat_archiver is a cumulative counter view
+  — failed_count > 0 by itself is not evidence anything is currently wrong,
+  since a transient failure that was retried and later succeeded increments
+  failed_count too. Do NOT treat failed_count > 0 alone as a problem; only
+  archiving_stale=true (or, reading the raw fields yourself,
+  last_failed_time more recent than last_archived_time) means archiving is
+  presently stuck.
+
+  Three mutually exclusive endings, pick exactly one based on what you found:
+
+  Ending A — archive_mode is off:
+  This is not a failure to diagnose — it's a policy question for the
+  customer (do they want WAL archiving at all). Do not recommend enabling
+  it as if it were an obvious fix; report the finding and let a human
+  decide.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: archive_mode=off — WAL archiving is not configured on this instance; no PITR/base-backup capability exists until an operator explicitly enables it
+  ESCALATE_TO: none
+
+  Ending B — archive_mode is on and archiving_stale is true (the real problem):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: archive_mode=on; archiving_stale=true; last_failed_wal=<wal file>; last_failed_time=<timestamp>; failed_count=<N>; archived_count=<N>
+  TRANSITION_TO: pbs_db_backup_archiving_remediate
+
+  Ending C — archive_mode is on and archiving_stale is false (healthy):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: archive_mode=on; archiving_stale=false; last_archived_wal=<wal file>; last_archived_time=<timestamp>; no action needed
+  ESCALATE_TO: none
+escalation:
+  - "archive_mode is on and archiving_stale is true — WAL archiving is currently failing"
+  - "failed_count is climbing across repeated checks even if the most recent single attempt succeeded — investigate the underlying archive_command reliability"
+target_hints: []

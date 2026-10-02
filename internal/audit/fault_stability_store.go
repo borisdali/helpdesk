@@ -95,13 +95,13 @@ func (c *FaultStabilityCert) EarnsTrust() bool {
 
 // FaultStabilityStore persists and retrieves fault triage consistency certs.
 type FaultStabilityStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 }
 
 // NewFaultStabilityStore creates the fault_stability_cert table if needed and
 // returns a ready-to-use FaultStabilityStore.
-func NewFaultStabilityStore(db *sql.DB, isPostgres bool) (*FaultStabilityStore, error) {
+func NewFaultStabilityStore(db *rebindDB, isPostgres bool) (*FaultStabilityStore, error) {
 	s := &FaultStabilityStore{db: db, isPostgres: isPostgres}
 	if err := s.createSchema(); err != nil {
 		return nil, fmt.Errorf("create fault_stability_cert schema: %w", err)

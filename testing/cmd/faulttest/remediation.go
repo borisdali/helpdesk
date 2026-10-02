@@ -490,6 +490,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 			Resolution:   "approved",
 			ResolvedBy:   r.cfg.OperatorID,
 			ApprovalMode: "auto",
+			Purpose:      "remediation",
 		})
 		return err
 	}
@@ -648,6 +649,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		ResolvedBy:       r.cfg.OperatorID,
 		ApprovalMode:     modeInput,
 		ConnectionString: connStr,
+		Purpose:          "remediation",
 		Reason:           reasonInput,
 		VerdictCorrect:   verdictCorrect,
 		VerdictNotes:     verdictNotes,
@@ -717,6 +719,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 			ResolvedBy:       r.cfg.OperatorID,
 			ApprovalMode:     "force",
 			ConnectionString: connStr,
+			Purpose:          "remediation",
 		})
 		if err != nil {
 			return fmt.Errorf("proceed-escalation: %w", err)

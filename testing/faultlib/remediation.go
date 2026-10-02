@@ -67,7 +67,17 @@ type ProceedEscalationRequest struct {
 	ApprovalMode     string `json:"approval_mode,omitempty"` // "manual"|"review"|"auto"|"session"|"force"
 	ApprovalSession  string `json:"approval_session,omitempty"`
 	ConnectionString string `json:"connection_string,omitempty"`
-	Reason           string `json:"reason,omitempty"` // optional operator rationale
+	// Purpose, forwarded to the remediation playbook (cmd/gateway/playbooks.go's
+	// own ProceedEscalationRequest.Purpose) — found live, 2026-10-01: this
+	// struct never had this field at all, so no caller could ever set it,
+	// unlike every other Purpose-forwarding request in this file
+	// (TriggerPlaybookRun/ProceedStep/triggerAgent all set X-Purpose directly).
+	// The gateway's own fallback (the triage run's recorded Purpose) doesn't
+	// save this either — that field wasn't being persisted on the triage run
+	// in the first place — so remediation's first tool call was denied with
+	// purpose="" even though the triage phase itself had succeeded.
+	Purpose string `json:"purpose,omitempty"`
+	Reason  string `json:"reason,omitempty"` // optional operator rationale
 	// At-gate feedback — captured before remediation runs.
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
 	VerdictNotes   string `json:"verdict_notes,omitempty"`
@@ -339,6 +349,10 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 		ResolvedBy:       "faulttest",
 		ApprovalMode:     approvalMode,
 		ConnectionString: connStr,
+		// Matches every other Purpose-forwarding request in this file
+		// (TriggerPlaybookRun/ProceedStep/triggerAgent) — this call is
+		// specifically what approves and triggers the remediation phase.
+		Purpose: "remediation",
 	}
 	resp, err := r.ProceedEscalation(ctx, gate.RunID, proceedReq)
 	if err != nil {

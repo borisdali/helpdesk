@@ -13,7 +13,7 @@ import (
 
 // ApprovalStore persists approval requests to the database (SQLite or PostgreSQL).
 type ApprovalStore struct {
-	db         *sql.DB
+	db         *rebindDB
 	isPostgres bool
 	waiters    map[string][]chan *StoredApproval // keyed by approval_id
 	waiterMu   sync.Mutex
@@ -49,7 +49,7 @@ type StoredApproval struct {
 	ResolutionReason string    `json:"resolution_reason,omitempty"`
 
 	// Expiration
-	ExpiresAt         time.Time `json:"expires_at,omitempty"`
+	ExpiresAt          time.Time `json:"expires_at,omitempty"`
 	ApprovalValidUntil time.Time `json:"approval_valid_until,omitempty"`
 
 	// Policy
@@ -68,7 +68,7 @@ type StoredApproval struct {
 // NewApprovalStore creates a new approval store using the given database connection.
 // The database should already be opened (typically shared with the audit Store).
 // isPostgres should match the backend used by the Store that owns the connection.
-func NewApprovalStore(db *sql.DB, isPostgres bool) (*ApprovalStore, error) {
+func NewApprovalStore(db *rebindDB, isPostgres bool) (*ApprovalStore, error) {
 	if err := createApprovalTables(db, isPostgres); err != nil {
 		return nil, fmt.Errorf("create approval tables: %w", err)
 	}
@@ -80,7 +80,7 @@ func NewApprovalStore(db *sql.DB, isPostgres bool) (*ApprovalStore, error) {
 	}, nil
 }
 
-func createApprovalTables(db *sql.DB, isPostgres bool) error {
+func createApprovalTables(db *rebindDB, isPostgres bool) error {
 	pkDef := "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if isPostgres {
 		pkDef = "BIGSERIAL PRIMARY KEY"
