@@ -1,7 +1,7 @@
 # aiHelpDesk Audit System
 
 This document covers the audit system in depth: event types, the hash chain,
-all API endpoints, the `auditor` monitoring CLI, and environment variables. For
+all API endpoints, the `auditor` monitoring CLI and environment variables. For
 the broader governance architecture see [AIGOVERNANCE.md](AIGOVERNANCE.md). For
 policy decision history and the `govexplain` CLI see [GOVEXPLAIN.md](GOVEXPLAIN.md).
 For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
@@ -29,7 +29,7 @@ For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
    - [6.4 Governance](#64-governance)
    - [6.5 Fleet jobs](#65-fleet-jobs)
    - [6.6 Rollbacks](#66-rollbacks)
-   - [6.7 Health](#67-health)
+   - [6.7 Health and Readiness](#67-health-and-readiness)
    - [6.8 Approval Sessions](#68-approval-sessions)
 7. [Event Query Filters](#7-event-query-filters)
 8. [Starting auditd](#8-starting-auditd)
@@ -60,7 +60,7 @@ For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
 
 The audit system is a tamper-evident, hash-chained log of every significant
 action taken by aiHelpDesk agents. Every tool execution, policy decision,
-delegation, and gateway request produces an audit event. Events are stored in
+delegation and gateway request produces an audit event. Events are stored in
 `auditd`, an independent service, so that a compromised agent cannot erase its
 own footprint.
 
@@ -153,7 +153,7 @@ Core fields present on every event:
 | `event_type` | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation`, `rollback_initiated`, `rollback_executed`, `rollback_verified` |
 | `session_id` | Session identifier of the recording component |
 | `trace_id` | End-to-end correlation ID; empty when no orchestrator context |
-| `origin` | Dispatch path that produced the event: `"direct_tool"` (fleet-runner structured dispatch via `POST /tool/{name}`), `"agent"` (LLM/A2A path), or `"gateway"` (gateway-originated request). Set on `tool_execution` and `tool_invoked` events; absent on delegation and reasoning events. See [§4.5](#45-origin-values). |
+| `origin` | Dispatch path that produced the event: `"direct_tool"` (fleet-runner structured dispatch via `POST /tool/{name}`), `"agent"` (LLM/A2A path) or `"gateway"` (gateway-originated request). Set on `tool_execution` and `tool_invoked` events; absent on delegation and reasoning events. See [§4.5](#45-origin-values). |
 | `agent` | Name of the agent that recorded the event |
 | `prev_hash` | SHA-256 of the previous event in the chain |
 | `event_hash` | SHA-256 of this event's canonical JSON |
@@ -163,7 +163,7 @@ Core fields present on every event:
 | Field | Description |
 |-------|-------------|
 | `tool_name` | Tool that executed (e.g. `run_sql`, `delete_pod`) |
-| `action_class` | `read`, `write`, or `destructive` |
+| `action_class` | `read`, `write` or `destructive` |
 | `outcome_status` | `success` or `error` |
 | `outcome_error` | Error message if the tool failed |
 | `duration_ms` | Execution time in milliseconds |
@@ -171,7 +171,7 @@ Core fields present on every event:
 
 #### Rollback event fields
 
-Three additional event types appear in the audit chain whenever a rollback is initiated, executed, or verified.
+Three additional event types appear in the audit chain whenever a rollback is initiated, executed or verified.
 
 | Event type | Key fields |
 |---|---|
@@ -193,9 +193,9 @@ curl "http://localhost:1199/v1/journeys?trace_id=tr_rbk_a1b2c3d4"
 |-------|-------------|
 | `resource_type` | `database` or `kubernetes` |
 | `resource_name` | Resource identifier |
-| `action` | `read`, `write`, or `destructive` |
+| `action` | `read`, `write` or `destructive` |
 | `tags` | Tags resolved from infra config |
-| `effect` | `allow`, `deny`, or `require_approval` |
+| `effect` | `allow`, `deny` or `require_approval` |
 | `policy_name` | Name of the matched policy (or `default`) |
 | `message` | Human-readable reason from the matched rule |
 | `explanation` | Full decision trace in human-readable form |
@@ -236,7 +236,7 @@ response — this is the authoritative record of what the sub-agent actually did
 | `tools_confirmed` | Tool names that appear in the audit trail for this trace since the delegation started |
 | `write_confirmed` | Subset of `tools_confirmed` classified as `write` |
 | `destructive_confirmed` | Subset of `tools_confirmed` classified as `destructive` |
-| `mismatch` | `true` when either (a) the delegation was `write`/`destructive` but no tool of that class or stronger is in the trail, or (b) — regardless of `action_class`, including `read` — the model's own reasoning named a tool it never actually invoked (see `narrated_not_confirmed`) and no policy denial explains the absence |
+| `mismatch` | `true` when either (a) the delegation was `write`/`destructive` but no tool of that class or stronger is in the trail or (b) — regardless of `action_class`, including `read` — the model's own reasoning named a tool it never actually invoked (see `narrated_not_confirmed`) and no policy denial explains the absence |
 | `narrated_not_confirmed` | Tool names the model's own reasoning (`agent_reasoning` events' `tool_calls`) claimed to invoke, with no matching `tool_execution` event anywhere in the trace. Empty when `mismatch` is the write/destructive-absence kind instead. See [MUTATION_TOOLS.md §5.7](MUTATION_TOOLS.md#57-narrated-but-unconfirmed-tool-calls-read-action-coverage) |
 | `target_drift` | Connection strings a tool call in this hop actually used that differ from the run's intended target. Independent of `mismatch` — a real, confirmed tool call can still target the wrong server. See [MUTATION_TOOLS.md §5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) |
 | `unverified_evidence` | Hypothesis `EVIDENCE` quotes (v0.28.0) on the report's **primary/root-cause hypothesis** that didn't match, after normalization, any real `tool_execution` output recorded for this hop. Independent of `mismatch` — the tool call itself can be real and correctly confirmed while the quote is fabricated. Content-provenance, fabrication-detection Layer 3. Each quote is prefixed with its owning hypothesis's own text. See [MUTATION_TOOLS.md §5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance) |
@@ -287,7 +287,7 @@ The orchestrator prompt instructs the LLM to report mismatches to the user and
 
 The `origin` field records *how* a tool was invoked. It is set on
 `tool_execution` and `tool_invoked` events and is absent on delegation,
-reasoning, and policy events.
+reasoning and policy events.
 
 | Value | When set | Trace prefix |
 |-------|----------|--------------|
@@ -297,7 +297,7 @@ reasoning, and policy events.
 
 **Why it matters:** filtering by `origin` lets you isolate structured,
 deterministic fleet operations (`direct_tool`) from LLM-mediated interactions
-(`agent`) — useful for compliance reporting, anomaly detection, and auditing
+(`agent`) — useful for compliance reporting, anomaly detection and auditing
 the LLM's decision-making independently of automated jobs.
 
 ```bash
@@ -396,7 +396,7 @@ chain records the individual tool calls as normal `gateway_request` events.
 Fleet job records are **not** part of the audit event hash chain — they are
 operational records managed separately. The tool calls themselves (the actual
 work) appear as `gateway_request` audit events with `purpose=fleet_rollout`,
-`purpose_note=job_id=<id> server=<name> stage=<stage>`, and the fleet-runner's
+`purpose_note=job_id=<id> server=<name> stage=<stage>` and the fleet-runner's
 service account as the principal. This lets you correlate fleet job activity in
 the standard audit trail:
 
@@ -442,11 +442,29 @@ curl -X POST http://localhost:1199/v1/rollbacks \
 curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
 ```
 
-### 6.7 Health
+### 6.7 Health and Readiness
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Returns `{"status":"ok"}` |
+| `GET` | `/health` | Liveness: returns `{"status":"ok"}` unconditionally once the process is up. No dependency checks. |
+| `GET` | `/ready` | Readiness: pings the real database and confirms the schema is actually loaded. `503` with a `reason` field if either check fails. |
+
+These answer different questions and the difference is deliberate, not redundant. `/health` is
+intentionally dependency-free — a Kubernetes liveness-probe failure restarts the process and
+restarting does nothing to fix a broken database, so liveness has to stay simple enough to never
+itself be the thing that's broken. `/ready` is where a real check belongs instead: a live
+`PingContext` against the database, then a query against the most foundational table
+(`audit_events`) to confirm schema creation actually ran — a successful ping alone only proves
+the connection works, not that the schema is loaded.
+
+This distinction isn't theoretical: it closed a real incident. auditd's own process once stayed
+up — `/health` kept returning 200 — while its Postgres volume had been recreated empty out from
+under it; every real query failed with `relation "audit_events" does not exist` until the process
+was manually restarted. A liveness probe alone would never have caught this (the process hadn't
+crashed); `/ready` would have failed immediately and routed traffic away from the broken replica.
+The Helm chart wires both accordingly —
+[`livenessProbe` → `/health`, `readinessProbe` → `/ready`](../deploy/helm/helpdesk/templates/auditd.yaml) —
+so this isn't just documented, it's load-bearing in the actual deployment.
 
 ### 6.8 Approval Sessions
 
@@ -466,7 +484,7 @@ Request body:
 |---|---|---|
 | `granted_by` | yes | Identity of the operator granting the session |
 | `expires_in_secs` | yes | Session lifetime in seconds (must be > 0) |
-| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, `"escalation"`, or any combination |
+| `allowed_classes` | yes | Action classes the session covers: `"write"`, `"destructive"`, `"escalation"` or any combination |
 | `scope` | no | Informational label (e.g. a playbook series ID or maintenance window name). Stored for audit purposes, not enforced. |
 
 ```bash
@@ -517,11 +535,11 @@ Revokes the session immediately. Returns `204 No Content`. Returns `404` if not 
 | `granted_by` | string | Operator who created the session |
 | `granted_at` | RFC3339 | When the session was created |
 | `expires_at` | RFC3339 | When the session expires |
-| `allowed_classes` | []string | Action classes covered: `"write"`, `"destructive"`, and/or `"escalation"` |
+| `allowed_classes` | []string | Action classes covered: `"write"`, `"destructive"` and/or `"escalation"` |
 | `scope` | string | Informational label; empty when not provided |
 | `revoked` | bool | `true` if the session was explicitly revoked before expiry |
 
-A session is considered valid when: `revoked=false`, `expires_at` is in the future, and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_docker_inspect`) without a separate operator call.
+A session is considered valid when: `revoked=false`, `expires_at` is in the future and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_docker_inspect`) without a separate operator call.
 
 See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the full usage guide.
 
@@ -538,10 +556,10 @@ See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the f
 | `trace_id_prefix` | string | Filter by trace ID prefix (e.g. `tr_`, `dt_`) |
 | `event_type` | string | `delegation_decision`, `gateway_request`, `tool_execution`, `policy_decision`, `agent_reasoning`, `delegation_verification`, `governance_violation`, `rollback_initiated`, `rollback_executed`, `rollback_verified` |
 | `agent` | string | Filter by agent name |
-| `action_class` | string | `read`, `write`, or `destructive` |
+| `action_class` | string | `read`, `write` or `destructive` |
 | `tool_name` | string | Filter by tool name (e.g. `terminate_connection`) |
 | `outcome_status` | string | Filter by outcome (e.g. `success`, `error`, `denied`) |
-| `origin` | string | Filter by dispatch path: `direct_tool`, `agent`, or `gateway` (see [§4.5](#45-origin-values)) |
+| `origin` | string | Filter by dispatch path: `direct_tool`, `agent` or `gateway` (see [§4.5](#45-origin-values)) |
 | `since` | RFC3339 | Only events at or after this timestamp |
 | `limit` | int | Maximum events to return (default: 100) |
 
@@ -670,7 +688,7 @@ was actually exercised against real Postgres during v0.30 development.
 ## 9. auditor CLI
 
 The `auditor` subscribes to the auditd Unix socket and provides real-time
-monitoring, security alerting, and chain verification.
+monitoring, security alerting and chain verification.
 
 ```bash
 # Alerts only (default) — denials, anomalies, chain breaks
@@ -866,7 +884,7 @@ The gateway proxy is read-only. Writing results goes directly to auditd (done au
 
 1. Find the first broken event with `GET /v1/verify`
 2. Possible causes: direct database modification (tampering), database
-   corruption, or a write race condition during a crash
+   corruption or a write race condition during a crash
 3. If tampering is suspected, treat the log as potentially compromised and
    preserve a copy before any remediation
 

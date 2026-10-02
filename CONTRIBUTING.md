@@ -51,12 +51,15 @@ If you're looking for a first contribution and don't have a specific bug or feat
 
 ## AI-assisted contributions
 
-Use whatever coding assistant you like. This project is built with heavy AI assistance itself, so we're not going to pretend otherwise. But:
+Use whatever coding assistant you like. This project is built with heavy AI assistance itself, so we're not going to pretend otherwise. In fact, our expectation is that most of the PRs are going to be written by AI assistants soon, so we are open it. However:
 
-- **A human — exactly one — is responsible for the PR's content.** An assistant can write 100% of the code, the tests and even the commit message. That doesn't change who's accountable for it.
-- **Review it like you'd be paged for it, because you might be.** Before submitting, verify the assistant's claims against the actual code and actual test output — not against how plausible the diff reads. This project's entire premise is catching an AI that confidently states something it never actually verified; hold your own AI-assisted PR to the same standard you'd want an on-call agent held to. If a claim in your PR description isn't something you personally checked, don't include it as fact.
+- **A human, and exactly one, is responsible for the PR's content.** That human is You. An assistant can write 100% of the code, the tests and even the commit message. That doesn't change who's accountable for it.
+- **Review it like you'd be paged for it, because you might be.** Before submitting, verify the assistant's claims against the actual code and the actual test output, not against how plausible the diff reads. This project's entire premise is catching an AI that confidently states something it never actually verified. So, please, hold your own AI-assisted PR to the same standard you'd want an on-call agent held to. If a claim in your PR description isn't something you personally checked, don't include it as fact.
 - **Be prepared to explain any line of it.** "The assistant wrote it that way" is not an answer to a review comment.
-- **`Co-Authored-By` trailers are welcome, not required, but every commit must have a human author** — a maintainer merging the PR, not just an assistant's own commit identity.
+- **`Co-Authored-By` trailers are not welcomed to highlight that every commit must have a human author**. You, as a maintainer merging the PR, is that owner. Not just an assistant's own commit identity. Many repos require disclosing the use of AI assistants. We don't care. What we do very much care instead is that your PR is well understand and reviewed by You and You are prepared to stand behind it.
+
+## Do I need to know Golang?
+You don't have to be an expert at writing Go, but if you use AI assistant of any kind, you need to understand the generated code enough to stand behind it. No exceptions. Please don't send a PR with an AI assistant generated code that you don't 100% understand, reviewed and confirmed to work according to your spec/task.
 
 ## Submitting a PR
 
@@ -66,4 +69,4 @@ Use whatever coding assistant you like. This project is built with heavy AI assi
 4. Open the PR against the current release branch (see [Branching](#branching) above), not `main`, unless it's a production bug fix.
 5. Link the issue you coordinated on, if there was one.
 
-Contributions big or small are genuinely welcome, just not at the cost of engineering quality. When in doubt, ask before you build.
+Contributions big or small are genuinely welcome, just **not at the cost of engineering quality**. When in doubt, ask before you build.
