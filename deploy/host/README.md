@@ -324,6 +324,11 @@ See [here](../../docs/AIGOVERNANCE.md) for details on aiHelpDesk AI Governance m
 ./startall.sh --governance
 ```
 
+By default `auditd` stores its own data in a local SQLite file; it also supports Postgres as a
+fully-supported alternative backend (useful for more concurrent-write headroom, or to keep
+auditd's storage on the same managed-database infrastructure as the rest of your stack) — see
+[docs/AUDIT.md §8.2](../../docs/AUDIT.md#82-postgres-backend).
+
 To enable policy enforcement, set these in `.env` before starting:
 
 ```bash

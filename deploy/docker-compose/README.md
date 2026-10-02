@@ -236,6 +236,14 @@ docker compose --profile governance up -d
 docker compose up -d
 ```
 
+`auditd`'s SQLite persistence (shown in the table above) is the default; Postgres is a
+fully-supported alternative backend (more concurrent-write headroom, or to keep auditd's storage
+on the same managed-database infrastructure as the rest of your stack) — set the `HELPDESK_AUDIT_DB`
+environment variable to a `postgres://` DSN instead of a file path. See
+[docs/AUDIT.md §8.2](../../docs/AUDIT.md#82-postgres-backend) for details, including the
+requirement that auditd's own storage never share a server with a target database this deployment
+monitors or remediates.
+
 ### 3.2 Enabling Governance (Binary Deployment)
 
 ```bash
