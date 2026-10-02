@@ -642,6 +642,11 @@ governance:
     dsnSecret: helpdesk-auditd-dsn
 ```
 
+The chart itself doesn't manage a Postgres instance's lifecycle (bring-your-own-database, same
+convention used elsewhere in this project) — [`deploy/helm/examples/postgres-auditd.yaml`](../deploy/helm/examples/postgres-auditd.yaml)
+is a deployable reference manifest for a dedicated instance if you don't already have one to
+point at.
+
 When `dsnSecret` is set, the chart does not create the `audit-data`
 PersistentVolumeClaim it otherwise would for SQLite — there's nothing
 durable to store locally once the database itself lives on Postgres.

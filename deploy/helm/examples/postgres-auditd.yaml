@@ -1,0 +1,102 @@
+# Reference example: a dedicated Postgres instance for auditd's own storage
+# on Kubernetes, to pair with the Helm chart's `governance.auditd.dsnSecret`
+# option documented in docs/AUDIT.md §8.2 ("Postgres backend").
+#
+# This is NOT managed by the helpdesk Helm chart itself — the chart
+# deliberately doesn't own the lifecycle of a general-purpose Postgres
+# instance (bring-your-own-database, the same convention this project uses
+# for the fault-injection target database and the CNPG examples elsewhere).
+# Apply it as-is for a quick evaluation, or treat it as a starting point and
+# swap in your own managed Postgres (RDS, Cloud SQL, AlloyDB, a
+# CloudNativePG cluster, etc.) for a real deployment.
+#
+# IMPORTANT — isolation requirement (docs/AUDIT.md §8.2): auditd's own
+# storage must never live on the same server as a target database this
+# deployment monitors or remediates. A target-database outage must never
+# take auditd down with it. Deploy this into its own namespace, separate
+# from any namespace your monitored databases live in.
+#
+# Usage:
+#   kubectl create namespace helpdesk-auditd-storage
+#   kubectl apply -f postgres-auditd.yaml
+#   kubectl -n helpdesk-auditd-storage create secret generic helpdesk-auditd-dsn \
+#     --from-literal=dsn='postgres://postgres:<password>@postgres-auditd.helpdesk-auditd-storage.svc.cluster.local:5432/auditd?sslmode=disable'
+#   # then, in your helpdesk Helm values:
+#   #   governance:
+#   #     auditd:
+#   #       dsnSecret: helpdesk-auditd-dsn
+#
+# Change POSTGRES_PASSWORD below before applying — this file ships a
+# placeholder, not a real credential.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-auditd
+  labels:
+    app: postgres-auditd
+spec:
+  selector:
+    app: postgres-auditd
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-auditd
+  labels:
+    app: postgres-auditd
+spec:
+  serviceName: postgres-auditd
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-auditd
+  template:
+    metadata:
+      labels:
+        app: postgres-auditd
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: CHANGE-ME-BEFORE-APPLYING
+            - name: POSTGRES_DB
+              value: auditd
+          volumeMounts:
+            # postgres:18+ images expect a single mount at
+            # /var/lib/postgresql (major-version-specific subdirectories
+            # underneath), not the old /var/lib/postgresql/data convention —
+            # see testing/docker/docker-compose.yaml's own postgres-auditd
+            # service for the same note.
+            - name: pgdata
+              mountPath: /var/lib/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

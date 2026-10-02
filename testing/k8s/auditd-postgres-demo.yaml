@@ -1,0 +1,87 @@
+# Ad hoc K8s showcase manifest — a dedicated self-managed Postgres for
+# auditd's own storage, mirroring testing/docker/docker-compose.yaml's
+# postgres-auditd service exactly (postgres:18, separate from any
+# fault-injection target). Deployed in its own namespace, never the
+# namespace of any monitored target — see docs/AUDIT.md §8.2 and
+# feedback_auditd_storage_isolation memory: auditd's own storage must never
+# share a server with a target database it monitors/remediates.
+#
+# For a real deployment, see the customer-facing reference example instead:
+# deploy/helm/examples/postgres-auditd.yaml. This file is this session's
+# own live-verification fixture, not meant to be reused as-is.
+#
+# Apply: kubectl apply -f testing/k8s/auditd-postgres-demo.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: helpdesk-auditd-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-auditd
+  namespace: helpdesk-auditd-storage
+  labels:
+    app: postgres-auditd
+spec:
+  selector:
+    app: postgres-auditd
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-auditd
+  namespace: helpdesk-auditd-storage
+  labels:
+    app: postgres-auditd
+spec:
+  serviceName: postgres-auditd
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-auditd
+  template:
+    metadata:
+      labels:
+        app: postgres-auditd
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: auditdk8spass
+            - name: POSTGRES_DB
+              value: auditd
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
