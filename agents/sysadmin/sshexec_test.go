@@ -102,7 +102,7 @@ func startTestSSHServer(t *testing.T, authorizedPub ssh.PublicKey, handler func(
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { listener.Close() }) //nolint:errcheck
 
 	go func() {
 		for {
@@ -122,7 +122,7 @@ func serveTestSSHConn(nConn net.Conn, config *ssh.ServerConfig, handler func(cmd
 	if err != nil {
 		return
 	}
-	defer sconn.Close()
+	defer sconn.Close() //nolint:errcheck
 	go ssh.DiscardRequests(reqs)
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
@@ -134,7 +134,7 @@ func serveTestSSHConn(nConn net.Conn, config *ssh.ServerConfig, handler func(cmd
 			continue
 		}
 		go func() {
-			defer channel.Close()
+			defer channel.Close() //nolint:errcheck
 			for req := range requests {
 				if req.Type != "exec" {
 					if req.WantReply {

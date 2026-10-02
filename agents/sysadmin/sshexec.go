@@ -73,13 +73,13 @@ func sshRun(ctx context.Context, host resolvedHost, name string, args []string, 
 		return "", fmt.Errorf("ssh: handshake with %s: %w", addr, err)
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	session, err := client.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("ssh: new session on %s: %w", addr, err)
 	}
-	defer session.Close()
+	defer session.Close() //nolint:errcheck
 
 	command := shellCommand(name, args, env)
 

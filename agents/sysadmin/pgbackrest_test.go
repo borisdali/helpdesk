@@ -155,7 +155,7 @@ func pgBackRestJSONWithBackups(stanzaName string, statusCode int, statusMsg stri
 	stop  time.Time
 }) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`[{"name":%q,"status":{"code":%d,"message":%q},"backup":[`, stanzaName, statusCode, statusMsg))
+	fmt.Fprintf(&sb, `[{"name":%q,"status":{"code":%d,"message":%q},"backup":[`, stanzaName, statusCode, statusMsg)
 	for i, b := range backups {
 		if i > 0 {
 			sb.WriteString(",")
