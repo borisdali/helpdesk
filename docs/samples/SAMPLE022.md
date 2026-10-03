@@ -1,5 +1,11 @@
 # aiHelpDesk Sample#22 (on K8s): The Bugs Only a Real Cluster Could Show
 
+The raw transcript of the sample commands and deliberations presented below complements this blog post:
+
+- **[When the Watchman Can’t See: How a Silent Backup Failure Almost Stayed Silent Forever](https://itnext.io/when-the-watchman-cant-see-how-a-silent-backup-failure-almost-stayed-silent-forever-98ccc9597043)**  
+  Your dashboard was green and yet your backups had been dead for two weeks. Nobody lied to you, but nobody asked the right question either  
+  
+  
 If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
 Next, review another aiHelpDesk pioneering concept: the [Operational SRE/DBA Flywheel](../VAULT.md#the-operational-sredba-flywheel).
 
