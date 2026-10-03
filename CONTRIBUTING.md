@@ -55,11 +55,19 @@ Use whatever coding assistant you like. This project is built with heavy AI assi
 
 - **A human, and exactly one, is responsible for the PR's content.** That human is You. An assistant can write 100% of the code, the tests and even the commit message. That doesn't change who's accountable for it.
 - **Review it like you'd be paged for it, because you might be.** Before submitting, verify the assistant's claims against the actual code and the actual test output, not against how plausible the diff reads. This project's entire premise is catching an AI that confidently states something it never actually verified. So, please, hold your own AI-assisted PR to the same standard you'd want an on-call agent held to. If a claim in your PR description isn't something you personally checked, don't include it as fact.
-- **Be prepared to explain any line of it.** "The assistant wrote it that way" is not an answer to a review comment.
-- **`Co-Authored-By` trailers are not welcomed to highlight that every commit must have a human author**. You, as a maintainer merging the PR, is that owner. Not just an assistant's own commit identity. Many repos require disclosing the use of AI assistants. We don't care. What we do very much care instead is that your PR is well understand and reviewed by You and You are prepared to stand behind it.
+- **Be prepared to explain any line of it.** "The assistant wrote it that way" is not an answer to a review comment. Please read the next point in full that elaborates on this point:
+- **`Co-Authored-By` trailers are not welcomed**  This is to highlight that every commit must have a human author. That human author is you, if you are sending a PR.  
+
+  PRs are very welcomed, but as a maintainer merging the PR, you are the owner.   
+  
+  In our experience, that "Co-Authored-By" seem to somehow dilute that ownership, giving an impression that the responsibility is shared. It's not.   
+
+  We really don't care if you wrote the whole PR yourself, used an AI coding assitant for parts or all of it, your neighbour helped or your neighbour's cat. Our goal is to see the repo florish (not to turn it into unmanageable spaghetti) and uphold the high quality engineering bar, as well as to protect the reviewer's time, so please be prepared to defend every line change in your PR.  
+  
+  We realize that this policy is different from many other OSS repos that explicitly require disclosing the use of AI assistants. We don't. The only thing we do care (very much) is that your PR is well understand and reviewed by You and You are prepared to stand behind it.
 
 ## Do I need to know Golang?
-You don't have to be an expert at writing Go, but if you use AI assistant of any kind, you need to understand the generated code enough to stand behind it. No exceptions. Please don't send a PR with an AI assistant generated code that you don't 100% understand, reviewed and confirmed to work according to your spec/task.
+You don't have to be an expert at writing Go, but if you use AI assistant of any kind, you need to understand the generated code enough to stand behind it. No exceptions. Please don't send a PR with an AI assistant generated code that you don't 100% understand, reviewed and confirmed it to work according to your spec/task.
 
 ## Submitting a PR
 
