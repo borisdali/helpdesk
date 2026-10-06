@@ -148,7 +148,7 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 | `pbs_checkpoint_bgwriter_triage` | Checkpoint & bgwriter Triage | performance | database | `get_bgwriter_stats`, `read_pg_log`, `get_pg_settings` |
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
-| `pbs_db_pitr_recovery` | Database Down — Backup Restore & PITR | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
+| `pbs_db_data_loss_triage` | Database Down — Data Loss Triage | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 | `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 | `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
 | `pbs_wal_disk_full` | WAL Disk Full — Recovery | capacity | sysadmin | `check_host`, `get_host_logs`, `check_disk`, `get_pg_settings` |
@@ -1429,9 +1429,9 @@ pbs_db_restart_triage  (entry_point: true)
         │
         ├─ K8s: logs show bad config      → pbs_db_config_recovery
         │                                          │
-        │                                          └─ logs show corrupt data → pbs_db_pitr_recovery
+        │                                          └─ logs show corrupt data → pbs_db_data_loss_triage
         │
-        ├─ K8s: logs show corrupt/missing files → pbs_db_pitr_recovery
+        ├─ K8s: logs show corrupt/missing files → pbs_db_data_loss_triage
         │
         └─ Docker-hosted DB or hosting type unknown
            (agent cannot read docker logs)
@@ -1463,14 +1463,14 @@ live-verified end-to-end against a real cluster with the `db-wal-disk-full-k8s` 
 [FAULTTEST.md](FAULTTEST.md)) — not just unit-tested with synthetic run data.
 
 Every playbook in this graph can now earn its own fault-stability cert — including
-`pbs_sysadmin_docker_inspect`, `pbs_db_pitr_recovery` and `pbs_wal_disk_full`, which are only
+`pbs_sysadmin_docker_inspect`, `pbs_db_data_loss_triage` and `pbs_wal_disk_full`, which are only
 ever reached as downstream hops here, never a fault's own entry point. See
 [CONSISTENCY.md §Certification scope](CONSISTENCY.md#certification-scope-every-hop-in-a-chain-not-just-the-entry-point-v0260)
 and [VAULT.md's `vault hop-certs`](VAULT.md#vault-hop-certs).
 
 The agent is prompted with the escalation paths at run time:
 
-> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_pitr_recovery`, `pbs_sysadmin_docker_inspect`"
+> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_data_loss_triage`, `pbs_sysadmin_docker_inspect`"
 
 For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
 

@@ -52,7 +52,7 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
 		"pbs_db_config_recovery",
-		"pbs_db_pitr_recovery",
+		"pbs_db_data_loss_triage",
 	}
 	seriesFound := map[string]bool{}
 	for _, pb := range playbooks {
@@ -792,8 +792,9 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if ep, _ := pb["entry_point"].(bool); ep {
 			t.Error("entry_point = true, want false (config recovery is not an entry point)")
 		}
-		// config recovery uses transitions_to (same-domain follow-on to pitr_recovery),
-		// not escalates_to (cross-domain handoff). Directive split added in v0.16.
+		// config recovery uses transitions_to (same-domain follow-on to
+		// data_loss_triage), not escalates_to (cross-domain handoff).
+		// Directive split added in v0.16.
 		transitions, _ := pb["transitions_to"].([]any)
 		if len(transitions) == 0 {
 			t.Error("transitions_to is empty, want at least one series ID")
@@ -805,8 +806,8 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		t.Logf("config_recovery: transitions_to=%v requires_evidence=%v", transitions, evidence)
 	})
 
-	t.Run("pitr_recovery_is_agent_with_evidence", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_db_pitr_recovery")
+	t.Run("data_loss_triage_is_agent_with_evidence", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_data_loss_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
@@ -814,7 +815,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		t.Logf("pitr_recovery: requires_evidence=%v", evidence)
+		t.Logf("data_loss_triage: requires_evidence=%v", evidence)
 	})
 
 	t.Run("sysadmin_docker_inspect_is_seeded", func(t *testing.T) {
@@ -1809,7 +1810,7 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	}
 	remediationSeries := map[string]bool{
 		"pbs_db_config_recovery": true,
-		"pbs_db_pitr_recovery":   true,
+		"pbs_db_data_loss_triage":   true,
 		"pbs_db_restart_action":  true,
 		"pbs_wal_disk_full":      true,
 	}

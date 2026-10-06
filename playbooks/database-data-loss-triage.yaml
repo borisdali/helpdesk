@@ -1,6 +1,8 @@
-series_id: pbs_db_pitr_recovery
-name: Database Down — Backup Restore & PITR
-version: "1.2"
+series_id: pbs_db_data_loss_triage
+name: Database Down — Data Loss Triage
+version: "1.3"
+playbook_type: triage
+approval_mode: manual
 execution_mode: agent
 # Same remediation domain, different agent (sysadmin_agent owns
 # get_pgbackrest_status/restore_from_backup) — same precedent as
@@ -10,7 +12,7 @@ execution_mode: agent
 # instance, healthy repo — see Step 4a below). Every other scenario below
 # still escalates exactly as before.
 transitions_to:
-  - pbs_db_restore_latest_action
+  - pbs_pgbackrest_restore_remediate
 requires_evidence:
   - "PANIC.*could not locate a valid checkpoint"
   - "database files are incompatible with server"
@@ -25,6 +27,13 @@ description: |
   PGDATA and WAL archive location from stored baseline data, and guide the
   operator through the restore-from-backup and point-in-time recovery
   procedure. This playbook requires human DBA involvement throughout.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - data-corruption
+    - wal-segment-loss
+    - checkpoint-corruption
+    - missing-data-directory
 symptoms:
   - "PostgreSQL log: 'invalid page in block' or 'could not read block'"
   - "PostgreSQL log: 'requested WAL segment has already been removed'"
@@ -112,7 +121,7 @@ guidance: |
     on the storage volume itself, which a restore onto the same damaged
     volume would not resolve).
   If all four hold, emit exactly:
-    TRANSITION_TO: pbs_db_restore_latest_action
+    TRANSITION_TO: pbs_pgbackrest_restore_remediate
   and stop — do not attempt any of Step 5's manual procedure yourself.
   That playbook will reconfirm backup health on its own before restoring;
   do not skip straight to it without having actually checked the above.

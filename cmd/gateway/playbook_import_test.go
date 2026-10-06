@@ -387,7 +387,7 @@ approval_mode: agent
 entry_point: true
 escalates_to:
   - pbs_db_config_recovery
-  - pbs_db_pitr_recovery
+  - pbs_db_data_loss_triage
 requires_evidence:
   - "connection refused"
   - "FATAL.*could not connect"
@@ -415,7 +415,7 @@ requires_evidence:
 		t.Error("entry_point should be true")
 	}
 	if len(d.EscalatesTo) != 2 || d.EscalatesTo[0] != "pbs_db_config_recovery" {
-		t.Errorf("escalates_to = %v, want [pbs_db_config_recovery pbs_db_pitr_recovery]", d.EscalatesTo)
+		t.Errorf("escalates_to = %v, want [pbs_db_config_recovery pbs_db_data_loss_triage]", d.EscalatesTo)
 	}
 	if len(d.RequiresEvidence) != 2 {
 		t.Errorf("requires_evidence = %v, want 2 entries", d.RequiresEvidence)
@@ -457,7 +457,7 @@ func TestParseImportResponse_NewFields(t *testing.T) {
 			"execution_mode": "agent",
 			"approval_mode": "agent",
 			"entry_point": false,
-			"escalates_to": ["pbs_db_pitr_recovery"],
+			"escalates_to": ["pbs_db_data_loss_triage"],
 			"requires_evidence": ["FATAL.*invalid value for parameter", "FATAL.*configuration file"]
 		},
 		"warning_messages": [],
@@ -477,7 +477,7 @@ func TestParseImportResponse_NewFields(t *testing.T) {
 	if pb.EntryPoint {
 		t.Error("entry_point should be false")
 	}
-	if len(pb.EscalatesTo) != 1 || pb.EscalatesTo[0] != "pbs_db_pitr_recovery" {
+	if len(pb.EscalatesTo) != 1 || pb.EscalatesTo[0] != "pbs_db_data_loss_triage" {
 		t.Errorf("escalates_to = %v", pb.EscalatesTo)
 	}
 	if len(pb.RequiresEvidence) != 2 {

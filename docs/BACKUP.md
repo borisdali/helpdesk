@@ -23,7 +23,7 @@ Fault: [`db-backup-archiving-broken`](https://github.com/borisdali/helpdesk/blob
 Triage playbook: [`pbs_db_backup_health_triage`](../playbooks/database-backup-health-triage.yaml)  
 Remediation playbook: [`pbs_db_backup_archiving_remediate`](../playbooks/database-backup-archiving-remediate.yaml)  
 
-Other playbooks in this category deal with the failure scenarios that cover *restoring and recovering* from a backup after a data loss. A good example is the PITR scenario and its associated [`pbs_db_pitr_recovery`](../playbooks/database-pitr-recovery.yaml) playbook, part of the "Database Down" [playbook chain/graph](PLAYBOOK_OPS.md#12-understand-the-db-down-escalation-chain). This scanrio however is different. It covers backup-*taking* failures, which is really the precondition for both PITR and most other base-backup strategies that actually depend on it.
+Other playbooks in this category deal with the failure scenarios that cover *restoring and recovering* from a backup after a data loss. A good example is the PITR scenario and its associated [`pbs_db_data_loss_triage`](../playbooks/database-data-loss-triage.yaml) playbook, part of the "Database Down" [playbook chain/graph](PLAYBOOK_OPS.md#12-understand-the-db-down-escalation-chain). This scanrio however is different. It covers backup-*taking* failures, which is really the precondition for both PITR and most other base-backup strategies that actually depend on it.
 
 **The failure mode**:   
 There are multiple reasons for a backup to fail. This particular one deals with the `archive_command` silently failing due to a broken script, a bad path, a permissions change, a full disk at the archive destination or similar reasons. Nothing in a routine health check may surface it. The database itself is unaffected and keeps serving traffic normally and the only symptom is that the WAL archive, which a recovery would need later, has silently stopped growing.
@@ -314,7 +314,7 @@ Not yet built — tracked, not forgotten:
 
 See also: [HA_DR.md](HA_DR.md) for streaming-replication and failover diagnosis,
 [PLAYBOOKS.md](PLAYBOOKS.md) for the "Database Down" playbook graph including
-`pbs_db_pitr_recovery` (restoring *from* a backup after data loss — the other half of the
+`pbs_db_data_loss_triage` (restoring *from* a backup after data loss — the other half of the
 backup story from this page's backup-*taking* focus), [FAULTTEST.md](FAULTTEST.md) for the
 fault injection CLI and full catalog reference, [CONSISTENCY.md](CONSISTENCY.md) for how a
 playbook earns a stability certification before entering live rotation.

@@ -701,7 +701,7 @@ func TestPlaybookStore_NewFields_RoundTrip(t *testing.T) {
 		Name:             "round-trip test",
 		Description:      "desc",
 		EntryPoint:       true,
-		EscalatesTo:      []string{"pbs_config_recovery", "pbs_pitr_recovery"},
+		EscalatesTo:      []string{"pbs_config_recovery", "pbs_data_loss_triage"},
 		RequiresEvidence: []string{"FATAL.*invalid parameter", "PANIC.*checkpoint"},
 		ExecutionMode:    "agent",
 	}
@@ -720,7 +720,7 @@ func TestPlaybookStore_NewFields_RoundTrip(t *testing.T) {
 		t.Error("EntryPoint = false, want true")
 	}
 	if len(got.EscalatesTo) != 2 || got.EscalatesTo[0] != "pbs_config_recovery" {
-		t.Errorf("EscalatesTo = %v, want [pbs_config_recovery pbs_pitr_recovery]", got.EscalatesTo)
+		t.Errorf("EscalatesTo = %v, want [pbs_config_recovery pbs_data_loss_triage]", got.EscalatesTo)
 	}
 	if len(got.RequiresEvidence) != 2 || got.RequiresEvidence[0] != "FATAL.*invalid parameter" {
 		t.Errorf("RequiresEvidence = %v, want 2 entries", got.RequiresEvidence)

@@ -518,7 +518,7 @@ failures:
     severity: critical
     description: >
       The instance's own data directory is damaged beyond a simple restart
-      (pg_control missing) — the actual data-loss scenario pbs_db_pitr_recovery
+      (pg_control missing) — the actual data-loss scenario pbs_db_data_loss_triage
       exists for, not just a backup-health precondition like
       db-pgbackrest-repo-unreadable. Closes v0.31's restore/recovery gap:
       v0.30 only ever answered "is backup healthy?"; this fault proves the
@@ -578,7 +578,7 @@ failures:
           pgbackrest --stanza=main --delta restore
         '
         docker restart helpdesk-test-pg-pgbackrest
-    diagnosis_playbook_series_id: pbs_db_pitr_recovery
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
     prompt: >
       Monitoring flagged that this database is unreachable. Please
       investigate and determine the root cause and appropriate recovery
@@ -595,7 +595,7 @@ failures:
           - "restore"
       expected_diagnosis:
         category: "pgdata_corrupted"
-        narrative: "The agent should identify from get_host_logs/read_pg_log_file that postgres cannot find its own data system (missing pg_control, not a transient crash), confirm from get_pgbackrest_status that a healthy, non-stale backup exists, confirm this is a single instance with no replica topology, and emit TRANSITION_TO: pbs_db_restore_latest_action rather than attempting to diagnose or fix this itself — pbs_db_pitr_recovery's own guidance does not perform the restore."
+        narrative: "The agent should identify from get_host_logs/read_pg_log_file that postgres cannot find its own data system (missing pg_control, not a transient crash), confirm from get_pgbackrest_status that a healthy, non-stale backup exists, confirm this is a single instance with no replica topology, and emit TRANSITION_TO: pbs_pgbackrest_restore_remediate rather than attempting to diagnose or fix this itself — pbs_db_data_loss_triage's own guidance does not perform the restore."
     timeout: 90s
 
   - id: db-connection-refused

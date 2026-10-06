@@ -3,7 +3,7 @@ name: Database Down — Configuration Recovery
 version: "1.2"
 execution_mode: agent
 transitions_to:
-  - pbs_db_pitr_recovery
+  - pbs_db_data_loss_triage
 requires_evidence:
   - "FATAL.*invalid value for parameter"
   - "FATAL.*configuration file"

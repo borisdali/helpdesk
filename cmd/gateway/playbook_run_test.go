@@ -190,14 +190,14 @@ func TestAssembleTriagePrompt_ContainsGuidance(t *testing.T) {
 func TestAssembleTriagePrompt_EscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{
 		Name:        "Restart Triage",
-		EscalatesTo: []string{"pbs_db_config_recovery", "pbs_db_pitr_recovery"},
+		EscalatesTo: []string{"pbs_db_config_recovery", "pbs_db_data_loss_triage"},
 	}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
 	if !strings.Contains(prompt, "pbs_db_config_recovery") {
 		t.Error("prompt missing escalates_to series ID")
 	}
-	if !strings.Contains(prompt, "pbs_db_pitr_recovery") {
+	if !strings.Contains(prompt, "pbs_db_data_loss_triage") {
 		t.Error("prompt missing second escalates_to series ID")
 	}
 }
@@ -297,13 +297,13 @@ var _ *infra.Config
 // --- parseAgentEscalation ---
 
 func TestParseAgentEscalation_FullSignal(t *testing.T) {
-	text := "The database appears to have a corrupted WAL file.\n\nRecommendation: initiate PITR recovery.\n\nFINDINGS: WAL corruption detected; PITR recovery needed.\nESCALATE_TO: pbs_pitr_recovery\n"
+	text := "The database appears to have a corrupted WAL file.\n\nRecommendation: initiate PITR recovery.\n\nFINDINGS: WAL corruption detected; PITR recovery needed.\nESCALATE_TO: pbs_data_loss_triage\n"
 	esc := parseAgentEscalation(text)
 
 	if esc.Findings != "WAL corruption detected; PITR recovery needed." {
 		t.Errorf("findings = %q", esc.Findings)
 	}
-	if esc.EscalateTo != "pbs_pitr_recovery" {
+	if esc.EscalateTo != "pbs_data_loss_triage" {
 		t.Errorf("escalate_to = %q", esc.EscalateTo)
 	}
 	if !esc.SawSignalLine {
@@ -876,12 +876,12 @@ func TestExtractConclusionFallback_EmptyInput(t *testing.T) {
 
 func TestParseAgentEscalation_BoldFindings(t *testing.T) {
 	// LLM uses **FINDINGS:** instead of plain FINDINGS:
-	text := "Investigated the cluster.\n\n**FINDINGS:** WAL corruption on replica.\n**ESCALATE_TO:** pbs_pitr_recovery\n"
+	text := "Investigated the cluster.\n\n**FINDINGS:** WAL corruption on replica.\n**ESCALATE_TO:** pbs_data_loss_triage\n"
 	esc := parseAgentEscalation(text)
 	if esc.Findings != "WAL corruption on replica." {
 		t.Errorf("Findings = %q", esc.Findings)
 	}
-	if esc.EscalateTo != "pbs_pitr_recovery" {
+	if esc.EscalateTo != "pbs_data_loss_triage" {
 		t.Errorf("EscalateTo = %q", esc.EscalateTo)
 	}
 }

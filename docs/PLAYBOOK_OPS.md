@@ -126,7 +126,7 @@ pbs_db_restart_triage  (entry_point: true)
         │   pbs_db_config_recovery
         │       │  evidence: PANIC, checksum failure, invalid page
         │       ▼
-        │   pbs_db_pitr_recovery
+        │   pbs_db_data_loss_triage
         │
         └─ Docker-hosted DB ──────────────────────────────────────────
                 │  DB agent cannot read docker logs
@@ -143,7 +143,7 @@ pbs_db_restart_triage  (entry_point: true)
 - **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
 - For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_docker_inspect` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
 - If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_docker_inspect` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
-- **Do not jump to `pbs_db_config_recovery` or `pbs_db_pitr_recovery` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
+- **Do not jump to `pbs_db_config_recovery` or `pbs_db_data_loss_triage` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
 
 ### 1.2a Auto-chaining vs. manual escalation
 
@@ -226,7 +226,7 @@ The config recovery and PITR recovery playbooks require log evidence before they
 | Playbook | Evidence patterns required |
 |---|---|
 | `pbs_db_config_recovery` | `FATAL.*invalid value for parameter`, `FATAL.*configuration file`, `FATAL.*could not open file` |
-| `pbs_db_pitr_recovery` | `PANIC.*could not locate a valid checkpoint`, `database files are incompatible with server`, `invalid page.*could not read block` |
+| `pbs_db_data_loss_triage` | `PANIC.*could not locate a valid checkpoint`, `database files are incompatible with server`, `invalid page.*could not read block` |
 
 Always pass relevant log lines in the `context` field of your run request. This is not a gate — the run proceeds regardless — but it removes warnings and gives the agent a confirmed hypothesis to start from.
 
@@ -258,8 +258,8 @@ Identify the most relevant line. Common patterns and what they mean:
 | `OOM kill` / `out of memory` | OOM kill | `pbs_db_restart_triage` |
 | `FATAL: invalid value for parameter` | Bad config value | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_config_recovery` |
 | `FATAL: could not open file "postgresql.conf"` | Config file missing/corrupt | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_config_recovery` |
-| `PANIC: could not locate a valid checkpoint` | WAL corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
-| `invalid page in block` / `checksum failure` | Data corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_pitr_recovery` |
+| `PANIC: could not locate a valid checkpoint` | WAL corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_data_loss_triage` |
+| `invalid page in block` / `checksum failure` | Data corruption | start with `pbs_db_restart_triage`, but likely proceed with `pbs_db_data_loss_triage` |
 
 ### 2.2 Step 2: Trigger the entry-point triage playbook
 

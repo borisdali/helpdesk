@@ -7,7 +7,7 @@ execution_mode: agent
 # Same-domain follow-ons: both recoveries run under the postgres_database_agent.
 transitions_to:
   - pbs_db_config_recovery
-  - pbs_db_pitr_recovery
+  - pbs_db_data_loss_triage
 # Cross-domain escalation: container inspection is handled by the sysadmin agent.
 escalates_to:
   - pbs_sysadmin_docker_inspect

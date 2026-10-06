@@ -1,5 +1,5 @@
-series_id: pbs_db_restore_latest_action
-name: "Sysadmin — Restore From Latest pgBackRest Backup"
+series_id: pbs_pgbackrest_restore_remediate
+name: "pgBackRest — Restore From Latest Backup"
 version: "1.0"
 playbook_type: remediation
 entry_point: false
@@ -12,14 +12,14 @@ description: |
   Restore a single PostgreSQL instance from its most recent pgBackRest
   backup after data-directory loss or corruption, then bring it back up.
   Restore-to-latest only — no point-in-time target, no replica rebuild.
-  Runs only when pbs_db_pitr_recovery's own triage has already confirmed a
+  Runs only when pbs_db_data_loss_triage's own triage has already confirmed a
   healthy, non-stale backup exists on an intact repo and this is a single
   instance with no replica topology to consider; every other corruption
   scenario (no backup, broken repo, replica involved, ambiguous scope)
   stays with that playbook's human-escalation default.
 symptoms:
-  - "pbs_db_pitr_recovery triage confirmed a healthy, non-stale pgBackRest backup exists"
-  - "pbs_db_pitr_recovery triage confirmed this is a single instance, not a primary with replicas"
+  - "pbs_db_data_loss_triage triage confirmed a healthy, non-stale pgBackRest backup exists"
+  - "pbs_db_data_loss_triage triage confirmed this is a single instance, not a primary with replicas"
   - "restore-to-latest-backup is the confirmed correct action"
 guidance: |
   You are the remediation stage of a diagnostic chain. The prior playbook

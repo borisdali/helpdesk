@@ -328,19 +328,27 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_config_recovery: requires_evidence is empty")
 	}
 
-	// PITR recovery: execution_mode=agent, requires_evidence set, entry_point=false.
-	pitr := bySeriesID["pbs_db_pitr_recovery"]
-	if pitr == nil {
-		t.Fatal("pbs_db_pitr_recovery not seeded")
+	// Data loss triage: execution_mode=agent, playbook_type=triage,
+	// requires_evidence set, entry_point=false (deliberately NOT a preferred
+	// starting point for the availability problem_class — reached via
+	// pbs_db_restart_triage's own transition or its own specific evidence,
+	// never as the system's default first guess for a generic "database
+	// down" symptom).
+	dataLoss := bySeriesID["pbs_db_data_loss_triage"]
+	if dataLoss == nil {
+		t.Fatal("pbs_db_data_loss_triage not seeded")
 	}
-	if pitr.ExecutionMode != "agent" {
-		t.Errorf("pbs_db_pitr_recovery: execution_mode = %q, want agent", pitr.ExecutionMode)
+	if dataLoss.ExecutionMode != "agent" {
+		t.Errorf("pbs_db_data_loss_triage: execution_mode = %q, want agent", dataLoss.ExecutionMode)
 	}
-	if len(pitr.RequiresEvidence) == 0 {
-		t.Error("pbs_db_pitr_recovery: requires_evidence is empty")
+	if dataLoss.PlaybookType != "triage" {
+		t.Errorf("pbs_db_data_loss_triage: playbook_type = %q, want triage", dataLoss.PlaybookType)
 	}
-	if pitr.EntryPoint {
-		t.Error("pbs_db_pitr_recovery: entry_point = true, want false")
+	if len(dataLoss.RequiresEvidence) == 0 {
+		t.Error("pbs_db_data_loss_triage: requires_evidence is empty")
+	}
+	if dataLoss.EntryPoint {
+		t.Error("pbs_db_data_loss_triage: entry_point = true, want false")
 	}
 
 	// Triage playbooks: execution_mode=agent, playbook_type=triage.

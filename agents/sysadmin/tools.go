@@ -1667,9 +1667,9 @@ type RestoreFromBackupResult struct {
 // restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
 // (pgBackRest's own default recovery target), single stanza, single
 // instance — no PITR-to-arbitrary-timestamp, no replica rebuild. It exists
-// to remediate pbs_db_pitr_recovery's one automatable branch (a healthy,
+// to remediate pbs_db_data_loss_triage's one automatable branch (a healthy,
 // non-stale backup on an intact repo, reached via TRANSITION_TO from that
-// playbook into pbs_db_restore_latest_action) — every other corruption
+// playbook into pbs_pgbackrest_restore_remediate) — every other corruption
 // scenario (no backup, broken repo, replica topology, ambiguous scope) stays
 // a human escalation by design, same philosophy as
 // runPgBackRestBackupImpl's own refusal to touch a broken repo.
