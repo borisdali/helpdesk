@@ -267,11 +267,20 @@ func TestRestoreFromBackupTool_DefaultsStanzaViaStatus(t *testing.T) {
 
 // TestRestoreFromBackupTool_PropagatesRunnerError verifies a real restore
 // failure (after pg_isready already confirmed the server down) surfaces
-// pgBackRest's own diagnostic output, not just a generic error.
+// pgBackRest's own diagnostic output, not just a generic error. The exact
+// error text and exit code (75, "[075]: no backup set found to restore")
+// are verbatim from a real pgBackRest 2.59.2 restore attempted live against
+// a stanza that was never stanza-created (2026-10-06) — not invented. That
+// same live test confirmed something more important than the error text
+// itself: pgBackRest validates backup existence BEFORE touching the target
+// directory at all (a canary file placed in the target survived the failed
+// restore untouched) — restoring against a nonexistent backup is already
+// safe today with zero code on our side, so this test only needs to prove
+// the failure is surfaced, not guard against data loss itself.
 func TestRestoreFromBackupTool_PropagatesRunnerError(t *testing.T) {
 	capture := &sequencedErrRunner{
-		outputs: []string{"no response\n", "ERROR: [055]: unable to find a backup set to restore"},
-		errs:    []error{fmt.Errorf("exit status 2"), fmt.Errorf("exit status 1")},
+		outputs: []string{"no response\n", "ERROR: [075]: no backup set found to restore"},
+		errs:    []error{fmt.Errorf("exit status 2"), fmt.Errorf("exit status 75")},
 	}
 	old := cmdRunner
 	cmdRunner = capture
@@ -282,7 +291,7 @@ func TestRestoreFromBackupTool_PropagatesRunnerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("restoreFromBackupTool() error = nil, want an error when pgbackrest restore exits non-zero")
 	}
-	if !strings.Contains(err.Error(), "unable to find a backup set") {
+	if !strings.Contains(err.Error(), "no backup set found to restore") {
 		t.Errorf("error = %v, want it to include pgbackrest's own diagnostic output", err)
 	}
 }
