@@ -1651,6 +1651,129 @@ func runPgBackRestBackupTool(ctx agent.ToolContext, args RunPgBackRestBackupArgs
 	return result, err
 }
 
+// ── restore_from_backup ──────────────────────────────────────────────────────
+
+// RestoreFromBackupArgs defines arguments for the restore_from_backup tool.
+type RestoreFromBackupArgs struct {
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
+	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+}
+
+// RestoreFromBackupResult is the result of restore_from_backup.
+type RestoreFromBackupResult struct {
+	Output string `json:"output"`
+}
+
+// restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
+// (pgBackRest's own default recovery target), single stanza, single
+// instance — no PITR-to-arbitrary-timestamp, no replica rebuild. It exists
+// to remediate pbs_db_pitr_recovery's one automatable branch (a healthy,
+// non-stale backup on an intact repo, reached via TRANSITION_TO from that
+// playbook into pbs_db_restore_latest_action) — every other corruption
+// scenario (no backup, broken repo, replica topology, ambiguous scope) stays
+// a human escalation by design, same philosophy as
+// runPgBackRestBackupImpl's own refusal to touch a broken repo.
+//
+// This overwrites PGDATA, so it is classified ActionDestructive (not
+// ActionWrite like a fresh backup) and gated by two checks, both verified
+// live against a real crashed-then-restored pgBackRest fixture before this
+// was written, not assumed from documentation:
+//
+//  1. pg_isready must report the server down. Confirmed live: exit 0
+//     ("accepting connections") while healthy, exit 2 ("no response") once
+//     crashed. This is the only thing standing between "restore a dead
+//     instance" and "destroy a live one" — refuse outright if the server
+//     answers.
+//  2. A stale postmaster.pid left over from the crash must be removed
+//     before restoring. Confirmed live: `pgbackrest restore --force` does
+//     NOT bypass pgBackRest's own "[038]: unable to restore while
+//     PostgreSQL is running" refusal — `--force` means something else to
+//     pgBackRest. The real fix, and what pgBackRest's own error HINTs at, is
+//     removing the pid file once step 1 has already confirmed the server
+//     isn't actually running. $PGDATA is read from pgBackRest's own
+//     pg1-path config rather than hardcoded, so this stays correct for any
+//     real deployment's actual data directory.
+func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
+	stanza := args.Stanza
+	if stanza == "" {
+		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		if err != nil {
+			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: resolving stanza name: %w", err)
+		}
+		stanza = status.Stanza
+	}
+
+	readyScript := "pg_isready"
+	restoreScript := "PGDATA=$(grep '^pg1-path=' /etc/pgbackrest.conf | cut -d= -f2); rm -f \"$PGDATA/postmaster.pid\"; pgbackrest --stanza=" + shellQuote(stanza) + " --delta restore"
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return RestoreFromBackupResult{}, err
+		}
+		if policyEnforcer != nil {
+			policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
+			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+				policy.ActionDestructive, host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
+				slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
+				return RestoreFromBackupResult{}, err
+			}
+		}
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
+				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+			}
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", restoreScript})
+		default:
+			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
+				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+			}
+			out, err = runOnHost(ctx, host, "sh", []string{"-c", restoreScript}, nil)
+		}
+	case infraConfig != nil:
+		return RestoreFromBackupResult{}, fmt.Errorf(
+			"restore_from_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+	default:
+		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
+			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+		}
+		out, err = cmdRunner.Run(ctx, "sh", []string{"-c", restoreScript}, nil)
+	}
+	if err != nil {
+		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
+	}
+	return RestoreFromBackupResult{Output: out}, nil
+}
+
+func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
+	start := time.Now()
+	result, err := restoreFromBackupImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "restore_from_backup", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "restore_from_backup",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
 // ── DirectToolRegistry ───────────────────────────────────────────────────────
 
 // marshalResult marshals a value to JSON string for the direct tool registry.
@@ -1769,6 +1892,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := runPgBackRestBackupImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("restore_from_backup", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RestoreFromBackupArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := restoreFromBackupImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

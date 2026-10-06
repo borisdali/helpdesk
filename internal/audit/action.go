@@ -106,6 +106,7 @@ var ToolClassification = map[string]ActionClass{
 
 	"get_pgbackrest_status": ActionRead,
 	"run_pgbackrest_backup": ActionWrite,
+	"restore_from_backup":   ActionDestructive,
 }
 
 // ClassifyTool returns the action class for a given tool name.

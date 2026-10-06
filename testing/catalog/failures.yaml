@@ -512,6 +512,92 @@ failures:
         narrative: "The agent should identify from get_pgbackrest_status that pgBackRest cannot access its own repository (a non-ok stanza status, likely reporting the stanza as \"[invalid]\" with a permission-denied detail in the repo-level status message), correctly distinguishing this filesystem-level failure from WAL-archiving health or a simple stale-backup finding, and recommend investigating the repo path's permissions/ownership rather than assuming a transient blip."
     timeout: 60s
 
+  - id: db-pgdata-corrupted
+    name: "Data directory corrupted — restore from latest backup"
+    category: database
+    severity: critical
+    description: >
+      The instance's own data directory is damaged beyond a simple restart
+      (pg_control missing) — the actual data-loss scenario pbs_db_pitr_recovery
+      exists for, not just a backup-health precondition like
+      db-pgbackrest-repo-unreadable. Closes v0.31's restore/recovery gap:
+      v0.30 only ever answered "is backup healthy?"; this fault proves the
+      narrowest real restore slice — restore to the latest pgBackRest
+      backup, single instance, no PITR-to-timestamp — actually works
+      end to end against real data loss.
+    # Same dedicated pgBackRest target as db-pgbackrest-repo-unreadable, for
+    # the same reason (a full-catalog sweep shares one connection string
+    # across every database-category fault; this needs its own container
+    # with a real backup already taken).
+    agent_conn_override: pgbackrest-db
+    prerequisites: |
+      Requires the dedicated pgBackRest target
+      (testing/docker/docker-compose.pgbackrest.yaml) with an initial
+      backup already taken (testing/docker/setup-pgbackrest-backup.sh), and
+      testing/docker/start-with-sshd.sh's container-survives-a-postgres-
+      crash fix (v0.31) — without it, deleting pg_control crashes the
+      whole container (postgres is PID 1), taking sshd down with it and
+      making the target unreachable by either of agents/sysadmin's
+      dispatch paths at the exact moment diagnosis/restore needs them.
+      Confirmed live, 2026-10-06.
+
+      Docker-only, same reasoning as db-pgbackrest-repo-unreadable: this
+      fault needs real filesystem access into the container, not a SQL-only
+      mechanism. No external_compat variant.
+
+      inject deliberately uses shell_exec (runs on the harness host, with
+      real `docker` CLI access), not docker_exec (which only runs inside
+      the container and cannot issue `docker restart` on itself) — the
+      crash must happen as part of the container's own supervised startup
+      so it lands in `docker logs` (get_host_logs is a literal `docker logs
+      --tail N`), not an out-of-band exec session's own stdout. Verified
+      live: a bare `rm` without a restart doesn't crash a running backend
+      (pg_control is read at startup, not continuously) — the container
+      must actually restart to make postgres attempt startup and panic.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        docker exec helpdesk-test-pg-pgbackrest rm -f /var/lib/postgresql/data/global/pg_control
+        docker restart helpdesk-test-pg-pgbackrest
+    teardown:
+      type: shell_exec
+      # Repairs infra directly, not through any agent tool — same convention
+      # every other fault's teardown uses, needed because --repeat stability
+      # runs skip remediation entirely (see docs/CONSISTENCY.md). The exact
+      # sequence verified live, 2026-10-06, against the real fixture: a
+      # stale postmaster.pid (left over from the abnormal exit) blocks
+      # pgbackrest restore outright ("[038]: unable to restore while
+      # PostgreSQL is running") until removed — --force does NOT bypass
+      # this, it means something else to pgBackRest.
+      script_inline: |
+        set -e
+        docker exec -u postgres helpdesk-test-pg-pgbackrest sh -c '
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza=main --delta restore
+        '
+        docker restart helpdesk-test-pg-pgbackrest
+    diagnosis_playbook_series_id: pbs_db_pitr_recovery
+    prompt: >
+      Monitoring flagged that this database is unreachable. Please
+      investigate and determine the root cause and appropriate recovery
+      path.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "The agent should identify from get_host_logs/read_pg_log_file that postgres cannot find its own data system (missing pg_control, not a transient crash), confirm from get_pgbackrest_status that a healthy, non-stale backup exists, confirm this is a single instance with no replica topology, and emit TRANSITION_TO: pbs_db_restore_latest_action rather than attempting to diagnose or fix this itself — pbs_db_pitr_recovery's own guidance does not perform the restore."
+    timeout: 90s
+
   - id: db-connection-refused
     name: "Database connection refused"
     category: database

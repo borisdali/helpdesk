@@ -1,11 +1,21 @@
 series_id: pbs_db_pitr_recovery
 name: Database Down — Backup Restore & PITR
-version: "1.1"
+version: "1.2"
 execution_mode: agent
+# Same remediation domain, different agent (sysadmin_agent owns
+# get_pgbackrest_status/restore_from_backup) — same precedent as
+# pbs_sysadmin_docker_inspect's own TRANSITION_TO into a tool set it
+# doesn't itself hold. Added v0.31: the one automatable branch of this
+# otherwise human-only playbook (restore to latest backup, single
+# instance, healthy repo — see Step 4a below). Every other scenario below
+# still escalates exactly as before.
+transitions_to:
+  - pbs_db_restore_latest_action
 requires_evidence:
   - "PANIC.*could not locate a valid checkpoint"
   - "database files are incompatible with server"
   - "invalid page.*could not read block"
+  - "could not find the database system"
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -26,10 +36,14 @@ symptoms:
 guidance: |
   IMPORTANT: This is the most severe database recovery scenario. The database
   cannot be brought back with a simple restart or config change. A human DBA
-  must be involved from the start. This playbook provides the diagnostic
-  framework and key decision points — it does not perform the restore itself.
-  Escalate immediately before taking any action that could overwrite salvageable
-  data.
+  must be involved from the start in every case except the one narrow,
+  automatable path checked explicitly in Step 4a below (pgBackRest,
+  restore-to-latest, single instance, no deeper hardware issue) — that one
+  case hands off to an automated remediation playbook instead. This playbook
+  itself still does not perform any restore — it provides the diagnostic
+  framework, the one automatable hand-off, and otherwise the key decision
+  points for a human. Escalate immediately before taking any action that
+  could overwrite salvageable data.
 
   Step 1 — Confirm the failure type and scope:
   Use get_pod_logs to identify the specific error. The error class determines
@@ -78,6 +92,30 @@ guidance: |
   Locate the most recent base backup from your backup tool (pg_basebackup,
   pgBackRest, Barman, cloud snapshot). The backup must predate the failure
   and must be complete.
+
+  Step 4a — Check whether this is the one automatable case:
+  Restore-to-latest-backup can be handed off to an automated remediation
+  playbook ONLY when every one of these is true — otherwise fall through
+  to the fully manual Step 5 below:
+  - The backup tool is pgBackRest (not pg_basebackup, Barman, or a cloud
+    snapshot — those have no automated restore tool yet).
+  - This server is a single, standalone instance — no primary/replica
+    topology. If there is any indication of replicas, do not take this
+    path; a restore here invalidates every replica's WAL timeline (see
+    Step 6), which this automated path does not handle.
+  - You have NOT already decided PITR to an arbitrary point in time is
+    needed (e.g. "restore to just before the failure, not to the latest
+    backup"). The automated path only ever restores to the latest
+    available backup, pgBackRest's own default recovery target.
+  - Nothing so far suggests the corruption or data loss extends beyond
+    what a plain restore-and-replay-WAL would fix (e.g. a hardware error
+    on the storage volume itself, which a restore onto the same damaged
+    volume would not resolve).
+  If all four hold, emit exactly:
+    TRANSITION_TO: pbs_db_restore_latest_action
+  and stop — do not attempt any of Step 5's manual procedure yourself.
+  That playbook will reconfirm backup health on its own before restoring;
+  do not skip straight to it without having actually checked the above.
 
   Step 5 — Restore procedure (operator-executed):
   a. Stop the PostgreSQL pod completely (scale to 0 replicas).

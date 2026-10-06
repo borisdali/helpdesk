@@ -156,6 +156,7 @@ func main() {
 			agentName + "-restart_service":       {"host", "systemd", "remediation"},
 			agentName + "-get_pgbackrest_status": {"host", "backup", "diagnostics"},
 			agentName + "-run_pgbackrest_backup": {"host", "backup", "remediation"},
+			agentName + "-restore_from_backup":   {"host", "backup", "remediation"},
 		},
 		SkillExamples: map[string][]string{
 			agentName + "-check_host":            {"Is the alloydb-omni container running?"},
@@ -250,6 +251,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	restoreFromBackupToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "restore_from_backup",
+		Description: "Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready). Use only when get_pgbackrest_status confirms a healthy, non-stale backup exists and the instance is confirmed down — never against a broken repo/stanza or a live instance.",
+	}, restoreFromBackupTool)
+	if err != nil {
+		return nil, err
+	}
+
 	return []tool.Tool{
 		checkHostToolDef,
 		getHostLogsToolDef,
@@ -260,6 +269,7 @@ func createTools() ([]tool.Tool, error) {
 		restartServiceToolDef,
 		getPgBackRestStatusToolDef,
 		runPgBackRestBackupToolDef,
+		restoreFromBackupToolDef,
 	}, nil
 }
 

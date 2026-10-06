@@ -1,0 +1,91 @@
+series_id: pbs_db_restore_latest_action
+name: "Sysadmin — Restore From Latest pgBackRest Backup"
+version: "1.0"
+playbook_type: remediation
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Restore a single PostgreSQL instance from its most recent pgBackRest
+  backup after data-directory loss or corruption, then bring it back up.
+  Restore-to-latest only — no point-in-time target, no replica rebuild.
+  Runs only when pbs_db_pitr_recovery's own triage has already confirmed a
+  healthy, non-stale backup exists on an intact repo and this is a single
+  instance with no replica topology to consider; every other corruption
+  scenario (no backup, broken repo, replica involved, ambiguous scope)
+  stays with that playbook's human-escalation default.
+symptoms:
+  - "pbs_db_pitr_recovery triage confirmed a healthy, non-stale pgBackRest backup exists"
+  - "pbs_db_pitr_recovery triage confirmed this is a single instance, not a primary with replicas"
+  - "restore-to-latest-backup is the confirmed correct action"
+guidance: |
+  You are the remediation stage of a diagnostic chain. The prior playbook
+  has already confirmed: data-directory loss or corruption on this
+  instance, a healthy non-stale pgBackRest backup available to restore
+  from, and no replica topology to worry about. Your target for every tool
+  call below is the connection_string stated at the top of this prompt.
+
+  PRECONDITION CHECK — abort and escalate (do not call restore_from_backup)
+  if any of these are true:
+  - get_pgbackrest_status (Step 1 below) reports status_code != 0 (broken
+    repo/stanza) — there is nothing safe to restore from.
+  - get_pgbackrest_status reports no successful backup has ever completed.
+  - Prior findings mention a replica or primary/replica topology — this
+    playbook only handles a single, standalone instance.
+  - You have any doubt the instance is actually down — restore_from_backup
+    itself refuses to run if postgres is still accepting connections, but
+    do not rely on that as your only check; confirm first.
+
+  Step 1 — Reconfirm backup health:
+  Call get_pgbackrest_status with the connection_string (target). Do not
+  trust the prior playbook's diagnosis alone — reconfirm status_code=0,
+  backup_stale=false, and a non-empty last_backup_label yourself before
+  proceeding, the same discipline run_pgbackrest_backup's own remediation
+  already applies to a stale-backup finding.
+
+  Step 2 — Restore from the latest backup:
+  Call restore_from_backup with the same connection_string (target). This
+  restores the most recent backup's data (pgBackRest's own default recovery
+  target — not an arbitrary point in time) and overwrites the current data
+  directory. It independently refuses if the instance is still accepting
+  connections — if it refuses, stop and escalate; do not retry or attempt
+  to work around the refusal.
+
+  Step 3 — Bring the instance back up:
+  Call restart_container with the connection_string (target) to restart the
+  whole container against the now-repaired data directory.
+
+  Step 4 — Confirm recovery:
+  Call check_host to verify Status=running and Restarting=false. Call
+  get_host_logs and look for "database system is ready to accept
+  connections" — the same verification pbs_replica_restart_action uses,
+  since this agent has no psql-based tools to confirm a live connection
+  directly. Also check for any new PANIC/FATAL immediately after startup,
+  which would mean the restore did not actually resolve the corruption.
+
+  Step 5 — Report outcome:
+  Emit FINDINGS with:
+  - Whether the restore and restart both succeeded
+  - The backup label/timestamp that was restored from (from Step 1's
+    last_backup_label/last_backup_time)
+  - Container state and log evidence after restart (quote the actual log
+    line, do not paraphrase)
+  - Any anomalies (restart_container failed, instance crashed again after
+    restart, logs show a different error than before)
+
+  Do NOT call any write or destructive tools beyond restore_from_backup and
+  restart_container. Do NOT retry restore_from_backup more than once — if
+  it fails or refuses, report the failure and stop so a human can
+  investigate. Do NOT emit TRANSITION_TO or ESCALATE_TO — this is a
+  terminal action playbook. Your job ends with FINDINGS.
+
+escalation:
+  - "get_pgbackrest_status reports status_code != 0 or no successful backup ever completed"
+  - "restore_from_backup refuses because the instance is still accepting connections — the prior diagnosis may be wrong"
+  - "restart_container fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
+  - "logs show a new PANIC/FATAL immediately after restart — escalate rather than retry"
+  - "any sign of replica/primary topology — this playbook does not rebuild replicas"
+target_hints: []
