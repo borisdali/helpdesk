@@ -1,18 +1,32 @@
 series_id: pbs_db_data_loss_triage
 name: Database Down — Data Loss Triage
-version: "1.3"
+version: "1.6"
 playbook_type: triage
 approval_mode: manual
 execution_mode: agent
-# Same remediation domain, different agent (sysadmin_agent owns
-# get_pgbackrest_status/restore_from_backup) — same precedent as
-# pbs_sysadmin_docker_inspect's own TRANSITION_TO into a tool set it
-# doesn't itself hold. Added v0.31: the one automatable branch of this
-# otherwise human-only playbook (restore to latest backup, single
-# instance, healthy repo — see Step 4a below). Every other scenario below
-# still escalates exactly as before.
-transitions_to:
-  - pbs_pgbackrest_restore_remediate
+# Cross-domain escalation, two different reasons:
+# - pbs_sysadmin_docker_inspect: this agent has no tool of its own to read
+#   Docker/Podman container logs — same precedent as pbs_db_restart_triage's
+#   own ESCALATE_TO: pbs_sysadmin_docker_inspect. This is a ONE-WAY handoff
+#   (v0.31, revised): Step 1 front-loads every condition it can determine
+#   without log evidence (single_instance/backup_tool/pitr_decided) into its
+#   own FINDINGS before escalating, so pbs_sysadmin_docker_inspect can judge
+#   the one remaining evidence-dependent condition itself and escalate
+#   straight to pbs_pgbackrest_health_triage — it does NOT escalate back
+#   here. An earlier revision of this playbook bounced back here first; that
+#   added two full LLM round-trips for zero benefit once it was clear none
+#   of the static conditions needed fresh evidence to answer.
+# - pbs_pgbackrest_health_triage: same reasoning, for the Kubernetes path
+#   (Step 4a below) — this agent has no tool of its own to verify
+#   pgBackRest's actual backup health either. Added v0.31: the one
+#   automatable branch of this otherwise human-only playbook (restore to
+#   latest backup, single instance, healthy repo). It does NOT transition
+#   directly to the remediation playbook itself, since that would mean
+#   transitioning on assumption rather than verified tool output. Every
+#   other scenario below still escalates to a human exactly as before.
+escalates_to:
+  - pbs_pgbackrest_health_triage
+  - pbs_sysadmin_docker_inspect
 requires_evidence:
   - "PANIC.*could not locate a valid checkpoint"
   - "database files are incompatible with server"
@@ -55,8 +69,32 @@ guidance: |
   could overwrite salvageable data.
 
   Step 1 — Confirm the failure type and scope:
-  Use get_pod_logs to identify the specific error. The error class determines
-  the recovery path:
+  Check the Known Infrastructure section of your context for this server's
+  hosting type first. You have no tool of your own to read Docker/Podman
+  container logs — if the entry shows "[docker container: ...]" or "[podman
+  container: ...]", you cannot confirm the failure signature yourself.
+
+  Before escalating, answer what you CAN already determine without any log
+  evidence, from the Known Infrastructure context alone — these don't
+  depend on the specific failure text, so decide them now rather than
+  making the agent you hand off to re-derive them:
+  - single_instance: is this a standalone instance, or is there a
+    primary/replica topology on record for it?
+  - backup_tool: is pgBackRest the configured backup tool (not
+    pg_basebackup, Barman, or a cloud snapshot)?
+  - pitr_decided: have you (on this first pass) already concluded an
+    arbitrary point-in-time restore is needed, as opposed to restoring to
+    the latest backup? On a first pass this is always false.
+  Emit exactly:
+    FINDINGS: single_instance=<true|false>; backup_tool=<pgbackrest|other|unknown>; pitr_decided=<true|false>
+    ESCALATE_TO: pbs_sysadmin_docker_inspect
+  and stop. It has the tools to read the real container logs and will
+  judge, together with these findings, whether this qualifies for the one
+  automatable restore path — do not guess at the failure type yourself
+  without that evidence, and do not proceed to Step 2 below.
+
+  For a Kubernetes-hosted instance, use get_pod_logs to identify the
+  specific error. The error class determines the recovery path:
 
   Corruption errors ("invalid page", "checksum failure", "could not read block"):
     One or more data files are unreadable. The scope may be limited to a single
@@ -102,10 +140,13 @@ guidance: |
   pgBackRest, Barman, cloud snapshot). The backup must predate the failure
   and must be complete.
 
-  Step 4a — Check whether this is the one automatable case:
-  Restore-to-latest-backup can be handed off to an automated remediation
-  playbook ONLY when every one of these is true — otherwise fall through
-  to the fully manual Step 5 below:
+  Step 4a — Check whether this is the one automatable case (Kubernetes
+  path only — a Docker/Podman-hosted instance never reaches this step
+  itself; pbs_sysadmin_docker_inspect makes the equivalent call directly
+  once it has real log evidence, using the same four conditions):
+  Restore-to-latest-backup can be handed off to the sysadmin agent for
+  verification and action ONLY when every one of these is true — otherwise
+  fall through to the fully manual Step 5 below:
   - The backup tool is pgBackRest (not pg_basebackup, Barman, or a cloud
     snapshot — those have no automated restore tool yet).
   - This server is a single, standalone instance — no primary/replica
@@ -120,11 +161,17 @@ guidance: |
     what a plain restore-and-replay-WAL would fix (e.g. a hardware error
     on the storage volume itself, which a restore onto the same damaged
     volume would not resolve).
-  If all four hold, emit exactly:
-    TRANSITION_TO: pbs_pgbackrest_restore_remediate
-  and stop — do not attempt any of Step 5's manual procedure yourself.
-  That playbook will reconfirm backup health on its own before restoring;
-  do not skip straight to it without having actually checked the above.
+  You have no tool of your own to confirm pgBackRest's actual backup
+  health — do not guess or assume it is healthy. If all four hold, emit
+  exactly:
+    FINDINGS: data_loss_restore_candidate=true; <summarize what you found
+    in Steps 1-4: the failure signature, that this is a single instance,
+    and that a pgBackRest backup is expected to exist>
+    ESCALATE_TO: pbs_pgbackrest_health_triage
+  and stop — do not attempt any of Step 5's manual procedure yourself. The
+  sysadmin agent will independently verify backup health via
+  get_pgbackrest_status and only proceed to the actual restore if that
+  comes back healthy — it will escalate to a human itself otherwise.
 
   Step 5 — Restore procedure (operator-executed):
   a. Stop the PostgreSQL pod completely (scale to 0 replicas).

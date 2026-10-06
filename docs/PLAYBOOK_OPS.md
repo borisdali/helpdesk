@@ -134,15 +134,31 @@ pbs_db_restart_triage  (entry_point: true)
             pbs_sysadmin_docker_inspect  ← approval_mode: session
                 (SysAdmin agent: check_host + get_host_logs,
                  confirms or revises prior hypothesis)
-                │  exitcode=0 + clean shutdown confirmed
-                ▼
-            pbs_db_restart_action  ← approval_mode: manual (explicit only)
-                (SysAdmin agent: restart_container + verify)
+                │
+                ├─ exitcode=0 + clean shutdown confirmed ───────────────
+                │       ▼
+                │   pbs_db_restart_action  ← approval_mode: manual
+                │       (SysAdmin agent: restart_container + verify)
+                │
+                └─ logs: "could not find the database system" (v0.31) ──
+                        │  prior FINDINGS already gave single_instance/
+                        │  backup_tool/pitr_decided — this playbook judges
+                        │  the remaining evidence-dependent condition
+                        │  itself and transitions straight on (same agent,
+                        │  no bounce back to the DB agent)
+                        ▼
+                    pbs_pgbackrest_health_triage  ← approval_mode: manual
+                        (SysAdmin agent: get_pgbackrest_status)
+                        │  Ending D (healthy) + data_loss_restore_candidate=true
+                        ▼
+                    pbs_pgbackrest_restore_remediate  ← approval_mode: manual
+                        (SysAdmin agent: restore_from_backup + restart_container)
 ```
 
 - **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
 - For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_docker_inspect` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
 - If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_docker_inspect` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
+- If the inspection instead finds `"could not find the database system"` (missing/corrupt `pg_control` — real data loss, not a clean shutdown), `pbs_sysadmin_docker_inspect` transitions straight to `pbs_pgbackrest_health_triage` (v0.31) rather than dead-ending in a human-only finding. It does NOT bounce back to the DB agent: `pbs_db_data_loss_triage` already front-loaded everything decidable without log evidence (single instance? pgBackRest in use? PITR already decided?) into its own escalation FINDINGS, so `pbs_sysadmin_docker_inspect` only has to judge the one evidence-dependent condition (does the log text suggest anything beyond what a plain restore would fix?) and can act on the combined picture itself. `pbs_pgbackrest_health_triage` then gets a real, tool-verified backup-health check (not an assumption) before `pbs_pgbackrest_restore_remediate` ever touches the data directory.
 - **Do not jump to `pbs_db_config_triage` or `pbs_db_data_loss_triage` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
 
 ### 1.2a Auto-chaining vs. manual escalation

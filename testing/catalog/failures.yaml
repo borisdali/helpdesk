@@ -585,6 +585,7 @@ failures:
       path.
     evaluation:
       expected_tools:
+        - get_host_logs
         - get_pgbackrest_status
       expected_keywords:
         any_of:
@@ -595,7 +596,7 @@ failures:
           - "restore"
       expected_diagnosis:
         category: "pgdata_corrupted"
-        narrative: "The agent should identify from get_host_logs/read_pg_log_file that postgres cannot find its own data system (missing pg_control, not a transient crash), confirm from get_pgbackrest_status that a healthy, non-stale backup exists, confirm this is a single instance with no replica topology, and emit TRANSITION_TO: pbs_pgbackrest_restore_remediate rather than attempting to diagnose or fix this itself — pbs_db_data_loss_triage's own guidance does not perform the restore."
+        narrative: "pbs_db_data_loss_triage (DB agent) has no tool of its own to read Docker container logs. It should front-load everything it CAN determine without log evidence — single_instance, backup_tool, pitr_decided — into FINDINGS, then emit ESCALATE_TO: pbs_sysadmin_docker_inspect rather than guessing the rest. That playbook calls get_host_logs, recognizes \"could not find the database system\" as a genuine data-loss signature, judges whether the logs suggest anything beyond a plain restore, and — if the prior findings plus its own evidence all qualify — emits TRANSITION_TO: pbs_pgbackrest_health_triage directly (same agent, no bounce back to the DB agent for a decision it's already equipped to make). That playbook calls get_pgbackrest_status, confirms a healthy non-stale backup (Ending D), sees the data_loss_restore_candidate=true finding, and emits TRANSITION_TO: pbs_pgbackrest_restore_remediate — none of the triage/inspection playbooks perform the restore itself."
     timeout: 90s
 
   - id: db-connection-refused

@@ -1,15 +1,23 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.7"
+version: "1.9"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
 agent_name: sysadmin_agent
 approval_mode: manual
-# Same-domain follow-ons: both handled by sysadmin_agent.
+# Same-domain follow-ons: all handled by sysadmin_agent.
+# pbs_pgbackrest_health_triage (v0.31): reached when prior findings from
+# pbs_db_data_loss_triage (single_instance/backup_tool/pitr_decided) plus
+# this playbook's own log evidence together qualify for the one automatable
+# restore path — see the "could not find the database system" rule below.
+# A straight transition, not an escalation back to the DB agent: once this
+# playbook has the evidence, it judges the remaining condition itself
+# rather than bouncing back for a decision it's already equipped to make.
 transitions_to:
   - pbs_db_restart_action
   - pbs_wal_disk_full
+  - pbs_pgbackrest_health_triage
 # Cross-domain escalation: returning context to the DB agent, or forward to
 # the K8s agent when check_host reveals the target is Kubernetes-managed.
 escalates_to:
@@ -80,6 +88,19 @@ guidance: |
   - "FATAL" / "PANIC" (other)        → hard failure; do not restart without config review.
   - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
   - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
+  - "could not find the database system" → data directory/pg_control missing
+    or corrupted — a genuine data-loss recovery scenario, not a plain
+    FATAL/PANIC config issue (added v0.31). The DB agent already handed you
+    single_instance/backup_tool/pitr_decided in its prior FINDINGS (it
+    can't read these logs itself, so it front-loaded everything it could
+    determine without them) — you only need to judge whether THESE LOGS
+    suggest anything beyond what a plain restore would fix (e.g. a
+    separate storage/hardware-level complaint, not just the missing
+    pg_control line). If all of the prior findings are true AND nothing
+    here suggests deeper damage, this qualifies for the automatable
+    restore path — see the escalation rule below. Do not recommend a
+    restart; a restore is needed, and a restart would just repeat the
+    crash.
   If container logs lack PostgreSQL-level detail, also call read_pg_log_file
   with filter="PANIC" to look for disk/WAL crash evidence (PostgreSQL PANIC
   is more severe than FATAL and is what ENOSPC triggers). Also call it again
@@ -112,6 +133,22 @@ guidance: |
   - logs contain "No space left on device" with a pg_wal path:
     TRANSITION_TO: pbs_wal_disk_full
     (disk must be freed before any restart attempt — restarting now will re-PANIC)
+  - logs contain "could not find the database system" AND the prior
+    FINDINGS from pbs_db_data_loss_triage show single_instance=true,
+    backup_tool=pgbackrest, pitr_decided=false, AND nothing in these logs
+    suggests damage beyond what a plain restore would fix:
+    FINDINGS: data_loss_restore_candidate=true; <your own log evidence,
+    quoted verbatim>
+    TRANSITION_TO: pbs_pgbackrest_health_triage
+    (it will verify backup health for real via get_pgbackrest_status
+    before anything destructive happens — checked BEFORE the generic
+    FATAL/PANIC/invalid-page rule below so it isn't swallowed by that
+    rule's own "do NOT escalate" default)
+  - logs contain "could not find the database system" but any of the
+    above conditions do NOT hold (replica topology, non-pgBackRest tool,
+    PITR already decided, or deeper damage suspected):
+    Do NOT escalate — describe the finding and why it doesn't qualify for
+    the automatable path; this needs a human DBA.
   - exitcode=137 / oomkilled=true:
     Do NOT escalate — describe the OOM evidence and recommend operator review
     before restarting.
