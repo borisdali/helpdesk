@@ -1821,7 +1821,7 @@ failures:
         pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
     diagnosis_playbook_series_id: pbs_pg_hba_triage
     remediation:
-      playbook_id: pbs_db_config_recovery
+      playbook_id: pbs_db_config_triage
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
     prompt: >

@@ -313,19 +313,28 @@ func TestSeedSystemPlaybooks_NewFields(t *testing.T) {
 		t.Error("pbs_db_restart_triage: escalates_to is empty")
 	}
 
-	// Config recovery: execution_mode=agent, transitions_to and requires_evidence set.
-	config := bySeriesID["pbs_db_config_recovery"]
+	// Config triage: execution_mode=agent, playbook_type=triage, transitions_to
+	// and requires_evidence set, entry_point=false (reached via
+	// pbs_db_restart_triage's own transition, same reasoning as data loss
+	// triage below — not a preferred starting point on its own).
+	config := bySeriesID["pbs_db_config_triage"]
 	if config == nil {
-		t.Fatal("pbs_db_config_recovery not seeded")
+		t.Fatal("pbs_db_config_triage not seeded")
 	}
 	if config.ExecutionMode != "agent" {
-		t.Errorf("pbs_db_config_recovery: execution_mode = %q, want agent", config.ExecutionMode)
+		t.Errorf("pbs_db_config_triage: execution_mode = %q, want agent", config.ExecutionMode)
+	}
+	if config.PlaybookType != "triage" {
+		t.Errorf("pbs_db_config_triage: playbook_type = %q, want triage", config.PlaybookType)
 	}
 	if len(config.TransitionsTo) == 0 {
-		t.Error("pbs_db_config_recovery: transitions_to is empty")
+		t.Error("pbs_db_config_triage: transitions_to is empty")
 	}
 	if len(config.RequiresEvidence) == 0 {
-		t.Error("pbs_db_config_recovery: requires_evidence is empty")
+		t.Error("pbs_db_config_triage: requires_evidence is empty")
+	}
+	if config.EntryPoint {
+		t.Error("pbs_db_config_triage: entry_point = true, want false")
 	}
 
 	// Data loss triage: execution_mode=agent, playbook_type=triage,

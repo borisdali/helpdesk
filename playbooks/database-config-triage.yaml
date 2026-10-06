@@ -1,6 +1,8 @@
-series_id: pbs_db_config_recovery
+series_id: pbs_db_config_triage
 name: Database Down — Configuration Recovery
-version: "1.2"
+version: "1.3"
+playbook_type: triage
+approval_mode: manual
 execution_mode: agent
 transitions_to:
   - pbs_db_data_loss_triage
@@ -16,6 +18,13 @@ description: |
   offending parameter from pod logs, locate the configuration file using
   stored baseline data, and guide the operator through reverting the change
   so the database can restart cleanly.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - invalid-config-value
+    - unrecognized-parameter
+    - alter-system-override
+    - config-file-unreadable
 symptoms:
   - "database will not start after a configuration change"
   - "pod in CrashLoopBackOff; logs show FATAL configuration error"

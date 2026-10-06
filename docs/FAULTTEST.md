@@ -639,7 +639,7 @@ FAULT                            PLATFORM   PLAYBOOK                   FAULT TES
 ------------------------------------------------------------------------------------------------------------------------------------------------
 db-max-connections               any        pbs_connection_triage      2026-04-22  PASS       -
 db-connection-refused            any        pbs_db_restart_triage      (never)                -
-db-pg-hba-corrupt                any        pbs_db_config_recovery     (never)                -
+db-pg-hba-corrupt                any        pbs_db_config_triage     (never)                -
 host-container-stopped           docker/vm  (none)                     NO PLAYBOOK            -
 db-wal-disk-full                 docker/vm  pbs_wal_disk_full          2026-05-03  PASS       -
 db-wal-disk-full-k8s             k8s        pbs_k8s_pod_crash_triage  (never)              -
@@ -845,7 +845,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 | Fault | Playbook | Agent | Notes |
 |-------|----------|-------|-------|
 | `db-connection-refused` | `pbs_db_restart_action` | sysadmin | Requires `--sysadmin-agent`; DB triage escalates to sysadmin, which restarts the container |
-| `db-pg-hba-corrupt` | `pbs_db_config_recovery` | db | |
+| `db-pg-hba-corrupt` | `pbs_db_config_triage` | db | |
 | `db-process-kill` | `pbs_db_restart_triage` | db | |
 | `db-checkpoint-warning` | `pbs_checkpoint_bgwriter_triage` | db | |
 | `db-tx-lock-chain-blocker` | `pbs_lock_chain_triage` | db | |

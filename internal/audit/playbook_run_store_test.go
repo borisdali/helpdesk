@@ -118,7 +118,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_triage", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 	if runs[0].Outcome != "escalated" {
 		t.Errorf("outcome = %q, want escalated", runs[0].Outcome)
 	}
-	if runs[0].EscalatedTo != "pbs_db_config_recovery" {
+	if runs[0].EscalatedTo != "pbs_db_config_triage" {
 		t.Errorf("escalated_to = %q", runs[0].EscalatedTo)
 	}
 	if runs[0].FindingsSummary == "" {

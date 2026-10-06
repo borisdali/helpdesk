@@ -1100,7 +1100,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	// remediation_series_id — a target the model never mentioned — misrepresenting
 	// its own conclusion as an unresolved handoff. Found live: a wal-stale-slot
 	// triage run concluded "database healthy, false alarm" with ESCALATE_TO: none,
-	// but still surfaced transition_target: pbs_db_config_recovery and a
+	// but still surfaced transition_target: pbs_db_config_triage and a
 	// misleading "protocol violation — agent omitted" log line.
 	if req.GateEscalation && req.RemediationSeriesID != "" &&
 		prev.escalatedTo == "" && prev.transitionTo == "" &&

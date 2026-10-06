@@ -11,7 +11,7 @@ approval_mode: manual
 # coerces anything outside it to requires_operator_approval — preventing the
 # model from inventing playbook names. No cross-domain escalations declared.
 transitions_to:
-  - pbs_db_config_recovery
+  - pbs_db_config_triage
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -61,7 +61,7 @@ guidance: |
   HYPOTHESIS_2: <alternative if considered> | CONFIDENCE: <0.0–1.0> | REJECTED: <one-sentence reason why ruled out>
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: error=<error text verbatim>; target=<host:port/dbname>; cause=hba_rejection
-  TRANSITION_TO: pbs_db_config_recovery
+  TRANSITION_TO: pbs_db_config_triage
 escalation:
   - "error is 'password authentication failed' — this is a credential issue, not HBA; use pbs_auth_failure_triage"
   - "error is 'connection refused' — database process is not running; use pbs_db_restart_triage"

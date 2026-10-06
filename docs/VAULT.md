@@ -287,7 +287,7 @@ db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_
 db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
 db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
 db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_action      2026-07-10  PASS       STABLE(3)      3 runs  100% escalated  last: 2026-07-10
-db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
+db-pg-hba-corrupt                any        pbs_db_config_triage     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
 
 When a remediation playbook has two or more versions with run data, the per-version trend appears as indented rows below the fault. The `*` marks the currently active version. When more than two versions exist, a `→ vault versions <series>` pointer appears for the full history.

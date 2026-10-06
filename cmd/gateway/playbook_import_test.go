@@ -386,7 +386,7 @@ execution_mode: agent
 approval_mode: agent
 entry_point: true
 escalates_to:
-  - pbs_db_config_recovery
+  - pbs_db_config_triage
   - pbs_db_data_loss_triage
 requires_evidence:
   - "connection refused"
@@ -414,8 +414,8 @@ requires_evidence:
 	if !d.EntryPoint {
 		t.Error("entry_point should be true")
 	}
-	if len(d.EscalatesTo) != 2 || d.EscalatesTo[0] != "pbs_db_config_recovery" {
-		t.Errorf("escalates_to = %v, want [pbs_db_config_recovery pbs_db_data_loss_triage]", d.EscalatesTo)
+	if len(d.EscalatesTo) != 2 || d.EscalatesTo[0] != "pbs_db_config_triage" {
+		t.Errorf("escalates_to = %v, want [pbs_db_config_triage pbs_db_data_loss_triage]", d.EscalatesTo)
 	}
 	if len(d.RequiresEvidence) != 2 {
 		t.Errorf("requires_evidence = %v, want 2 entries", d.RequiresEvidence)

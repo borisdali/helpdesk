@@ -51,7 +51,7 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_lock_chain_remediate",
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
-		"pbs_db_config_recovery",
+		"pbs_db_config_triage",
 		"pbs_db_data_loss_triage",
 	}
 	seriesFound := map[string]bool{}
@@ -785,7 +785,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 	})
 
 	t.Run("config_recovery_is_agent_with_evidence", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_db_config_recovery")
+		pb := getBySeriesID(t, "pbs_db_config_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
@@ -1809,7 +1809,7 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 		"pbs_sysadmin_docker_inspect": true,
 	}
 	remediationSeries := map[string]bool{
-		"pbs_db_config_recovery": true,
+		"pbs_db_config_triage": true,
 		"pbs_db_data_loss_triage":   true,
 		"pbs_db_restart_action":  true,
 		"pbs_wal_disk_full":      true,

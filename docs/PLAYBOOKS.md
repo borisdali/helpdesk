@@ -147,7 +147,7 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 | `pbs_replication_lag` | Replication Lag Triage | availability | database | `get_replication_status`, `get_server_info` |
 | `pbs_checkpoint_bgwriter_triage` | Checkpoint & bgwriter Triage | performance | database | `get_bgwriter_stats`, `read_pg_log`, `get_pg_settings` |
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
-| `pbs_db_config_recovery` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
+| `pbs_db_config_triage` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_data_loss_triage` | Database Down — Data Loss Triage | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
 | `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 | `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
@@ -437,7 +437,7 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
   "status":            "pending_gate",
   "gate_type":         "transition",
   "findings":          "Pod recovered after a restart and is now healthy.",
-  "transition_target": "pbs_db_config_recovery",
+  "transition_target": "pbs_db_config_triage",
   "gate_reason":        "objective_evidence:pod_restarted"
 }
 ```
@@ -1207,7 +1207,7 @@ curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_3f7a2b1c \
 # Mark a run as escalated to a follow-on Playbook
 curl -s -X PATCH http://localhost:8080/api/v1/fleet/playbook-runs/plr_8c9d2e3f \
   -H "Content-Type: application/json" \
-  -d '{"outcome":"escalated","escalated_to":"pbs_db_config_recovery","findings_summary":"Logs show FATAL: invalid value for parameter max_connections."}'
+  -d '{"outcome":"escalated","escalated_to":"pbs_db_config_triage","findings_summary":"Logs show FATAL: invalid value for parameter max_connections."}'
 ```
 
 Returns `204 No Content` on success.
@@ -1427,7 +1427,7 @@ Only one Playbook per `problem_class` should have `entry_point: true`.
 ```
 pbs_db_restart_triage  (entry_point: true)
         │
-        ├─ K8s: logs show bad config      → pbs_db_config_recovery
+        ├─ K8s: logs show bad config      → pbs_db_config_triage
         │                                          │
         │                                          └─ logs show corrupt data → pbs_db_data_loss_triage
         │
@@ -1470,7 +1470,7 @@ and [VAULT.md's `vault hop-certs`](VAULT.md#vault-hop-certs).
 
 The agent is prompted with the escalation paths at run time:
 
-> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_recovery`, `pbs_db_data_loss_triage`, `pbs_sysadmin_docker_inspect`"
+> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_triage`, `pbs_db_data_loss_triage`, `pbs_sysadmin_docker_inspect`"
 
 For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
 

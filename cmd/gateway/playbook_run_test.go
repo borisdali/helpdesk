@@ -126,7 +126,7 @@ func TestHandlePlaybookRun_AgentMode(t *testing.T) {
 		Guidance:      "Step 1: run check_connection.",
 		ExecutionMode: "agent",
 		EntryPoint:    true,
-		EscalatesTo:   []string{"pbs_db_config_recovery"},
+		EscalatesTo:   []string{"pbs_db_config_triage"},
 		IsActive:      true,
 	}
 	auditSrv := mockAuditdPlaybook(t, pb)
@@ -190,11 +190,11 @@ func TestAssembleTriagePrompt_ContainsGuidance(t *testing.T) {
 func TestAssembleTriagePrompt_EscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{
 		Name:        "Restart Triage",
-		EscalatesTo: []string{"pbs_db_config_recovery", "pbs_db_data_loss_triage"},
+		EscalatesTo: []string{"pbs_db_config_triage", "pbs_db_data_loss_triage"},
 	}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
-	if !strings.Contains(prompt, "pbs_db_config_recovery") {
+	if !strings.Contains(prompt, "pbs_db_config_triage") {
 		t.Error("prompt missing escalates_to series ID")
 	}
 	if !strings.Contains(prompt, "pbs_db_data_loss_triage") {
@@ -1006,7 +1006,7 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	traceID := audit.NewTraceIDWithPrefix("tr_")
 
 	gw.recordEscalationDecision(context.Background(), traceID, principal,
-		pb, "pbs_db_config_recovery", "connection pool exhaustion detected", false)
+		pb, "pbs_db_config_triage", "connection pool exhaustion detected", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -1029,8 +1029,8 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	if ev.Decision == nil {
 		t.Fatal("Decision is nil")
 	}
-	if ev.Decision.Agent != "pbs_db_config_recovery" {
-		t.Errorf("Decision.Agent = %q, want pbs_db_config_recovery", ev.Decision.Agent)
+	if ev.Decision.Agent != "pbs_db_config_triage" {
+		t.Errorf("Decision.Agent = %q, want pbs_db_config_triage", ev.Decision.Agent)
 	}
 	if ev.Decision.RequestCategory != audit.CategoryIncident {
 		t.Errorf("RequestCategory = %q, want %q", ev.Decision.RequestCategory, audit.CategoryIncident)
@@ -1045,7 +1045,7 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	if !strings.Contains(ev.Decision.ReasoningChain[0], "pbs_db_restart_triage") {
 		t.Errorf("ReasoningChain[0] should mention source playbook: %q", ev.Decision.ReasoningChain[0])
 	}
-	if !strings.Contains(ev.Decision.ReasoningChain[1], "pbs_db_config_recovery") {
+	if !strings.Contains(ev.Decision.ReasoningChain[1], "pbs_db_config_triage") {
 		t.Errorf("ReasoningChain[1] should mention target playbook: %q", ev.Decision.ReasoningChain[1])
 	}
 	if ev.Principal == nil || ev.Principal.UserID != "ops@example.com" {
@@ -1069,7 +1069,7 @@ func TestRecordEscalationDecision_NoFindingsOmitsThirdStep(t *testing.T) {
 
 	pb := &audit.Playbook{SeriesID: "pbs_db_restart_triage"}
 	gw.recordEscalationDecision(context.Background(), "tr_test123",
-		identity.ResolvedPrincipal{}, pb, "pbs_db_config_recovery", "", false)
+		identity.ResolvedPrincipal{}, pb, "pbs_db_config_triage", "", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -6753,7 +6753,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 		})
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_recovery"}
+		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_triage"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop transitioned, got %v", extra["evidence_warnings"])
@@ -7067,7 +7067,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_MultipleSignals(t *testi
 		"HYPOTHESIS_1: pod restarted and was evicted due to node pressure | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithMultipleEvidence(t, pb, []string{"pod_restarted", "evicted"})
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -7115,7 +7115,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -7138,8 +7138,8 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
 		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
 	}
-	if resp["transition_target"] != "pbs_db_config_recovery" {
-		t.Errorf("transition_target = %q, want pbs_db_config_recovery", resp["transition_target"])
+	if resp["transition_target"] != "pbs_db_config_triage" {
+		t.Errorf("transition_target = %q, want pbs_db_config_triage", resp["transition_target"])
 	}
 	signals, ok := resp["objective_evidence_signals"].([]any)
 	if !ok || len(signals) != 1 || signals[0] != "pod_restarted" {
@@ -7171,7 +7171,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *t
 		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	var patchBodies [][]byte
 	var mu sync.Mutex
@@ -7275,7 +7275,7 @@ func TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason(
 		"HYPOTHESIS_1: transient issue, may have resolved | CONFIDENCE: 0.35 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod state uncertain\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
