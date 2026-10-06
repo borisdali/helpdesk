@@ -379,10 +379,20 @@ faulttest-gateway-nocache:
 #   FAULT_IDS                 comma-separated fault IDs (overrides CATEGORIES)
 #
 # Judge (optional — adds semantic scoring on top of keyword/tool scores):
-#   RECERTIFY_JUDGE=1         enable LLM-as-judge
-#   HELPDESK_MODEL_NAME       judge model (e.g. claude-haiku-4-5-20251001)
-#   HELPDESK_MODEL_VENDOR     judge vendor: anthropic or google
-#   HELPDESK_API_KEY          judge API key (defaults to agent key)
+#   RECERTIFY_JUDGE=1          enable LLM-as-judge
+#   RECERTIFY_JUDGE_VENDOR     judge vendor, pinned independently of the
+#                              diagnosis model under test: anthropic or google.
+#                              Leave unset to fall back to HELPDESK_MODEL_VENDOR
+#                              (the pre-existing behavior — same vendor as
+#                              whatever the agent under test is running,
+#                              which is almost never what you want for a real
+#                              model-swap evaluation: the judge would swap
+#                              right along with the model being judged).
+#   RECERTIFY_JUDGE_MODEL      judge model (e.g. claude-haiku-4-5-20251001).
+#                              Falls back to HELPDESK_MODEL_NAME when unset.
+#   RECERTIFY_JUDGE_API_KEY    judge API key. Falls back to HELPDESK_API_KEY
+#                              when unset — only sufficient if the judge
+#                              vendor matches whichever key that is.
 # ---------------------------------------------------------------------------
 RECERTIFY_LOG    = /tmp/helpdesk-recertify.log
 RECERTIFY_REPEAT ?= 5
@@ -418,6 +428,9 @@ recertify:
 		$(if $(FAULT_IDS),--ids "$(FAULT_IDS)",) \
 		$(if $(FAULTTEST_INFRA_CONFIG),--infra-config "$(FAULTTEST_INFRA_CONFIG)",) \
 		$(if $(RECERTIFY_JUDGE),--judge,) \
+		$(if $(RECERTIFY_JUDGE_VENDOR),--judge-vendor "$(RECERTIFY_JUDGE_VENDOR)",) \
+		$(if $(RECERTIFY_JUDGE_MODEL),--judge-model "$(RECERTIFY_JUDGE_MODEL)",) \
+		$(if $(RECERTIFY_JUDGE_API_KEY),--judge-api-key "$(RECERTIFY_JUDGE_API_KEY)",) \
 		2>&1 | tee $(RECERTIFY_LOG)
 	@echo ""
 	@echo "Certification results:"
