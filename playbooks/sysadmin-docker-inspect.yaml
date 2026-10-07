@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "2.0"
+version: "2.1"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -79,7 +79,16 @@ guidance: |
   - restarting=true → container is in a restart loop. Check logs immediately.
 
   Step 2 — Recent logs:
-  Call get_host_logs to retrieve the last 50 lines of container output.
+  Call get_host_logs with lines=300 to retrieve recent container output — NOT
+  the tool's own 100-line default, and nowhere near the 50 this guidance used
+  to say. A single successful WAL-replay recovery can legitimately produce
+  30+ log lines on its own (found live, 2026-10-07: a long-lived test
+  instance with several prior restores behind it produced enough recovery
+  noise between crash cycles that a 50-line window sometimes missed the
+  actual crash signature entirely, even though it was genuinely in the
+  container's log history — not a hypothetical, a real miss). A small window
+  risks silently truncating the one signal this step exists to find; asking
+  for extra lines costs nothing a real incident would notice.
   Key signals:
   - "database system was shut down"  → clean shutdown; a simple restart will recover.
   - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
