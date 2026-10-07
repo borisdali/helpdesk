@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "1.9"
+version: "2.0"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -96,11 +96,20 @@ guidance: |
     determine without them) — you only need to judge whether THESE LOGS
     suggest anything beyond what a plain restore would fix (e.g. a
     separate storage/hardware-level complaint, not just the missing
-    pg_control line). If all of the prior findings are true AND nothing
-    here suggests deeper damage, this qualifies for the automatable
-    restore path — see the escalation rule below. Do not recommend a
-    restart; a restore is needed, and a restart would just repeat the
-    crash.
+    pg_control line). This log line by itself is fully diagnostic — do NOT
+    go looking for a disk-pressure or memory explanation instead of it; a
+    full disk would produce "No space left on device" in the log text
+    directly, matching the rule above, not a missing pg_control file.
+    check_disk's own output on this test fixture includes an unrelated
+    host-mount entry that happens to always read ~91% full (a Docker
+    Desktop artifact, confirmed live — it reports the *host laptop's* own
+    disk usage, not anything about this container) — treat any disk/memory
+    reading as irrelevant once this log line is already present; it is not
+    corroborating evidence, it is noise. If all of the prior findings are
+    true AND nothing in the log text itself suggests deeper damage, this
+    qualifies for the automatable restore path — see the escalation rule
+    below. Do not recommend a restart; a restore is needed, and a restart
+    would just repeat the crash.
   If container logs lack PostgreSQL-level detail, also call read_pg_log_file
   with filter="PANIC" to look for disk/WAL crash evidence (PostgreSQL PANIC
   is more severe than FATAL and is what ENOSPC triggers). Also call it again
