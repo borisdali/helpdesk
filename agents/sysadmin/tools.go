@@ -628,18 +628,32 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 	var runtimeLabel, out string
 	var runErr error
 
+	// Explicit shell `2>&1` merge, not a bare argv call: cmdRunner.Run (and
+	// every CommandRunner implementation) returns stdout alone on success,
+	// discarding stderr — correct for get_pgbackrest_status (stderr there is
+	// non-fatal WARN noise that would corrupt JSON parsing) but wrong here.
+	// get_host_logs' whole job is showing everything that happened in the
+	// container, and `docker logs`'s own exit code is always 0 as long as
+	// the container exists, regardless of what happened inside it — a fatal
+	// startup error written to the container's stderr (confirmed live,
+	// 2026-10-07: PostgreSQL's own "could not find the database system"
+	// message, emitted before its logging subsystem initializes, goes to
+	// stderr, not stdout) was silently and unconditionally dropped every
+	// time, with no error to signal it. Merging streams in the shell before
+	// cmdRunner.Run ever sees the output sidesteps the split entirely,
+	// without touching the shared helper's behavior other callers rely on.
 	if runtime != "" {
 		runtimeLabel = runtime
-		out, runErr = cmdRunner.Run(ctx, runtime, []string{
-			"logs", "--tail", fmt.Sprintf("%d", lines), host.ContainerName,
-		}, nil)
+		script := shellCommand(runtime, []string{"logs", "--tail", fmt.Sprintf("%d", lines), host.ContainerName}, nil) + " 2>&1"
+		out, runErr = cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
 	} else {
 		runtimeLabel = "systemd"
-		out, runErr = cmdRunner.Run(ctx, "journalctl", []string{
+		script := shellCommand("journalctl", []string{
 			"-u", host.SystemdUnit,
 			"-n", fmt.Sprintf("%d", lines),
 			"--no-pager",
-		}, nil)
+		}, nil) + " 2>&1"
+		out, runErr = cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
 	}
 
 	if runErr != nil && strings.TrimSpace(out) == "" {
