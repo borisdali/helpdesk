@@ -124,6 +124,40 @@ aiHelpDesk offers a comprehensive testing strategy that is broken into five dist
   - Docker Compose stack
   - Optional: kind cluster for K8s tests
 
+  **Where a given integration test actually lives** — this comes down to Go package
+  visibility, not a stylistic choice, and both locations share the same `integration`
+  build tag and get swept together by `make integration`'s `INTEGRATION_PKGS`:
+
+  - **Co-located inside the agent's own package** (`package main`, white-box) — when the
+    test needs an unexported function or package-level state that only exists internally
+    to that agent: `agents/sysadmin/pgbackrest_ssh_integration_test.go` and
+    `agents/sysadmin/restore_from_backup_integration_test.go` call
+    `getPgBackRestStatusImpl`/`restoreFromBackupImpl` and set the package-level
+    `infraConfig` var directly; `agents/database/tools_integration_test.go` does the
+    same for that agent's own tool functions. None of these are exported, so a test
+    needing them literally cannot compile anywhere else.
+  - **`testing/integration/`** (standalone `package integration`, black-box) — when the
+    test only needs a package's *public* API: `internal/audit`'s exported store
+    constructors/methods against a real Postgres backend (the `*_store_postgres_test.go`
+    files), plus cross-cutting scenarios that don't belong to any one agent —
+    `testing/testutil`'s Docker helpers (`docker_test.go`), external fault-injection
+    mechanics (`external_inject_test.go`), a black-box check against the research
+    agent's own endpoint (`research_agent_test.go`). A further subpackage,
+    `testing/integration/governance/`, holds the same kind of black-box test for
+    gateway/incident/identity behavior specifically.
+
+  When adding a new integration test: if it needs to reach into a specific agent's own
+  unexported logic, it goes in that agent's package; if it only exercises a public API
+  or a cross-cutting helper, it goes in `testing/integration/` (or `.../governance/` for
+  gateway-level checks).
+
+  The subsections below (3a–3e) describe this layer's original design write-up — some of
+  the file paths named there (`testing/integration/database_test.go`,
+  `testing/integration/gateway_test.go`, `testing/integration/incident_test.go`) predate
+  the package-visibility split above and don't match where that coverage actually lives
+  today; treat them as illustrating the *kind* of test each case needs, not a literal
+  current file listing.
+
   3a. Database agent integration tests:
 
 ```

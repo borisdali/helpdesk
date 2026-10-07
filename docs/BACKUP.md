@@ -245,8 +245,8 @@ regression test captures the exact live preamble.
 
 ## 3. Restore from backup after data loss
 
-Fault: [`db-pgdata-corrupted`](../testing/catalog/failures.yaml) (search for the fault ID — the
-file is long)  
+Fault: [`db-pgdata-corrupted`](../testing/catalog/failures.yaml) (search for the fault ID, the
+file is not short)  
 Triage playbooks: [`pbs_db_data_loss_triage`](../playbooks/database-data-loss-triage.yaml) →
 [`pbs_sysadmin_docker_inspect`](../playbooks/sysadmin-docker-inspect.yaml) →
 [`pbs_pgbackrest_health_triage`](../playbooks/pgbackrest-health-triage.yaml)  
@@ -254,18 +254,18 @@ Remediation playbook: [`pbs_pgbackrest_restore_remediate`](../playbooks/pgbackre
 
 §§1–2 above both answer "is backup *healthy*?" This section answers a different, more severe
 question: the data directory itself is gone or corrupted (missing `pg_control`, "could not find
-the database system") and the instance won't start at all. §1/§2's read-only checks don't apply —
+the database system") and the instance won't start at all. §1/§2's R/O checks don't apply because 
 there's nothing left to query. Recovery means overwriting the current data directory with a
 backup, which is the most destructive operation in this project. v0.31 scopes this to the
 narrowest real slice: restore to the latest available pgBackRest backup, a single standalone
 instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
-promotion, and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
+promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
 
 **The failure mode**:  
 A missing/corrupted `pg_control` file (disk corruption, an accidental delete, a bad volume
-restore) leaves PostgreSQL unable to start at all — `postgres: could not find the database
+restore) leaves PostgreSQL unable to start at all and the error message is `postgres: could not find the database
 system`. This is distinct from every scenario in §1/§2: the database isn't slow or
-misconfigured, it's *gone*, and the only way back is restoring from a backup rather than fixing a
+misconfigured, it's *gone* and the only way back is restoring from a backup rather than fixing a
 setting.
 
 **Why aiHelpDesk doesn't make that mistake**:  
@@ -281,10 +281,9 @@ earlier revision of this chain *did* bounce `pbs_sysadmin_docker_inspect` back t
 safety benefit once it was clear none of the static conditions needed fresh evidence to answer —
 caught in review before it shipped, not after a slow live run.
 
-**A second, independent backstop that doesn't depend on the model getting it right** — and this
-is the one that actually matters for a destructive op:  
-`pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
-`pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2, and here
+**A second, independent backstop that doesn't depend on the model getting it right:**   
+And this is the one that actually matters for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
+`pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
 it does real work: `pbs_pgbackrest_restore_remediate` is only ever reached once that hop's own
 `TRANSITION_TO` fires, which should only happen when the backup is genuinely confirmed healthy.
 If the model's response claims "healthy" but the tool's own structured result says otherwise, the
@@ -348,7 +347,7 @@ Not yet built — tracked, not forgotten:
   crash point is actually contiguous. This is implementable without a live source instance:
   `pgbackrest info --output=json` already reports the stanza's `archive[].max` (the latest WAL
   segment filename physically present in the repo — not yet parsed into
-  `GetPgBackRestStatusResult`), and Postgres's own recovery log reports exactly which segments it
+  `GetPgBackRestStatusResult`) and Postgres's own recovery log reports exactly which segments it
   replayed (`"restored log file \"...\" from archive"`) and the final LSN (`"redo done at ..."`).
   Comparing the two after a restore — did recovery replay through the repo's own latest segment,
   or stop short — would turn a silent partial-recovery into a reported, CRITICAL finding instead
@@ -385,7 +384,7 @@ Not yet built — tracked, not forgotten:
   §1's `set_archive_command` cannot act
   against a real CNPG-managed cluster, at any privilege level — see §1's own "Verified, not just
   claimed" callout for the direct evidence (`postgresql.auto.conf` is mode 400, read-only even
-  for the Postgres superuser, and the container runs `readOnlyRootFilesystem: true`). This is
+  for the Postgres superuser and the container runs `readOnlyRootFilesystem: true`). This is
   CNPG's own deliberate design, not fixable by granting more access. A CNPG-native remediation
   path — patching the `Cluster` custom resource's own `archive_command` field (a K8s API write,
   reconciled by the operator) instead of running SQL — is a distinct, unbuilt capability, not an
