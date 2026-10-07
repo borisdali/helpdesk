@@ -22,7 +22,20 @@ set -uo pipefail
 
 /usr/sbin/sshd
 
-/usr/local/bin/docker-entrypoint.sh "$@" &
+# stdbuf -oL -eL: force line-buffered stdout/stderr through the whole
+# docker-entrypoint.sh -> postgres process tree (propagates via LD_PRELOAD,
+# inherited across fork/exec). Without this, a non-TTY pipe makes glibc's
+# stdio fully block-buffer postgres's own output — found live, 2026-10-07:
+# a real agent run's get_host_logs call raced postgres's own crash message
+# ("could not find the database system"), which was still sitting in
+# postgres's unflushed buffer, while this script's own `echo` below (plain
+# bash, flushes immediately) had already landed in the log stream —
+# `docker logs` showed the wrapper's "exited with code 2" line with
+# postgres's own diagnostic text missing entirely, even though it appeared
+# moments later once the OS eventually flushed it. A bigger get_host_logs
+# line window would not have fixed this: the content wasn't written yet,
+# regardless of how many lines were requested.
+stdbuf -oL -eL /usr/local/bin/docker-entrypoint.sh "$@" &
 PG_PID=$!
 wait "$PG_PID"
 EXIT_CODE=$?
