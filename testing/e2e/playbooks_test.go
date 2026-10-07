@@ -811,11 +811,103 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
+		if pt, _ := pb["playbook_type"].(string); pt != "triage" {
+			t.Errorf("playbook_type = %q, want triage", pt)
+		}
+		if am, _ := pb["approval_mode"].(string); am != "manual" {
+			t.Errorf("approval_mode = %q, want manual", am)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true, want false (reached via pbs_db_restart_triage's transition or its own evidence, not a preferred starting point)")
+		}
 		evidence, _ := pb["requires_evidence"].([]any)
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		t.Logf("data_loss_triage: requires_evidence=%v", evidence)
+		// v0.31: escalates to pbs_sysadmin_docker_inspect (no log-reading tool
+		// of its own for a Docker-hosted target) and pbs_pgbackrest_health_triage
+		// (no backup-health tool of its own, Kubernetes path).
+		escalates, _ := pb["escalates_to"].([]any)
+		for _, want := range []string{"pbs_sysadmin_docker_inspect", "pbs_pgbackrest_health_triage"} {
+			found := false
+			for _, e := range escalates {
+				if s, _ := e.(string); s == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("pbs_db_data_loss_triage.escalates_to does not include %q; got %v", want, escalates)
+			}
+		}
+		t.Logf("data_loss_triage: requires_evidence=%v escalates_to=%v", evidence, escalates)
+	})
+
+	t.Run("docker_inspect_transitions_to_pgbackrest_health_triage", func(t *testing.T) {
+		// v0.31: a same-agent transition (both sysadmin_agent), not an
+		// escalation — pbs_sysadmin_docker_inspect judges the one
+		// evidence-dependent condition itself once it has real log text and
+		// acts on the combined picture, rather than bouncing back to the DB
+		// agent for a decision it's already equipped to make.
+		pb := getBySeriesID(t, "pbs_sysadmin_docker_inspect")
+		transitions, _ := pb["transitions_to"].([]any)
+		found := false
+		for _, tr := range transitions {
+			if s, _ := tr.(string); s == "pbs_pgbackrest_health_triage" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("pbs_sysadmin_docker_inspect.transitions_to does not include pbs_pgbackrest_health_triage; got %v", transitions)
+		}
+	})
+
+	t.Run("pgbackrest_health_triage_is_agent_with_restore_transition", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_pgbackrest_health_triage")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if pt, _ := pb["playbook_type"].(string); pt != "triage" {
+			t.Errorf("playbook_type = %q, want triage", pt)
+		}
+		if an, _ := pb["agent_name"].(string); an != "sysadmin_agent" {
+			t.Errorf("agent_name = %q, want sysadmin_agent", an)
+		}
+		// v0.31: Ending D (healthy) transitions to the restore remediation
+		// only when prior findings flag a real data-loss context — see
+		// docs/BACKUP.md §3. pbs_pgbackrest_backup_remediate (Ending C,
+		// stale) predates this and must still be present.
+		transitions, _ := pb["transitions_to"].([]any)
+		for _, want := range []string{"pbs_pgbackrest_backup_remediate", "pbs_pgbackrest_restore_remediate"} {
+			found := false
+			for _, tr := range transitions {
+				if s, _ := tr.(string); s == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("pbs_pgbackrest_health_triage.transitions_to does not include %q; got %v", want, transitions)
+			}
+		}
+	})
+
+	t.Run("pgbackrest_restore_remediate_is_agent_remediation", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_pgbackrest_restore_remediate")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if pt, _ := pb["playbook_type"].(string); pt != "remediation" {
+			t.Errorf("playbook_type = %q, want remediation", pt)
+		}
+		if an, _ := pb["agent_name"].(string); an != "sysadmin_agent" {
+			t.Errorf("agent_name = %q, want sysadmin_agent", an)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true; remediation playbook should not be an entry point")
+		}
+		t.Logf("pgbackrest_restore_remediate: execution_mode=agent playbook_type=remediation agent_name=sysadmin_agent")
 	})
 
 	t.Run("sysadmin_docker_inspect_is_seeded", func(t *testing.T) {

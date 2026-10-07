@@ -87,7 +87,7 @@ func TestMultiAgentIncidentResponse(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	// Send the incident prompt to the orchestrator.
-	prompt := faultlib.ResolvePrompt(failure.Prompt, injectorCfg)
+	prompt := faultlib.ResolvePrompt(failure.Prompt, injectorCfg, *failure)
 	t.Logf("Sending incident prompt to orchestrator...")
 
 	queryCtx, cancel := context.WithTimeout(ctx, 180*time.Second)
@@ -217,7 +217,7 @@ func TestFaultInjectionE2E(t *testing.T) {
 			time.Sleep(3 * time.Second)
 
 			// Send prompt.
-			prompt := faultlib.ResolvePrompt(f.Prompt, injectorCfg)
+			prompt := faultlib.ResolvePrompt(f.Prompt, injectorCfg, f)
 			timeout := f.TimeoutDuration()
 			if timeout < 60*time.Second {
 				timeout = 60 * time.Second
