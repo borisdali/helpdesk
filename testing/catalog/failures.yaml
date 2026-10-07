@@ -494,8 +494,10 @@ failures:
     diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
     prompt: >
       Monitoring flagged that pgBackRest may not be able to report backup
-      status for this database. Please investigate backup health and
-      determine whether there's an actual problem.
+      status for this database. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      investigate backup health and determine whether there's an actual
+      problem.
     evaluation:
       expected_tools:
         - get_pgbackrest_status
@@ -580,9 +582,10 @@ failures:
         docker restart helpdesk-test-pg-pgbackrest
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
     prompt: >
-      Monitoring flagged that this database is unreachable. Please
-      investigate and determine the root cause and appropriate recovery
-      path.
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
     evaluation:
       expected_tools:
         - get_host_logs
