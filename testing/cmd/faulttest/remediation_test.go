@@ -672,3 +672,45 @@ func TestRunGateLoop_ForceMode_SendsRemediationPurpose(t *testing.T) {
 		t.Errorf("proceed-escalation body purpose = %v, want \"remediation\" — remediation's first tool call will be denied by policy otherwise", gotBody["purpose"])
 	}
 }
+
+// TestPrintGatePreviewAndReport_MultilineDescriptionIndentedThroughout is a
+// regression test for a real display bug: a playbook's own YAML
+// `description: |` block carries embedded newlines from the source file
+// (block-literal line breaks, not paragraph breaks meant for this
+// fixed-width gate display) — printing it with a single %s left every line
+// after the first flush against the terminal's left margin instead of
+// aligned under "Remediation plan  : ". Fixed by reflowing through the
+// existing wordWrap helper (used elsewhere in this package for
+// Findings/Plan sections), which already collapses embedded whitespace,
+// including newlines, before re-wrapping.
+func TestPrintGatePreviewAndReport_MultilineDescriptionIndentedThroughout(t *testing.T) {
+	desc := "Restore a single PostgreSQL instance from its most recent pgBackRest\n" +
+		"backup after data-directory loss or corruption, then bring it back up.\n" +
+		"Restore-to-latest only — no point-in-time target, no replica rebuild.\n" +
+		"Runs only when pbs_db_data_loss_triage's own triage has already confirmed a\n" +
+		"healthy, non-stale backup exists on an intact repo and this is a single\n" +
+		"instance with no replica topology to consider; every other corruption\n" +
+		"scenario (no backup, broken repo, replica involved, ambiguous scope)\n" +
+		"stays with that playbook's human-escalation default."
+
+	out := captureStdout(func() {
+		printGatePreviewAndReport(map[string]any{
+			"name":          "pgBackRest — Restore From Latest Backup",
+			"approval_mode": "manual",
+			"description":   desc,
+		}, nil)
+	})
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 output lines, got %d: %q", len(lines), out)
+	}
+	for i, line := range lines[1:] {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "                      ") {
+			t.Errorf("continuation line %d not indented under the label, got: %q", i+2, line)
+		}
+	}
+}

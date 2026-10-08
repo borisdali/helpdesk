@@ -394,7 +394,17 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 			}
 			fmt.Println(line)
 			if desc != "" {
-				fmt.Printf("                      %s\n", desc)
+				// desc is a playbook's own YAML `description: |` block —
+				// its embedded newlines are block-literal line breaks from
+				// the source file, not paragraph breaks meant for this
+				// fixed-width display, so a plain %s left every line after
+				// the first unindented at the terminal's margin. wordWrap
+				// already collapses embedded whitespace (including
+				// newlines, via strings.Fields) and re-wraps at 70 cols
+				// with this label's own width as the continuation indent —
+				// same convention already used for Findings/Plan elsewhere
+				// in this package.
+				fmt.Printf("                      %s\n", wordWrap(desc, 70, "                      "))
 			}
 		}
 	}
