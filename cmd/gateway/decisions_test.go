@@ -593,6 +593,8 @@ func TestHandleGetIncident(t *testing.T) {
 			w.Write(gateEventsData) //nolint:errcheck
 		case strings.Contains(r.URL.Path, "/feedback"):
 			http.Error(w, "not found", http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/v1/fleet/playbooks") && q.Get("series_id") == "pbs_lock_chain_remediate":
+			w.Write([]byte(`{"playbooks":[{"series_id":"pbs_lock_chain_remediate","playbook_type":"remediation"}]}`)) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -689,6 +691,8 @@ func TestHandleGetIncident_JourneyRefs(t *testing.T) {
 				w.Write(triageData) //nolint:errcheck
 			case r.URL.Path == "/v1/fleet/playbook-runs" && r.URL.Query().Get("prior_run_id") == triageRun.RunID:
 				w.Write(remListData) //nolint:errcheck
+			case strings.Contains(r.URL.Path, "/v1/fleet/playbooks") && r.URL.Query().Get("series_id") == "pbs_lock_remediate":
+				w.Write([]byte(`{"playbooks":[{"series_id":"pbs_lock_remediate","playbook_type":"remediation"}]}`)) //nolint:errcheck
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}

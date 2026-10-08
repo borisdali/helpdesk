@@ -4316,6 +4316,22 @@ func stripEscapedQuotes(s string) string {
 // losing, ever-growing battle — found live 2026-09-08, a single response
 // used three different connectors ("followed later by", "and then", "with")
 // in one quote, none of which an earlier "and"/"," -only regex recognized.
+//
+// Also splits on `;` and `—` (em dash) — not English connector words but
+// structural punctuation a model uses to glue multiple facts into one
+// quoted span without any interior `"` at all, so the `"`-only split above
+// never sees a boundary. Two real false positives found live 2026-10-07 on
+// the same db-pgdata-corrupted chain: a semicolon-joined
+// `"status_code=0; backup_stale=false; last_backup_label=..."` (each clause
+// individually present in the real tool output, but never as one contiguous
+// substring), and an em-dash-joined
+// `"PostgreSQL process has crashed... — server closed the connection
+// unexpectedly..."` (the model's own prose summary before the dash, with the
+// real verbatim log text only after it). Both are structural separators in
+// the same sense `"` already is here — a closed, finite set of punctuation
+// marks, not an open-ended connector vocabulary — so splitting on them keeps
+// the function's own reasoning rather than contradicting it.
+//
 // Every non-empty trimmed segment is verified independently, including
 // connector-phrase fragments — deliberately not trying to distinguish "a
 // separately-cited fact" from "an embedded identifier within one citation"
@@ -4327,11 +4343,13 @@ func stripEscapedQuotes(s string) string {
 // doesn't happen to appear in any real output is at worst reported noise,
 // not a missed fabrication — real facts remain independently checked
 // regardless of what glues them together. Returns a single-element slice
-// unchanged when no interior quote remains — the common case of one genuine
-// verbatim span.
+// unchanged when no interior quote/semicolon/em-dash remains — the common
+// case of one genuine verbatim span.
 func splitEvidenceQuoteParts(quote string) []string {
 	quote = stripEscapedQuotes(quote)
-	raw := strings.Split(quote, `"`)
+	raw := strings.FieldsFunc(quote, func(r rune) bool {
+		return r == '"' || r == ';' || r == '—'
+	})
 	parts := make([]string, 0, len(raw))
 	for _, p := range raw {
 		if t := strings.TrimSpace(p); t != "" {

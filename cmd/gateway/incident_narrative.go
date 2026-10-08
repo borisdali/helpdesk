@@ -25,15 +25,21 @@ type IncidentNarrative struct {
 	TriggerContext string        `json:"trigger_context,omitempty"` // original alert text that initiated the run
 	Triage         TriageChapter `json:"triage"`
 	Gate           *GateChapter  `json:"gate,omitempty"`
-	// Escalations holds every intermediate hop reached via an explicit
-	// ESCALATE_TO signal — further diagnosis, possibly on a different agent —
-	// strictly between the triage chapter and the (optional) terminal
-	// Remediation chapter. Most incidents have zero entries here.
+	// Escalations holds every intermediate hop that is not itself the
+	// terminal remediation chapter — whether reached via an explicit
+	// ESCALATE_TO (further diagnosis, possibly on a different agent) or via
+	// TRANSITION_TO targeting another triage-type playbook (a same-domain
+	// diagnosis hand-off, e.g. pbs_sysadmin_docker_inspect ->
+	// pbs_pgbackrest_health_triage). Most incidents have zero entries here.
 	Escalations []EscalationHop `json:"escalations,omitempty"`
-	// Remediation is populated only when the chain reached an explicit
-	// TRANSITION_TO signal — it is not simply "whatever run followed triage."
-	// A successor run reached via ESCALATE_TO is an escalation, not a
-	// remediation, and appears in Escalations instead.
+	// Remediation is populated only when the chain reaches a hop whose own
+	// active playbook is playbook_type "remediation" — it is not simply
+	// "whatever hop was reached via TRANSITION_TO." TRANSITION_TO is also used
+	// for same-domain triage->triage hand-offs, so classifying purely by
+	// which signal reached a hop (the pre-2026-10-07 rule) misclassified such
+	// a hop as Remediation and stopped the walk there, silently dropping the
+	// real remediation hop that followed — found live on a real 4-hop
+	// db-pgdata-corrupted chain. See hopIsRemediation in handleGetIncident.
 	Remediation *RemediationChapter `json:"remediation,omitempty"`
 	// Feedback holds all operator feedback records for this incident (up to four:
 	// triage/at_gate, triage/post_incident, remediation/at_gate, remediation/post_incident).
@@ -159,10 +165,18 @@ type RemediationChapter struct {
 // appear when an agent can't reach a diagnosis and hands off to another
 // agent (e.g. a database agent escalating to a sysadmin agent).
 type EscalationHop struct {
-	RunID            string                   `json:"run_id"`
-	Playbook         string                   `json:"playbook"` // series_id
-	Outcome          string                   `json:"outcome"`
-	EscalatedTo      string                   `json:"escalated_to,omitempty"`
+	RunID       string `json:"run_id"`
+	Playbook    string `json:"playbook"` // series_id
+	Outcome     string `json:"outcome"`
+	EscalatedTo string `json:"escalated_to,omitempty"`
+	// TransitionedTo mirrors EscalatedTo for the other half of "what did this
+	// hop's own response point to next" — non-empty when this hop emitted a
+	// same-domain TRANSITION_TO rather than a cross-domain ESCALATE_TO (never
+	// both). A hop can land here via TRANSITION_TO and still itself emit
+	// TRANSITION_TO onward — e.g. pbs_sysadmin_docker_inspect, reached by
+	// ESCALATE_TO, itself transitions to pbs_pgbackrest_health_triage, which
+	// is still triage-type and belongs here too, not in Remediation.
+	TransitionedTo   string                   `json:"transitioned_to,omitempty"`
 	Findings         string                   `json:"findings,omitempty"`
 	DiagnosticReport *audit.DiagnosticReport  `json:"diagnostic_report,omitempty"`
 	Steps            []*audit.PlaybookRunStep `json:"steps,omitempty"`
@@ -329,31 +343,59 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Escalation hops — every run that followed the triage run, walked to
-	// completion (not just one hop). Each hop is classified by the signal
-	// its PREDECESSOR emitted, not by chain position: a hop reached because
-	// the predecessor's EscalatedTo was set is another diagnosis hop
-	// (Escalations); a hop reached because the predecessor's TransitionedTo
-	// was set is the remediation — singular, wherever it falls in the chain.
-	// Classification stops at the first remediation hop found; a remediation
-	// run that itself further escalates is out of scope for now.
+	// completion (not just one hop). Each hop is classified by its OWN active
+	// playbook's playbook_type, not by which signal its predecessor emitted:
+	// a hop whose playbook is playbook_type "remediation" is the Remediation
+	// chapter — singular, wherever it falls in the chain; every other hop is
+	// a diagnosis hop (Escalations), regardless of whether it was reached via
+	// ESCALATE_TO (cross-domain) or TRANSITION_TO (same-domain triage->triage
+	// hand-off, e.g. pbs_sysadmin_docker_inspect -> pbs_pgbackrest_health_triage).
+	// Classifying by "reached via TRANSITION_TO" alone (the pre-2026-10-07
+	// rule) assumed TRANSITION_TO always points straight at the remediation
+	// playbook — true until a same-domain triage->triage TRANSITION_TO was
+	// introduced, at which point it misclassified that triage hop as
+	// Remediation and broke the walk right there, silently dropping the real
+	// remediation hop that followed (found live on a real 4-hop
+	// db-pgdata-corrupted chain: pbs_pgbackrest_restore_remediate never
+	// appeared in the narrative at all). Classification still stops at the
+	// first true remediation hop found; a remediation run that itself
+	// further escalates is out of scope for now.
 	//
-	// Each hop also gets a lookupTraceEvents call for HasMismatch/HasTargetDrift.
-	// This is sequential, matching fetchRunSteps just below it and the rest of
-	// this file/package's convention (no goroutine fan-out anywhere in
-	// cmd/gateway) — worst case (maxEscalationHops = 20) this roughly doubles
-	// the existing per-hop round-trip count, the same risk class as the
+	// Each hop also gets a lookupTraceEvents call for HasMismatch/HasTargetDrift,
+	// plus one isRemediationPlaybook lookup for classification. This is
+	// sequential, matching fetchRunSteps just below it and the rest of this
+	// file/package's convention (no goroutine fan-out anywhere in
+	// cmd/gateway) — worst case (maxEscalationHops = 20) this roughly triples
+	// the original per-hop round-trip count, the same risk class as the
 	// fetchRunSteps calls already here, not a new one.
 	// hops was already fetched above (needed early for triageWindowEnd).
 
+	// isRemediationPlaybook looks up seriesID's active playbook and reports
+	// whether it is playbook_type "remediation" — cached per series_id since
+	// a chain can in principle revisit the same series (e.g. a retry loop).
+	// Fails open to false (treat as a diagnosis hop) on a lookup error,
+	// matching this function's existing "never guess a hop into Remediation
+	// without confirmation" discipline.
+	playbookTypeCache := make(map[string]bool)
+	isRemediationPlaybook := func(seriesID string) bool {
+		if v, ok := playbookTypeCache[seriesID]; ok {
+			return v
+		}
+		pb, err := g.fetchPlaybookBySeriesID(r.Context(), seriesID)
+		v := err == nil && pb.PlaybookType == "remediation"
+		playbookTypeCache[seriesID] = v
+		return v
+	}
+
 	var classified []*audit.PlaybookRun
-	predecessor := run
+	var remediationRunID string
 	for i, hop := range hops {
 		classified = append(classified, hop)
 		var hopWindowEnd time.Time
 		if i+1 < len(hops) {
 			hopWindowEnd = hops[i+1].StartedAt
 		}
-		if predecessor.TransitionedTo != "" {
+		if isRemediationPlaybook(hop.SeriesID) {
 			steps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
 			rem := &RemediationChapter{
 				RunID:         hop.RunID,
@@ -374,19 +416,18 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 				lookupOEVEvents(hop.TraceID), hop.StartedAt, hopWindowEnd,
 				evidence.HopOutcome{Report: hop.DiagnosticReport, RawText: hop.AgentTranscript, SawSignalLine: hop.SawSignalLine})
 			narrative.Remediation = rem
-			predecessor = hop
+			remediationRunID = hop.RunID
 			break
 		}
 
-		// Escalation hop: predecessor.EscalatedTo != "", or neither signal
-		// set (defensive default — never guess a hop into Remediation
-		// without an explicit TRANSITION_TO).
+		// Still a diagnosis hop: this playbook's own type isn't "remediation".
 		hopSteps, _ := g.fetchRunSteps(r.Context(), hop.RunID)
 		eh := EscalationHop{
 			RunID:            hop.RunID,
 			Playbook:         hop.SeriesID,
 			Outcome:          hop.Outcome,
 			EscalatedTo:      hop.EscalatedTo,
+			TransitionedTo:   hop.TransitionedTo,
 			Findings:         hop.FindingsSummary,
 			DiagnosticReport: hop.DiagnosticReport,
 			Steps:            hopSteps,
@@ -408,7 +449,6 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			eh.CompletedAt = &t
 		}
 		narrative.Escalations = append(narrative.Escalations, eh)
-		predecessor = hop
 	}
 
 	if len(classified) > 0 {
@@ -423,7 +463,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		narrative.ResolvedAt = &t
 		narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
 	}
-	narrative.Journeys = buildJourneyRefs(run, classified)
+	narrative.Journeys = buildJourneyRefs(run, classified, remediationRunID)
 
 	// 4. Feedback — all operator feedback slots for this incident.
 	narrative.Feedback = g.fetchAllRunFeedback(r.Context(), runID)
@@ -632,25 +672,31 @@ func (g *Gateway) fetchEscalationHops(ctx context.Context, triageRunID string) [
 // buildJourneyRefs assembles one audit.IncidentJourneyRef per phase of the
 // incident: triage, any intermediate escalation hops, and the terminal
 // remediation hop (if the chain reached one). Intermediate hops are labeled
-// "escalation:1", "escalation:2", etc.; the hop produced by an explicit
-// TRANSITION_TO is labeled "remediation" regardless of its position in the
-// chain. Adjacent phases that share a non-empty trace_id (the agent handled
-// both in a single session) are merged into one "phaseA+phaseB" entry,
-// generalizing the historical "triage+remediation" merge to N-hop chains.
-func buildJourneyRefs(run *audit.PlaybookRun, hops []*audit.PlaybookRun) []audit.IncidentJourneyRef {
+// "escalation:1", "escalation:2", etc.; the hop whose RunID matches
+// remediationRunID (pass "" if the chain never reached a remediation-type
+// playbook) is labeled "remediation" regardless of its position in the
+// chain. This is a pure function — the remediation/escalation classification
+// itself (which requires a playbook_type lookup) happens once in the caller
+// and is passed in by RunID, rather than re-derived here from
+// hop.TransitionedTo; re-deriving it from TransitionedTo alone was the
+// pre-2026-10-07 bug (see the Remediation field's doc comment above).
+// Adjacent phases that share a non-empty trace_id (the agent handled both in
+// a single session) are merged into one "phaseA+phaseB" entry, generalizing
+// the historical "triage+remediation" merge to N-hop chains.
+func buildJourneyRefs(run *audit.PlaybookRun, hops []*audit.PlaybookRun, remediationRunID string) []audit.IncidentJourneyRef {
 	type labeled struct{ phase, traceID string }
 	all := []labeled{{phase: "triage", traceID: run.TraceID}}
 
-	predecessor := run
 	escalationNum := 0
 	for _, hop := range hops {
-		phase := "remediation"
-		if predecessor.TransitionedTo == "" {
+		var phase string
+		if remediationRunID != "" && hop.RunID == remediationRunID {
+			phase = "remediation"
+		} else {
 			escalationNum++
 			phase = fmt.Sprintf("escalation:%d", escalationNum)
 		}
 		all = append(all, labeled{phase: phase, traceID: hop.TraceID})
-		predecessor = hop
 	}
 
 	var refs []audit.IncidentJourneyRef

@@ -1727,11 +1727,38 @@ func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
 
 // mockPriorRunIDServer serves GET .../playbook-runs?prior_run_id=<id>&limit=1
 // from a map, mirroring auditd's raw {"runs":[...]} response shape. Missing
-// keys return an empty runs array (no successor for that hop).
+// keys return an empty runs array (no successor for that hop). No
+// playbook_type data — any series_id looked up by isRemediationPlaybook
+// fails open to "not remediation".
 func mockPriorRunIDServer(t *testing.T, next map[string]incidentRun) *httptest.Server {
+	return mockPriorRunIDServerWithTypes(t, next, nil)
+}
+
+// mockPriorRunIDServerWithTypes is mockPriorRunIDServer plus a series_id ->
+// playbook_type map, serving GET .../fleet/playbooks?series_id=<id> so
+// walkToRemediation's isRemediationPlaybook lookup resolves to real values
+// instead of always failing open. Missing keys 404, same fail-open behavior
+// as mockPriorRunIDServer.
+func mockPriorRunIDServerWithTypes(t *testing.T, next map[string]incidentRun, playbookTypes map[string]string) *httptest.Server {
 	t.Helper()
+	// playbookTypeCache is a package-level cache (see its own doc comment) —
+	// reset it so a series_id reused by an earlier test in this same binary
+	// can't leak a stale playbook_type into this one.
+	playbookTypeCache = map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/fleet/playbooks") && r.URL.Query().Get("series_id") != "" {
+			seriesID := r.URL.Query().Get("series_id")
+			pbType, ok := playbookTypes[seriesID]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"series_id": seriesID, "playbook_type": pbType}},
+			})
+			return
+		}
 		priorID := r.URL.Query().Get("prior_run_id")
 		runs := []incidentRun{}
 		if hop, ok := next[priorID]; ok {
@@ -1765,9 +1792,9 @@ func TestFetchNextHop_NoSuccessor(t *testing.T) {
 // only successor was reached via TRANSITION_TO, so it is the remediation run.
 func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
 	triage := &incidentRun{RunID: "plr_t1", TransitionedTo: "pbs_lock_remediate"}
-	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
 		"plr_t1": {RunID: "plr_r1", SeriesID: "pbs_lock_remediate", Outcome: "resolved"},
-	})
+	}, map[string]string{"pbs_lock_remediate": "remediation"})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem == nil || rem.RunID != "plr_r1" {
 		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1", rem)
@@ -1794,13 +1821,38 @@ func TestWalkToRemediation_EscalationOnly(t *testing.T) {
 // middle one.
 func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
 	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
-	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
 		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
 		"plr_e1": {RunID: "plr_r1", SeriesID: "pbs_k8s_pod_crash_remediate", Outcome: "resolved"},
-	})
+	}, map[string]string{"pbs_k8s_pod_crash_remediate": "remediation"})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem == nil || rem.RunID != "plr_r1" {
 		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the terminal hop, not plr_e1)", rem)
+	}
+}
+
+// TestWalkToRemediation_TransitionToTriageHop_NotMisclassified is a
+// regression test for the real bug found live 2026-10-07 on the
+// db-pgdata-corrupted fault's actual 4-hop chain, mirroring
+// cmd/gateway/incident_narrative_test.go's identically-named/-purposed test:
+// a hop reached via TRANSITION_TO whose own playbook is still
+// playbook_type=triage (pbs_pgbackrest_health_triage, a same-domain hand-off
+// target of pbs_sysadmin_docker_inspect) must not be treated as remediation —
+// the walk must continue past it to the real remediation hop.
+func TestWalkToRemediation_TransitionToTriageHop_NotMisclassified(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
+		"plr_e1": {RunID: "plr_e2", SeriesID: "pbs_pgbackrest_health_triage", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_restore_remediate"},
+		"plr_e2": {RunID: "plr_r1", SeriesID: "pbs_pgbackrest_restore_remediate", Outcome: "resolved"},
+	}, map[string]string{
+		"pbs_sysadmin_docker_inspect":      "triage",
+		"pbs_pgbackrest_health_triage":     "triage",
+		"pbs_pgbackrest_restore_remediate": "remediation",
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the true remediation hop, not plr_e2's still-triage-type hop)", rem)
 	}
 }
 
@@ -2871,6 +2923,7 @@ func TestEscalationHopDesc(t *testing.T) {
 		{Outcome: "transitioned"},
 		{Outcome: "resolved"},
 		{Outcome: "some_future_outcome"},
+		{Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
 	}
 
 	tests := []struct {
@@ -2883,9 +2936,10 @@ func TestEscalationHopDesc(t *testing.T) {
 		{"transitioned is terminal, handed to remediation", "escalation:3", "terminal escalation hop — handed off to remediation"},
 		{"resolved is terminal, investigation concluded", "escalation:4", "terminal escalation hop — investigation concluded here"},
 		{"unknown outcome falls back", "escalation:5", "intermediate escalation hop — further diagnosis, not yet resolved"},
-		{"index out of range falls back", "escalation:6", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"index out of range falls back", "escalation:7", "intermediate escalation hop — further diagnosis, not yet resolved"},
 		{"unparsable index falls back", "escalation:abc", "intermediate escalation hop — further diagnosis, not yet resolved"},
 		{"merged phase suffix still resolves index 1", "escalation:1+remediation", "intermediate hop — escalated further to pbs_k8s_pod_crash_triage"},
+		{"transitioned with explicit target names it, not generic 'remediation'", "escalation:6", "intermediate hop — transitioned to pbs_pgbackrest_health_triage"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -2511,12 +2511,66 @@ func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
 	}
 }
 
+// TestCheckEvidenceProvenance_SemicolonJoinedCompoundQuote reproduces the
+// live false positive found 2026-10-07 on db-pgdata-corrupted: a model
+// citing get_pgbackrest_status's own field summary as one semicolon-joined
+// quote (no interior `"` at all) with no genuine fabrication — each clause
+// is individually real, just never contiguous as one string in the tool
+// output's own formatting.
+func TestCheckEvidenceProvenance_SemicolonJoinedCompoundQuote(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_pgbackrest_status",
+			Result: `{"status_code":0,"backup_stale":false,"last_backup_label":"20261007-full"}`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "status_code=0; backup_stale=false; last_backup_label=20261007-full"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (every semicolon-joined clause is real), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_EmDashJoinedProsePrefix reproduces the other
+// live false positive found 2026-10-07 on db-pgdata-corrupted: a model
+// prefixing a real verbatim log quote with its own prose summary, joined by
+// an em dash rather than a quote mark. Before the fix, the whole blob failed
+// verification as one unit — a false positive on the genuinely real log
+// text. After the fix, splitting isolates the two halves: the real log text
+// verifies silently, and only the model's own prose characterization (which
+// is not literal tool output, so correctly stays unverified — same "report
+// noise, not the whole compound quote" behavior as
+// TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated) is flagged.
+func TestCheckEvidenceProvenance_EmDashJoinedProsePrefix(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: "2026-10-07 12:00:00 UTC [1] LOG:  server closed the connection unexpectedly\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "PostgreSQL process has crashed — server closed the connection unexpectedly"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg2", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "PostgreSQL process has crashed" {
+		t.Errorf("expected only the model's own prose prefix flagged, not the real log text after the dash, got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
 // TestSplitEvidenceQuoteParts covers the quote-boundary splitting a compound
 // EVIDENCE quote can leave behind — every literal quote character is a split
 // point, so connector words/phrases come back as their own segments too (see
 // evidenceQuoteVerified's isEvidenceGlueOnly for how those get filtered out
 // later, not here) — and confirms a quote with no interior quote (the common
-// case) is returned unchanged as a single element.
+// case) is returned unchanged as a single element. Also covers the two real
+// false positives found live 2026-10-07 (db-pgdata-corrupted) that motivated
+// also splitting on `;` and `—`: a semicolon-joined compound fact with no
+// interior `"` at all, and an em-dash-joined prose-prefix-then-verbatim-quote
+// pattern.
 func TestSplitEvidenceQuoteParts(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -2530,6 +2584,21 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "AND", "fact two"}},
 		{"unusual connector phrase", `fact one" followed later by "fact two`, []string{"fact one", "followed later by", "fact two"}},
 		{"backslash-escaped inner quotes are stripped before splitting", `host \"172.18.0.4\", user \"postgres\"`, []string{"host", "172.18.0.4", ", user", "postgres"}},
+		{
+			"semicolon-joined compound fact, no interior quotes at all",
+			"status_code=0; backup_stale=false; last_backup_label=20261007-full",
+			[]string{"status_code=0", "backup_stale=false", "last_backup_label=20261007-full"},
+		},
+		{
+			"em-dash-joined prose prefix then verbatim log quote",
+			"PostgreSQL process has crashed — server closed the connection unexpectedly",
+			[]string{"PostgreSQL process has crashed", "server closed the connection unexpectedly"},
+		},
+		{
+			"semicolon and em-dash combined with an inner quote",
+			`a=1; b="c" — trailing note`,
+			[]string{"a=1", "b=", "c", "trailing note"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
