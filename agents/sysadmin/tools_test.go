@@ -931,6 +931,71 @@ func TestReadPgLogFile_CustomLogPath(t *testing.T) {
 	}
 }
 
+// argCapturingRunner records the args of each Run call (in addition to
+// returning canned responses in order) — used where a test needs to assert
+// exactly what command was dispatched, not just that some mocked response
+// came back.
+type argCapturingRunner struct {
+	responses []mockResponse
+	idx       int
+	calls     [][]string
+}
+
+func (m *argCapturingRunner) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
+	m.calls = append(m.calls, append([]string{name}, args...))
+	if m.idx >= len(m.responses) {
+		return "", nil
+	}
+	r := m.responses[m.idx]
+	m.idx++
+	return r.output, r.err
+}
+
+// TestReadPgLogFile_UsesConfiguredPgLogDir is a regression test for a real
+// gap found live 2026-10-08: readPgLogFileImpl always defaulted to
+// pgLogDefaultDir ("/var/lib/postgresql/data/log", correct for the
+// postgres:16 Docker image this project's own fixtures use) regardless of
+// the target — wrong for a real systemd-managed install (Debian/Ubuntu logs
+// to /var/log/postgresql/, RHEL to /var/lib/pgsql/<ver>/data/log/ by
+// default). Confirms a target's own configured PgLogDir is used when the
+// tool call doesn't specify log_path explicitly.
+func TestReadPgLogFile_UsesConfiguredPgLogDir(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"vm_db": {
+				Name:             "vm_db",
+				ConnectionString: "host=localhost",
+				VMName:           "vm",
+				SystemdUnit:      "postgresql@16-main",
+				PgLogDir:         "/var/log/postgresql",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"vm": {Name: "vm", Address: "localhost", Runtime: ""},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	old := cmdRunner
+	runner := &argCapturingRunner{responses: []mockResponse{
+		{output: "postgresql-16-main.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	cmdRunner = runner
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{Target: "vm_db"})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.Logs == "" {
+		t.Error("Logs is empty")
+	}
+	if len(runner.calls) == 0 || !strings.Contains(strings.Join(runner.calls[0], " "), "/var/log/postgresql") {
+		t.Errorf("first dispatched command = %v, want it to reference the configured PgLogDir /var/log/postgresql", runner.calls)
+	}
+}
+
 // TestExecInProcess_K8s_NoPodFound verifies the error when the selector matches no pods.
 func TestExecInProcess_K8s_NoPodFound(t *testing.T) {
 	defer withMockRunner("", nil)() // kubectl get pod returns empty

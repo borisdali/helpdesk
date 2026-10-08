@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.0"
+version: "1.1"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -55,16 +55,28 @@ guidance: |
   to work around the refusal.
 
   Step 3 — Bring the instance back up:
-  Call restart_container with the connection_string (target) to restart the
-  whole container against the now-repaired data directory.
+  Call check_host with the connection_string (target) first and read its
+  `runtime` field — do not assume from the prior playbook's own wording,
+  confirm it yourself, the same discipline Step 1 already applies to backup
+  health. runtime=docker or runtime=podman → call restart_container.
+  runtime=systemd → call restart_service instead; restart_container does
+  not apply to a systemd-managed instance and will fail outright. Either
+  way, this restarts the instance against the now-repaired data directory.
 
   Step 4 — Confirm recovery:
-  Call check_host to verify Status=running and Restarting=false. Call
-  get_host_logs and look for "database system is ready to accept
-  connections" — the same verification pbs_replica_restart_action uses,
-  since this agent has no psql-based tools to confirm a live connection
-  directly. Also check for any new PANIC/FATAL immediately after startup,
-  which would mean the restore did not actually resolve the corruption.
+  Call check_host again to verify the instance is up (Status=running and
+  Restarting=false for docker/podman; ActiveState=active, SubState=running
+  for systemd). Call get_host_logs and look for "database system is ready
+  to accept connections" — the same verification pbs_replica_restart_action
+  uses, since this agent has no psql-based tools to confirm a live
+  connection directly. For a systemd target specifically, get_host_logs
+  (journalctl) typically shows only the service's own lifecycle messages,
+  not PostgreSQL's own output — if it doesn't show the "ready to accept
+  connections" line, also call read_pg_log_file (do not pass log_path; this
+  target's own configured default is already correct) before concluding the
+  restart failed. Also check for any new PANIC/FATAL immediately after
+  startup, which would mean the restore did not actually resolve the
+  corruption.
 
   Step 5 — Report outcome:
   Emit FINDINGS with:
@@ -77,7 +89,7 @@ guidance: |
     restart, logs show a different error than before)
 
   Do NOT call any write or destructive tools beyond restore_from_backup and
-  restart_container. Do NOT retry restore_from_backup more than once — if
+  restart_container/restart_service. Do NOT retry restore_from_backup more than once — if
   it fails or refuses, report the failure and stop so a human can
   investigate. Do NOT emit TRANSITION_TO or ESCALATE_TO — this is a
   terminal action playbook. Your job ends with FINDINGS.
@@ -85,7 +97,7 @@ guidance: |
 escalation:
   - "get_pgbackrest_status reports status_code != 0 or no successful backup ever completed"
   - "restore_from_backup refuses because the instance is still accepting connections — the prior diagnosis may be wrong"
-  - "restart_container fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
+  - "restart_container/restart_service fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
   - "logs show a new PANIC/FATAL immediately after restart — escalate rather than retry"
   - "any sign of replica/primary topology — this playbook does not rebuild replicas"
 target_hints: []

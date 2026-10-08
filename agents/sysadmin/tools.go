@@ -95,6 +95,7 @@ type resolvedHost struct {
 	Runtime       string // container runtime binary: "docker", "podman", or "" (systemd/k8s)
 	ContainerName string // from DBServer.ContainerName (docker/podman only)
 	SystemdUnit   string // from DBServer.SystemdUnit (systemd only)
+	PgLogDir      string // from DBServer.PgLogDir; overrides pgLogDefaultDir when set
 	// SSH fields — populated from the VM entry, empty unless the VM has SSHUser
 	// set. See runOnHost (sshexec.go) for the local-vs-SSH dispatch this enables.
 	VMAddress  string
@@ -237,6 +238,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		Runtime:       vm.Runtime,
 		ContainerName: db.ContainerName,
 		SystemdUnit:   db.SystemdUnit,
+		PgLogDir:      db.PgLogDir,
 		VMAddress:     vm.Address,
 		SSHUser:       vm.SSHUser,
 		SSHPort:       vm.SSHPort,
@@ -266,13 +268,19 @@ func resolveHost(serverID string) (resolvedHost, error) {
 }
 
 // execInProcess runs cmd inside the process hosting the database — either via
-// "docker/podman exec <container>" or "kubectl exec <pod>". Returns an error
-// for systemd targets (no exec primitive available).
+// "docker/podman exec <container>" or "kubectl exec <pod>", or (for a
+// systemd/VM target, where there's no container boundary to exec into —
+// the host IS the process's own filesystem namespace) directly on the host
+// via runOnHost, over real SSH when configured. Found live 2026-10-08: this
+// default case used to error outright ("no exec primitive available"),
+// silently breaking read_pg_log_file/check_memory for every systemd target
+// — dispatching via runOnHost instead is the correct equivalent of "exec
+// into the process" when there's no container to exec into.
 func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string, error) {
 	switch {
 	case host.Runtime == "docker" || host.Runtime == "podman":
 		args := append([]string{"exec", host.ContainerName}, cmd...)
-		return cmdRunner.Run(ctx, host.Runtime, args, nil)
+		return runOnHost(ctx, host, host.Runtime, args, nil)
 
 	case host.K8sPodSelector != "":
 		// Resolve the pod name from the selector first.
@@ -289,7 +297,10 @@ func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string
 		return cmdRunner.Run(ctx, "kubectl", execArgs, nil)
 
 	default:
-		return "", fmt.Errorf("cannot exec into process: target uses systemd (no exec primitive)")
+		if len(cmd) == 0 {
+			return "", fmt.Errorf("execInProcess: empty command")
+		}
+		return runOnHost(ctx, host, cmd[0], cmd[1:], nil)
 	}
 }
 
@@ -520,10 +531,19 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	var runtimeLabel, output string
 	var runErr error
 
+	// runOnHost (sshexec.go), not cmdRunner.Run directly: a VM entry with
+	// SSHUser/SSHKeyPath set dispatches over real SSH, falling back to
+	// today's local exec otherwise — zero behavior change for every
+	// existing Docker/local target, which never sets those fields. Found
+	// live 2026-10-08: this function (and get_host_logs/restart_container/
+	// restart_service alongside it) called cmdRunner.Run directly, bypassing
+	// the SSH dispatch every pgBackRest tool already used — a genuinely
+	// remote host/VM target would have silently run these commands on the
+	// sysadmin agent's own local host instead of the real target.
 	if runtime != "" {
 		// Docker or Podman
 		runtimeLabel = runtime
-		output, runErr = cmdRunner.Run(ctx, runtime, []string{
+		output, runErr = runOnHost(ctx, host, runtime, []string{
 			"inspect",
 			"--format",
 			"{{.State.Status}} (running={{.State.Running}}, restarting={{.State.Restarting}}, oomkilled={{.State.OOMKilled}}, dead={{.State.Dead}}, exitcode={{.State.ExitCode}})",
@@ -541,7 +561,7 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	} else {
 		// Systemd
 		runtimeLabel = "systemd"
-		output, runErr = cmdRunner.Run(ctx, "systemctl", []string{
+		output, runErr = runOnHost(ctx, host, "systemctl", []string{
 			"show", "--property=ActiveState,SubState,Result,MainPID,ExecMainStartTimestamp",
 			host.SystemdUnit,
 		}, nil)
@@ -642,10 +662,12 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 	// time, with no error to signal it. Merging streams in the shell before
 	// cmdRunner.Run ever sees the output sidesteps the split entirely,
 	// without touching the shared helper's behavior other callers rely on.
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
 	if runtime != "" {
 		runtimeLabel = runtime
 		script := shellCommand(runtime, []string{"logs", "--tail", fmt.Sprintf("%d", lines), host.ContainerName}, nil) + " 2>&1"
-		out, runErr = cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
+		out, runErr = runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
 	} else {
 		runtimeLabel = "systemd"
 		script := shellCommand("journalctl", []string{
@@ -653,7 +675,7 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 			"-n", fmt.Sprintf("%d", lines),
 			"--no-pager",
 		}, nil) + " 2>&1"
-		out, runErr = cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
+		out, runErr = runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
 	}
 
 	if runErr != nil && strings.TrimSpace(out) == "" {
@@ -849,7 +871,14 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 		return PgLogFileResult{}, err
 	}
 
+	// Precedence: explicit tool-call arg, then the target's own configured
+	// PgLogDir (real systemd/VM targets whose distro packaging logs
+	// somewhere other than the Docker image's own default — see PgLogDir's
+	// doc comment), then the Docker-image-shaped hardcoded default.
 	logDir := args.LogPath
+	if logDir == "" {
+		logDir = host.PgLogDir
+	}
 	if logDir == "" {
 		logDir = pgLogDefaultDir
 	}
@@ -1062,7 +1091,9 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	}
 
 	start := time.Now()
-	out, runErr := cmdRunner.Run(ctx, runtime, []string{"restart", host.ContainerName}, nil)
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
+	out, runErr := runOnHost(ctx, host, runtime, []string{"restart", host.ContainerName}, nil)
 	duration := time.Since(start)
 	output := strings.TrimSpace(out)
 
@@ -1128,7 +1159,9 @@ func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartRe
 	}
 
 	start := time.Now()
-	out, runErr := cmdRunner.Run(ctx, "systemctl", []string{"restart", host.SystemdUnit}, nil)
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
+	out, runErr := runOnHost(ctx, host, "systemctl", []string{"restart", host.SystemdUnit}, nil)
 	duration := time.Since(start)
 	output := strings.TrimSpace(out)
 

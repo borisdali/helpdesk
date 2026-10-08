@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_docker_inspect
 name: "Sysadmin — Docker Container Inspection"
-version: "2.1"
+version: "2.2"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -51,7 +51,7 @@ guidance: |
   even if the root cause is unclear. Insufficient evidence is itself a finding.
   Describe the recommended action for operator approval and stop.
 
-  Step 1 — Container state:
+  Step 1 — Container/service state:
   Call check_host with the connection_string (target). Read the `runtime`
   field FIRST, before anything else in the result:
   - runtime=kubectl → this target is Kubernetes-managed, NOT a Docker/Podman
@@ -69,6 +69,14 @@ guidance: |
     perform further diagnosis yourself.
   - runtime=docker or runtime=podman → proceed with the container inspection
     steps below, unchanged.
+  - runtime=systemd → this target is a real host/VM, not a container — the
+    database runs as a systemd-managed service directly on the host. This is
+    NOT a hand-off case: you have the tools to diagnose this yourself
+    (check_host, get_host_logs, read_pg_log_file, check_memory,
+    restart_service all work against a systemd target already). Proceed to
+    Step 2 below, but read "Read these fields carefully (systemd targets
+    only)" instead of the docker/podman block, and use the systemd-specific
+    guidance in Step 2.
 
   Read these fields carefully (docker/podman targets only):
   - exitcode=0  → container was stopped CLEANLY (user, orchestrator, or graceful shutdown).
@@ -77,6 +85,17 @@ guidance: |
   - oomkilled=true → kernel killed the process due to memory pressure. Call check_memory next.
   - exitcode=1 or higher (and oomkilled=false) → process exited with error. Check logs.
   - restarting=true → container is in a restart loop. Check logs immediately.
+
+  Read these fields carefully (systemd targets only — check_host's `details`
+  reports ActiveState/SubState/Result/MainPID, not exitcode=/oomkilled=):
+  - ActiveState=active, SubState=running → service is up. This is NOT a
+    crash. Do not speculate about OOM or disk unless logs provide direct
+    evidence.
+  - ActiveState=failed → the service exited with an error. Check logs.
+  - ActiveState=inactive, Result=success → service was stopped CLEANLY
+    (operator or clean shutdown), not a crash.
+  - Result=oom-kill (if present) → kernel killed the process due to memory
+    pressure. Call check_memory next.
 
   Step 2 — Recent logs:
   Call get_host_logs with lines=300 to retrieve recent container output — NOT
@@ -89,6 +108,17 @@ guidance: |
   container's log history — not a hypothetical, a real miss). A small window
   risks silently truncating the one signal this step exists to find; asking
   for extra lines costs nothing a real incident would notice.
+
+  For a systemd target specifically: get_host_logs runs journalctl, which
+  typically shows only the service's own lifecycle (start/stop/crash-exit-
+  code messages from systemd itself), NOT PostgreSQL's own diagnostic
+  text — the distro's packaged service wrapper (e.g. Debian's pg_ctlcluster)
+  redirects postgres's actual stdout/stderr to its own log file, not to the
+  journal. Do not conclude "no evidence" from a quiet journalctl output on a
+  systemd target — always also call read_pg_log_file (do not pass log_path;
+  this target's own configured default is already correct) for the real
+  crash signature before drawing a conclusion.
+
   Key signals:
   - "database system was shut down"  → clean shutdown; a simple restart will recover.
   - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
@@ -145,9 +175,16 @@ guidance: |
     ESCALATE_TO: pbs_k8s_pod_crash_triage
     (checked FIRST, before any docker/podman-specific rule below — a
     Kubernetes target never falls into the docker rules that follow)
-  - exitcode=0 AND logs confirm clean shutdown AND no corruption/OOM/disk signals:
+  - exitcode=0 (docker/podman only) AND logs confirm clean shutdown AND no
+    corruption/OOM/disk signals:
     TRANSITION_TO: pbs_db_restart_action
     (the restart playbook will perform and confirm the restart)
+  - ActiveState=inactive, Result=success (systemd) AND logs confirm clean
+    shutdown AND no corruption/OOM/disk signals:
+    Do NOT escalate — pbs_db_restart_action only knows how to restart a
+    Docker/Podman container (`docker start`), not a systemd service, as of
+    this writing. Describe the clean-shutdown finding and recommend the
+    operator run `systemctl start <unit>` manually.
   - logs contain "No space left on device" with a pg_wal path:
     TRANSITION_TO: pbs_wal_disk_full
     (disk must be freed before any restart attempt — restarting now will re-PANIC)
@@ -167,7 +204,7 @@ guidance: |
     PITR already decided, or deeper damage suspected):
     Do NOT escalate — describe the finding and why it doesn't qualify for
     the automatable path; this needs a human DBA.
-  - exitcode=137 / oomkilled=true:
+  - exitcode=137 / oomkilled=true (docker/podman) or Result=oom-kill (systemd):
     Do NOT escalate — describe the OOM evidence and recommend operator review
     before restarting.
   - FATAL / PANIC (other than WAL disk full) / "invalid page" / "checksum failure":

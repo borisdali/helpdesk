@@ -329,6 +329,9 @@ func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	if i.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", i.cfg.SSHKeyPath)
 	}
+	if i.cfg.SSHPort != 0 {
+		args = append(args, "-p", fmt.Sprintf("%d", i.cfg.SSHPort))
+	}
 	args = append(args, target, "bash -s")
 
 	cmd := exec.CommandContext(ctx, "ssh", args...)

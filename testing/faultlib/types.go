@@ -277,6 +277,14 @@ type HarnessConfig struct {
 	SSHUser string
 	// SSHKeyPath is the SSH private key path for ssh_exec faults.
 	SSHKeyPath string
+	// SSHPort is the SSH port for ssh_exec faults (default: 22, OpenSSH's
+	// own default when omitted). Added 2026-10-08: a real VM's sshd may not
+	// be reachable on port 22 from wherever faulttest runs (a non-standard
+	// port, a NAT/forwarded port) — agents/sysadmin/sshexec.go's own SSH
+	// dispatch (used by the agent itself) already correctly honors a
+	// per-target port; this was the one remaining gap, in faulttest's own
+	// fault-injection ssh_exec path.
+	SSHPort int
 
 	// CustomCatalogs is the list of additional customer catalog file paths,
 	// populated by repeated --catalog flags.
