@@ -1543,11 +1543,24 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 		if err != nil {
 			errMsg = err.Error()
 		}
+		// Audit the full structured result (status_code/backup_stale/
+		// last_backup_label/last_backup_time/last_backup_error), not just
+		// result.Output (the raw `pgbackrest info` CLI JSON embedded inside
+		// it) — those computed fields are what the model actually reasons
+		// from and cites in EVIDENCE quotes, but the raw CLI blob never
+		// contains them verbatim (e.g. backup_stale doesn't exist in
+		// pgbackrest's own output at all; last_backup_time is an RFC3339
+		// reformat of a raw Unix timestamp). Logging only the raw blob made
+		// those real, correct citations permanently unverifiable by
+		// checkEvidenceProvenance (cmd/gateway/playbooks.go) — found live
+		// 2026-10-07 on a real db-pgdata-corrupted run. Same pattern already
+		// used by agents/incident/tools.go's create_incident_bundle.
+		resultJSON, _ := json.Marshal(result)
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "get_pgbackrest_status",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
 		}, audit.ToolResult{
-			Output: result.Output,
+			Output: string(resultJSON),
 			Error:  errMsg,
 		}, duration)
 	}
