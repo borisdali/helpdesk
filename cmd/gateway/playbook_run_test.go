@@ -2534,6 +2534,31 @@ func TestCheckEvidenceProvenance_SemicolonJoinedCompoundQuote(t *testing.T) {
 	}
 }
 
+// TestCheckEvidenceProvenance_LiteralEscapeSequenceInEvidence reproduces the
+// live false positive found 2026-10-07 on db-pgdata-corrupted (run
+// plr_c01b34d8): the model's EVIDENCE citation of check_connection's real
+// psql error used literal `\n`/`\t` characters instead of real
+// newline/tab — a byte-for-byte-real quote that failed verification purely
+// because of this representational mismatch, confirmed directly against the
+// real audit trail (repr() on the stored tool.Result showed genuine control
+// characters, not literal backslash sequences).
+func TestCheckEvidenceProvenance_LiteralEscapeSequenceInEvidence(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "check_connection",
+			Result: "psql: error: connection to server at \"localhost\" (::1), port 15435 failed: server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg3", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (same content, just a literal-escape-sequence vs. real-whitespace representational mismatch), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
 // TestCheckEvidenceProvenance_EmDashJoinedProsePrefix reproduces the other
 // live false positive found 2026-10-07 on db-pgdata-corrupted: a model
 // prefixing a real verbatim log quote with its own prose summary, joined by
@@ -2788,6 +2813,26 @@ func TestEvidenceQuoteVerified_SeparatorPunctuationNormalized(t *testing.T) {
 	}
 	if evidenceQuoteVerified("active = t", outputs) {
 		t.Error(`evidenceQuoteVerified("active = t", ...) = true, want false — wrong value must still fail regardless of separator`)
+	}
+}
+
+// TestEvidenceQuoteVerified_LiteralEscapeSequencesNormalized reproduces a
+// live false positive found 2026-10-07 on db-pgdata-corrupted (run
+// plr_c01b34d8): a model's EVIDENCE citation of a real psql error message
+// used the literal two-character sequences `\n`/`\t` (as if writing a JSON
+// string literal in prose) where the real check_connection tool output —
+// already round-tripped through JSON audit storage — has genuine newline/tab
+// bytes instead. Same content, different whitespace representation. Also
+// checks a genuinely wrong value still fails regardless of unescaping.
+func TestEvidenceQuoteVerified_LiteralEscapeSequencesNormalized(t *testing.T) {
+	output := "psql: error: connection to server at \"localhost\" (::1), port 15435 failed: server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n"
+	quote := `server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally`
+	if !evidenceQuoteVerified(quote, []string{output}) {
+		t.Error("expected true — same content, model just wrote literal \\n/\\t instead of real whitespace")
+	}
+	wrong := `server closed the connection unexpectedly\n\tThis definitely means the disk is full`
+	if evidenceQuoteVerified(wrong, []string{output}) {
+		t.Error("expected false — genuinely different text must still fail regardless of escape-sequence unescaping")
 	}
 }
 

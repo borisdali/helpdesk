@@ -4431,13 +4431,32 @@ func evidenceQuoteVerified(quote string, outputs []string) bool {
 // output's separately-spaced "active | f".
 var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|", " | ")
 
-// normalizeEvidenceText lowercases, canonicalizes field/value separator
-// punctuation (see evidenceSeparatorReplacer), strips literal double-quote
-// characters, and collapses whitespace runs to a single space —
+// evidenceEscapeSequenceReplacer unescapes the common whitespace escape
+// sequences a model can type literally in its EVIDENCE prose when citing
+// text it remembers as containing a newline/tab — e.g. "...connection
+// unexpectedly\n\tThis probably means..." where `\n`/`\t` are the literal
+// two-character sequences (backslash + letter), not real control characters.
+// The real tool output, already round-tripped through JSON storage, has
+// genuine newline/tab bytes there instead — normalizeEvidenceText's
+// whitespace-collapse (strings.Fields) correctly treats those as a boundary,
+// but it can't do the same for a literal backslash-n, which isn't whitespace
+// at all, so the two normalized strings never matched even though the quote
+// was byte-for-byte real. Found live 2026-10-07 on a real check_connection
+// psql error message. Same "formatting difference, not content difference"
+// principle as evidenceSeparatorReplacer/stripEscapedQuotes above — applied
+// to both the quote and the candidate output for the same reason those are,
+// even though only the quote side is expected to ever actually contain these
+// literal sequences.
+var evidenceEscapeSequenceReplacer = strings.NewReplacer(`\n`, " ", `\t`, " ", `\r`, " ")
+
+// normalizeEvidenceText lowercases, unescapes literal whitespace escape
+// sequences (see evidenceEscapeSequenceReplacer), canonicalizes field/value
+// separator punctuation (see evidenceSeparatorReplacer), strips literal
+// double-quote characters, and collapses whitespace runs to a single space —
 // deterministic, not fuzzy: closes formatting-only gaps (line breaks, double
-// spaces, casing, separator choice, embedded-quote punctuation) between a
-// verbatim-instructed quote and the raw tool output it came from, without
-// tolerating any actual content difference.
+// spaces, casing, separator choice, embedded-quote punctuation, escaped
+// whitespace) between a verbatim-instructed quote and the raw tool output it
+// came from, without tolerating any actual content difference.
 //
 // Stripping `"` (added 2026-09-08) closes a third live false positive on the
 // same fault (db-replica-disconnected, plr_25737a2d): a real Postgres log
@@ -4452,6 +4471,7 @@ var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|",
 // can't turn a fabricated value into a verified one — same reasoning as
 // evidenceSeparatorReplacer above.
 func normalizeEvidenceText(s string) string {
+	s = evidenceEscapeSequenceReplacer.Replace(s)
 	s = evidenceSeparatorReplacer.Replace(s)
 	s = strings.ReplaceAll(s, `"`, "")
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
