@@ -133,6 +133,17 @@ type GateChapter struct {
 	Resolution     string    `json:"resolution"` // "approved" | "denied"
 	Reason         string    `json:"reason,omitempty"`
 	ApprovalMode   string    `json:"approval_mode,omitempty"`
+	// GateReason is WHY the gate fired in the first place (e.g.
+	// "objective_evidence:pgbackrest_backup_unhealthy", "trust_not_earned",
+	// "low_confidence") — distinct from Reason above, which is the
+	// operator's own rationale for their decision. Read directly off the
+	// persisted PlaybookRun (set by chainEscalation when the force-gate
+	// first fires, preserved through approval/denial — see
+	// TestHandleProceedEscalation_PreservesGateReason). Was computed
+	// server-side all along but never surfaced to a human reader before —
+	// found live 2026-10-08: without it, a reader has no way to tell
+	// *why* a gate fired, only that one did and who resolved it.
+	GateReason string `json:"gate_reason,omitempty"`
 }
 
 // RemediationChapter holds the remediation playbook run.
@@ -315,7 +326,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		run.Outcome == audit.OutcomeAbandoned
 
 	if isGated || run.Outcome == audit.OutcomeGatePending {
-		gate := &GateChapter{}
+		gate := &GateChapter{GateReason: run.GateReason}
 		switch run.Outcome {
 		case audit.OutcomeTransitioned, audit.OutcomeEscalated:
 			gate.Resolution = "approved"

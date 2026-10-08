@@ -2027,6 +2027,41 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 }
 
+// TestPrintIncidentJourney_Gate_ShowsGateReason is a regression test for a
+// real gap found live 2026-10-08: the GATE section showed who approved a
+// gate and when, but never WHY it fired — gate_reason (e.g.
+// "objective_evidence:pgbackrest_backup_unhealthy") was already computed and
+// stored server-side but never surfaced to a human reader. Proves it's now
+// rendered as its own "Reason:" line.
+func TestPrintIncidentJourney_Gate_ShowsGateReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_gate1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_gate1",
+				"playbook": "pbs_db_data_loss_triage",
+			},
+			"gate": map[string]any{
+				"resolution":      "approved",
+				"approved_by":     "operator",
+				"acknowledged_at": time.Now().UTC().Format(time.RFC3339),
+				"gate_reason":     "objective_evidence:pgbackrest_backup_unhealthy",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_gate1")
+	})
+
+	if !strings.Contains(out, "Reason:    objective_evidence:pgbackrest_backup_unhealthy") {
+		t.Errorf("output missing gate_reason line, got:\n%s", out)
+	}
+}
+
 // TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft closes
 // the gap found during v0.29 doc review: the gateway's incident-narrative
 // response now includes an incident_record object (origin/status/

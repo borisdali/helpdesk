@@ -5088,6 +5088,7 @@ type incidentNarrative struct {
 		AcknowledgedAt time.Time `json:"acknowledged_at,omitempty"`
 		Resolution     string    `json:"resolution"`
 		Reason         string    `json:"reason,omitempty"`
+		GateReason     string    `json:"gate_reason,omitempty"`
 	} `json:"gate,omitempty"`
 	// Escalations holds every intermediate hop reached via ESCALATE_TO,
 	// strictly between Triage and the (optional) terminal Remediation.
@@ -5347,6 +5348,9 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			gateLine += "  at " + n.Gate.AcknowledgedAt.UTC().Format("15:04 UTC")
 		}
 		fmt.Printf("Decision:  %s\n", gateLine)
+		if n.Gate.GateReason != "" {
+			fmt.Printf("Reason:    %s\n", n.Gate.GateReason)
+		}
 		// At-gate feedback
 		var gateFeedback []string
 		for _, fb := range n.Feedback {

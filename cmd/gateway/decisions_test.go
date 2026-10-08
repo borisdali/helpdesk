@@ -554,6 +554,7 @@ func TestHandleGetIncident(t *testing.T) {
 		TransitionedTo:  "pbs_lock_chain_remediate",
 		FindingsSummary: "root blocker PID 867",
 		Operator:        "alice",
+		GateReason:      "objective_evidence:pgbackrest_backup_unhealthy",
 		StartedAt:       time.Now().Add(-30 * time.Second).UTC(),
 		CompletedAt:     time.Now().Add(-20 * time.Second).UTC(),
 	}
@@ -635,6 +636,9 @@ func TestHandleGetIncident(t *testing.T) {
 	}
 	if narrative.Gate.ApprovedBy != "bob" {
 		t.Errorf("Gate.ApprovedBy = %q, want bob", narrative.Gate.ApprovedBy)
+	}
+	if narrative.Gate.GateReason != "objective_evidence:pgbackrest_backup_unhealthy" {
+		t.Errorf("Gate.GateReason = %q, want objective_evidence:pgbackrest_backup_unhealthy", narrative.Gate.GateReason)
 	}
 	if narrative.Remediation == nil {
 		t.Fatal("Remediation chapter should be present")
