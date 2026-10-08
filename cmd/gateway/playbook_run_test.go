@@ -5689,6 +5689,110 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal is a
+// regression test for a real bug found live 2026-10-08 on a real
+// db-pgdata-corrupted run: when force-mode auto-chaining already advanced
+// several hops deep (triage -> docker_inspect -> pgbackrest_health_triage)
+// before an objective-evidence gate fired trying to reach
+// pgbackrest_restore_remediate, chainEscalation deliberately leaves the
+// PRIMARY run's own EscalatedTo unchanged — it still names the FIRST hop's
+// target (pbs_sysadmin_docker_inspect), already completed, not the real
+// pending hop (see chainEscalation's own "len(chain) == 0" comment).
+// Approving the gate via /proceed-escalation, before this fix, re-read that
+// stale signal and re-dispatched the already-completed first hop instead of
+// continuing from the real leaf's own pending TRANSITION_TO — the real
+// remediation playbook never ran; a duplicate, dead-end branch ran instead.
+// Locks in the fix: handleProceedEscalation walks the prior_run_id chain
+// forward to the real leaf hop and dispatches from there.
+func TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal(t *testing.T) {
+	primary := &audit.PlaybookRun{
+		RunID:       "plr_top",
+		Outcome:     audit.OutcomeGatePending,
+		EscalatedTo: "pbs_sysadmin_docker_inspect", // stale: the FIRST hop's target, already completed
+	}
+	mid1 := &audit.PlaybookRun{
+		RunID:          "plr_mid1",
+		SeriesID:       "pbs_sysadmin_docker_inspect",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_pgbackrest_health_triage",
+		PriorRunID:     "plr_top",
+	}
+	mid2 := &audit.PlaybookRun{
+		RunID:           "plr_mid2",
+		SeriesID:        "pbs_pgbackrest_health_triage",
+		Outcome:         audit.OutcomeTransitioned,
+		TransitionedTo:  "pbs_pgbackrest_restore_remediate", // the REAL pending hop
+		FindingsSummary: "real findings from the leaf hop",
+		PriorRunID:      "plr_mid1",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_restore01",
+		SeriesID:      "pbs_pgbackrest_restore_remediate",
+		Name:          "pgBackRest Restore",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+
+	runsByID := map[string]*audit.PlaybookRun{"plr_top": primary, "plr_mid1": mid1, "plr_mid2": mid2}
+	nextByPrior := map[string]*audit.PlaybookRun{"plr_top": mid1, "plr_mid1": mid2}
+
+	var patchBody, startedPriorRunID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("prior_run_id") != "":
+			priorID := r.URL.Query().Get("prior_run_id")
+			runs := []*audit.PlaybookRun{}
+			if next, ok := nextByPrior[priorID]; ok {
+				runs = []*audit.PlaybookRun{next}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			run, ok := runsByID[id]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			data, _ := json.Marshal(run)
+			w.Write(data) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			b, _ := io.ReadAll(r.Body)
+			var parsed audit.PlaybookRun
+			json.Unmarshal(b, &parsed) //nolint:errcheck
+			startedPriorRunID = parsed.PriorRunID
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_newrem"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_top",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("got %d, want 502 (no A2A client wired — confirms the agent-chain dispatch path was reached); body: %s", rec.Code, rec.Body.String())
+	}
+	if startedPriorRunID != "plr_mid2" {
+		t.Errorf("recordPlaybookRunStart's prior_run_id = %q, want plr_mid2 (the real leaf hop) — the duplicate-dispatch bug re-sends plr_top instead", startedPriorRunID)
+	}
+	// patchBody is the PRIMARY run's (plr_top) own finalization — confirms it
+	// still reflects plr_top's own original (now-harmless) first-hop signal,
+	// untouched by this fix, which only changes what gets DISPATCHED next.
+	if !strings.Contains(patchBody, "pbs_sysadmin_docker_inspect") {
+		t.Errorf("PATCH body for the primary run should still reference its own original escalated_to; got: %s", patchBody)
+	}
+}
+
 // TestHandleProceedEscalation_PreservesGateReason is a regression guard for a
 // real bug found during review: recordPlaybookRunComplete's Update SQL sets
 // gate_reason unconditionally (no COALESCE), so a resolve call that passed ""

@@ -1842,6 +1842,38 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// run.EscalatedTo/TransitionedTo can be stale: when force-mode
+	// auto-chaining already advanced several hops deep before the gate fired
+	// (e.g. triage -> docker_inspect -> pgbackrest_health_triage, THEN gated
+	// trying to reach pgbackrest_restore_remediate), chainEscalation
+	// deliberately never overwrites the PRIMARY run's own first-hop signal
+	// once the chain has moved past it (see its own doc comment) — that
+	// guard exists to stop a downstream hop's gated transition from
+	// corrupting the triage run's persisted field and making
+	// handleGetIncident misclassify it. But it means run.EscalatedTo here
+	// still names the FIRST hop's target (already completed, its own run
+	// already exists) rather than the REAL hop awaiting this decision.
+	// Walk the prior_run_id chain forward (same mechanism
+	// fetchEscalationHops/fetchNextHop already use) to find the actual leaf —
+	// the hop with no successor yet — and act on ITS signal and RunID
+	// instead. In the common case (gate fires on the primary hop directly,
+	// chain never advanced), fetchNextHop(run.RunID) finds nothing and
+	// leafRun stays run — zero behavior change. Found live 2026-10-08: a
+	// real db-pgdata-corrupted run approved via this path re-dispatched
+	// pbs_sysadmin_docker_inspect (the already-completed first hop) instead
+	// of continuing from pbs_pgbackrest_health_triage's own pending
+	// TRANSITION_TO pbs_pgbackrest_restore_remediate — the real remediation
+	// playbook never ran, while the duplicate dead-ended at a second,
+	// unrelated gate (trust_not_earned).
+	leafRun := run
+	for i := 0; i < maxEscalationHops; i++ {
+		next := g.fetchNextHop(r.Context(), leafRun.RunID)
+		if next == nil {
+			break
+		}
+		leafRun = next
+	}
+
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
@@ -1869,12 +1901,13 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// remediation playbook doesn't exist, we want a clean 404 with no audit
 	// footprint — not a half-finished gate that leaves the run marked
 	// "transitioned" but with nothing actually running.
-	nextSeriesID := run.EscalatedTo
-	approvedOutcome := audit.OutcomeEscalated
-	isTransition := run.TransitionedTo != ""
+	// nextSeriesID/isTransition describe leafRun's own pending signal — the
+	// REAL hop being dispatched now, which may be several levels below the
+	// primary run (see leafRun's own comment above).
+	nextSeriesID := leafRun.EscalatedTo
+	isTransition := leafRun.TransitionedTo != ""
 	if isTransition {
-		nextSeriesID = run.TransitionedTo
-		approvedOutcome = audit.OutcomeTransitioned
+		nextSeriesID = leafRun.TransitionedTo
 	}
 	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
 	if err != nil {
@@ -1882,10 +1915,21 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// primaryOutcome reflects the PRIMARY run's (runID's) own first-hop
+	// signal — distinct from nextSeriesID/isTransition above. chainEscalation
+	// deliberately never updates run.EscalatedTo/TransitionedTo past the
+	// first hop (see leafRun's own comment), so this is simply re-confirming
+	// whatever that original signal already was, now that the gate is
+	// resolved — it has nothing to do with which hop is actually dispatched.
+	primaryOutcome := audit.OutcomeEscalated
+	if run.TransitionedTo != "" {
+		primaryOutcome = audit.OutcomeTransitioned
+	}
+
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 	// gate_reason passed through from run — see the denied branch above for why.
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
+	g.recordPlaybookRunComplete(r.Context(), runID, primaryOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
 	// Store at-gate feedback when provided. Captured before remediation runs —
 	// a cleaner signal than post-incident feedback because the operator hasn't
@@ -1923,7 +1967,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		ConnectionString: connStr,
 		Namespace:        namespace,
 		Purpose:          purpose,
-		PriorRunID:       runID,
+		PriorRunID:       leafRun.RunID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
 		IsTransition:     isTransition,
@@ -1942,19 +1986,18 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	principal := authz.PrincipalFromContext(r.Context())
 	g.enforceApprovalOverride(principal, &remReq.ApprovalMode, nextPB.ApprovalMode, remReq.ConnectionString, &warnings)
 
-	// Thread prior findings.
-	if prior, err := g.fetchPlaybookRun(r.Context(), runID); err == nil {
-		remReq.PriorFindings = prior.FindingsSummary
-	}
+	// Thread prior findings — from leafRun, the hop actually being continued
+	// from, not necessarily the primary run (see leafRun's own comment above).
+	remReq.PriorFindings = leafRun.FindingsSummary
 
 	remStartTraceID := r.Header.Get("X-Trace-ID")
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy, remReq.Origin)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, leafRun.RunID, "", resolvedBy, remReq.Origin)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
-		"triage_run_id", runID, "remediation_series", nextSeriesID,
+		"triage_run_id", runID, "leaf_run_id", leafRun.RunID, "remediation_series", nextSeriesID,
 		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
 
 	if nextPB.ExecutionMode == "agent_approve" {
