@@ -114,6 +114,7 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
 | `vm_name` | string | **Required for SysAdmin.** Key in the `vms` map. Mutually exclusive with `k8s_cluster` — set one or the other, never both. |
 | `container_name` | string | The container name or ID to target. Required when the VM's `runtime` is `docker` or `podman`. |
 | `systemd_unit` | string | The systemd service unit name (e.g. `"postgresql-16"`). Required when the VM's `runtime` is `""`. |
+| `pg_log_dir` | string | Optional. Overrides `read_pg_log_file`'s default PostgreSQL log directory (`/var/lib/postgresql/data/log`, correct for the `postgres:16` Docker image this project's own test fixtures use) — a real systemd install logs elsewhere: Debian/Ubuntu's packaged PostgreSQL to `/var/log/postgresql/`, RHEL/Red Hat's to `/var/lib/pgsql/<version>/data/log/`. Left unset, every Docker/K8s target keeps the hardcoded default unchanged. |
 
 ### VM fields
 
@@ -122,7 +123,7 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
 | `name` | string | Human-readable VM name. |
 | `address` | string | Hostname or IP address of the machine. |
 | `runtime` | string | Container runtime: `"docker"`, `"podman"`, or `""` (systemd/direct). Applies to all databases on this VM. |
-| `ssh_user` | string | Optional. Enables SSH dispatch for `get_pgbackrest_status`/`run_pgbackrest_backup` (§4.1, §4.3) when set alongside `ssh_key_path`. Not used by any other tool. |
+| `ssh_user` | string | Optional. Enables SSH dispatch when set alongside `ssh_key_path` — as of v0.31, every SysAdmin tool that reaches the host (`check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`, `restart_container`, `restart_service`, plus `get_pgbackrest_status`/`run_pgbackrest_backup` since v0.30) dispatches via SSH when this is set, falling back to local/container exec otherwise — see [§5](#5-container-runtime-dispatch). Before v0.31, only the pgBackRest tool pair honored this field; the other six silently ran locally regardless of it, a real gap found and closed live. |
 | `ssh_port` | int | Optional, default `22`. Only meaningful when `ssh_user` is set. |
 | `ssh_key_path` | string | Optional. Path to a private key, read fresh on every connection — never cached, so a Vault-issued short-lived credential refreshed at this path works transparently. A sibling `<path>-cert.pub` file, if present, is loaded as an SSH certificate for certificate-based auth. |
 
@@ -154,7 +155,7 @@ If the server ID is not found, has no `vm_name`, or the referenced VM is not def
 
 The agent is instructed to use the server's friendly name or the server ID from the user's prompt — never to invent or guess connection strings or container names, which are resolved internally.
 
-`get_pgbackrest_status` and `run_pgbackrest_backup` (§4.1, §4.3) additionally resolve a **VM-level SSH connection** when the VM entry carries `ssh_user`/`ssh_key_path` (and optional `ssh_port`, default 22) — the agent's first tool pair able to reach a host that isn't colocated with the agent process or running Docker/Podman on it. See [§5](#5-container-runtime-dispatch) for the full three-way dispatch.
+Every tool that reaches the host resolves a **VM-level SSH connection** when the VM entry carries `ssh_user`/`ssh_key_path` (and optional `ssh_port`, default 22) — the mechanism that lets any of them reach a host that isn't colocated with the agent process or running Docker/Podman on it. `get_pgbackrest_status`/`run_pgbackrest_backup` were the first two wired for this (v0.30); `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`, `restart_container`, and `restart_service` were wired the same way in v0.31, closing a real gap where they silently ran locally regardless of this field. See [§5](#5-container-runtime-dispatch) for the full dispatch table.
 
 ---
 
@@ -185,7 +186,9 @@ Returns:
 
 `status` values: `running`, `stopped`, `restarting`, `error`, `unknown`. For systemd hosts, `running` maps to `active (running)`, `stopped` to `inactive` or `failed`.
 
-`details` contains the raw `docker inspect` status string or `systemctl status` active state for further diagnosis.
+`details` contains the raw `docker inspect` status string or `systemctl show` active-state fields for further diagnosis.
+
+Dispatched via [§5](#5-container-runtime-dispatch)'s SSH-or-local mechanism — reaches a remote systemd/VM target over SSH when the VM's `ssh_user`/`ssh_key_path` are set, local exec otherwise.
 
 #### `get_host_logs`
 
@@ -197,7 +200,9 @@ lines    int      optional — number of log lines to return (default: 100)
 since    string   optional — relative time filter, e.g. "30m", "2h", "1d"
 ```
 
-For container runtimes, calls `docker logs --tail N [--since T]`. For systemd, calls `journalctl -u <unit> -n N [--since T]`. Returns the raw log output — the agent reads it for error patterns without further parsing.
+For container runtimes, calls `docker logs --tail N [--since T]`. For systemd, calls `journalctl -u <unit> -n N [--since T]`. Dispatched via [§5](#5-container-runtime-dispatch)'s SSH-or-local mechanism, same as `check_host`. Returns the raw log output — the agent reads it for error patterns without further parsing.
+
+On a real systemd target, `journalctl` typically shows only the service's own lifecycle messages (start/stop/crash-exit-code), not PostgreSQL's own stdout/stderr — the distro's packaged service wrapper (e.g. Debian's `pg_ctlcluster`) redirects that to its own log file instead. `read_pg_log_file` below is the real source for PostgreSQL-level detail on a systemd target; this tool's own guidance to the model says so explicitly.
 
 This is the primary tool for diagnosing why a database failed to start. PostgreSQL startup errors (`FATAL`, `PANIC`, `invalid value for parameter`) appear here.
 
@@ -209,7 +214,7 @@ Report disk usage on the host where the database process runs.
 target   string   required — server ID
 ```
 
-For container runtimes, executes `df -h` inside the container. For systemd hosts, executes `df -h` on the host directly. Returns raw `df` output. The agent looks for filesystems above 80% usage, particularly the data directory mount.
+For container runtimes, executes `df -h` inside the container. For systemd hosts, executes `df -h` on the host — over SSH when the VM's `ssh_user`/`ssh_key_path` are set, locally otherwise. Returns raw `df` output. The agent looks for filesystems above 80% usage, particularly the data directory mount.
 
 #### `check_memory`
 
@@ -219,7 +224,7 @@ Report memory usage on the host.
 target   string   required — server ID
 ```
 
-For container runtimes, executes `free -h` inside the container (or reads `/proc/meminfo`). For systemd hosts, executes `free -h`. Returns raw output. The agent looks for low available memory that could cause OOM kills or swap pressure.
+For container runtimes, executes `free -h` inside the container (or reads `/proc/meminfo`). For systemd hosts, executes `free -h` — over SSH when configured, locally otherwise. Returns raw output. The agent looks for low available memory that could cause OOM kills or swap pressure.
 
 #### `read_pg_log_file`
 
@@ -229,7 +234,7 @@ Read the PostgreSQL log file directly from inside the container, pod, or host pr
 target    string   required — server ID
 lines     int      optional — number of tail lines to return (default: 200)
 filter    string   optional — case-insensitive substring filter applied to each line
-log_dir   string   optional — override default log directory (default: /var/lib/postgresql/data/log)
+log_dir   string   optional — override default log directory (default: /var/lib/postgresql/data/log, or the target's own configured `pg_log_dir` — see §2 — when set and this arg is omitted)
 ```
 
 **How it works:**
@@ -245,7 +250,7 @@ The exec path depends on the server's runtime:
 | `docker` | `docker exec <container> sh -c "ls -t <log_dir> | head -1"` then `docker exec <container> tail -n N <file>` |
 | `podman` | Same as docker with `podman` binary |
 | `kubectl` (k8s) | Two-step: `kubectl get pod -l <selector> -n <ns>` to resolve pod name, then `kubectl exec <pod> -n <ns> -- tail ...` |
-| systemd (host) | Reads the log file directly on the local filesystem |
+| systemd (host) | `ls -t`/`tail` run directly on the host — over SSH when the VM's `ssh_user`/`ssh_key_path` are set, locally otherwise (same SSH-or-local mechanism as `check_host`; before v0.31 this row read the log file only on the agent's own local filesystem regardless of configuration, a real gap closed live) |
 
 **Key distinction from DB agent's `read_pg_log`:** The DB agent tool uses `pg_read_file()` SQL and requires a live Postgres connection. This tool uses process exec (`docker exec` / `kubectl exec`) and works when Postgres is completely down — including after a crash, failed startup, or OOM kill.
 
@@ -343,7 +348,7 @@ Restart the database container using the configured container runtime.
 target   string   required — server ID
 ```
 
-Executes `docker restart <container_name>` (or `podman restart`). Returns:
+Executes `docker restart <container_name>` (or `podman restart`) — over SSH when the VM's `ssh_user`/`ssh_key_path` are set, locally otherwise. Returns:
 
 ```json
 {
@@ -365,7 +370,7 @@ Restart the database systemd service.
 target   string   required — server ID
 ```
 
-Executes `systemctl restart <systemd_unit>`. Returns the same shape as `restart_container` with `runtime: "systemd"`.
+Executes `systemctl restart <systemd_unit>` — over SSH when configured, locally otherwise (the real intended behavior all along; before v0.31 this always ran locally regardless of configuration, a real gap closed live). Returns the same shape as `restart_container` with `runtime: "systemd"`.
 
 Same pre-investigation requirement as `restart_container`.
 
@@ -373,29 +378,49 @@ Same pre-investigation requirement as `restart_container`.
 
 ## 5. Container runtime dispatch
 
-`containerRuntimeBin()` selects the execution backend at call time:
+`containerRuntimeBin()` selects which binary a command runs as — a separate question from
+*where* it runs, covered next:
 
 | `container_runtime` | Binary used | Commands |
 |---|---|---|
 | `"docker"` | `docker` | `docker inspect`, `docker logs`, `docker exec`, `docker restart` |
 | `"podman"` | `podman` | Same commands — Podman is Docker-compatible |
-| `""` (empty) | host directly | `systemctl`, `journalctl`, `df`, `free` |
+| `""` (empty) | `systemctl`/`journalctl`/`df`/`free` | Direct host commands, no container runtime involved |
 
-The binary must be present in the `PATH` of the user running the SysAdmin agent process. For Docker and Podman, the user must have permission to call the Docker socket or Podman socket without `sudo`.
+**Where each command actually runs** is decided by `runOnHost` (`agents/sysadmin/sshexec.go`),
+a single dispatcher every host-reaching tool goes through (`check_host`, `get_host_logs`,
+`check_disk`, `check_memory`, `read_pg_log_file`, `restart_container`, `restart_service`, plus
+`get_pgbackrest_status`/`run_pgbackrest_backup` via their own dispatch below): if the resolved
+VM has `ssh_user`+`ssh_key_path` set, the command (whichever binary `containerRuntimeBin()`
+picked) runs over a real SSH connection to `address:ssh_port`; otherwise it runs locally via
+`exec.CommandContext`, unchanged from before this mechanism existed. The binary must be present
+in the `PATH` of whichever host actually runs the command — the agent's own host for local exec,
+the remote VM for SSH dispatch. For Docker and Podman, that host's user must have permission to
+call the Docker/Podman socket without `sudo`.
 
 If the binary is not found, `check_host` returns `status: error` with a details message explaining the missing binary. This is treated as a configuration error, not a database failure — the agent is instructed to report it as such rather than diagnosing a database problem.
 
+**Found live, v0.31**: before this fix, only `get_pgbackrest_status`/`run_pgbackrest_backup`
+(below) actually honored `ssh_user`/`ssh_key_path` — the seven tools listed above all called the
+local-exec path directly, silently ignoring a VM's SSH configuration. A target with no
+`container_name` (systemd-only, no Docker/Podman daemon reachable locally) would have these
+tools run commands on the *agent's own host* instead of the real target, with no error to signal
+the mismatch. Confirmed via a real in-process SSH server in `agents/sysadmin/ssh_dispatch_test.go`
+that each of the seven now reaches a remote host for real, not just that they compile against
+`runOnHost`'s signature.
+
 ### pgBackRest tool dispatch
 
-`get_pgbackrest_status` and `run_pgbackrest_backup` use a separate, three-way dispatch, not the
+`get_pgbackrest_status` and `run_pgbackrest_backup` use their own three-way dispatch, not the
 `containerRuntimeBin()` table above — pgBackRest needs to run as the `postgres` OS user (it
-checks PGDATA ownership), which `docker exec`'s default root user doesn't satisfy, and it's the
-first tool pair able to reach a host over SSH rather than only local/container exec:
+checks PGDATA ownership), which `docker exec`'s default root user doesn't satisfy. These were the
+first two tools wired for SSH dispatch (v0.30), before `runOnHost` existed as the shared
+mechanism described above:
 
 | Resolved host | Dispatch |
 |---|---|
 | `runtime="docker"`/`"podman"` | `docker exec <container> su postgres -c '<quoted pgbackrest command>'` |
-| VM has `ssh_user`+`ssh_key_path` set (any other runtime) | SSH: dial, authenticate (key or certificate — see §2's VM fields), run the command remotely, capture stdout/stderr/exit code |
+| VM has `ssh_user`+`ssh_key_path` set (any other runtime) | SSH via `runOnHost`: dial, authenticate (key or certificate — see §2's VM fields), run the command remotely, capture stdout/stderr/exit code — the same mechanism the table above now uses |
 | No `target` given, or VM has neither of the above | Runs `pgbackrest` directly on the agent's own host |
 
 The SSH client (`agents/sysadmin/sshexec.go`) verifies the remote host key against

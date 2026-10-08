@@ -70,7 +70,7 @@ against a live container: baseline healthy → injection → real `archive_comma
 `failed_count` climbing, `archiving_stale=true` → teardown → restored, a fresh success
 recorded, `archiving_stale=false` again.
 
-**A real, architectural incompatibility found testing against a real CloudNativePG cluster**:   
+**An architectural incompatibility found testing against a real CloudNativePG cluster**:   
 This fault and `set_archive_command` are `external_compat: true`, i.e.  structurally portable pure SQL, working against any Postgres reachable over libpq. Tested
 against a real CNPG-managed cluster to confirm that in practice, not just in theory and it...
 genuinely does not work there. The reason?   
@@ -222,8 +222,10 @@ found" from inside that Pod instead of a hardcoded refusal naming one specific o
 [§3](#3-roadmap) for the separate, still-open question of operator-managed (CNPG-style) backup
 visibility, which this change does not address.
 
-**A real parsing bug found live against an actual K8s Pod — and an initial wrong hypothesis,
-corrected before shipping a fix that wouldn't have worked**:   
+**A parsing bug found live against an actual K8s Pod**:  
+
+And an initial wrong hypothesis, corrected before shipping a fix that wouldn't have worked. 
+
 Deploying a self-managed Postgres+pgBackRest Pod to a real K8s cluster to prove the `kubectl exec` path above (not
 just unit-test it) surfaced `get_pgbackrest_status: parsing pgbackrest info JSON: invalid
 character 'P' looking for beginning of value`.  
@@ -337,6 +339,26 @@ restore`, exit code 75 — and the canary file survived untouched. pgBackRest va
 selectable backup exists (it has to read `backup.info` to build a restore file-list) before it
 does anything destructive to the target — restoring against a nonexistent backup is already safe
 today, confirmed empirically rather than assumed, with zero code of our own responsible for it.
+
+**Real host/VM support, not just Docker**:  
+Everything above was built and live-verified against the dedicated Docker fixture
+(`testing/docker/docker-compose.pgbackrest.yaml`).  
+
+This same chain also works against a real, SSH-reachable Linux host/VM running PostgreSQL as a genuine systemd service. Not a disguised
+container, but via [`db-pgdata-corrupted-vm`](../testing/catalog/failures.yaml) (new fault, same diagnosis/remediation playbooks).  
+
+This required making the following SysAdmin Agent's tool more robust and portable: `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`,
+`restart_container` and `restart_service`. All of them called the local-exec path directly, ignoring a target's configured `ssh_user`/`ssh_key_path` — only `get_pgbackrest_status`/
+`run_pgbackrest_backup` (§2 above) ever actually dispatched over SSH.   
+
+See [SYSADMIN_AGENT.md §5](SYSADMIN_AGENT.md#5-container-runtime-dispatch) for the full fix and the real in-process-SSH-server tests proving it.
+
+`pbs_pgbackrest_restore_remediate` has a new `restart_service` path written from well-established
+Debian/RHEL packaging conventions (journalctl showing only service-lifecycle lines, not
+PostgreSQL's own output.   
+
+`read_pg_log_file`'s log directory differing by distro, see the new `pg_log_dir` infra-config field), not something directly observed against a real VM the way every
+other claim in this document is.  
 
 ## 4. Roadmap
 

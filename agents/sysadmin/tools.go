@@ -748,20 +748,25 @@ type CheckDiskArgs struct {
 }
 
 func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) {
-	// If a target is given and run_on_host is not set, exec inside the process.
+	// If a target is given and run_on_host is not set, exec inside the process
+	// — execInProcess itself now handles docker/podman/k8s exec and systemd
+	// (SSH when configured, local exec otherwise; see runOnHost) uniformly,
+	// so no fallback is needed here anymore. Before 2026-10-08, a systemd
+	// target made execInProcess return a "cannot exec into process" error
+	// that this function caught and fell back to local df for — that error
+	// can no longer occur (execInProcess's systemd branch now dispatches
+	// instead of erroring), so that fallback was dead code masked by a
+	// now-false comment; removed rather than left stale.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return DiskResult{}, err
 		}
 		out, runErr := execInProcess(ctx, host, []string{"df", "-h"})
-		if runErr == nil {
-			return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
-		}
-		// Systemd targets return "cannot exec" — fall through to local df.
-		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+		if runErr != nil {
 			return DiskResult{}, fmt.Errorf("check_disk: %w: %s", runErr, out)
 		}
+		return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 	}
 	out, err := cmdRunner.Run(ctx, "df", []string{"-h"}, nil)
 	if err != nil {
@@ -805,20 +810,18 @@ type CheckMemoryArgs struct {
 }
 
 func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, error) {
-	// If a target is given and run_on_host is not set, exec inside the process.
+	// See checkDiskImpl's identical comment: execInProcess now handles
+	// systemd dispatch (SSH-or-local) itself, so no fallback is needed here.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return MemoryResult{}, err
 		}
 		out, runErr := execInProcess(ctx, host, []string{"free", "-h"})
-		if runErr == nil {
-			return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
-		}
-		// Systemd targets return "cannot exec" — fall through to local free.
-		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+		if runErr != nil {
 			return MemoryResult{}, fmt.Errorf("check_memory: %w: %s", runErr, out)
 		}
+		return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 	}
 	out, err := cmdRunner.Run(ctx, "free", []string{"-h"}, nil)
 	if err != nil {

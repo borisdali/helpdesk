@@ -165,6 +165,68 @@ func TestRestartContainerTool_SSHDispatch(t *testing.T) {
 	}
 }
 
+// TestCheckDiskTool_SSHDispatch and TestCheckMemoryTool_SSHDispatch prove a
+// bonus of the execInProcess fix above: check_disk/check_memory call
+// execInProcess directly (no dispatch logic of their own), so fixing
+// execInProcess's systemd default case transitively fixed these two as
+// well, even though the original plan's own scope note said this gap
+// "is noted but not fixed here" — that note undersold what the shared-code
+// fix actually covered. Confirmed here, not just inferred from reading the
+// code, the same discipline the rest of this fix got.
+func TestCheckDiskTool_SSHDispatch(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
+		if !strings.Contains(cmd, "df") || !strings.Contains(cmd, "-h") {
+			return "unexpected command: " + cmd, 1
+		}
+		return "Filesystem Size Used Avail Use% Mounted on\n/dev/sda1 20G 5G 15G 25% /\n", 0
+	})
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
+	os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, srv.addr, srv.hostPub)) //nolint:errcheck
+
+	addr, port := hostPortOf(t, srv.addr)
+	withPgBackRestSSHInfra(t, addr, port, keyPath)
+
+	ctx := mockToolContext{context.Background()}
+	result, err := checkDiskTool(ctx, CheckDiskArgs{Target: "pgbackrest_db"})
+	if err != nil {
+		t.Fatalf("checkDiskTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "/dev/sda1") {
+		t.Errorf("Output = %q, want the remote df output — real SSH round trip did not reach the remote host", result.Output)
+	}
+}
+
+func TestCheckMemoryTool_SSHDispatch(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
+		if !strings.Contains(cmd, "free") || !strings.Contains(cmd, "-h") {
+			return "unexpected command: " + cmd, 1
+		}
+		return "              total        used        free\nMem:           15Gi        12Gi       1.0Gi\n", 0
+	})
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
+	os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, srv.addr, srv.hostPub)) //nolint:errcheck
+
+	addr, port := hostPortOf(t, srv.addr)
+	withPgBackRestSSHInfra(t, addr, port, keyPath)
+
+	ctx := mockToolContext{context.Background()}
+	result, err := checkMemoryTool(ctx, CheckMemoryArgs{Target: "pgbackrest_db"})
+	if err != nil {
+		t.Fatalf("checkMemoryTool() error = %v", err)
+	}
+	if !strings.Contains(result.Output, "15Gi") {
+		t.Errorf("Output = %q, want the remote free output — real SSH round trip did not reach the remote host", result.Output)
+	}
+}
+
 // TestExecInProcess_SystemdTarget_DispatchesViaRunOnHost is a regression
 // test for execInProcess's own fix: the systemd default case used to error
 // outright ("cannot exec into process") rather than dispatch at all — this
