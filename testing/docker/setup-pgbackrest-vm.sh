@@ -135,7 +135,8 @@ cat <<EOF
       "connection_string": "host=<VM-ADDRESS> port=5432 dbname=postgres user=postgres",
       "vm_name": "pgbackrest-real-vm",
       "systemd_unit": "${PG_UNIT}",
-      "pg_log_dir": "${PG_LOG_DIR}"
+      "pg_log_dir": "${PG_LOG_DIR}",
+      "tags": ["test"]
     }
   },
   "vms": {
