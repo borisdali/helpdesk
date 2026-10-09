@@ -30,9 +30,9 @@ databases or your infra.
 ## Table of Contents
 
 1. [Tools](#1-tools)
-   - [Database agent (1.1–1.4)](#database-agent)
-   - [Kubernetes agent (1.5–1.9)](#kubernetes-agent)
-   - [SysAdmin agent (1.10–1.11)](#sysadmin-agent)
+   - [Database agent (1.1–1.5)](#database-agent)
+   - [Kubernetes agent (1.6–1.10)](#kubernetes-agent)
+   - [SysAdmin agent (1.11–1.15)](#sysadmin-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
 4. [Safeguards and Automatic Recovery](#4-safeguards-and-automatic-recovery)
@@ -174,6 +174,27 @@ termination of legitimately short-lived idle connections.
 
 ---
 
+#### 1.5 `set_archive_command` — change WAL archive_command
+
+**Action class**: `write` (policy pre-check)
+
+```
+connection_string   string   optional
+command             string   required — the new archive_command value
+```
+
+Runs `ALTER SYSTEM SET archive_command = '<command>';` followed by `SELECT pg_reload_conf();` via the shared `runPsqlAs` helper. Used to restore WAL archiving after a `db-backup-archiving-broken` diagnosis.
+
+**Execution sequence**:
+
+1. Policy pre-check (`CheckDatabase` with `ActionWrite`)
+2. Execute `ALTER SYSTEM SET archive_command = ...` then `SELECT pg_reload_conf()`
+3. Return combined output
+
+**Safeguards**: the tool itself takes whatever `command` value it's given — the safety discipline lives one level up, in `pbs_db_backup_archiving_remediate`'s own guidance: it restores `archive_command` only to a value confirmed correct from `get_saved_snapshots` (a prior known-good reading), never a guess, and stops to ask a human when no pre-failure reading exists at all. See [BACKUP.md §1](BACKUP.md#1-wal-archiving-failure-the-backup-taking-precondition).
+
+---
+
 ### Kubernetes agent
 
 All three K8s mutation tools share the same action class (`destructive`)
@@ -182,7 +203,7 @@ database tools, there is **no structural guard** inside the mutation tool that
 forces an inspection call — the enforce-first discipline relies on the system
 prompt (Mechanism A) and the approval context (Mechanism C) only.
 
-#### 1.5 `describe_pod` — read-only inspector
+#### 1.6 `describe_pod` — read-only inspector
 
 **Action class**: `read` (no policy check needed)
 
@@ -199,7 +220,7 @@ the pod identity and understand the current state before acting.
 
 ---
 
-#### 1.6 `delete_pod` — single pod deletion
+#### 1.7 `delete_pod` — single pod deletion
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -232,7 +253,7 @@ rolling the entire deployment.
 
 ---
 
-#### 1.7 `restart_deployment` — rolling restart
+#### 1.8 `restart_deployment` — rolling restart
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -262,7 +283,7 @@ that requires a full pod cycle.
 
 ---
 
-#### 1.8 `scale_deployment` — replica count change
+#### 1.9 `scale_deployment` — replica count change
 
 **Action class**: `destructive` (policy pre-check + post-execution blast-radius
 check)
@@ -292,7 +313,7 @@ touching running pods.
 
 ---
 
-#### 1.9 `debug_node_dmesg` — worker-node kernel log pull
+#### 1.10 `debug_node_dmesg` — worker-node kernel log pull
 
 **Action class**: `write` (policy pre-check + pre-execution blast-radius check)
 
@@ -364,9 +385,9 @@ orphaned by a previous failed run for the same node.
 
 ### SysAdmin agent
 
-The SysAdmin agent operates at the OS and container-runtime level. Its two mutation tools restart a database process rather than operating on data. The severity is different from database mutations — a restart is recoverable and leaves data intact — but the policy and audit enforcement is identical. See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for the agent's full documentation including the server ID resolution model and the remediation permission tiers.
+The SysAdmin agent operates at the OS and container-runtime level. Most of its mutation tools restart a database process rather than operating on data — a restart is recoverable and leaves data intact. `restore_from_backup` (§1.15, added v0.31) is the exception: it overwrites the current data directory with a backup, the most destructive operation in this project. The policy and audit enforcement is identical across all of them regardless of severity. See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for the agent's full documentation including the server ID resolution model and the remediation permission tiers.
 
-#### 1.10 `restart_container` — container restart
+#### 1.11 `restart_container` — container restart
 
 **Action class**: `destructive` (policy pre-check, full audit record)
 
@@ -390,7 +411,7 @@ Calls `docker restart <container_name>` (or `podman restart`) for the container 
 
 ---
 
-#### 1.11 `restart_service` — systemd service restart
+#### 1.12 `restart_service` — systemd service restart
 
 **Action class**: `destructive` (policy pre-check, full audit record)
 
@@ -402,11 +423,92 @@ Calls `systemctl restart <systemd_unit>` for the systemd unit associated with th
 
 Applies only to hosts where the database runs directly under systemd (not containerised). If the server's `host` block has `container_runtime` set, this tool returns an error — use `restart_container` instead.
 
-**Execution sequence**: identical to `restart_container` (§1.10) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording and `auto_remediation_eligible` flag apply.
+**Execution sequence**: identical to `restart_container` (§1.11) with `systemctl restart` substituted for `docker restart`. The same safeguards, policy pre-check, audit recording and `auto_remediation_eligible` flag apply.
 
 ---
 
-## 1.12 Rollback capability per tool
+#### 1.13 `get_pgbackrest_status` — read-only inspector
+
+**Action class**: `read` (no policy check needed)
+
+```
+target   string   optional — server ID from infrastructure config
+```
+
+Runs `pgbackrest info --output=json` and parses the result into a structured status: `StatusCode`/`StatusMessage` (stanza-level), `RepoStatusCode`/`RepoStatusMessage` (repo-level — distinguishes a broken repo/stanza from a merely stale one), and `BackupStale` (computed from the most recent backup's `StopTime` against a configurable max-age, most-recent determined by comparing `StopTime` explicitly rather than assuming array order). Call this before `run_pgbackrest_backup` or `restore_from_backup` to confirm the actual backup state rather than assuming it.
+
+Locates the JSON array's start (`jsonArrayPrefix`) rather than assuming the whole output is JSON — pgBackRest can write WARN-level noise to stdout ahead of its own JSON (found live against a real Kubernetes Pod, where auto-injected `<SERVICE_NAME>_*` env vars triggered this). Dispatches over Docker/Podman exec, `kubectl exec`, or real SSH depending on the target's configured runtime.
+
+---
+
+#### 1.14 `run_pgbackrest_backup` — manual backup
+
+**Action class**: `write` (policy pre-check)
+
+```
+target   string   optional — server ID from infrastructure config. Required
+                   whenever infrastructure config is loaded.
+stanza   string   optional — resolved the same way restore_from_backup
+                   resolves it when omitted (§1.15)
+type     string   optional — backup type; defaults to "full"
+```
+
+Runs `pgbackrest --stanza=<stanza> --type=<type> backup`. Used to remediate a stale-but-otherwise-healthy backup (`pbs_pgbackrest_backup_remediate`) — deliberately narrow: it does not attempt to fix a broken repo/stanza, which has no confirmed-correct value to restore and is instead escalated to a human.
+
+**Execution sequence**:
+
+1. Resolve server ID → `resolvedHost`
+2. Policy pre-check (`CheckTool` with `ActionWrite`)
+3. Execute `pgbackrest --stanza=... --type=... backup` via the same dispatch path as `get_pgbackrest_status`
+4. Return raw command output
+
+---
+
+#### 1.15 `restore_from_backup` — restore from latest pgBackRest backup
+
+**Action class**: `destructive` (policy pre-check, full audit record)
+
+```
+target   string   optional — server ID from infrastructure config. Required whenever
+                   infrastructure config is loaded; omitting it then is a resolution
+                   failure, not a request to run locally.
+stanza   string   optional — pgBackRest stanza name. When omitted, the only stanza
+                   present is used; errors if more than one exists.
+```
+
+Restores the target's PostgreSQL data directory from the latest pgBackRest backup — `pgbackrest --stanza=<stanza> --delta restore`, pgBackRest's own default recovery target.   
+
+This is an **in-place restore**: it overwrites the data directory on the same host/target the instance already runs on. It does not spin up a separate, new database server from the backup (useful for cloning, sandboxing or building a standby), which is a materially different operation with a different risk profile (nothing existing gets overwritten) and is not what this tool does.   
+
+Deliberately narrow in scope even within in-place restore: restore-to-latest only, single stanza, single instance. No point-in-time target, no replica rebuild, no non-pgBackRest restore path, no restore-to-new-instance. See [BACKUP.md §4](BACKUP.md#4-roadmap) for what's explicitly out of scope.
+
+Dispatches over Docker/Podman exec, `kubectl exec`, or real SSH depending on the target's configured runtime — the same shared dispatch path (`execInProcess`/`runOnHost`) every other SysAdmin tool uses.
+
+**Execution sequence**:
+
+1. Resolve server ID → `resolvedHost` (fails immediately if server ID not in config or has no runtime/VM resolution)
+2. Policy pre-check (`CheckTool` with `ActionDestructive`)
+3. **Refuse outright if `pg_isready` reports the instance still accepting connections** — the one check standing between restoring a dead instance and destroying a live one. This is not a soft warning; the tool returns an error and takes no further action.
+4. Remove the stale `postmaster.pid` (the instance is confirmed down by step 3, so this is safe) and execute `pgbackrest --stanza=<stanza> --delta restore`
+5. Record `RecordToolCall` in audit log with server ID, stanza, duration and outcome
+6. Return `RestoreFromBackupResult` with raw command output
+
+**Safeguards that exist, stated explicitly**:
+
+1. **`pg_isready` pre-flight refusal** (step 3 above) — a deterministic, code-level check. Answers "is this instance currently live," not "is this data genuinely unrecoverable."
+2. **The backup-health objective-evidence gate.** Reached only via `pbs_pgbackrest_restore_remediate`, itself only reachable through a chain where `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call has already confirmed a non-stale backup on a healthy repo. That confirmation is backed by the `pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) — unlike every other gate in this project, this one **cannot be bypassed by `approval_mode=force`**: if the model's response claims "healthy" but the tool's own structured result disagrees, the gateway forces a `pending_gate` regardless of the caller's automated intent. This answers "is there a backup worth restoring from," not "should a restore happen at all."
+3. **Normal policy/approval gating** on the `ActionDestructive` tier itself (step 2), same as any other destructive tool — a human approval step under any `approval_mode` other than `force`.
+
+**What this does *not* independently verify, stated plainly rather than left implicit**:   
+Nothing above confirms that the data loss is actually genuine, irrecoverable corruption rather than, say, an instance that's merely stopped for routine maintenance or a transient outage. That determination is made upstream, in `pbs_db_data_loss_triage`/`pbs_sysadmin_docker_inspect`'s own reading of `get_host_logs`/`read_pg_log_file` output for a specific corruption signature (`pg_control` missing, `"could not find the database system"`). And it rests on the model's own quoted-evidence discipline, not a deterministic objective-evidence signal the way the backup-health check does.   
+
+Under `approval_mode=force`, this specific judgment is not independently re-verified by code before the restore proceeds. This is the same limitation already disclosed in [BACKUP.md §3](BACKUP.md#3-restore-from-backup-after-data-loss)'s "What this does not cover", restated here because it's the one gap directly relevant to *this* tool's blast radius, not an abstract caveat.
+
+**Policy note**: does not carry `auto_remediation_eligible` — unlike `restart_container`/`restart_service`, there is no automatic, gate-free path to this tool regardless of playbook configuration.
+
+---
+
+## 1.16 Rollback capability per tool
 
 Every mutation tool captures state before it executes so the operation can be reversed via the rollback API. Reversibility depends on the tool. Here are a few examples:
 
@@ -421,6 +523,7 @@ Every mutation tool captures state before it executes so the operation can be re
 | `terminate_idle_connections` | **No** | Same as above — pre-flight assessment is the control |
 | `restart_container` | **No** | Restart is instantaneous; pre-flight `check_host`/`get_host_logs` is the control |
 | `restart_service` | **No** | Same as above |
+| `restore_from_backup` | **No** | The restore itself overwrites the pre-state being restored from; `pg_isready` pre-flight refusal and the non-bypassable objective-evidence gate (§1.15) are the controls, not a post-hoc rollback |
 
 Future DML tools (`exec_update`, `exec_delete`, `exec_insert`) will capture row-level pre-state using a two-tier model (bounded SELECT or WAL decoding depending on target capabilities).
 
@@ -1781,7 +1884,7 @@ tool issues both a list call for pod discovery/cleanup and a singular get for
 the status poll) — see `agents/k8s/tools_test.go` for details. There is
 deliberately no `TestDebugNodeDmesgTool_BlastRadiusDenied`: this tool checks
 blast radius pre-execution with a hardcoded `PodsAffected: 1` (see
-[§1.9](#19-debug_node_dmesg--worker-node-kernel-log-pull)) and
+[§1.10](#110-debug_node_dmesg--worker-node-kernel-log-pull)) and
 `internal/policy/engine.go`'s `max_pods_affected` condition is gated on `> 0`
 — `max_pods_affected: 0` is treated as "unset", not "deny anything" — so no
 valid threshold can ever deny a call whose count is always exactly `1`. This
