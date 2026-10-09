@@ -201,19 +201,16 @@ services:
       # relative to the repo root, correct for `go run ./testing/cmd/
       # faulttest`) resolved to nothing inside this container.
       #
-      # Two separate env vars, not one, because the same infrastructure.json
-      # is read BOTH by this containerized stack AND by sysadmin-agent run as
-      # a plain local process for other make targets (faulttest/faulttest-fast/
-      # integration) — a single ssh_key_path value has to resolve in both
-      # contexts. Defaults (unset) preserve the original fixed-path behavior
-      # for anyone not using this feature. To make one ssh_key_path value
-      # work everywhere, export both vars set to the SAME absolute host path
-      # as the key, and set ssh_key_path in your infrastructure.json to that
-      # identical path — the container then has a file at that literal path
-      # too, no translation needed:
+      # Same variable on both sides of the mount, not source/target vars of
+      # their own: the same infrastructure.json is read BOTH by this
+      # containerized stack AND by sysadmin-agent run as a plain local
+      # process for other make targets (faulttest/faulttest-fast/
+      # integration), so ssh_key_path is one fixed string either way — the
+      # container needs a file at that exact literal path, not a translated
+      # one. Export it as an absolute path matching your infra config's own
+      # ssh_key_path and the container gets a file there too, no translation:
       #   export HELPDESK_SSH_KEY_HOST=/abs/path/to/pgbackrest_test_client_key
-      #   export HELPDESK_SSH_KEY_CONTAINER_PATH=/abs/path/to/pgbackrest_test_client_key
-      - ${HELPDESK_SSH_KEY_HOST:-../../testing/docker/ssh/pgbackrest_test_client_key}:${HELPDESK_SSH_KEY_CONTAINER_PATH:-/etc/helpdesk/ssh/pgbackrest_test_client_key}:ro
+      - ${HELPDESK_SSH_KEY_HOST:-../../testing/docker/ssh/pgbackrest_test_client_key}:${HELPDESK_SSH_KEY_HOST:-../../testing/docker/ssh/pgbackrest_test_client_key}:ro
       # Mount the Docker socket so the agent can inspect and manage containers on the host.
       # Required for databases managed via Docker/Podman. Remove if not applicable.
       - /var/run/docker.sock:/var/run/docker.sock
