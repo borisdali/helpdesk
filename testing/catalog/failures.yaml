@@ -661,7 +661,7 @@ failures:
       script_inline: |
         #!/bin/bash
         set -e
-        PG_UNIT="postgresql" # EDIT to match your real VM's unit name
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
         DATA_DIR=$(psql -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' ')
         if [ -z "$DATA_DIR" ]; then
           echo "could not determine data_directory via psql — is postgres reachable?" >&2
@@ -680,7 +680,7 @@ failures:
       script_inline: |
         #!/bin/bash
         set -e
-        PG_UNIT="postgresql" # EDIT to match your real VM's unit name
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
         STANZA="main" # EDIT to match your real VM's pgBackRest stanza
         # No `sudo -u postgres` wrapper here: setup-pgbackrest-vm.sh authorizes
         # the dispatch SSH key under ~postgres/.ssh/authorized_keys and the SSH
