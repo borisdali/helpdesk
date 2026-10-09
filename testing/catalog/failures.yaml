@@ -686,7 +686,7 @@ failures:
         # the dispatch SSH key under ~postgres/.ssh/authorized_keys and the SSH
         # login IS already postgres (per the recommended ssh_user: "postgres"
         # infra entry) — its sudoers grant only covers run-as=root for
-        # `systemctl restart/show/status`, not run-as=postgres, so wrapping in
+        # `systemctl restart`/`show`, not run-as=postgres, so wrapping in
         # `sudo -u postgres` would be rejected outright ("not allowed to
         # execute ... as postgres"), not merely prompt for a password.
         PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
