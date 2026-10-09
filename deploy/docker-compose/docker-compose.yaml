@@ -194,6 +194,15 @@ services:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      # SSH private key for real host/VM dispatch (check_host, restart_service,
+      # get_host_logs, etc. — see agents/sysadmin/sshexec.go). Not COPY'd into
+      # the image by the Dockerfile, so it must be bind-mounted explicitly;
+      # found live 2026-10-08 when a VM db_server's ssh_key_path (a path
+      # relative to the repo root, correct for `go run ./testing/cmd/
+      # faulttest`) resolved to nothing inside this container. Point an
+      # infrastructure.json VM entry's ssh_key_path at the in-container path
+      # on the right of the mount below, not the host-side path on the left.
+      - ${HELPDESK_SSH_KEY_HOST:-../../testing/docker/ssh/pgbackrest_test_client_key}:/etc/helpdesk/ssh/pgbackrest_test_client_key:ro
       # Mount the Docker socket so the agent can inspect and manage containers on the host.
       # Required for databases managed via Docker/Podman. Remove if not applicable.
       - /var/run/docker.sock:/var/run/docker.sock
