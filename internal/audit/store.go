@@ -315,7 +315,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 	if event.Outcome != nil {
 		outcomeStatus = event.Outcome.Status
 		outcomeError = event.Outcome.ErrorMessage
-		outcomeDurationMs = event.Outcome.Duration.Milliseconds()
+		outcomeDurationMs = int64(event.Outcome.Duration)
 	} else if event.PolicyDecision != nil {
 		// For policy decision events, surface the effect in outcome_status so it is
 		// queryable without json_extract. Normalize "deny" → "denied" so the stored
@@ -452,7 +452,7 @@ func (s *Store) RecordOutcome(ctx context.Context, eventID string, outcome *Outc
 	`),
 		outcome.Status,
 		outcome.ErrorMessage,
-		outcome.Duration.Milliseconds(),
+		int64(outcome.Duration),
 		eventID,
 	)
 	return err

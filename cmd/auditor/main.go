@@ -777,7 +777,7 @@ func (a *Auditor) logEvent(event *audit.Event) {
 	duration := ""
 	if event.Outcome != nil {
 		outcome = event.Outcome.Status
-		duration = event.Outcome.Duration.String()
+		duration = event.Outcome.Duration.Duration().String()
 	}
 
 	fmt.Printf("\n[EVENT] %s\n", event.EventID)
@@ -1064,7 +1064,7 @@ func (a *Auditor) checkLongDuration(event *audit.Event) {
 	}
 	isPlaybookRun := strings.Contains(intent, "/fleet/playbooks") && strings.HasSuffix(strings.TrimRight(intent, "/"), "/run")
 
-	duration := event.Outcome.Duration
+	duration := event.Outcome.Duration.Duration()
 
 	warnThreshold := 15 * time.Second
 	critThreshold := 30 * time.Second
@@ -1342,7 +1342,7 @@ func (a *Auditor) checkTimestampGap(event *audit.Event) {
 	// is explained by execution time — not manipulation.
 	const clockSkewTolerance = -5 * time.Second
 	if gap < clockSkewTolerance {
-		if event.Outcome != nil && gap+event.Outcome.Duration >= clockSkewTolerance {
+		if event.Outcome != nil && gap+event.Outcome.Duration.Duration() >= clockSkewTolerance {
 			// Gap fully explained by how long this event ran — not anomalous.
 		} else {
 			a.recordSecurityAlert("timestamp_anomaly", AlertCritical,

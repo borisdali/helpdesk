@@ -8,6 +8,27 @@ import (
 	"helpdesk/internal/identity"
 )
 
+// Milliseconds is a duration expressed in milliseconds, for JSON fields
+// named duration_ms. A plain time.Duration there would be wrong: Go's
+// default JSON encoding of time.Duration is its raw nanosecond count, which
+// silently mislabels a "_ms" field name. Found live (2026-10-10) via a real
+// /v1/events response showing duration_ms=1032796958 for a call that took
+// about one second — 1,032,796,958 ns, off by exactly 1e6 from what the
+// field name promised. Construct via MillisecondsFromDuration; convert back
+// with .Duration() wherever real time.Duration arithmetic is needed.
+type Milliseconds int64
+
+// MillisecondsFromDuration converts a time.Duration to its millisecond count
+// for storage in a Milliseconds field.
+func MillisecondsFromDuration(d time.Duration) Milliseconds {
+	return Milliseconds(d.Milliseconds())
+}
+
+// Duration converts back to a time.Duration for arithmetic/formatting.
+func (m Milliseconds) Duration() time.Duration {
+	return time.Duration(m) * time.Millisecond
+}
+
 // EventType identifies the type of audit event.
 type EventType string
 
@@ -169,8 +190,8 @@ type ToolExecution struct {
 	// Error contains any error message if the tool failed.
 	Error string `json:"error,omitempty"`
 
-	// Duration is how long the tool execution took.
-	Duration time.Duration `json:"duration_ms,omitempty"`
+	// Duration is how long the tool execution took, in milliseconds.
+	Duration Milliseconds `json:"duration_ms,omitempty"`
 
 	// PreState captures the resource state immediately before a mutation.
 	// Only populated for reversible operations (scale_deployment, future DML tools).
@@ -180,9 +201,9 @@ type ToolExecution struct {
 
 // Outcome captures the result of a delegation (filled in after completion).
 type Outcome struct {
-	Status       string        `json:"status"` // success, error, timeout
-	ErrorMessage string        `json:"error_message,omitempty"`
-	Duration     time.Duration `json:"duration_ms"`
+	Status       string       `json:"status"` // success, error, timeout
+	ErrorMessage string       `json:"error_message,omitempty"`
+	Duration     Milliseconds `json:"duration_ms"`
 }
 
 // PolicyDecision captures the outcome of a policy evaluation.
