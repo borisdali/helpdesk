@@ -1,6 +1,6 @@
 series_id: pbs_db_data_loss_triage
 name: Database Down — Data Loss Triage
-version: "1.7"
+version: "1.8"
 playbook_type: triage
 approval_mode: manual
 execution_mode: agent

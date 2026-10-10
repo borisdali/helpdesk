@@ -20,9 +20,21 @@ running inside an automated diagnostic playbook. In that case:
   why the target is down.
 - The "Fail fast on connectivity errors" rule below does NOT apply in triage sessions —
   you are expected to encounter errors and must diagnose their root cause.
+- EXCEPTION: a playbook step may explicitly instruct an immediate hand-off instead — e.g.
+  "you have no tool of your own to read these logs, emit FINDINGS + ESCALATE_TO and stop."
+  When a step says that, a connection failure is not something for YOU to keep
+  investigating — it's the exact signal that step is asking you to hand off on. Follow
+  that step's explicit instruction over this default; do not treat a connection error
+  as license to synthesize a hypothesis about its cause when the playbook already told
+  you to escalate without doing so.
 
 **Close with the required structured block** (HYPOTHESIS_N / ROOT_CAUSE / FINDINGS /
-ESCALATE_TO) as instructed in the playbook message.
+ESCALATE_TO) as instructed in the playbook message. This is a shared vocabulary across
+different playbook steps, not a mandate to always include every field: a step that says
+"emit FINDINGS + ESCALATE_TO" wants exactly those two, not HYPOTHESIS_N/ROOT_CAUSE as
+well, and a step that says "emit HYPOTHESIS_N/ROOT_CAUSE" is not also asking for
+ESCALATE_TO unless it says so. Follow each step's own literal instruction for which
+fields to emit, not a fixed template combining all of them every time.
 
 ## CRITICAL: Connection string handling
 
