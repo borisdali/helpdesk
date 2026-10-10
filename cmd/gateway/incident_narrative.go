@@ -29,7 +29,7 @@ type IncidentNarrative struct {
 	// terminal remediation chapter — whether reached via an explicit
 	// ESCALATE_TO (further diagnosis, possibly on a different agent) or via
 	// TRANSITION_TO targeting another triage-type playbook (a same-domain
-	// diagnosis hand-off, e.g. pbs_sysadmin_docker_inspect ->
+	// diagnosis hand-off, e.g. pbs_sysadmin_host_triage ->
 	// pbs_pgbackrest_health_triage). Most incidents have zero entries here.
 	Escalations []EscalationHop `json:"escalations,omitempty"`
 	// Remediation is populated only when the chain reaches a hop whose own
@@ -184,7 +184,7 @@ type EscalationHop struct {
 	// hop's own response point to next" — non-empty when this hop emitted a
 	// same-domain TRANSITION_TO rather than a cross-domain ESCALATE_TO (never
 	// both). A hop can land here via TRANSITION_TO and still itself emit
-	// TRANSITION_TO onward — e.g. pbs_sysadmin_docker_inspect, reached by
+	// TRANSITION_TO onward — e.g. pbs_sysadmin_host_triage, reached by
 	// ESCALATE_TO, itself transitions to pbs_pgbackrest_health_triage, which
 	// is still triage-type and belongs here too, not in Remediation.
 	TransitionedTo   string                   `json:"transitioned_to,omitempty"`
@@ -360,7 +360,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	// chapter — singular, wherever it falls in the chain; every other hop is
 	// a diagnosis hop (Escalations), regardless of whether it was reached via
 	// ESCALATE_TO (cross-domain) or TRANSITION_TO (same-domain triage->triage
-	// hand-off, e.g. pbs_sysadmin_docker_inspect -> pbs_pgbackrest_health_triage).
+	// hand-off, e.g. pbs_sysadmin_host_triage -> pbs_pgbackrest_health_triage).
 	// Classifying by "reached via TRANSITION_TO" alone (the pre-2026-10-07
 	// rule) assumed TRANSITION_TO always points straight at the remediation
 	// playbook — true until a same-domain triage->triage TRANSITION_TO was

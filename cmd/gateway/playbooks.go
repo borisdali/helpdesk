@@ -1860,7 +1860,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// chain never advanced), fetchNextHop(run.RunID) finds nothing and
 	// leafRun stays run — zero behavior change. Found live 2026-10-08: a
 	// real db-pgdata-corrupted run approved via this path re-dispatched
-	// pbs_sysadmin_docker_inspect (the already-completed first hop) instead
+	// pbs_sysadmin_host_triage (the already-completed first hop) instead
 	// of continuing from pbs_pgbackrest_health_triage's own pending
 	// TRANSITION_TO pbs_pgbackrest_restore_remediate — the real remediation
 	// playbook never ran, while the duplicate dead-ended at a second,
@@ -2242,7 +2242,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	if req.ConnectionString != "" {
 		if pb.AgentName == agentNameSysadmin {
 			// Only pbs_db_restart_action actually calls restart_container — the
-			// other two sysadmin playbooks (pbs_sysadmin_docker_inspect,
+			// other two sysadmin playbooks (pbs_sysadmin_host_triage,
 			// pbs_wal_disk_full) explicitly forbid it in their own guidance and
 			// hand off to this playbook for the actual restart. Naming it here
 			// unconditionally for every sysadmin playbook was misleading (told the

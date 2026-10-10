@@ -138,9 +138,9 @@ A `fault_stability_cert` used to be attributed only to a **fault's designated en
 series** (`diagnosis_playbook_series_id` in the catalog) — never to an intermediate or
 remediation playbook reached partway through a chain. Concretely: a fault whose entry point is
 `pbs_connection_triage`, but whose chain runs `pbs_connection_triage →
-pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage`, used to only ever certify
+pbs_sysadmin_host_triage → pbs_k8s_pod_crash_triage`, used to only ever certify
 `pbs_connection_triage`. The downstream hops could never earn a cert of their own, no matter how
-many `--repeat` batches exercised them as part of that chain — `pbs_sysadmin_docker_inspect`,
+many `--repeat` batches exercised them as part of that chain — `pbs_sysadmin_host_triage`,
 concretely, never appears as any fault's own `diagnosis_playbook_series_id` anywhere.
 
 As of v0.26.0, `faulttest run --repeat N --approval-mode=force` now also fetches each rep's

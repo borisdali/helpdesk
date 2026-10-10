@@ -201,7 +201,7 @@ Not yet built — tracked, not forgotten:
   an incremental addition to existing ones.
 - **K8s-hosted replica support.** `pbs_sysadmin_replica_connectivity_triage` only
   branches on `runtime=docker`/`podman` today — no `runtime=kubectl` path (mirroring
-  `pbs_sysadmin_docker_inspect`'s own `ESCALATE_TO: pbs_k8s_pod_crash_triage`) exists
+  `pbs_sysadmin_host_triage`'s own `ESCALATE_TO: pbs_k8s_pod_crash_triage`) exists
   yet, since no K8s-hosted replica scenario has been built.
 
 ---

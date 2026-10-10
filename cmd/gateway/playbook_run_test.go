@@ -221,7 +221,7 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 // TestAssembleTriagePrompt_SysadminRestartHint is a regression test for a real
 // bug found during live 3-hop escalation-chain verification: every
 // sysadmin-agent playbook's prompt unconditionally named restart_container in
-// its first line, even for pbs_sysadmin_docker_inspect/pbs_wal_disk_full,
+// its first line, even for pbs_sysadmin_host_triage/pbs_wal_disk_full,
 // whose own guidance explicitly forbids calling it. Since ClassifyDelegation
 // only scans this first line, "restart" appearing there classified every
 // sysadmin delegation as write — including pure-diagnosis hops that never
@@ -237,7 +237,7 @@ func TestAssembleTriagePrompt_SysadminRestartHint(t *testing.T) {
 		t.Errorf("pbs_db_restart_action's first line = %q, want it to mention restart_container", firstLine)
 	}
 
-	for _, seriesID := range []string{"pbs_sysadmin_docker_inspect", "pbs_wal_disk_full"} {
+	for _, seriesID := range []string{"pbs_sysadmin_host_triage", "pbs_wal_disk_full"} {
 		pb := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: seriesID}
 		prompt := assembleTriagePrompt(pb, req, "")
 		firstLine := strings.SplitN(prompt, "\n", 2)[0]
@@ -2955,9 +2955,9 @@ func TestBuildSuggestedNext_PopulatesFields(t *testing.T) {
 		ConnectionString: "prod-db",
 		ApprovalMode:     "session",
 	}
-	result := buildSuggestedNext("pbs_sysadmin_docker_inspect", req, "run_123", "container stopped cleanly")
+	result := buildSuggestedNext("pbs_sysadmin_host_triage", req, "run_123", "container stopped cleanly")
 
-	if result["playbook_series_id"] != "pbs_sysadmin_docker_inspect" {
+	if result["playbook_series_id"] != "pbs_sysadmin_host_triage" {
 		t.Errorf("playbook_series_id = %v", result["playbook_series_id"])
 	}
 	if result["reason"] != "container stopped cleanly" {
@@ -3190,7 +3190,7 @@ func TestAppendChainedText_ChainedError(t *testing.T) {
 func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
 	chain := []chainEntry{
 		{Step: 1, PlaybookSeriesID: "pbs_db_triage", ToolCalls: []string{"check_connection", "get_saved_snapshots"}},
-		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_host_triage", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
 	}
 
 	got := aggregateChainToolCalls(chain)
@@ -3209,7 +3209,7 @@ func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
 func TestAggregateChainToolCalls_NoToolCalls(t *testing.T) {
 	chain := []chainEntry{
 		{Step: 1, PlaybookSeriesID: "pbs_db_triage"},
-		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect"},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_host_triage"},
 	}
 	if got := aggregateChainToolCalls(chain); len(got) != 0 {
 		t.Errorf("aggregateChainToolCalls() = %v, want empty", got)
@@ -5696,7 +5696,7 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 // before an objective-evidence gate fired trying to reach
 // pgbackrest_restore_remediate, chainEscalation deliberately leaves the
 // PRIMARY run's own EscalatedTo unchanged — it still names the FIRST hop's
-// target (pbs_sysadmin_docker_inspect), already completed, not the real
+// target (pbs_sysadmin_host_triage), already completed, not the real
 // pending hop (see chainEscalation's own "len(chain) == 0" comment).
 // Approving the gate via /proceed-escalation, before this fix, re-read that
 // stale signal and re-dispatched the already-completed first hop instead of
@@ -5708,11 +5708,11 @@ func TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal(t *testing
 	primary := &audit.PlaybookRun{
 		RunID:       "plr_top",
 		Outcome:     audit.OutcomeGatePending,
-		EscalatedTo: "pbs_sysadmin_docker_inspect", // stale: the FIRST hop's target, already completed
+		EscalatedTo: "pbs_sysadmin_host_triage", // stale: the FIRST hop's target, already completed
 	}
 	mid1 := &audit.PlaybookRun{
 		RunID:          "plr_mid1",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_pgbackrest_health_triage",
 		PriorRunID:     "plr_top",
@@ -5788,7 +5788,7 @@ func TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal(t *testing
 	// patchBody is the PRIMARY run's (plr_top) own finalization — confirms it
 	// still reflects plr_top's own original (now-harmless) first-hop signal,
 	// untouched by this fix, which only changes what gets DISPATCHED next.
-	if !strings.Contains(patchBody, "pbs_sysadmin_docker_inspect") {
+	if !strings.Contains(patchBody, "pbs_sysadmin_host_triage") {
 		t.Errorf("PATCH body for the primary run should still reference its own original escalated_to; got: %s", patchBody)
 	}
 }
@@ -5927,13 +5927,13 @@ func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
 	run := &audit.PlaybookRun{
 		RunID:           "plr_gate_purpose01",
 		Outcome:         audit.OutcomeGatePending,
-		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		EscalatedTo:     "pbs_sysadmin_host_triage",
 		FindingsSummary: "Pod is Kubernetes-managed; sysadmin investigation required.",
 		Purpose:         "diagnostic",
 	}
 	remedPB := &audit.Playbook{
 		PlaybookID:    "pb_sysadmin_rem01",
-		SeriesID:      "pbs_sysadmin_docker_inspect",
+		SeriesID:      "pbs_sysadmin_host_triage",
 		Name:          "Sysadmin — Docker Inspect",
 		ExecutionMode: "agent",
 		IsActive:      true,
@@ -6187,7 +6187,7 @@ func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
 	// (e.g. sysadmin-level action). This is NOT a same-series pipeline transition.
 	agentText := "Blocker session is making external calls. OS-level escalation needed.\n\n" +
 		"FINDINGS: connections 198/200 (99%); blocker=PID 4321 (active, 45m, has_writes=true); recommended=escalate\n" +
-		"ESCALATE_TO: pbs_sysadmin_docker_inspect\n"
+		"ESCALATE_TO: pbs_sysadmin_host_triage\n"
 
 	auditSrv := mockGateAuditdPlaybook(t, pb)
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -6205,8 +6205,8 @@ func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
 	if resp["status"] != "pending_gate" {
 		t.Errorf("status = %q, want pending_gate", resp["status"])
 	}
-	if resp["escalation_target"] != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("escalation_target = %q, want pbs_sysadmin_docker_inspect", resp["escalation_target"])
+	if resp["escalation_target"] != "pbs_sysadmin_host_triage" {
+		t.Errorf("escalation_target = %q, want pbs_sysadmin_host_triage", resp["escalation_target"])
 	}
 	if resp["gate_type"] != "escalation" {
 		t.Errorf("gate_type = %q, want escalation", resp["gate_type"])
@@ -6959,7 +6959,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 		})
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_host_triage"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop escalated, got %v", extra["evidence_warnings"])
@@ -7009,7 +7009,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 		})
 		extra := map[string]any{"evidence_warnings": []string{"prior hop warning"}}
-		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_docker_inspect", agentName: "sysadmin_agent"}
+		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_host_triage", agentName: "sysadmin_agent"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		warnings, ok := extra["evidence_warnings"].([]string)
 		if !ok || len(warnings) != 2 {
@@ -7077,7 +7077,7 @@ func TestRecordSignalLessWarnings_ProtocolViolation(t *testing.T) {
 
 	t.Run("hop escalated — no-op regardless of playbook type", func(t *testing.T) {
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_host_triage"}
 		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
 			t.Error("expected no protocol violation when hop escalated")
 		}

@@ -613,7 +613,7 @@ curl "http://localhost:8080/api/v1/incidents/plr_t1" | jq '.escalations, .remedi
 
 ```json
 [
-  {"run_id": "plr_e1", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "transitioned",
+  {"run_id": "plr_e1", "playbook": "pbs_sysadmin_host_triage", "outcome": "transitioned",
    "findings": "dmesg shows OOM-killer event"}
 ]
 {"run_id": "plr_r1", "playbook": "pbs_k8s_pod_crash_remediate", "outcome": "resolved"}

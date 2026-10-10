@@ -1,6 +1,6 @@
 series_id: pbs_db_restart_triage
 name: Database Down — Restart Triage
-version: "1.7"
+version: "1.8"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -10,7 +10,7 @@ transitions_to:
   - pbs_db_data_loss_triage
 # Cross-domain escalation: container inspection is handled by the sysadmin agent.
 escalates_to:
-  - pbs_sysadmin_docker_inspect
+  - pbs_sysadmin_host_triage
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -68,7 +68,7 @@ guidance: |
   Look at the Known Infrastructure section of your context for this server's entry.
   - If the entry shows "[docker container: ...]" or "[podman container: ...]": the
     server is container-hosted on a VM. You cannot read docker logs or inspect the
-    container directly. You MUST emit ESCALATE_TO: pbs_sysadmin_docker_inspect in
+    container directly. You MUST emit ESCALATE_TO: pbs_sysadmin_host_triage in
     your structured block — do not attempt to diagnose the container state yourself.
     The sysadmin agent has the tools (check_host, get_host_logs, read_pg_log_file)
     to determine definitively whether the container crashed, was stopped cleanly,
@@ -81,7 +81,7 @@ guidance: |
     process exited cleanly — check for intentional shutdown.
   - If there is NO Known Infrastructure entry for this server, or the hosting type
     cannot be determined: default to escalation. Emit ESCALATE_TO:
-    pbs_sysadmin_docker_inspect. The sysadmin agent can inspect the host and
+    pbs_sysadmin_host_triage. The sysadmin agent can inspect the host and
     determine whether the server is bare-metal, containerised, or K8s-managed.
     Do NOT withhold escalation because you cannot confirm the hosting type —
     unknown hosting is itself a signal that the sysadmin path is appropriate.

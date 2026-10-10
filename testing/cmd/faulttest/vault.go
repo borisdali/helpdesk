@@ -2190,7 +2190,7 @@ func isRemediationPlaybook(gatewayURL, apiKey, seriesID string) bool {
 // (still mid-escalation, or terminated without ever reaching one). Hops are
 // classified by their OWN playbook_type, not by which signal reached them:
 // TRANSITION_TO is also used for same-domain triage->triage hand-offs (e.g.
-// pbs_sysadmin_docker_inspect -> pbs_pgbackrest_health_triage), so the older
+// pbs_sysadmin_host_triage -> pbs_pgbackrest_health_triage), so the older
 // "reached via TRANSITION_TO" rule misclassified such a hop as remediation
 // and stopped the walk right there — found live on a real 4-hop
 // db-pgdata-corrupted chain where the true remediation run
@@ -5039,7 +5039,7 @@ type narrativeEscalationHop struct {
 	EscalatedTo string `json:"escalated_to,omitempty"`
 	// TransitionedTo is non-empty when this hop's own response was a
 	// same-domain TRANSITION_TO rather than a cross-domain ESCALATE_TO —
-	// e.g. pbs_sysadmin_docker_inspect transitioning to the still-triage-type
+	// e.g. pbs_sysadmin_host_triage transitioning to the still-triage-type
 	// pbs_pgbackrest_health_triage. A hop can land in Escalations via either
 	// signal now (see cmd/gateway/incident_narrative.go's classification
 	// fix) — never both set.
@@ -5552,7 +5552,7 @@ func escalationHopDesc(phase string, escalations []narrativeEscalationHop) strin
 		return fallback
 	case "transitioned":
 		// A transitioned-outcome hop can land in Escalations now (its own
-		// playbook is still triage-type, e.g. pbs_sysadmin_docker_inspect ->
+		// playbook is still triage-type, e.g. pbs_sysadmin_host_triage ->
 		// pbs_pgbackrest_health_triage) — it is NOT necessarily "handed off
 		// to remediation" just because it emitted TRANSITION_TO; that claim
 		// used to be safe when any TRANSITION_TO hop was assumed remediation

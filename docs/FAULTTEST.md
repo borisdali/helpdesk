@@ -856,7 +856,7 @@ Some faults carry a `remediation` block that identifies the recovery action. Whe
 
 The Playbook IDs must exist in your aiHelpDesk deployment. See [Playbooks](PLAYBOOKS.md) for how to create and activate them. If a Playbook ID is not found the remediation phase records an error in the report but does not fail the overall run.
 
-For `db-connection-refused`, the remediation runs as a two-step cross-agent chain: the DB triage playbook (`pbs_db_restart_triage`) escalates to the SysAdmin agent via `pbs_sysadmin_docker_inspect`, which then transitions to `pbs_db_restart_action` to restart the container. `faulttest` waits for the full chain to complete before polling for recovery. Pass `--sysadmin-agent http://localhost:1103` (alongside `--gateway`) so that the SysAdmin agent knows about the ephemeral container.
+For `db-connection-refused`, the remediation runs as a two-step cross-agent chain: the DB triage playbook (`pbs_db_restart_triage`) escalates to the SysAdmin agent via `pbs_sysadmin_host_triage`, which then transitions to `pbs_db_restart_action` to restart the container. `faulttest` waits for the full chain to complete before polling for recovery. Pass `--sysadmin-agent http://localhost:1103` (alongside `--gateway`) so that the SysAdmin agent knows about the ephemeral container.
 
 Each fault's `remediation` block specifies a `verify_sql` query that confirms the specific condition has resolved. Generic `SELECT 1` (the default) only checks connectivity; fault-specific queries confirm the actual state was corrected:
 

@@ -824,11 +824,11 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		// v0.31: escalates to pbs_sysadmin_docker_inspect (no log-reading tool
+		// v0.31: escalates to pbs_sysadmin_host_triage (no log-reading tool
 		// of its own for a Docker-hosted target) and pbs_pgbackrest_health_triage
 		// (no backup-health tool of its own, Kubernetes path).
 		escalates, _ := pb["escalates_to"].([]any)
-		for _, want := range []string{"pbs_sysadmin_docker_inspect", "pbs_pgbackrest_health_triage"} {
+		for _, want := range []string{"pbs_sysadmin_host_triage", "pbs_pgbackrest_health_triage"} {
 			found := false
 			for _, e := range escalates {
 				if s, _ := e.(string); s == want {
@@ -845,11 +845,11 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 
 	t.Run("docker_inspect_transitions_to_pgbackrest_health_triage", func(t *testing.T) {
 		// v0.31: a same-agent transition (both sysadmin_agent), not an
-		// escalation — pbs_sysadmin_docker_inspect judges the one
+		// escalation — pbs_sysadmin_host_triage judges the one
 		// evidence-dependent condition itself once it has real log text and
 		// acts on the combined picture, rather than bouncing back to the DB
 		// agent for a decision it's already equipped to make.
-		pb := getBySeriesID(t, "pbs_sysadmin_docker_inspect")
+		pb := getBySeriesID(t, "pbs_sysadmin_host_triage")
 		transitions, _ := pb["transitions_to"].([]any)
 		found := false
 		for _, tr := range transitions {
@@ -859,7 +859,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("pbs_sysadmin_docker_inspect.transitions_to does not include pbs_pgbackrest_health_triage; got %v", transitions)
+			t.Errorf("pbs_sysadmin_host_triage.transitions_to does not include pbs_pgbackrest_health_triage; got %v", transitions)
 		}
 	})
 
@@ -911,7 +911,7 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 	})
 
 	t.Run("sysadmin_docker_inspect_is_seeded", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_sysadmin_docker_inspect")
+		pb := getBySeriesID(t, "pbs_sysadmin_host_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
@@ -929,13 +929,13 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		escalates, _ := pb["escalates_to"].([]any)
 		found := false
 		for _, e := range escalates {
-			if s, _ := e.(string); s == "pbs_sysadmin_docker_inspect" {
+			if s, _ := e.(string); s == "pbs_sysadmin_host_triage" {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("pbs_db_restart_triage.escalates_to does not include pbs_sysadmin_docker_inspect; got %v", escalates)
+			t.Errorf("pbs_db_restart_triage.escalates_to does not include pbs_sysadmin_host_triage; got %v", escalates)
 		}
 	})
 
@@ -1888,23 +1888,23 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	// The playbook catalog draws a hard line between diagnostic series (only
 	// ever reached via ESCALATE_TO) and remediation series (only ever reached
 	// via TRANSITION_TO) — see playbooks/database-restart-triage.yaml and
-	// playbooks/sysadmin-docker-inspect.yaml. This lets us assert the
+	// playbooks/sysadmin-host-triage.yaml. This lets us assert the
 	// classification is correct regardless of which path the LLM actually
 	// takes at runtime (direct transition, or escalate-then-transition).
 	//
 	// This is a regression test for the original bug: any successor run used
 	// to be labeled "remediation" unconditionally, so an ESCALATE_TO hop into
-	// pbs_sysadmin_docker_inspect would have wrongly appeared as remediation
+	// pbs_sysadmin_host_triage would have wrongly appeared as remediation
 	// instead of escalations[].
 	diagnosticSeries := map[string]bool{
-		"pbs_db_restart_triage":       true,
-		"pbs_sysadmin_docker_inspect": true,
+		"pbs_db_restart_triage":    true,
+		"pbs_sysadmin_host_triage": true,
 	}
 	remediationSeries := map[string]bool{
-		"pbs_db_config_triage": true,
-		"pbs_db_data_loss_triage":   true,
-		"pbs_db_restart_action":  true,
-		"pbs_wal_disk_full":      true,
+		"pbs_db_config_triage":    true,
+		"pbs_db_data_loss_triage": true,
+		"pbs_db_restart_action":   true,
+		"pbs_wal_disk_full":       true,
 	}
 
 	escalations, _ := narrative["escalations"].([]any)

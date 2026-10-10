@@ -375,7 +375,7 @@ type k8sPodStatusJSON struct {
 // SystemdUnit — see checkHostImpl's dispatch), this surfaces real pod
 // status/restart/last-termination fields, and makes the "this is Kubernetes,
 // not Docker" signal unambiguous via Runtime="kubectl" — the field
-// playbooks/sysadmin-docker-inspect.yaml's guidance checks first to decide
+// playbooks/sysadmin-host-triage.yaml's guidance checks first to decide
 // whether to escalate to the K8s agent instead of continuing its
 // docker-oriented steps.
 func checkHostK8s(ctx context.Context, target string, host resolvedHost) (CheckHostResult, error) {

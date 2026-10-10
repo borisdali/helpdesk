@@ -99,7 +99,7 @@ func TestHandleGetDecision_Gate_Escalation(t *testing.T) {
 		RunID:           "plr_conn01",
 		SeriesID:        "pbs_connection_triage",
 		Outcome:         audit.OutcomeGatePending,
-		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		EscalatedTo:     "pbs_sysadmin_host_triage",
 		FindingsSummary: "connections 198/200; recommended=escalate",
 		Operator:        "ops-bob",
 		StartedAt:       time.Now().UTC(),
@@ -125,8 +125,8 @@ func TestHandleGetDecision_Gate_Escalation(t *testing.T) {
 		t.Errorf("extra.gate_type = %q, want escalation", gateType)
 	}
 	escTarget, _ := d.Extra["escalation_target"].(string)
-	if escTarget != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("extra.escalation_target = %q, want pbs_sysadmin_docker_inspect", escTarget)
+	if escTarget != "pbs_sysadmin_host_triage" {
+		t.Errorf("extra.escalation_target = %q, want pbs_sysadmin_host_triage", escTarget)
 	}
 	if _, hasTrans := d.Extra["transition_target"]; hasTrans {
 		t.Errorf("extra.transition_target should be absent for a true escalation gate")

@@ -120,18 +120,18 @@ curl http://localhost:8080/api/v1/decisions | jq .
       "id":           "gate:plr_b8e2d4f1",
       "type":         "gate",
       "status":       "pending",
-      "summary":      "Triage complete — ESCALATE_TO pbs_sysadmin_docker_inspect",
+      "summary":      "Triage complete — ESCALATE_TO pbs_sysadmin_host_triage",
       "requested_by": "bob",
       "requested_at": "2026-06-01T13:11:45Z",
       "resolve_url":  "POST https://helpdesk.internal/api/v1/decisions/gate:plr_b8e2d4f1/resolve",
       "extra": {
         "gate_type":          "escalation",
-        "escalation_target":  "pbs_sysadmin_docker_inspect",
+        "escalation_target":  "pbs_sysadmin_host_triage",
         "findings":           "Connection refused — Docker-level investigation needed.",
         "series_id":          "pbs_connection_triage",
         "confidence_warning": "Primary hypothesis confidence 55%",
         "remediation_preview": {
-          "series_id":     "pbs_sysadmin_docker_inspect",
+          "series_id":     "pbs_sysadmin_host_triage",
           "name":          "Docker Container Inspect",
           "description":   "Inspect the database container for OOM kills, crash loops, or misconfig.",
           "approval_mode": "manual"

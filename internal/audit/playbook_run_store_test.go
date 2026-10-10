@@ -556,7 +556,7 @@ func TestPlaybookRunStore_ListByPriorRunID_MultiHopChain(t *testing.T) {
 		SeriesID:      "pbs_connection_triage",
 		ExecutionMode: "agent",
 		Outcome:       "escalated",
-		EscalatedTo:   "pbs_sysadmin_docker_inspect",
+		EscalatedTo:   "pbs_sysadmin_host_triage",
 		Operator:      "alice",
 		StartedAt:     time.Now().UTC().Truncate(time.Second),
 	}
@@ -566,7 +566,7 @@ func TestPlaybookRunStore_ListByPriorRunID_MultiHopChain(t *testing.T) {
 
 	hop2 := &PlaybookRun{ // sysadmin agent — escalates further
 		PlaybookID:    "pb_sysadmin1",
-		SeriesID:      "pbs_sysadmin_docker_inspect",
+		SeriesID:      "pbs_sysadmin_host_triage",
 		ExecutionMode: "agent",
 		Outcome:       "escalated",
 		EscalatedTo:   "pbs_k8s_pod_crash_triage",

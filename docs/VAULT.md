@@ -559,7 +559,7 @@ Findings:  Connection refused; no infra entry for this target
            ⚠ [Layer 2] unverified — no matching tool execution in the audit trail
 
 ── ESCALATION 1/1 ───────────────────────────────────────────
-Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
+Playbook:  pbs_sysadmin_host_triage   Outcome: escalated
 Findings:  check_host runtime=kubectl — target is Kubernetes-managed
            ⚠ [Layer 2] target drift — a tool call used a different connection string
            ⚠ [Layer 3] unverified evidence (non-blocking) — "walreceiver stopped due to administrator command"
@@ -1454,9 +1454,9 @@ all, so no hop certs are ever posted; `faulttest` prints a one-time warning when
 is the case.
 
 ```
-Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+Stability certs for series pbs_sysadmin_host_triage (model: claude-sonnet-4-6)
 
-  Fault         : db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect  (WAL disk full (hop: pbs_sysadmin_docker_inspect))
+  Fault         : db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage  (WAL disk full (hop: pbs_sysadmin_host_triage))
   Trust         : EARNED
   Verdict       : STABLE / CLEAN
   Runs          : 3  (pass rate 100%)
@@ -1468,7 +1468,7 @@ If the series has never been reached by any `--repeat --approval-mode=force` bat
 the command prints guidance instead of an empty table:
 
 ```
-Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+Stability certs for series pbs_sysadmin_host_triage (model: claude-sonnet-4-6)
   None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
   against a fault whose chain passes through this series to generate one.
 ```

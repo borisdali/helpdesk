@@ -41,7 +41,7 @@ func getIncidentFromGateway(t *testing.T, runID string) map[string]any {
 
 // TestIntegration_GatewayIncident_ThreeHopEscalation seeds a real 3-hop chain
 // in auditd — triage (ESCALATE_TO) → sysadmin diagnostic hop (TRANSITION_TO)
-// → remediation — matching the pbs_db_restart_triage → pbs_sysadmin_docker_inspect
+// → remediation — matching the pbs_db_restart_triage → pbs_sysadmin_host_triage
 // → pbs_db_restart_action shape from the shipped playbook catalog, then
 // verifies the real gateway binary classifies it correctly: the middle hop
 // must land in escalations[], not remediation.
@@ -58,13 +58,13 @@ func TestIntegration_GatewayIncident_ThreeHopEscalation(t *testing.T) {
 	// expected journeys[] entries into one, defeating the assertion below.
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"escalated_to":     "pbs_sysadmin_host_triage",
 		"findings_summary": "connection refused; cannot reach docker daemon from db agent toolset",
 		"trace_id":         "trace-3hop-" + suffix + "-triage",
 		"completed_at":     time.Now().UTC().Format(time.RFC3339),
 	})
 
-	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+	sysadminRunID := recordRun(t, "pbs_sysadmin_host_triage", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "transitioned",
 		"transitioned_to":  "pbs_db_restart_action",
@@ -104,8 +104,8 @@ func TestIntegration_GatewayIncident_ThreeHopEscalation(t *testing.T) {
 	if hop["run_id"] != sysadminRunID {
 		t.Errorf("escalations[0].run_id = %v, want %s", hop["run_id"], sysadminRunID)
 	}
-	if hop["playbook"] != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("escalations[0].playbook = %v, want pbs_sysadmin_docker_inspect", hop["playbook"])
+	if hop["playbook"] != "pbs_sysadmin_host_triage" {
+		t.Errorf("escalations[0].playbook = %v, want pbs_sysadmin_host_triage", hop["playbook"])
 	}
 
 	// Remediation: the third hop, NOT the sysadmin hop.
@@ -148,13 +148,13 @@ func TestIntegration_GatewayIncident_EscalationOnly(t *testing.T) {
 
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"escalated_to":     "pbs_sysadmin_host_triage",
 		"findings_summary": "connection refused; escalating to sysadmin agent",
 		"trace_id":         traceID,
 		"completed_at":     time.Now().UTC().Format(time.RFC3339),
 	})
 
-	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+	sysadminRunID := recordRun(t, "pbs_sysadmin_host_triage", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "unknown",
 		"findings_summary": "ambiguous evidence; awaiting further investigation",
@@ -180,7 +180,7 @@ func TestIntegration_GatewayIncident_EscalationOnly(t *testing.T) {
 // TestIntegration_GatewayIncident_FourHopTwoEscalations seeds a real 4-hop
 // chain — triage (ESCALATE_TO) → sysadmin diagnostic hop (ESCALATE_TO) →
 // K8s diagnostic hop (TRANSITION_TO) → remediation — matching the new
-// pbs_db_restart_triage → pbs_sysadmin_docker_inspect → pbs_k8s_pod_crash_triage
+// pbs_db_restart_triage → pbs_sysadmin_host_triage → pbs_k8s_pod_crash_triage
 // → pbs_k8s_pod_crash_remediate live escalation chain (DB agent → sysadmin
 // agent → K8s agent, 2 escalations + 1 transition, spanning 3 distinct
 // agents). TestHandleGetIncident_FourHopTwoEscalations (unit-level, mocked
@@ -193,13 +193,13 @@ func TestIntegration_GatewayIncident_FourHopTwoEscalations(t *testing.T) {
 
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"escalated_to":     "pbs_sysadmin_host_triage",
 		"findings_summary": "connection refused; no known infrastructure entry for this server",
 		"trace_id":         "trace-4hop-" + suffix + "-triage",
 		"completed_at":     time.Now().UTC().Format(time.RFC3339),
 	})
 
-	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+	sysadminRunID := recordRun(t, "pbs_sysadmin_host_triage", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "escalated",
 		"escalated_to":     "pbs_k8s_pod_crash_triage",
@@ -248,8 +248,8 @@ func TestIntegration_GatewayIncident_FourHopTwoEscalations(t *testing.T) {
 	if hop1["run_id"] != sysadminRunID {
 		t.Errorf("escalations[0].run_id = %v, want %s", hop1["run_id"], sysadminRunID)
 	}
-	if hop1["playbook"] != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("escalations[0].playbook = %v, want pbs_sysadmin_docker_inspect", hop1["playbook"])
+	if hop1["playbook"] != "pbs_sysadmin_host_triage" {
+		t.Errorf("escalations[0].playbook = %v, want pbs_sysadmin_host_triage", hop1["playbook"])
 	}
 	hop2, _ := escalations[1].(map[string]any)
 	if hop2 == nil {
@@ -322,13 +322,13 @@ func TestIntegration_GatewayIncident_VerificationFlagsSurfaceOnChapters(t *testi
 
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"escalated_to":     "pbs_sysadmin_host_triage",
 		"findings_summary": "connection refused",
 		"trace_id":         triageTrace,
 		"started_at":       triageStart.Format(time.RFC3339Nano),
 		"completed_at":     escalateStart.Format(time.RFC3339Nano),
 	})
-	sysadminRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+	sysadminRunID := recordRun(t, "pbs_sysadmin_host_triage", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "resolved",
 		"findings_summary": "container healthy",
@@ -449,12 +449,12 @@ func TestIntegration_GatewayIncident_VerificationFlags_SharedTraceDoesNotLeakAcr
 
 	triageRunID := recordRun(t, "pbs_db_restart_triage", map[string]any{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_sysadmin_docker_inspect",
+		"escalated_to":     "pbs_sysadmin_host_triage",
 		"findings_summary": "connection refused",
 		"trace_id":         "trace-leak-" + suffix + "-triage",
 		"completed_at":     escStart.Format(time.RFC3339Nano),
 	})
-	escalationRunID := recordRun(t, "pbs_sysadmin_docker_inspect", map[string]any{
+	escalationRunID := recordRun(t, "pbs_sysadmin_host_triage", map[string]any{
 		"prior_run_id":     triageRunID,
 		"outcome":          "transitioned",
 		"transitioned_to":  "pbs_db_restart_action",

@@ -131,7 +131,7 @@ pbs_db_restart_triage  (entry_point: true)
         └─ Docker-hosted DB ──────────────────────────────────────────
                 │  DB agent cannot read docker logs
                 ▼
-            pbs_sysadmin_docker_inspect  ← approval_mode: session
+            pbs_sysadmin_host_triage  ← approval_mode: session
                 (SysAdmin agent: check_host + get_host_logs,
                  confirms or revises prior hypothesis)
                 │
@@ -156,9 +156,9 @@ pbs_db_restart_triage  (entry_point: true)
 ```
 
 - **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
-- For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_docker_inspect` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
-- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_docker_inspect` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
-- If the inspection instead finds `"could not find the database system"` (missing/corrupt `pg_control` — real data loss, not a clean shutdown), `pbs_sysadmin_docker_inspect` transitions straight to `pbs_pgbackrest_health_triage` (v0.31) rather than dead-ending in a human-only finding. It does NOT bounce back to the DB agent: `pbs_db_data_loss_triage` already front-loaded everything decidable without log evidence (single instance? pgBackRest in use? PITR already decided?) into its own escalation FINDINGS, so `pbs_sysadmin_docker_inspect` only has to judge the one evidence-dependent condition (does the log text suggest anything beyond what a plain restore would fix?) and can act on the combined picture itself. `pbs_pgbackrest_health_triage` then gets a real, tool-verified backup-health check (not an assumption) before `pbs_pgbackrest_restore_remediate` ever touches the data directory.
+- For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_host_triage` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
+- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_host_triage` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
+- If the inspection instead finds `"could not find the database system"` (missing/corrupt `pg_control` — real data loss, not a clean shutdown), `pbs_sysadmin_host_triage` transitions straight to `pbs_pgbackrest_health_triage` (v0.31) rather than dead-ending in a human-only finding. It does NOT bounce back to the DB agent: `pbs_db_data_loss_triage` already front-loaded everything decidable without log evidence (single instance? pgBackRest in use? PITR already decided?) into its own escalation FINDINGS, so `pbs_sysadmin_host_triage` only has to judge the one evidence-dependent condition (does the log text suggest anything beyond what a plain restore would fix?) and can act on the combined picture itself. `pbs_pgbackrest_health_triage` then gets a real, tool-verified backup-health check (not an assumption) before `pbs_pgbackrest_restore_remediate` ever touches the data directory.
 - **Do not jump to `pbs_db_config_triage` or `pbs_db_data_loss_triage` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
 
 ### 1.2a Auto-chaining vs. manual escalation
@@ -170,7 +170,7 @@ Auto-chaining is controlled by **two independent gates**:
 1. The **requester's `approval_mode`** (or session) must authorise escalation.
 2. The **target playbook's own `approval_mode`** must be `session` or `auto`. Playbooks with `approval_mode: manual` (or unset) can never be auto-chained — the gateway always returns `suggested_next` for them, regardless of the requester's mode.
 
-This means `approval_mode=auto` auto-chains **diagnostic** steps (like `pbs_sysadmin_docker_inspect`, which has `approval_mode: session`) but **not** remediation steps (like `pbs_db_restart_action`, which has `approval_mode: manual`). The operator always receives `suggested_next` for the restart step and must invoke it explicitly after reviewing the diagnosis.
+This means `approval_mode=auto` auto-chains **diagnostic** steps (like `pbs_sysadmin_host_triage`, which has `approval_mode: session`) but **not** remediation steps (like `pbs_db_restart_action`, which has `approval_mode: manual`). The operator always receives `suggested_next` for the restart step and must invoke it explicitly after reviewing the diagnosis.
 
 To automate the entire path — diagnosis **and** remediation — use `approval_mode=force`. This bypasses the playbook-level `manual` gate and chains through every step. Use it in non-production environments or when you have already reviewed the escalation path and accept full responsibility for the outcome.
 
@@ -217,7 +217,7 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
   }" | jq '{chain: [.chain[] | {step, agent_name, findings}], suggested_next}'
 ```
 
-The inspection step chains because `pbs_sysadmin_docker_inspect` has `approval_mode: session` and the session includes `"escalation"` in `allowed_classes`. The restart step still stops at `suggested_next` because `pbs_db_restart_action` has `approval_mode: manual`.
+The inspection step chains because `pbs_sysadmin_host_triage` has `approval_mode: session` and the session includes `"escalation"` in `allowed_classes`. The restart step still stops at `suggested_next` because `pbs_db_restart_action` has `approval_mode: manual`.
 
 To run the full chain end-to-end including the restart (e.g. in staging or after a pre-reviewed escalation path):
 
@@ -513,7 +513,7 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 - [ ] Pass the log line in `context`
 - [ ] Save `run_id` from the response
 - [ ] If `suggested_next` is present: either fire the next playbook manually (manual mode) or re-run with `approval_mode=auto` for a single-call chained investigation
-- [ ] For Docker-hosted DBs with `approval_mode=auto`: the gateway auto-chains through `pbs_sysadmin_docker_inspect` (2-step diagnosis) and returns `suggested_next` for `pbs_db_restart_action` — ensure the SysAdmin agent is running
+- [ ] For Docker-hosted DBs with `approval_mode=auto`: the gateway auto-chains through `pbs_sysadmin_host_triage` (2-step diagnosis) and returns `suggested_next` for `pbs_db_restart_action` — ensure the SysAdmin agent is running
 - [ ] `pbs_db_restart_action` always requires explicit invocation (`approval_mode: manual`) — review the `chain` diagnosis before firing the restart
 
 **After resolution:**

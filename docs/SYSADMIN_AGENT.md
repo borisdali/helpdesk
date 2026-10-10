@@ -4,7 +4,7 @@ The **SysAdmin agent** is the host-level layer of aiHelpDesk. Where the database
 
 Its primary role is **diagnostic**: it can check whether a container or systemd service is running, retrieve recent logs, inspect disk and memory pressure, check pgBackRest's own backup-job health, and — when a playbook with the right permission tier authorises it — restart the container or service, or take a fresh pgBackRest backup. All write and restart operations are policy-checked and fully audited.
 
-The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks, and for the `pbs_sysadmin_docker_inspect` system Playbook (see [Playbooks](PLAYBOOKS.md)). For Docker-hosted databases that go unreachable, the DB agent's restart triage escalates to the SysAdmin agent automatically, which then reads container state and logs to confirm or revise the root-cause hypothesis.
+The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks, and for the `pbs_sysadmin_host_triage` system Playbook (see [Playbooks](PLAYBOOKS.md)). For a Docker/Podman-hosted or systemd-managed database that goes unreachable, the DB agent's restart triage escalates to the SysAdmin agent automatically, which then reads container or service state and logs to confirm or revise the root-cause hypothesis.
 
 ---
 
@@ -602,7 +602,7 @@ This is the only infrastructure change required to run the host fault test in th
 
 ## 10. Integration with playbooks
 
-The SysAdmin agent is actively used by the `pbs_sysadmin_docker_inspect` system Playbook — the second stage of the Docker DB-down diagnostic chain. When the DB agent's restart triage (`pbs_db_restart_triage`) confirms "connection refused" on a Docker-hosted server, it emits `ESCALATE_TO: pbs_sysadmin_docker_inspect`. The gateway then routes to the SysAdmin agent, which:
+The SysAdmin agent is actively used by the `pbs_sysadmin_host_triage` system Playbook — the second stage of the Docker DB-down diagnostic chain. When the DB agent's restart triage (`pbs_db_restart_triage`) confirms "connection refused" on a Docker-hosted server, it emits `ESCALATE_TO: pbs_sysadmin_host_triage`. The gateway then routes to the SysAdmin agent, which:
 
 1. Calls `check_host` to read the container's exit code and OOM-kill flag
 2. Calls `get_host_logs` for recent container output
@@ -614,12 +614,12 @@ This chain runs in one API call when `approval_mode=auto`, or returns `suggested
 | Series | Mode | Agent | SysAdmin involvement |
 |---|---|---|---|
 | `pbs_db_restart_triage` | `agent` | database | Classifies failure; escalates to SysAdmin agent for Docker-hosted DBs |
-| `pbs_sysadmin_docker_inspect` | `agent` | **sysadmin** | Reads container state + logs; revises or confirms prior hypothesis; transitions to `pbs_db_restart_action` when a restart is warranted |
+| `pbs_sysadmin_host_triage` | `agent` | **sysadmin** | Reads container state + logs; revises or confirms prior hypothesis; transitions to `pbs_db_restart_action` when a restart is warranted |
 | `pbs_db_restart_action` | `agent` | **sysadmin** | Calls `restart_container` to bring the container back up; verifies the DB accepts connections before declaring success |
 | `pbs_db_config_triage` | `agent` | database | Config-error recovery; no SysAdmin involvement |
 | `pbs_db_data_loss_triage` | `agent` | database | WAL/data corruption recovery; always requires human DBA |
 
-The full chain for a Docker DB-down scenario is: `pbs_db_restart_triage` → escalate → `pbs_sysadmin_docker_inspect` → transition → `pbs_db_restart_action`. All three stages run within a single `faulttest --remediate` session when `--sysadmin-agent` is configured alongside `--gateway`.
+The full chain for a Docker DB-down scenario is: `pbs_db_restart_triage` → escalate → `pbs_sysadmin_host_triage` → transition → `pbs_db_restart_action`. All three stages run within a single `faulttest --remediate` session when `--sysadmin-agent` is configured alongside `--gateway`.
 
 **A second, independent chain** starts directly at the SysAdmin agent rather than escalating into it: `pbs_pgbackrest_health_triage` (`diagnosis_playbook_series_id` on `db-pgbackrest-repo-unreadable`) → `TRANSITION_TO` → `pbs_pgbackrest_backup_remediate`. This is the first entry point where a fault's diagnosis playbook is a first-hop SysAdmin playbook rather than one reached via `ESCALATE_TO` from the database agent — see [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for the wiring details that only surface at that layer.
 

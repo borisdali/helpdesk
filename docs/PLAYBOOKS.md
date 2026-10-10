@@ -149,7 +149,7 @@ aiHelpDesk ships 14 expert-authored system Playbooks that are seeded into auditd
 | `pbs_db_restart_triage` | Database Down — Restart Triage | availability | database | `check_connection`, `get_pod_status`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_config_triage` | Database Down — Configuration Recovery | availability | database | `get_pod_logs`, `get_events`, `get_pg_settings`, `read_pg_log`, `read_uploaded_file`, `restart_deployment` |
 | `pbs_db_data_loss_triage` | Database Down — Data Loss Triage | availability | database | `check_connection`, `get_pod_logs`, `get_events`, `read_pg_log`, `read_uploaded_file` |
-| `pbs_sysadmin_docker_inspect` | Sysadmin — Docker Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
+| `pbs_sysadmin_host_triage` | Sysadmin — Host/Container Inspection | availability | sysadmin | `check_host`, `get_host_logs`, `check_memory`, `read_pg_log_file` |
 | `pbs_db_restart_action` | Sysadmin — Docker Container Restart | availability | sysadmin | `restart_container`, `check_host`, `check_connection` |
 | `pbs_wal_disk_full` | WAL Disk Full — Recovery | capacity | sysadmin | `check_host`, `get_host_logs`, `check_disk`, `get_pg_settings` |
 | `pbs_wal_stale_slot` | WAL Accumulation — Stale Replication Slot | capacity | database | `get_pg_settings`, `get_replication_status`, `get_active_connections` |
@@ -415,9 +415,9 @@ When the gate fires, the run returns HTTP 200 with `"status": "pending_gate"`. T
   "status":               "pending_gate",
   "gate_type":            "escalation",
   "findings":             "Connection refused — Docker-level investigation needed.",
-  "escalation_target":    "pbs_sysadmin_docker_inspect",
-  "escalation_findings":  "Connection refused — Docker-level investigation needed.",
-  "remediation_preview":  { "series_id": "pbs_sysadmin_docker_inspect", "name": "Docker Container Inspect", "description": "Inspect the database container for OOM kills, crash loops or misconfig.", "approval_mode": "manual" },
+  "escalation_target":    "pbs_sysadmin_host_triage",
+  "escalation_findings":  "Connection refused — host/container-level investigation needed.",
+  "remediation_preview":  { "series_id": "pbs_sysadmin_host_triage", "name": "Host/Container Inspect", "description": "Inspect the database container or service for OOM kills, crash loops or misconfig.", "approval_mode": "manual" },
   "diagnostic_report":    { "hypotheses": [...], "root_cause": "..." },
   "confidence_warning":   "Primary hypothesis confidence 55% — competing hypothesis at 42%.",
   "suggested_approval_mode": "manual",
@@ -1435,7 +1435,7 @@ pbs_db_restart_triage  (entry_point: true)
         │
         └─ Docker-hosted DB or hosting type unknown
            (agent cannot read docker logs)
-                                          → pbs_sysadmin_docker_inspect
+                                          → pbs_sysadmin_host_triage
                                               (sysadmin agent calls check_host,
                                                reads the `runtime` field first)
                                                     │
@@ -1463,16 +1463,16 @@ live-verified end-to-end against a real cluster with the `db-wal-disk-full-k8s` 
 [FAULTTEST.md](FAULTTEST.md)) — not just unit-tested with synthetic run data.
 
 Every playbook in this graph can now earn its own fault-stability cert — including
-`pbs_sysadmin_docker_inspect`, `pbs_db_data_loss_triage` and `pbs_wal_disk_full`, which are only
+`pbs_sysadmin_host_triage`, `pbs_db_data_loss_triage` and `pbs_wal_disk_full`, which are only
 ever reached as downstream hops here, never a fault's own entry point. See
 [CONSISTENCY.md §Certification scope](CONSISTENCY.md#certification-scope-every-hop-in-a-chain-not-just-the-entry-point-v0260)
 and [VAULT.md's `vault hop-certs`](VAULT.md#vault-hop-certs).
 
 The agent is prompted with the escalation paths at run time:
 
-> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_triage`, `pbs_db_data_loss_triage`, `pbs_sysadmin_docker_inspect`"
+> "If your investigation reveals a different root cause than this Playbook addresses, the next Playbooks to consider are (by series ID): `pbs_db_config_triage`, `pbs_db_data_loss_triage`, `pbs_sysadmin_host_triage`"
 
-For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_docker_inspect` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
+For Docker-hosted databases, the DB agent is instructed to emit `ESCALATE_TO: pbs_sysadmin_host_triage` immediately after confirming "connection refused" — it cannot read Docker container logs, so it cannot distinguish a clean stop from a crash or a disk-full condition. The SysAdmin agent, which runs as the second stage, calls `check_host` and `get_host_logs` and explicitly states whether the DB agent's prior hypothesis was confirmed, revised or corrected. If the logs contain `No space left on device` with a `pg_wal` path, it escalates to `pbs_wal_disk_full` rather than directly to the restart playbook, since restarting with a full WAL disk will immediately re-PANIC.
 
 If instead `check_host` reports `runtime=kubectl`, the target is Kubernetes-managed rather than a plain Docker/Podman container — the sysadmin agent's docker-oriented tools (`get_host_logs` in container mode, `check_memory`, `restart_container`) do not apply, since the workload runs in a pod on a cluster, not on the host the sysadmin agent has shell access to. It escalates a third time, to `pbs_k8s_pod_crash_triage`, which has the Kubernetes-native tools (`get_pods`, `describe_pod`, `get_pod_logs`, `read_pod_file`) to diagnose the pod directly. That playbook's exit-code and OOM semantics are Kubernetes-specific and distinct from Docker's — the K8s agent does not reuse the sysadmin agent's `exitcode=`/`oomkilled=` reasoning to interpret them.
 
@@ -1487,7 +1487,7 @@ aiHelpDesk escalation graph makes that hand-off process structural instead of si
 Here are just the two real example chains, at different depths, showing what this looks like end to end:
 
 **Three hops, three domains** (`db-wal-disk-full-k8s`):  
-The Database Agent gets `connection refused` against a target it has no infrastructure record for. It can troubleshoot a lot, but it can't tell a clean stop from a crash from a disk-full condition. Those are container/host facts, not database facts. Cross-domain escalation feature to the rescue! Per its own [playbook](PLAYBOOKS.md) guidance, it escalates immediately rather than guessing: `ESCALATE_TO: pbs_sysadmin_docker_inspect`. The SysAdmin Agent receives the Database Agent's investigation up to this point, calls `check_host` and the first thing it reads is the `runtime` field. In [this particular example](samples/SAMPLE015.md) the database refusing the connections happened to be hosted on K8s and so the `runtime` field comes back as `kubectl`. That tells the SysAdmin Agent that this target isn't the Docker/Podman container and it can't use its own tool set for much because the database resides in a K8s-managed Pod. 
+The Database Agent gets `connection refused` against a target it has no infrastructure record for. It can troubleshoot a lot, but it can't tell a clean stop from a crash from a disk-full condition. Those are container/host facts, not database facts. Cross-domain escalation feature to the rescue! Per its own [playbook](PLAYBOOKS.md) guidance, it escalates immediately rather than guessing: `ESCALATE_TO: pbs_sysadmin_host_triage`. The SysAdmin Agent receives the Database Agent's investigation up to this point, calls `check_host` and the first thing it reads is the `runtime` field. In [this particular example](samples/SAMPLE015.md) the database refusing the connections happened to be hosted on K8s and so the `runtime` field comes back as `kubectl`. That tells the SysAdmin Agent that this target isn't the Docker/Podman container and it can't use its own tool set for much because the database resides in a K8s-managed Pod. 
 
 That's a third domain, outside what either prior agent can inspect. And so the SysAdmin Agent escalates again, this time to `pbs_k8s_pod_crash_triage`, which finally has the right tools (`get_pods`, `read_pod_file`, Pod-native log access). And so the routing part ends (automatically!) and the real work begins: distinguish a controlled shutdown (`ExitCode=0`, `Reason=Completed`) from a crash, read the Pod's actual logs and correctly conclude the database itself is healthy. In that particular sample, the real problem turned out to be a missing port-forward, not a dead process. 
 
@@ -1592,7 +1592,7 @@ ESCALATE_TO: <series_id>     # cross-domain: hand off to a different agent/domai
 
 **`TRANSITION_TO:`** is used when the triage playbook hands off to its remediation counterpart within the same problem domain — for example, `pbs_vacuum_triage` → `pbs_vacuum_remediate` or `pbs_lock_chain_triage` → `pbs_lock_chain_remediate`. The two playbooks form a deliberate pair; the triage agent has done its job and the next step is the expected remediation.
 
-**`ESCALATE_TO:`** is used for true out-of-scope escalations — the diagnosis requires a different agent or domain entirely, such as a DB agent discovering a Docker-level problem and handing off to the SysAdmin agent (`ESCALATE_TO: pbs_sysadmin_docker_inspect`). These are genuinely unexpected handoffs.
+**`ESCALATE_TO:`** is used for true out-of-scope escalations — the diagnosis requires a different agent or domain entirely, such as a DB agent discovering a Docker-level problem and handing off to the SysAdmin agent (`ESCALATE_TO: pbs_sysadmin_host_triage`). These are genuinely unexpected handoffs.
 
 The Gateway strips these lines from the visible `text` returned to the operator, then uses them to:
 
@@ -1644,9 +1644,9 @@ When the run's approval mode does not permit auto-chaining, the response include
 ```json
 {
   "text": "...",
-  "escalation_hint": "pbs_sysadmin_docker_inspect",
+  "escalation_hint": "pbs_sysadmin_host_triage",
   "suggested_next": {
-    "playbook_series_id": "pbs_sysadmin_docker_inspect",
+    "playbook_series_id": "pbs_sysadmin_host_triage",
     "reason": "connection refused — docker container state unknown",
     "request": {
       "connection_string": "staging-db",

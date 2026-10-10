@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_replica_connectivity_triage
 name: "Sysadmin — Replica Connectivity Diagnosis"
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -11,7 +11,7 @@ transitions_to:
   - pbs_replica_restart_action
 # No cross-domain escalation target today — the replica in every environment
 # this playbook runs in is Docker/Podman-hosted. A runtime=kubectl branch
-# (mirroring pbs_sysadmin_docker_inspect's own ESCALATE_TO: pbs_k8s_pod_crash_triage)
+# (mirroring pbs_sysadmin_host_triage's own ESCALATE_TO: pbs_k8s_pod_crash_triage)
 # would be a natural addition if a K8s-hosted replica scenario is ever built.
 escalates_to: []
 problem_class: availability

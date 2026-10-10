@@ -773,7 +773,7 @@ func TestCheckMemory_K8s(t *testing.T) {
 // resolveHost never populates Runtime on the K8s path), so a K8s target
 // silently fell into the systemd branch with an empty SystemdUnit instead of
 // ever revealing it was Kubernetes-managed. Runtime="kubectl" is the
-// discriminator playbooks/sysadmin-docker-inspect.yaml's guidance now checks
+// discriminator playbooks/sysadmin-host-triage.yaml's guidance now checks
 // first to decide whether to escalate to the K8s agent.
 func TestCheckHost_K8s_Running(t *testing.T) {
 	withK8sInfra(t)
@@ -808,7 +808,7 @@ func TestCheckHost_K8s_Running(t *testing.T) {
 }
 
 // TestCheckHost_K8s_CrashLoopBackOff verifies the restarting/CrashLoopBackOff
-// branch — the scenario a chain hop from pbs_sysadmin_docker_inspect would
+// branch — the scenario a chain hop from pbs_sysadmin_host_triage would
 // actually hit for a genuinely crashing pod.
 func TestCheckHost_K8s_CrashLoopBackOff(t *testing.T) {
 	withK8sInfra(t)

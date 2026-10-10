@@ -61,7 +61,7 @@ func TestExtractHopSignatures_Nil(t *testing.T) {
 func TestExtractHopSignatures_BasicEscalation(t *testing.T) {
 	n := &incidentNarrative{
 		Escalations: []narrativeEscalationHop{
-			{Playbook: "pbs_sysadmin_docker_inspect", Outcome: "escalated", EscalatedTo: "pbs_k8s_pod_crash_triage"},
+			{Playbook: "pbs_sysadmin_host_triage", Outcome: "escalated", EscalatedTo: "pbs_k8s_pod_crash_triage"},
 		},
 	}
 	sigs := extractHopSignatures(n, "pbs_db_restart_triage")
@@ -69,7 +69,7 @@ func TestExtractHopSignatures_BasicEscalation(t *testing.T) {
 		t.Fatalf("len = %d, want 1", len(sigs))
 	}
 	got := sigs[0]
-	if got.SeriesID != "pbs_sysadmin_docker_inspect" {
+	if got.SeriesID != "pbs_sysadmin_host_triage" {
 		t.Errorf("SeriesID = %q", got.SeriesID)
 	}
 	if !got.Passed {
@@ -86,12 +86,12 @@ func TestExtractHopSignatures_BasicEscalation(t *testing.T) {
 func TestExtractHopSignatures_ExcludesEntryPoint(t *testing.T) {
 	n := &incidentNarrative{
 		Escalations: []narrativeEscalationHop{
-			{Playbook: "pbs_db_restart_triage", Outcome: "escalated", EscalatedTo: "pbs_sysadmin_docker_inspect"},
-			{Playbook: "pbs_sysadmin_docker_inspect", Outcome: "resolved"},
+			{Playbook: "pbs_db_restart_triage", Outcome: "escalated", EscalatedTo: "pbs_sysadmin_host_triage"},
+			{Playbook: "pbs_sysadmin_host_triage", Outcome: "resolved"},
 		},
 	}
 	sigs := extractHopSignatures(n, "pbs_db_restart_triage")
-	if len(sigs) != 1 || sigs[0].SeriesID != "pbs_sysadmin_docker_inspect" {
+	if len(sigs) != 1 || sigs[0].SeriesID != "pbs_sysadmin_host_triage" {
 		t.Errorf("expected only the non-entry-point hop, got %+v", sigs)
 	}
 }
@@ -99,7 +99,7 @@ func TestExtractHopSignatures_ExcludesEntryPoint(t *testing.T) {
 func TestExtractHopSignatures_ExcludesGatePending(t *testing.T) {
 	n := &incidentNarrative{
 		Escalations: []narrativeEscalationHop{
-			{Playbook: "pbs_sysadmin_docker_inspect", Outcome: "gate_pending"},
+			{Playbook: "pbs_sysadmin_host_triage", Outcome: "gate_pending"},
 		},
 	}
 	sigs := extractHopSignatures(n, "pbs_entry")
@@ -114,8 +114,8 @@ func TestExtractHopSignatures_DedupSameSeries(t *testing.T) {
 	// only the first occurrence should count.
 	n := &incidentNarrative{
 		Escalations: []narrativeEscalationHop{
-			{Playbook: "pbs_sysadmin_docker_inspect", Outcome: "escalated", EscalatedTo: "pbs_k8s_pod_crash_triage"},
-			{Playbook: "pbs_sysadmin_docker_inspect", Outcome: "resolved"},
+			{Playbook: "pbs_sysadmin_host_triage", Outcome: "escalated", EscalatedTo: "pbs_k8s_pod_crash_triage"},
+			{Playbook: "pbs_sysadmin_host_triage", Outcome: "resolved"},
 		},
 	}
 	sigs := extractHopSignatures(n, "pbs_entry")
@@ -149,7 +149,7 @@ func TestExtractHopSignatures_CarriesCleanSignals(t *testing.T) {
 	n := &incidentNarrative{
 		Escalations: []narrativeEscalationHop{
 			{
-				Playbook: "pbs_sysadmin_docker_inspect", Outcome: "resolved",
+				Playbook: "pbs_sysadmin_host_triage", Outcome: "resolved",
 				HasMismatch: true, HasTargetDrift: true, HasProtocolViolation: true,
 			},
 		},
@@ -349,12 +349,12 @@ func TestPostHopCerts_PostsOnePerSeries(t *testing.T) {
 	f := Failure{ID: "db-wal-disk-full-k8s", Name: "WAL disk full", DiagnosisPlaybookSeriesID: "pbs_db_restart_triage"}
 
 	acc := map[string][]EvalResult{
-		"pbs_sysadmin_docker_inspect": {{Passed: true}, {Passed: true}},
-		"pbs_k8s_pod_crash_triage":    {{Passed: true}, {Passed: false}},
+		"pbs_sysadmin_host_triage": {{Passed: true}, {Passed: true}},
+		"pbs_k8s_pod_crash_triage": {{Passed: true}, {Passed: false}},
 	}
 	attrSigs := map[string][]string{
-		"pbs_sysadmin_docker_inspect": {"pbs_k8s_pod_crash_triage", "pbs_k8s_pod_crash_triage"},
-		"pbs_k8s_pod_crash_triage":    {"resolved", "resolved"},
+		"pbs_sysadmin_host_triage": {"pbs_k8s_pod_crash_triage", "pbs_k8s_pod_crash_triage"},
+		"pbs_k8s_pod_crash_triage": {"resolved", "resolved"},
 	}
 
 	postHopCerts(context.Background(), cfg, f, acc, attrSigs)
@@ -368,11 +368,11 @@ func TestPostHopCerts_PostsOnePerSeries(t *testing.T) {
 		byFaultID[b["fault_id"].(string)] = b
 	}
 
-	sysadmin, ok := byFaultID["db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect"]
+	sysadmin, ok := byFaultID["db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage"]
 	if !ok {
 		t.Fatalf("no cert posted for the synthetic sysadmin hop fault_id; got fault_ids: %v", keysOf(byFaultID))
 	}
-	if sysadmin["playbook_series_id"] != "pbs_sysadmin_docker_inspect" {
+	if sysadmin["playbook_series_id"] != "pbs_sysadmin_host_triage" {
 		t.Errorf("sysadmin hop playbook_series_id = %v, want its OWN series, not the entry point's", sysadmin["playbook_series_id"])
 	}
 	if sysadmin["n_runs"] != float64(2) {
@@ -423,23 +423,23 @@ func keysOf(m map[string]map[string]any) []string {
 
 func TestFetchHopCerts_Found(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("series_id") != "pbs_sysadmin_docker_inspect" || r.URL.Query().Get("model") != "claude-sonnet-4-6" {
+		if r.URL.Query().Get("series_id") != "pbs_sysadmin_host_triage" || r.URL.Query().Get("model") != "claude-sonnet-4-6" {
 			t.Errorf("unexpected query: %s", r.URL.RawQuery)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"certs": []map[string]any{
-				{"fault_id": "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect", "is_stable": true, "is_clean": true, "n_runs": 3},
+				{"fault_id": "db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage", "is_stable": true, "is_clean": true, "n_runs": 3},
 			},
 		})
 	}))
 	defer srv.Close()
 
-	certs := fetchHopCerts(srv.URL, "", "pbs_sysadmin_docker_inspect", "claude-sonnet-4-6")
+	certs := fetchHopCerts(srv.URL, "", "pbs_sysadmin_host_triage", "claude-sonnet-4-6")
 	if len(certs) != 1 {
 		t.Fatalf("len = %d, want 1", len(certs))
 	}
-	if certs[0].FaultID != "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect" {
+	if certs[0].FaultID != "db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage" {
 		t.Errorf("FaultID = %q", certs[0].FaultID)
 	}
 	if !certs[0].IsStable || !certs[0].IsClean {
@@ -491,8 +491,8 @@ func TestVaultHopCerts_CertsFound(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"certs": []map[string]any{
 				{
-					"fault_id":   "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect",
-					"fault_name": "WAL disk full (hop: pbs_sysadmin_docker_inspect)",
+					"fault_id":   "db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage",
+					"fault_name": "WAL disk full (hop: pbs_sysadmin_host_triage)",
 					"is_stable":  true, "is_clean": true, "attribution_consistent": true,
 					"primary_attribution": "pbs_k8s_pod_crash_triage",
 					"n_runs":              3, "pass_rate": 1.0,
@@ -503,10 +503,10 @@ func TestVaultHopCerts_CertsFound(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		vaultHopCerts([]string{"pbs_sysadmin_docker_inspect", "--gateway", srv.URL, "--agent-model", "claude-sonnet-4-6"})
+		vaultHopCerts([]string{"pbs_sysadmin_host_triage", "--gateway", srv.URL, "--agent-model", "claude-sonnet-4-6"})
 	})
 
-	if !strings.Contains(out, "db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect") {
+	if !strings.Contains(out, "db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage") {
 		t.Errorf("output missing fault_id:\n%s", out)
 	}
 	if !strings.Contains(out, "EARNED") {

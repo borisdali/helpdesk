@@ -250,7 +250,7 @@ regression test captures the exact live preamble.
 Fault: [`db-pgdata-corrupted`](../testing/catalog/failures.yaml) (search for the fault ID, the
 file is not short)  
 Triage playbooks: [`pbs_db_data_loss_triage`](../playbooks/database-data-loss-triage.yaml) →
-[`pbs_sysadmin_docker_inspect`](../playbooks/sysadmin-docker-inspect.yaml) →
+[`pbs_sysadmin_host_triage`](../playbooks/sysadmin-host-triage.yaml) →
 [`pbs_pgbackrest_health_triage`](../playbooks/pgbackrest-health-triage.yaml)  
 Remediation playbook: [`pbs_pgbackrest_restore_remediate`](../playbooks/pgbackrest-restore-remediate.yaml)  
 
@@ -278,7 +278,7 @@ see, each one **front-loads every condition it can determine without the evidenc
 about to fetch** (single instance? pgBackRest in use? PITR already decided?) into its own
 `FINDINGS`, so the next hop only has to judge the one condition it's actually equipped to answer
 and can act on the combined picture directly — no bouncing back for a decision already made. An
-earlier revision of this chain *did* bounce `pbs_sysadmin_docker_inspect` back to
+earlier revision of this chain *did* bounce `pbs_sysadmin_host_triage` back to
 `pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
 safety benefit once it was clear none of the static conditions needed fresh evidence to answer —
 caught in review before it shipped, not after a slow live run.
@@ -307,7 +307,7 @@ We found this during live debugging of something else entirely, confirmed while 
 Each of these bugs independently caused the diagnosis to miss the real corruption signature. In every one of those three cases, the diagnosis was wrong or
 incomplete and in every one, nothing destructive happened anyway. That's not luck.  
 
-`pbs_sysadmin_docker_inspect`'s own guidance only sets `FINDINGS: data_loss_restore_candidate=true` on a narrow, explicit conjunction — the exact
+`pbs_sysadmin_host_triage`'s own guidance only sets `FINDINGS: data_loss_restore_candidate=true` on a narrow, explicit conjunction — the exact
 `"could not find the database system"` signature *and* `single_instance=true` *and*
 `backup_tool=pgbackrest` *and* `pitr_decided=false` *and* "nothing in these logs suggests damage
 beyond what a plain restore would fix." Every branch where that conjunction doesn't hold says, verbatim, **"Do NOT escalate... needs a human DBA."**   
@@ -328,7 +328,7 @@ isn't any, then escalating on a false positive. That's a different, harder gap t
 close and nothing here should be read as claiming it does.
 
 **What this does *not* cover, said plainly rather than left implicit**:  
-- `pbs_db_data_loss_triage` and `pbs_sysadmin_docker_inspect` have no dedicated objective-evidence
+- `pbs_db_data_loss_triage` and `pbs_sysadmin_host_triage` have no dedicated objective-evidence
   signal of their own — `get_host_logs` returns raw text, not a structured result with a named
   probe the way `get_pgbackrest_status` does. Their findings (single instance? does the log text
   suggest damage beyond what a plain restore fixes?) rest on the model's own quoted-evidence
@@ -409,7 +409,7 @@ Not yet built — tracked, not forgotten:
   of a result that looks identical to a clean recovery from the outside.
 
 - **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
-  `pbs_sysadmin_docker_inspect` (§3).**  
+  `pbs_sysadmin_host_triage` (§3).**  
   Both currently reason over raw log text with no structured, named probe backing their
   conclusions the way `get_pgbackrest_status` backs the health-check hop. Building this would mean
   giving `get_host_logs`/`read_pg_log_file` a typed result with real signals (a specific failure

@@ -1772,7 +1772,7 @@ func mockPriorRunIDServerWithTypes(t *testing.T, next map[string]incidentRun, pl
 
 func TestFetchNextHop_Success(t *testing.T) {
 	srv := mockPriorRunIDServer(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage"},
 	})
 	hop := fetchNextHop(srv.URL, "", "plr_t1")
 	if hop == nil || hop.RunID != "plr_e1" {
@@ -1806,9 +1806,9 @@ func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
 // misclassification this whole fix closes, exercised against the
 // independently-implemented table-view walker.
 func TestWalkToRemediation_EscalationOnly(t *testing.T) {
-	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
 	srv := mockPriorRunIDServer(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "escalated"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "escalated"},
 	})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem != nil {
@@ -1820,9 +1820,9 @@ func TestWalkToRemediation_EscalationOnly(t *testing.T) {
 // escalation hop to find the true, terminal remediation hop — not the
 // middle one.
 func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
-	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
 	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
 		"plr_e1": {RunID: "plr_r1", SeriesID: "pbs_k8s_pod_crash_remediate", Outcome: "resolved"},
 	}, map[string]string{"pbs_k8s_pod_crash_remediate": "remediation"})
 	rem := walkToRemediation(srv.URL, "", triage)
@@ -1837,16 +1837,16 @@ func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
 // cmd/gateway/incident_narrative_test.go's identically-named/-purposed test:
 // a hop reached via TRANSITION_TO whose own playbook is still
 // playbook_type=triage (pbs_pgbackrest_health_triage, a same-domain hand-off
-// target of pbs_sysadmin_docker_inspect) must not be treated as remediation —
+// target of pbs_sysadmin_host_triage) must not be treated as remediation —
 // the walk must continue past it to the real remediation hop.
 func TestWalkToRemediation_TransitionToTriageHop_NotMisclassified(t *testing.T) {
-	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
 	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
 		"plr_e1": {RunID: "plr_e2", SeriesID: "pbs_pgbackrest_health_triage", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_restore_remediate"},
 		"plr_e2": {RunID: "plr_r1", SeriesID: "pbs_pgbackrest_restore_remediate", Outcome: "resolved"},
 	}, map[string]string{
-		"pbs_sysadmin_docker_inspect":      "triage",
+		"pbs_sysadmin_host_triage":         "triage",
 		"pbs_pgbackrest_health_triage":     "triage",
 		"pbs_pgbackrest_restore_remediate": "remediation",
 	})
@@ -1926,7 +1926,7 @@ func TestFetchIncidentNarrative_DecodesEscalations(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":       "plr_e1",
-					"playbook":     "pbs_sysadmin_docker_inspect",
+					"playbook":     "pbs_sysadmin_host_triage",
 					"outcome":      "transitioned",
 					"escalated_to": "",
 					"findings":     "dmesg shows OOM-killer event",
@@ -1954,8 +1954,8 @@ func TestFetchIncidentNarrative_DecodesEscalations(t *testing.T) {
 	if len(n.Escalations) != 1 {
 		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
 	}
-	if n.Escalations[0].RunID != "plr_e1" || n.Escalations[0].Playbook != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("Escalations[0] = %+v, want run_id=plr_e1 playbook=pbs_sysadmin_docker_inspect", n.Escalations[0])
+	if n.Escalations[0].RunID != "plr_e1" || n.Escalations[0].Playbook != "pbs_sysadmin_host_triage" {
+		t.Errorf("Escalations[0] = %+v, want run_id=plr_e1 playbook=pbs_sysadmin_host_triage", n.Escalations[0])
 	}
 	if n.Escalations[0].Findings != "dmesg shows OOM-killer event" {
 		t.Errorf("Escalations[0].Findings = %q", n.Escalations[0].Findings)
@@ -1987,7 +1987,7 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":   "plr_e1",
-					"playbook": "pbs_sysadmin_docker_inspect",
+					"playbook": "pbs_sysadmin_host_triage",
 					"outcome":  "transitioned",
 					"findings": "dmesg shows OOM-killer event",
 				},
@@ -2013,7 +2013,7 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	if !strings.Contains(out, "ESCALATION 1/1") {
 		t.Errorf("output missing ESCALATION section header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "pbs_sysadmin_docker_inspect") {
+	if !strings.Contains(out, "pbs_sysadmin_host_triage") {
 		t.Errorf("output missing escalation hop's playbook, got:\n%s", out)
 	}
 	if !strings.Contains(out, "dmesg shows OOM-killer event") {
@@ -2205,7 +2205,7 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":           "plr_flags2",
-					"playbook":         "pbs_sysadmin_docker_inspect",
+					"playbook":         "pbs_sysadmin_host_triage",
 					"outcome":          "resolved",
 					"findings":         "container healthy",
 					"has_mismatch":     false,
@@ -2447,7 +2447,7 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 			"escalations": []map[string]any{
 				{
 					"run_id":       "plr_e1",
-					"playbook":     "pbs_sysadmin_docker_inspect",
+					"playbook":     "pbs_sysadmin_host_triage",
 					"outcome":      "escalated",
 					"escalated_to": "pbs_k8s_pod_crash_triage",
 					"findings":     "runtime=kubectl detected",

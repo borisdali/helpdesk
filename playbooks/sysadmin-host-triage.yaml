@@ -1,6 +1,6 @@
-series_id: pbs_sysadmin_docker_inspect
-name: "Sysadmin — Docker Container Inspection"
-version: "2.2"
+series_id: pbs_sysadmin_host_triage
+name: "Sysadmin — Host/Container Inspection"
+version: "2.3"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -26,10 +26,12 @@ escalates_to:
 problem_class: availability
 author: aiHelpDesk
 description: |
-  Inspect a Docker-hosted PostgreSQL container that has been reported as unreachable.
-  Determine whether the container exited cleanly (manual stop / graceful shutdown)
-  or crashed (OOM kill, panic, unexpected exit), revise the prior DB agent's root
-  cause hypothesis if necessary, and provide evidence-based remediation guidance.
+  Inspect a PostgreSQL instance reported as unreachable, whether it runs in a
+  Docker/Podman container, under systemd directly on a host/VM, or (handed off
+  further) in a Kubernetes pod. Determine whether it exited cleanly (manual
+  stop / graceful shutdown) or crashed (OOM kill, panic, unexpected exit),
+  revise the prior DB agent's root cause hypothesis if necessary, and provide
+  evidence-based remediation guidance.
 root_cause_classes:
   version: "1.0"
   classes:
@@ -39,9 +41,9 @@ root_cause_classes:
     - process-crash
     - data-corruption
 symptoms:
-  - "DB agent diagnosed 'connection refused' but could not read docker container logs"
-  - "docker-hosted PostgreSQL is unreachable"
-  - "container status unknown — DB agent toolset cannot reach docker daemon"
+  - "DB agent diagnosed 'connection refused' but could not read the host's own container or service logs"
+  - "docker/podman-hosted or systemd-managed PostgreSQL is unreachable"
+  - "container or service status unknown — DB agent toolset cannot reach the docker daemon or systemd journal"
 guidance: |
   You are the second stage of a two-agent diagnostic chain. The DB agent has already
   confirmed "connection refused" — your job is to explain WHY using host/container tools.

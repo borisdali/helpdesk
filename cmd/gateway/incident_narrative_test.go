@@ -362,13 +362,13 @@ func TestHandleGetIncident_UnverifiedEvidence_SurfaceOnEscalationAndRemediation(
 		RunID:       "plr_uve_t1",
 		SeriesID:    "pbs_db_restart_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 		TraceID:     "tr_uve_triage",
 	}
 	escalation := &audit.PlaybookRun{
 		RunID:          "plr_uve_e1",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_db_restart_action",
 		PriorRunID:     "plr_uve_t1",
@@ -620,13 +620,13 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 		RunID:       "plr_indep01",
 		SeriesID:    "pbs_db_restart_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 		TraceID:     "tr_indep_triage",
 	}
 	escalation := &audit.PlaybookRun{
 		RunID:          "plr_indep02",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_db_restart_action",
 		PriorRunID:     "plr_indep01",
@@ -704,7 +704,7 @@ func TestHandleGetIncident_VerificationFlags_AllThreeChaptersIndependent(t *test
 // The old whole-trace Journey lookup couldn't distinguish between hops
 // sharing a trace_id, so a later hop's genuine mismatch leaked backward onto
 // an earlier, actually-clean hop's reported HasMismatch — confirmed live: the
-// pbs_sysadmin_docker_inspect hop's own delegation_verification event said
+// pbs_sysadmin_host_triage hop's own delegation_verification event said
 // mismatch:false, but its posted hop-cert still showed DIRTY. This models
 // that exact shape: an escalation hop and a remediation hop sharing one
 // trace_id, where only the remediation hop's own window contains a mismatch
@@ -715,13 +715,13 @@ func TestHandleGetIncident_VerificationFlags_SharedTrace_DoesNotLeakAcrossHops(t
 		RunID:       "plr_leak_t1",
 		SeriesID:    "pbs_connection_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		TraceID:     "trace-leak-triage",
 		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 	}
 	escHop := &audit.PlaybookRun{
 		RunID:          "plr_leak_e1",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_db_restart_action",
 		PriorRunID:     "plr_leak_t1",
@@ -895,14 +895,14 @@ func TestHandleGetIncident_EscalationOnly(t *testing.T) {
 		RunID:       "plr_esc01",
 		SeriesID:    "pbs_connection_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		Operator:    "alice",
 		TraceID:     "trace-triage",
 		StartedAt:   time.Now().UTC(),
 	}
 	hop := &audit.PlaybookRun{
 		RunID:      "plr_esc02",
-		SeriesID:   "pbs_sysadmin_docker_inspect",
+		SeriesID:   "pbs_sysadmin_host_triage",
 		Outcome:    audit.OutcomeEscalated,
 		PriorRunID: "plr_esc01",
 		TraceID:    "trace-hop",
@@ -952,13 +952,13 @@ func TestHandleGetIncident_ThreeHopEscalation(t *testing.T) {
 		RunID:       "plr_t1",
 		SeriesID:    "pbs_connection_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		TraceID:     "trace-t1",
 		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 	}
 	escHop := &audit.PlaybookRun{
 		RunID:          "plr_e1",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_k8s_pod_crash_remediate",
 		PriorRunID:     "plr_t1",
@@ -1031,13 +1031,13 @@ func TestHandleGetIncident_FourHopTwoEscalations(t *testing.T) {
 		RunID:       "plr_h1",
 		SeriesID:    "pbs_connection_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		TraceID:     "trace-h1",
 		StartedAt:   time.Now().Add(-4 * time.Minute).UTC(),
 	}
 	esc1 := &audit.PlaybookRun{
 		RunID:       "plr_h2",
-		SeriesID:    "pbs_sysadmin_docker_inspect",
+		SeriesID:    "pbs_sysadmin_host_triage",
 		Outcome:     audit.OutcomeEscalated,
 		EscalatedTo: "pbs_k8s_pod_crash_triage",
 		PriorRunID:  "plr_h1",
@@ -1119,13 +1119,13 @@ func TestHandleGetIncident_RemediationSuccessorIgnored(t *testing.T) {
 		RunID:       "plr_s1",
 		SeriesID:    "pbs_connection_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		TraceID:     "trace-s1",
 		StartedAt:   time.Now().Add(-3 * time.Minute).UTC(),
 	}
 	esc := &audit.PlaybookRun{
 		RunID:          "plr_s2",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_k8s_pod_crash_remediate",
 		PriorRunID:     "plr_s1",
@@ -1200,7 +1200,7 @@ func TestHandleGetIncident_RemediationSuccessorIgnored(t *testing.T) {
 // TestHandleGetIncident_TransitionToTriageHop_NotMisclassifiedAsRemediation is
 // a regression test for the real bug found live 2026-10-07 on the
 // db-pgdata-corrupted fault's actual 4-hop chain: pbs_db_data_loss_triage
-// (ESCALATE_TO) -> pbs_sysadmin_docker_inspect (TRANSITION_TO, same-domain
+// (ESCALATE_TO) -> pbs_sysadmin_host_triage (TRANSITION_TO, same-domain
 // hand-off to another TRIAGE-type playbook) -> pbs_pgbackrest_health_triage
 // (TRANSITION_TO, to the real remediation playbook) ->
 // pbs_pgbackrest_restore_remediate. The pre-fix classifier treated "reached
@@ -1217,13 +1217,13 @@ func TestHandleGetIncident_TransitionToTriageHop_NotMisclassifiedAsRemediation(t
 		RunID:       "plr_pg1",
 		SeriesID:    "pbs_db_data_loss_triage",
 		Outcome:     audit.OutcomeEscalated,
-		EscalatedTo: "pbs_sysadmin_docker_inspect",
+		EscalatedTo: "pbs_sysadmin_host_triage",
 		TraceID:     "trace-pg1",
 		StartedAt:   time.Now().Add(-4 * time.Minute).UTC(),
 	}
 	dockerInspect := &audit.PlaybookRun{
 		RunID:          "plr_pg2",
-		SeriesID:       "pbs_sysadmin_docker_inspect",
+		SeriesID:       "pbs_sysadmin_host_triage",
 		Outcome:        audit.OutcomeTransitioned,
 		TransitionedTo: "pbs_pgbackrest_health_triage",
 		PriorRunID:     "plr_pg1",
@@ -1256,7 +1256,7 @@ func TestHandleGetIncident_TransitionToTriageHop_NotMisclassifiedAsRemediation(t
 			"plr_pg3": restoreRemediate,
 		},
 		playbookTypeBySeriesID: map[string]string{
-			"pbs_sysadmin_docker_inspect":      "triage",
+			"pbs_sysadmin_host_triage":         "triage",
 			"pbs_pgbackrest_health_triage":     "triage",
 			"pbs_pgbackrest_restore_remediate": "remediation",
 		},

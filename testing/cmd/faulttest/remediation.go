@@ -90,7 +90,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	// before polling recovery. The chain runs asynchronously after gate approval,
 	// so without waiting here pollRecovery would start while the container is still
 	// down. waitForChildRunComplete waits for the immediate child run, which gives
-	// downstream transitions (e.g. pbs_sysadmin_docker_inspect → pbs_db_restart_action)
+	// downstream transitions (e.g. pbs_sysadmin_host_triage → pbs_db_restart_action)
 	// time to run and restart the service before we check connectivity.
 	remRunID := r.waitForChildRunComplete(ctx, gate.RunID, 5*time.Minute)
 
