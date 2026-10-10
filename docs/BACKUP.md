@@ -287,20 +287,53 @@ caught in review before it shipped, not after a slow live run.
 And this is the one that actually matters for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
 `pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
 it does real work: `pbs_pgbackrest_restore_remediate` is only ever reached once that hop's own
-`TRANSITION_TO` fires, which should only happen when the backup is genuinely confirmed healthy.
+`TRANSITION_TO` fires, which should only happen when the backup is genuinely confirmed healthy.  
+
 If the model's response claims "healthy" but the tool's own structured result says otherwise, the
-signal goes unconfirmed and the gateway forces a `pending_gate` — **this cannot be bypassed by
-`approval_mode=force`**; `cmd/gateway/playbooks.go`'s own force-gate mechanism exists specifically
+signal goes unconfirmed and the gateway forces a `pending_gate`. The import part is this: **it cannot be bypassed by
+`approval_mode=force`**.   
+
+That is, `cmd/gateway/playbooks.go`'s own force-gate mechanism exists specifically
 to override the caller's force-mode auto-chain intent when evidence contradicts the model's
 conclusion. The single most important precondition for this op — is there actually a healthy
 backup to restore from — is backed by a deterministic Go code path, not left to the model's prose.
+
+**A third protection, fails closed by design, not by accident**:  
+We found this during live debugging of something else entirely, confirmed while weeding out three separate live bugs during this chain's own testing:  
+- a stdio-buffering race that delayed when a crash message reached the log stream  
+- a log-request window too small once prior test cycles had piled up legitimate noise   
+- `get_host_logs` silently discarding stderr (where PostgreSQL's own fatal startup message actually lives)  
+
+Each of these bugs independently caused the diagnosis to miss the real corruption signature. In every one of those three cases, the diagnosis was wrong or
+incomplete and in every one, nothing destructive happened anyway. That's not luck.  
+
+`pbs_sysadmin_docker_inspect`'s own guidance only sets `FINDINGS: data_loss_restore_candidate=true` on a narrow, explicit conjunction — the exact
+`"could not find the database system"` signature *and* `single_instance=true` *and*
+`backup_tool=pgbackrest` *and* `pitr_decided=false` *and* "nothing in these logs suggests damage
+beyond what a plain restore would fix." Every branch where that conjunction doesn't hold says, verbatim, **"Do NOT escalate... needs a human DBA."**   
+
+`pbs_pgbackrest_health_triage` only transitions onward to `pbs_pgbackrest_restore_remediate` if that exact marker was set upstream.
+Otherwise its own guidance is `ESCALATE_TO: none`. Composed with the gateway's own chain-escalation mechanism,
+which requires an *explicit, positive* `TRANSITION_TO`/`ESCALATE_TO` signal to continue at all and
+never proceeds on silence or ambiguity, the result is that an uncertain or under-evidenced model
+doesn't need to actively decide *not* to recommend a restore. It just never produces the signal
+that would start one and the chain stops there by default.
+
+**The honest limit of this one, stated with the same care as everything else here**: this is enforced
+through LLM-interpreted playbook guidance, not a deterministic Go-level check the way the backup-health
+gate above is. The three live bugs that exercised this path were all cases of the model being
+appropriately *conservative* under incomplete evidence — it correctly never escalated. None of them
+tested the opposite failure mode: a model *confidently and wrongly* concluding corruption when there
+isn't any, then escalating on a false positive. That's a different, harder gap this property does not
+close and nothing here should be read as claiming it does.
 
 **What this does *not* cover, said plainly rather than left implicit**:  
 - `pbs_db_data_loss_triage` and `pbs_sysadmin_docker_inspect` have no dedicated objective-evidence
   signal of their own — `get_host_logs` returns raw text, not a structured result with a named
   probe the way `get_pgbackrest_status` does. Their findings (single instance? does the log text
   suggest damage beyond what a plain restore fixes?) rest on the model's own quoted-evidence
-  discipline, not a deterministic check.
+  discipline, not a deterministic check — the fail-closed property above narrows the blast radius of
+  that gap considerably, but, per the honest limit just stated, does not close it.
 - `restore_from_backup` itself doesn't independently re-verify `status_code`/`backup_stale` at the
   Go level when called with an explicit stanza (the normal path from the remediation playbook's
   own Step 1) — it relies on that playbook's LLM-mediated re-check plus the force-gate above as
