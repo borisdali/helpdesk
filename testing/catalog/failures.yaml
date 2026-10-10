@@ -668,7 +668,18 @@ failures:
           exit 1
         fi
         rm -f "$DATA_DIR/global/pg_control"
-        sudo systemctl restart "$PG_UNIT"
+        # Unlike `docker restart <container>` (db-pgdata-corrupted's own
+        # equivalent line), which always exits 0 regardless of whether the
+        # containerized process subsequently crashes, `systemctl restart` is
+        # synchronous — it waits for the unit to report started/failed and
+        # returns non-zero when it fails to start. Postgres genuinely cannot
+        # start without pg_control, so this restart failing is the CORRECT,
+        # intended outcome proving the corruption took effect — not a sign
+        # injection itself failed. Found live (2026-10-09): under `set -e`,
+        # an un-tolerated failure here aborted the script and faulttest
+        # reported "injection failed" even though the fault had been
+        # successfully induced (service genuinely down, as intended).
+        sudo systemctl restart "$PG_UNIT" || true
     teardown:
       type: ssh_exec
       exec_via: ""

@@ -28,7 +28,7 @@
     "pgbackrest-ubuntu-vm": {
       "_comment": "Real Ubuntu 24.04 (noble) host/VM, not a Docker container — PostgreSQL 16 + pgBackRest installed via testing/docker/setup-pgbackrest-vm.sh, reached over real SSH as the systemd/VM dispatch path (runtime left empty on the vms entry below). Backs db-pgdata-corrupted-vm.",
       "name": "pgBackRest Real Ubuntu VM",
-      "connection_string": "host=192.168.2.24 port=5432 dbname=postgres user=postgres",
+      "connection_string": "host=192.168.2.24 port=5432 dbname=postgres user=postgres password=testpass",
       "vm_name": "pgbackrest-real-ubuntu-vm",
       "systemd_unit": "postgresql@16-main",
       "pg_log_dir": "/var/log/postgresql",

@@ -94,6 +94,18 @@ guidance: |
   automatable restore path — do not guess at the failure type yourself
   without that evidence, and do not proceed to Step 2 below.
 
+  Do NOT attempt to connect to the database yourself before emitting this
+  hand-off, and do NOT respond with HYPOTHESIS_N/CONFIDENCE/EVIDENCE/
+  ROOT_CAUSE here — that format is for a playbook's own final answer, not
+  this step. Even if a connection attempt already failed or timed out
+  (monitoring already told you the database is unreachable — that is why
+  you were called), the FINDINGS + ESCALATE_TO hand-off above is still the
+  entire correct response to that signal, by itself, with no diagnosis
+  attempted yet. "Connection refused"/"timeout" is not failure-signature
+  evidence of any particular root cause (corruption vs. a plain crash vs.
+  something else) — the sysadmin agent you hand off to is the one that can
+  actually read the logs that would tell the difference.
+
   For a Kubernetes-hosted instance, use get_pod_logs to identify the
   specific error. The error class determines the recovery path:
 

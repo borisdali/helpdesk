@@ -49,6 +49,9 @@ debian)
                                              # every registered cluster, not just this one
     PGDATA="/var/lib/postgresql/${PG_VERSION}/main"
     PG_LOG_DIR="/var/log/postgresql"
+    PG_HBA="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf" # Debian/Ubuntu
+                   # splits config out of PGDATA into /etc/postgresql/,
+                   # unlike RHEL's packaging below.
     SSH_UNIT="ssh" # Debian/Ubuntu's openssh-server ships the real unit as
                    # ssh.service; sshd.service is only an alias symlink, and
                    # systemd refuses `enable` on an alias name directly
@@ -73,6 +76,8 @@ rhel)
     PG_UNIT="postgresql-${PG_VERSION}"
     PGDATA="/var/lib/pgsql/${PG_VERSION}/data"
     PG_LOG_DIR="${PGDATA}/log"
+    PG_HBA="${PGDATA}/pg_hba.conf" # RHEL keeps config inside PGDATA, unlike
+                   # Debian/Ubuntu's /etc/postgresql/ split above.
     SSH_UNIT="sshd" # RHEL/Red Hat's openssh-server unit is genuinely named
                     # sshd.service, not an alias — no equivalent issue here.
     dnf install -y openssh-server sudo
@@ -136,6 +141,36 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
     "ALTER SYSTEM SET archive_mode = on;" 2>/dev/null || true
 sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
     "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=${STANZA} archive-push %p';"
+
+# ── 4b. Remote TCP access ───────────────────────────────────────────────
+# Debian/Ubuntu and RHEL both ship listen_addresses='localhost' by default
+# — nothing listens on the external interface at all, independent of
+# firewall state. Found live (2026-10-09): a remote faulttest/agent
+# connection attempt from off-VM got a TCP *timeout*, not "connection
+# refused" — the signature of a dropped/unanswered SYN, not an active
+# rejection. listen_addresses requires a full restart (not just reload) to
+# take effect, so this piggybacks on the restart below rather than adding
+# a second one. The dispatch SSH key's own peer-auth access (agents/
+# sysadmin's SSH tools) is unaffected by any of this — only remote libpq
+# connections (faulttest's --conn/--agent-conn, or a real agent dialing
+# this target directly over TCP) need it.
+sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
+    "ALTER SYSTEM SET listen_addresses = '*';"
+sudo -u postgres psql -v ON_ERROR_STOP=1 -c \
+    "ALTER ROLE postgres PASSWORD 'testpass';" # same test password convention
+    # as the Docker fixtures (testing.infra.json's own password=testpass) —
+    # this is a disposable test target, not a production credential.
+if ! grep -q "aiHelpDesk test access" "$PG_HBA" 2>/dev/null; then
+    echo "host all all 0.0.0.0/0 md5 # aiHelpDesk test access — narrow this to your actual client network for anything with a routable address" \
+        >>"$PG_HBA"
+fi
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
+    # 192.168.2.24-style private-LAN targets are reasonable to open broadly;
+    # narrow this (ufw allow from <subnet> to any port 5432 proto tcp) for
+    # anything with a public/routable address instead.
+    ufw allow 5432/tcp comment "aiHelpDesk test target"
+fi
+
 sudo -u postgres psql -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf();"
 systemctl restart "$PG_UNIT"
 sudo -u postgres pgbackrest --stanza="$STANZA" --log-level-console=info stanza-create
@@ -148,7 +183,7 @@ cat <<EOF
   "db_servers": {
     "pgbackrest-vm": {
       "name": "pgBackRest Real VM Target",
-      "connection_string": "host=<VM-ADDRESS> port=5432 dbname=postgres user=postgres",
+      "connection_string": "host=<VM-ADDRESS> port=5432 dbname=postgres user=postgres password=testpass",
       "vm_name": "pgbackrest-real-vm",
       "systemd_unit": "${PG_UNIT}",
       "pg_log_dir": "${PG_LOG_DIR}",
