@@ -636,6 +636,102 @@ func TestWaitForChildRunComplete_EmptyOutcomeEventuallyTerminal(t *testing.T) {
 	}
 }
 
+// TestWaitForChildRunComplete_GatePending_ForceApproves is a regression test
+// for a real bug found live (2026-10-11): a second objective-evidence gate
+// firing deeper in a chain (e.g. the triage hop's own gate gets force-
+// approved fine, but the pgbackrest health-triage hop it leads to hits its
+// own gate on backup_stale=true) used to fall into the generic default case
+// here and get logged as "child run complete" — gate_pending is NOT
+// terminal, and the real remediation playbook (restore_from_backup/
+// restart_service) was never dispatched as a result. A live db-pgdata-
+// corrupted-vm run spent its full 2-minute recovery-check window polling a
+// database that nothing had ever actually tried to restore.
+func TestWaitForChildRunComplete_GatePending_ForceApproves(t *testing.T) {
+	var proceedCalls []string
+	outcomeCallCount := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/fleet/playbook-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("prior_run_id") == "plr_parent" {
+			json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{{"run_id": "plr_gated_child"}}}) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{}}) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		outcomeCallCount++
+		outcome := "gate_pending"
+		if outcomeCallCount >= 2 {
+			outcome = "resolved"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"outcome": outcome}) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", func(w http.ResponseWriter, r *http.Request) {
+		proceedCalls = append(proceedCalls, r.PathValue("runID"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "approved"}) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := &Remediator{
+		inner: faultlib.NewRemediator(&faultlib.HarnessConfig{GatewayURL: srv.URL}),
+		cfg:   &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL, ApprovalMode: "force"}},
+	}
+	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 5*time.Second)
+
+	if len(proceedCalls) != 1 || proceedCalls[0] != "plr_gated_child" {
+		t.Errorf("proceed-escalation calls = %v, want exactly one for plr_gated_child — the second gate was never force-approved", proceedCalls)
+	}
+	if got != "plr_gated_child" {
+		t.Errorf("childRunID = %q, want plr_gated_child", got)
+	}
+}
+
+// TestWaitForChildRunComplete_GatePending_NotForceMode_DoesNotApprove proves
+// the fix above is scoped to force mode only — any other approval mode means
+// a human genuinely needs to see and resolve the second gate themselves,
+// same as the top-level one, so it must not be silently auto-approved.
+func TestWaitForChildRunComplete_GatePending_NotForceMode_DoesNotApprove(t *testing.T) {
+	var proceedCalls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/fleet/playbook-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("prior_run_id") == "plr_parent" {
+			json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{{"run_id": "plr_gated_child"}}}) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{}}) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"outcome": "gate_pending"}) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", func(w http.ResponseWriter, r *http.Request) {
+		proceedCalls = append(proceedCalls, r.PathValue("runID"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "approved"}) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := &Remediator{
+		inner: faultlib.NewRemediator(&faultlib.HarnessConfig{GatewayURL: srv.URL}),
+		cfg:   &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL, ApprovalMode: "manual"}},
+	}
+	got := r.waitForChildRunComplete(context.Background(), "plr_parent", 2*time.Second)
+
+	if len(proceedCalls) != 0 {
+		t.Errorf("proceed-escalation calls = %v, want none — a second gate must not be auto-approved outside force mode", proceedCalls)
+	}
+	if got != "plr_gated_child" {
+		t.Errorf("childRunID = %q, want plr_gated_child returned as-is for the operator to resolve", got)
+	}
+}
+
 // TestRunGateLoop_ForceMode_SendsRemediationPurpose is a regression test for
 // a real bug found live (2026-10-01): none of this file's three "approved"
 // ProceedEscalationRequest call sites (force-mode, interactive TTY,
