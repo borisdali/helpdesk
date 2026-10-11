@@ -997,6 +997,55 @@ playbook guidance and escalation chaining are in effect. It is purely an
 audit-trail read; nothing about it depends on or can be influenced by,
 the agent's own response text.
 
+**What this check cannot see: declared target vs. actually-resolved target.**
+`checkTargetScope` compares the `connection_string` *parameter recorded on
+each `tool_execution` event* — i.e. what the caller **declared** — against
+the intended target, via `targetMatches`, a pure string comparison of
+connection-string fields. It has no visibility into which infra-config
+entry that string was ultimately *resolved* to inside the agent, nor which
+backend the command actually ran against. Those are two different
+questions, and a tool call can declare exactly the right target and still
+be dispatched to the wrong server.
+
+Found live (2026-10-10): a `check_host` call declared
+`host=<vm-host> port=5432 ...` — the correct, intended target, recorded
+faithfully in audit, matching `intendedTarget` exactly, so `target_drift`
+was (correctly, by its own definition) empty. But `resolveHost`
+(`agents/sysadmin/tools.go`) silently resolved that string to a completely
+unrelated Docker server, because its connection-string fallback matched on
+**port alone** and three registered servers all used Postgres's default
+5432 — picking whichever candidate Go's randomized map iteration reached
+first, non-deterministically across runs. The agent then reported real
+`runtime=docker` state for a server that had nothing to do with the
+incident. Every layer behaved "correctly" by its own contract and the
+wrong target was still touched, invisibly.
+
+Fixed at the resolution layer rather than here: that fallback now matches
+on host+port together and **refuses** when more than one server still
+matches, rather than guessing — the same principle `restore_from_backup`'s
+own `target` argument contract already states ("do not guess or omit
+target — report that as its own finding and escalate", see §1.15 and the
+`jsonschema` tag on `RestoreFromBackupArgs`). The two controls are
+complementary, not redundant —
+`checkTargetScope` is detective (catches a call that *declares* the wrong
+target, after the fact); the resolution fix is preventive (stops a call
+that declares the *right* target from being dispatched to the wrong one).
+
+A residual gap remains, stated plainly: a resolution that is *unambiguous
+but still wrong* — a stale or mistyped config entry that happens to be the
+only match — slips past both. The resolution fix only closes the
+*ambiguous* case, and `checkTargetScope` cannot see resolution at all.
+Closing that would require auditing the resolved server identity
+alongside the declared parameter, which nothing does today.
+
+The preventive half is covered by `agents/sysadmin/tools_test.go` —
+`TestResolveHost_PortFallback_HostDisambiguates` (two servers sharing 5432
+on different hosts now resolve correctly instead of by map order),
+`TestResolveHost_PortFallback_AmbiguousHostPort` and
+`TestResolveHost_PortFallback_BarePortAmbiguous` (both refuse rather than
+guess) — separate from `checkTargetScope`'s own coverage listed below,
+since they exercise a different layer.
+
 **Example** (crystal-ball mode, `db-wal-disk-full-k8s` fault): the agent
 was asked to investigate `host=127.0.0.1 port=5433 ...`, an intentionally
 unregistered target. Its final answer confidently diagnosed a "port

@@ -205,6 +205,12 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		// If host+port still matches more than one server, refuse rather than
 		// guess, the same "don't guess, report and escalate" principle every
 		// other resolution failure in this function already follows.
+		// Note this is NOT the same control as the gateway's own
+		// checkTargetScope (docs/MUTATION_TOOLS.md §5.6): that one compares the
+		// connection_string a tool call *declared* against the intended target
+		// and cannot see resolution at all, so it stayed (correctly) silent
+		// while this bug silently dispatched to the wrong server. See that
+		// section for why both layers exist and what still isn't covered.
 		if port := connStrPort(serverID); port != "" {
 			// A bare port number (host == "") carries no host info to match
 			// on — fall back to port-only matching in that case specifically,
