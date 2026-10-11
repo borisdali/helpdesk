@@ -2007,7 +2007,7 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_t1")
+		printIncidentJourney(srv.URL, "", "plr_t1", false)
 	})
 
 	if !strings.Contains(out, "ESCALATION 1/1") {
@@ -2024,6 +2024,72 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 	if !strings.Contains(out, "terminal escalation hop — handed off to remediation") {
 		t.Errorf("output missing escalation:1 phase description in JOURNEYS section for outcome=transitioned, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_Summary_OneLinePerHop proves the --summary mode:
+// one line per hop (triage, each escalation, remediation) instead of the
+// full Findings/Hypotheses/flags breakdown — asked for live (2026-10-11)
+// after a real 4-hop chain's default output ran to several screens, making
+// "what actually happened, hop by hop" hard to see at a glance.
+func TestPrintIncidentJourney_Summary_OneLinePerHop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id":  "plr_t1",
+			"started_at":   time.Now().UTC().Format(time.RFC3339),
+			"duration_sec": 145.0,
+			"incident_record": map[string]any{
+				"incident_id": "plr_t1",
+				"status":      "resolved",
+			},
+			"triage": map[string]any{
+				"run_id":   "plr_t1",
+				"playbook": "pbs_connection_triage",
+				"findings": "database unreachable, escalating for host-level inspection",
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":   "plr_e1",
+					"playbook": "pbs_sysadmin_host_triage",
+					"outcome":  "transitioned",
+					"findings": "dmesg shows OOM-killer event",
+				},
+			},
+			"remediation": map[string]any{
+				"run_id":   "plr_r1",
+				"playbook": "pbs_k8s_pod_crash_remediate",
+				"outcome":  "resolved",
+				"findings": "pod restarted with a higher memory limit",
+			},
+			"evaluation": map[string]any{
+				"diagnosis_score":   0.5,
+				"remediation_score": 1.0,
+				"overall_score":     0.91,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_t1", true)
+	})
+
+	for _, want := range []string{
+		"pbs_connection_triage", "pbs_sysadmin_host_triage", "pbs_k8s_pod_crash_remediate",
+		"dmesg shows OOM-killer event", "pod restarted with a higher memory limit",
+		"resolved in 145s", "Overall: 91%",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary output missing %q, got:\n%s", want, out)
+		}
+	}
+	// The whole point is brevity — the full mode's own section headers and
+	// hypothesis machinery must not appear.
+	for _, absent := range []string{"Hypotheses:", "═══"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("summary output should not contain full-mode content %q, got:\n%s", absent, out)
+		}
 	}
 }
 
@@ -2054,7 +2120,7 @@ func TestPrintIncidentJourney_Gate_ShowsGateReason(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_gate1")
+		printIncidentJourney(srv.URL, "", "plr_gate1", false)
 	})
 
 	if !strings.Contains(out, "Reason:    objective_evidence:pgbackrest_backup_unhealthy") {
@@ -2093,7 +2159,7 @@ func TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft(t *tes
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec1")
+		printIncidentJourney(srv.URL, "", "plr_rec1", false)
 	})
 
 	if !strings.Contains(out, "Origin: faulttest") {
@@ -2136,7 +2202,7 @@ func TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty(t *te
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec2")
+		printIncidentJourney(srv.URL, "", "plr_rec2", false)
 	})
 
 	if !strings.Contains(out, "Origin: real") {
@@ -2175,7 +2241,7 @@ func TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec3")
+		printIncidentJourney(srv.URL, "", "plr_rec3", false)
 	})
 
 	for _, want := range []string{"Origin:", "Status:", "Attribution:", "Bundle:", "Draft playbook:"} {
@@ -2217,7 +2283,7 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_flags1")
+		printIncidentJourney(srv.URL, "", "plr_flags1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
@@ -2261,7 +2327,7 @@ func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_unvevid1")
+		printIncidentJourney(srv.URL, "", "plr_unvevid1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
@@ -2300,7 +2366,7 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_remflag1")
+		printIncidentJourney(srv.URL, "", "plr_remflag1", false)
 	})
 
 	if !strings.Contains(out, "REMEDIATION") {
@@ -2353,7 +2419,7 @@ func TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters(t *testing.T
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_oevprint1")
+		printIncidentJourney(srv.URL, "", "plr_oevprint1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence — replica_disconnected") {
@@ -2389,7 +2455,7 @@ func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_pvflag1")
+		printIncidentJourney(srv.URL, "", "plr_pvflag1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] protocol violation") {
@@ -2419,7 +2485,7 @@ func TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_clean1")
+		printIncidentJourney(srv.URL, "", "plr_clean1", false)
 	})
 
 	if strings.Contains(out, "⚠") {
@@ -2469,7 +2535,7 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_t1")
+		printIncidentJourney(srv.URL, "", "plr_t1", false)
 	})
 
 	if !strings.Contains(out, "intermediate hop — escalated further to pbs_k8s_pod_crash_triage") {

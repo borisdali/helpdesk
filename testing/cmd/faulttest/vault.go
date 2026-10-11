@@ -2401,10 +2401,11 @@ func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, s
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
-	var details bool
+	var details, summary bool
 	var origin, status, attribution string
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
+	fs.BoolVar(&summary, "summary", false, "Deep-dive mode only: print one line per hop instead of the full breakdown")
 	fs.StringVar(&origin, "origin", "", "Filter by origin: real or faulttest (all-incidents listing only)")
 	fs.StringVar(&status, "status", "", "Filter by status: open, resolved, escalated, or abandoned (all-incidents listing only)")
 	fs.StringVar(&attribution, "attribution", "", "Filter by root-cause attribution label (all-incidents listing only)")
@@ -2427,7 +2428,7 @@ func vaultIncidents(args []string) {
 			fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents <run-id>")
 			os.Exit(1)
 		}
-		printIncidentJourney(cfg.GatewayURL, cfg.GatewayAPIKey, arg)
+		printIncidentJourney(cfg.GatewayURL, cfg.GatewayAPIKey, arg, summary)
 		return
 	}
 
@@ -5207,11 +5208,92 @@ func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, at
 	return result.Incidents, nil
 }
 
-func printIncidentJourney(gatewayURL, apiKey, runID string) {
+// printIncidentHopSummary prints one line per hop instead of the full
+// Findings/Hypotheses/flags breakdown printIncidentJourney gives — for a
+// 4+-hop chain, that breakdown easily runs to a full screen, and the
+// question "what actually happened, hop by hop" gets lost in it. This is
+// deliberately lossy: it shows chapter → chapter flow and a one-line gist of
+// each, not evidence/warnings/hypotheses — use the full (default) mode or
+// `vault journey <trace_id>` when those details matter. Named distinctly
+// from remediation.go's own printIncidentSummary (the live post-run block
+// printed right after a faulttest run completes) — same general idea,
+// different data source and call site, not a shared implementation.
+func printIncidentHopSummary(n *incidentNarrative) {
+	type chapter struct {
+		label     string
+		playbook  string
+		outcome   string
+		findings  string
+		nextLabel string // explicit override; "" means derive from the next chapter's own playbook
+	}
+	var chapters []chapter
+	chapters = append(chapters, chapter{
+		label:    "TRIAGE",
+		playbook: n.Triage.Playbook,
+		findings: n.Triage.Findings,
+	})
+	for i, e := range n.Escalations {
+		chapters = append(chapters, chapter{
+			label:    fmt.Sprintf("ESCALATION %d", i+1),
+			playbook: e.Playbook,
+			outcome:  e.Outcome,
+			findings: e.Findings,
+		})
+	}
+	if n.Remediation != nil {
+		chapters = append(chapters, chapter{
+			label:    "REMEDIATION",
+			playbook: n.Remediation.Playbook,
+			outcome:  n.Remediation.Outcome,
+			findings: n.Remediation.Findings,
+		})
+	}
+
+	status := "open"
+	if n.IncidentRecord != nil && n.IncidentRecord.Status != "" {
+		status = n.IncidentRecord.Status
+	}
+	fmt.Printf("INCIDENT %s — %s", n.IncidentID, status)
+	if n.DurationSec > 0 {
+		fmt.Printf(" in %.0fs", n.DurationSec)
+	}
+	fmt.Println()
+	fmt.Println()
+
+	const labelWidth = 13
+	for i, c := range chapters {
+		arrow := ""
+		if i+1 < len(chapters) {
+			arrow = " → " + chapters[i+1].playbook
+		} else if c.outcome != "" {
+			arrow = " (" + c.outcome + ")"
+		}
+		fmt.Printf("%d. %-*s %s%s\n", i+1, labelWidth, c.label, c.playbook, arrow)
+		if c.findings != "" {
+			fmt.Printf("   %s\n", truncate(c.findings, 110))
+		}
+	}
+
+	if n.Evaluation != nil {
+		fmt.Println()
+		parts := []string{fmt.Sprintf("diagnosis %.0f%%", n.Evaluation.DiagnosisScore*100)}
+		if n.Remediation != nil {
+			parts = append(parts, fmt.Sprintf("remediation %.0f%%", n.Evaluation.RemediationScore*100))
+		}
+		fmt.Printf("Overall: %.0f%% (%s)\n", n.Evaluation.OverallScore*100, strings.Join(parts, " · "))
+	}
+}
+
+func printIncidentJourney(gatewayURL, apiKey, runID string, summary bool) {
 	n, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if summary {
+		printIncidentHopSummary(n)
+		return
 	}
 
 	divider := strings.Repeat("═", 60)
