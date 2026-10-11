@@ -113,6 +113,38 @@ type resolvedHost struct {
 
 // connStrPort extracts the port number from a libpq connection string or
 // "host:port" address. Returns "" when no port is found.
+func connStrHost(s string) string {
+	// A bare port number (digits only, e.g. the caller passed just "58989")
+	// carries no host information at all — return empty, not the digits
+	// themselves, so callers can tell "no host known" apart from a real host
+	// that happens to parse oddly.
+	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
+		return ""
+	}
+	// libpq keyword format: "... host=myhost ..."
+	for _, field := range strings.Fields(s) {
+		if strings.HasPrefix(field, "host=") {
+			h := strings.TrimPrefix(field, "host=")
+			if h != "" {
+				return h
+			}
+		}
+	}
+	// "host:port" / URI format (after stripping scheme and userinfo)
+	s = strings.TrimPrefix(s, "postgresql://")
+	s = strings.TrimPrefix(s, "postgres://")
+	if idx := strings.LastIndex(s, "@"); idx >= 0 {
+		s = s[idx+1:]
+	}
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		return s[:idx]
+	}
+	if sl := strings.IndexAny(s, "/?"); sl >= 0 {
+		s = s[:sl]
+	}
+	return s
+}
+
 func connStrPort(s string) string {
 	// libpq keyword format: "... port=5432 ..."
 	for _, field := range strings.Fields(s) {
@@ -160,17 +192,48 @@ func resolveHost(serverID string) (resolvedHost, error) {
 	serverID = strings.TrimSpace(serverID)
 	db, ok := ic.DBServers[serverID]
 	if !ok {
-		// Fallback 1: treat target as a connection string and match by port.
+		// Fallback 1: treat target as a connection string and match by host+port.
 		// This allows the LLM to pass the connection string from triage findings
 		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
+		// Matches on host+port together, not port alone: 5432 is Postgres's own
+		// default and collides constantly across unrelated registered servers —
+		// found live (2026-10-10): a real VM target and two unrelated Docker
+		// servers all shared port 5432 in the same infra config. Port-only
+		// matching silently picked whichever candidate came first in Go's own
+		// randomized map iteration order — non-deterministic across runs, and it
+		// genuinely resolved to the wrong real server during a live diagnosis.
+		// If host+port still matches more than one server, refuse rather than
+		// guess, the same "don't guess, report and escalate" principle every
+		// other resolution failure in this function already follows.
 		if port := connStrPort(serverID); port != "" {
+			// A bare port number (host == "") carries no host info to match
+			// on — fall back to port-only matching in that case specifically,
+			// still collecting every match and refusing on ambiguity exactly
+			// like the host+port path below.
+			host := connStrHost(serverID)
+			var matches []string
 			for id, candidate := range ic.DBServers {
-				if connStrPort(candidate.ConnectionString) == port {
-					db = candidate
-					serverID = id
-					ok = true
-					break
+				if connStrPort(candidate.ConnectionString) != port {
+					continue
 				}
+				if host != "" && connStrHost(candidate.ConnectionString) != host {
+					continue
+				}
+				matches = append(matches, id)
+			}
+			switch len(matches) {
+			case 0:
+				// no match — fall through to Fallback 2
+			case 1:
+				db = ic.DBServers[matches[0]]
+				serverID = matches[0]
+				ok = true
+			default:
+				infraConfigMu.RUnlock()
+				sort.Strings(matches)
+				return resolvedHost{}, fmt.Errorf(
+					"target %q matches multiple registered servers by host+port (%s) — refusing to guess which one; use the exact server ID instead",
+					serverID, strings.Join(matches, ", "))
 			}
 		}
 	}

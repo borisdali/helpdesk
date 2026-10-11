@@ -1269,6 +1269,98 @@ func TestResolveHost_PortFallback_NoMatch(t *testing.T) {
 	}
 }
 
+// withTwoServersSamePort registers two real, distinct db_servers that both
+// use port 5432 but different hosts — the exact shape found live (2026-10-10):
+// a real VM target and an unrelated Docker server both on Postgres's own
+// default port in the same infra config.
+func withTwoServersSamePort(t *testing.T) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"vm-target": {
+				Name:             "vm-target",
+				ConnectionString: "host=real-vm.test port=5432 dbname=postgres user=postgres",
+				VMName:           "__vm__",
+				SystemdUnit:      "postgresql",
+			},
+			"docker-target": {
+				Name:             "docker-target",
+				ConnectionString: "host=localhost port=5432 dbname=postgres user=postgres",
+				VMName:           "__docker__",
+				ContainerName:    "unrelated-container",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"__vm__":     {Name: "__vm__", Runtime: ""},
+			"__docker__": {Name: "__docker__", Runtime: "docker"},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// TestResolveHost_PortFallback_HostDisambiguates proves the fix: two servers
+// sharing port 5432 but different hosts no longer collide — the host in the
+// target connection string correctly picks the one that actually matches,
+// instead of whichever candidate Go's randomized map iteration happened to
+// visit first.
+func TestResolveHost_PortFallback_HostDisambiguates(t *testing.T) {
+	withTwoServersSamePort(t)
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=localhost port=5432 dbname=postgres user=postgres",
+	})
+	if err != nil {
+		t.Fatalf("checkHostImpl: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker (should have resolved to docker-target, not vm-target)", result.Runtime)
+	}
+}
+
+// TestResolveHost_PortFallback_AmbiguousHostPort proves the real bug found
+// live (2026-10-10): two servers sharing the exact same host AND port must
+// refuse rather than silently pick one.
+func TestResolveHost_PortFallback_AmbiguousHostPort(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"server-a": {Name: "server-a", ConnectionString: "host=shared.test port=5432 dbname=a user=postgres", VMName: "__a__"},
+			"server-b": {Name: "server-b", ConnectionString: "host=shared.test port=5432 dbname=b user=postgres", VMName: "__b__"},
+		},
+		VMs: map[string]infra.VM{
+			"__a__": {Name: "__a__", Runtime: "docker"},
+			"__b__": {Name: "__b__", Runtime: "docker"},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=shared.test port=5432 dbname=x user=postgres",
+	})
+	if err == nil {
+		t.Fatal("expected a refusal error for an ambiguous host+port match, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple registered servers") {
+		t.Errorf("error %q should explain the ambiguity, not silently resolve", err.Error())
+	}
+}
+
+// TestResolveHost_PortFallback_BarePortAmbiguous: a bare port number carries
+// no host info to disambiguate with — when it matches more than one server,
+// refuse the same way the host+port case does, rather than falling back to
+// the old pick-first-in-map-order behavior.
+func TestResolveHost_PortFallback_BarePortAmbiguous(t *testing.T) {
+	withTwoServersSamePort(t)
+
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "5432"})
+	if err == nil {
+		t.Fatal("expected a refusal error for an ambiguous bare-port match, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple registered servers") {
+		t.Errorf("error %q should explain the ambiguity, not silently resolve", err.Error())
+	}
+}
+
 // ── containerRuntimeBin ───────────────────────────────────────────────────────
 
 func TestContainerRuntimeBin(t *testing.T) {
