@@ -518,6 +518,45 @@ func TestRestartService_Success(t *testing.T) {
 	}
 }
 
+// TestRestartService_DispatchesViaSudo is a regression test for a real bug
+// found live (2026-10-11): restart_service dispatched a bare
+// `systemctl restart <unit>`, never through sudo, so the NOPASSWD sudoers
+// grant set up for exactly this command never actually took effect — a
+// bare, unprivileged systemctl mutation goes through polkit instead and is
+// rejected ("Interactive authentication required"), distinct from any real
+// service failure. The agent's own restart request silently never worked
+// all night; PostgreSQL happened to come back up moments later via an
+// unrelated systemd retry, masking the gap.
+func TestRestartService_DispatchesViaSudo(t *testing.T) {
+	withSystemdInfra(t)
+	capture := &argCapturingRunner{responses: []mockResponse{{output: "", err: nil}}}
+	oldRunner := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = oldRunner }()
+
+	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{
+		Target: "prod_db",
+		Reason: "test",
+	})
+	if err != nil {
+		t.Fatalf("restartServiceImpl: %v", err)
+	}
+	if len(capture.calls) != 1 {
+		t.Fatalf("expected exactly 1 dispatched call, got %d: %v", len(capture.calls), capture.calls)
+	}
+	got := capture.calls[0]
+	want := []string{"sudo", "systemctl", "restart", "postgresql-16"}
+	if len(got) != len(want) {
+		t.Fatalf("dispatched command = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("dispatched command = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 func TestRestartService_WrongType(t *testing.T) {
 	withDockerInfra(t)
 	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{

@@ -1233,7 +1233,20 @@ func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartRe
 	start := time.Now()
 	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
 	// comment; dispatches over real SSH for a VM target, local exec otherwise.
-	out, runErr := runOnHost(ctx, host, "systemctl", []string{"restart", host.SystemdUnit}, nil)
+	// "sudo" is required here, not optional: a NOPASSWD sudoers grant (see
+	// testing/docker/setup-pgbackrest-vm.sh) only takes effect when a command
+	// is actually invoked THROUGH sudo — a bare `systemctl restart` as an
+	// unprivileged user goes through polkit instead and is rejected outright
+	// ("Interactive authentication required"), distinct from any real service
+	// failure. Found live (2026-10-11): the dispatch user's own restart
+	// request failed this way in ~114ms — instantly, before ever reaching
+	// PostgreSQL — while PostgreSQL itself came up cleanly ~19s later via
+	// systemd's own unrelated retry policy, making it look like "the restart
+	// eventually worked" when the agent's own attempt never actually ran.
+	// `systemctl show` (read-only) needs no such prefix — only the mutating
+	// `restart` verb goes through polkit at all, which is why that call has
+	// worked unprivileged all along.
+	out, runErr := runOnHost(ctx, host, "sudo", []string{"systemctl", "restart", host.SystemdUnit}, nil)
 	duration := time.Since(start)
 	output := strings.TrimSpace(out)
 

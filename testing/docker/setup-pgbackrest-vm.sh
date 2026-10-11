@@ -91,6 +91,17 @@ esac
 systemctl enable --now "$SSH_UNIT"
 systemctl enable --now "$PG_UNIT"
 
+# A stock OpenSSH install auto-generates ed25519, ECDSA, and RSA host keys —
+# same issue Dockerfile.pgbackrest already hit and fixed the same way: a real
+# SSH client's own host-key-algorithm negotiation can pick a different type
+# than whatever's pinned in a dispatching agent's known_hosts, producing
+# "knownhosts: key mismatch" even though the right key is present and
+# correct, just under a type the client didn't ask for. Removing the other
+# types outright means sshd can only ever offer the one we actually pin.
+rm -f /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key.pub \
+      /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key.pub
+systemctl restart "$SSH_UNIT"
+
 # ── 3. Authorize the project's existing test SSH key ────────────────────
 # Reuses the same key pair Dockerfile.pgbackrest already authorizes for its
 # own SSH-dispatch testing, rather than generating a new one — swap in your
@@ -106,6 +117,16 @@ else
 fi
 chown postgres:postgres ~postgres/.ssh/authorized_keys 2>/dev/null || true
 chmod 600 ~postgres/.ssh/authorized_keys 2>/dev/null || true
+
+# ── 3b. Journal read access ──────────────────────────────────────────────
+# get_host_logs (journalctl) needs this — without it, journalctl silently
+# returns "No journal files were opened due to insufficient permissions"
+# for this user, found live (2026-10-11): the dispatch user had no journal
+# access at all, meaning every get_host_logs call for a systemd target had
+# been returning nothing useful all along, undetected because
+# read_pg_log_file's own fallback happened to carry the real diagnosis
+# anyway. No sudo involved — group membership alone grants journal read.
+usermod -aG systemd-journal postgres
 
 # ── 4. Passwordless sudo for exactly the commands dispatch needs ────────
 # Both agents/sysadmin's own SSH dispatch (restart_service/check_host) and
