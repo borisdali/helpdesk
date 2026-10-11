@@ -546,6 +546,28 @@ The `Score` line matches the `SCORE` column in `vault incidents <series-id>` —
 
 `Origin`/`Status`/`Attribution` (and, once populated, `Bundle`/`Draft playbook`) come from the same incidents-table row the all-incidents listing above reads — see [docs/INCIDENTS.md § The Incident Receipt](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full field reference. Shown only when a row exists for this run; a pre-v0.29 or never-tracked run omits this block entirely rather than showing empty values.
 
+**`--summary`: one line per hop.** A multi-hop escalation chain's full deep-dive view above can run long — add `--summary` to condense it to one line per hop (triage/escalation/remediation playbook and outcome, truncated findings) plus a final score line, with none of the hypothesis/gate/feedback detail:
+
+```bash
+faulttest vault incidents plr_t1 --summary \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+```
+INCIDENT plr_t1 — resolved in 145s
+
+1. TRIAGE        pbs_connection_triage → pbs_sysadmin_host_triage
+   database unreachable, escalating for host-level inspection
+2. ESCALATION 1  pbs_sysadmin_host_triage → pbs_k8s_pod_crash_remediate
+   dmesg shows OOM-killer event
+3. REMEDIATION   pbs_k8s_pod_crash_remediate (resolved)
+   pod restarted with a higher memory limit
+
+Overall: 91% (diagnosis 50% · remediation 100%)
+```
+
+Reads the same `incidentNarrative` the full view fetches — no extra API calls. Has no effect outside deep-dive mode (the fault-id/series-id list view and the no-argument all-incidents listing both ignore it).
+
 **Verification warnings appear inline, when present.** If a chapter's underlying tool calls
 weren't fully verified — the agent narrated calling a tool that never actually executed, or a real
 tool call targeted a different server than requested — an inline warning line prints right under
