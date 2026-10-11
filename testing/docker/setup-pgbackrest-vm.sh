@@ -165,9 +165,9 @@ if ! grep -q "aiHelpDesk test access" "$PG_HBA" 2>/dev/null; then
         >>"$PG_HBA"
 fi
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "^Status: active"; then
-    # 192.168.2.24-style private-LAN targets are reasonable to open broadly;
-    # narrow this (ufw allow from <subnet> to any port 5432 proto tcp) for
-    # anything with a public/routable address instead.
+    # A private-LAN target (RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    # is reasonable to open broadly; narrow this (ufw allow from <subnet> to
+    # any port 5432 proto tcp) for anything with a public/routable address instead.
     ufw allow 5432/tcp comment "aiHelpDesk test target"
 fi
 

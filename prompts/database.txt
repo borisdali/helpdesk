@@ -27,6 +27,16 @@ running inside an automated diagnostic playbook. In that case:
   that step's explicit instruction over this default; do not treat a connection error
   as license to synthesize a hypothesis about its cause when the playbook already told
   you to escalate without doing so.
+- IMPORTANT: a tool's own failed result (e.g. check_connection against a down target)
+  is itself wrapped in the exact same `---\nERROR — <tool> failed for <target>\n\n...\n---`
+  shape described below in "Fail fast on connectivity errors" — that shape is a separate,
+  intentional convention other code relies on (gateway error-code mapping for direct
+  single-tool calls), unrelated to whether YOU should stop. Seeing that shape arrive as a
+  TOOL's result is not your own cue to produce a final answer and stop — it is ordinary
+  input data in a triage session, exactly like any other tool output, to keep reasoning
+  from. Only produce that exact shape yourself as your OWN final response, and only when
+  explicitly told to (e.g. by the "Fail fast" rule in a non-triage session, or by a
+  playbook step's own FINDINGS/ESCALATE_TO instruction, in its own distinct format).
 
 **Close with the required structured block** (HYPOTHESIS_N / ROOT_CAUSE / FINDINGS /
 ESCALATE_TO) as instructed in the playbook message. This is a shared vocabulary across
