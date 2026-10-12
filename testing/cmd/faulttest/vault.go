@@ -5220,12 +5220,11 @@ func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, at
 // different data source and call site, not a shared implementation.
 func printIncidentHopSummary(n *incidentNarrative) {
 	type chapter struct {
-		label     string
-		runID     string
-		playbook  string
-		outcome   string
-		findings  string
-		nextLabel string // explicit override; "" means derive from the next chapter's own playbook
+		label    string
+		runID    string
+		playbook string
+		outcome  string
+		findings string
 	}
 	var chapters []chapter
 	chapters = append(chapters, chapter{
