@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.1"
+version: "1.3"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -33,6 +33,17 @@ guidance: |
   - get_pgbackrest_status (Step 1 below) reports status_code != 0 (broken
     repo/stanza) — there is nothing safe to restore from.
   - get_pgbackrest_status reports no successful backup has ever completed.
+  - get_pgbackrest_status reports backup_stale=true — the most recent
+    backup is older than expected, and this system does not currently
+    verify that the WAL needed to reach a consistent recovery point from it
+    is actually present and continuous in the repo (staleness here is a
+    pure backup-age check, nothing more). Taking a fresh backup is not a
+    fallback: the data directory is already confirmed corrupted/missing
+    pg_control, so there is nothing valid left to back up from, online or
+    offline. This is a human judgment call — do not emit TRANSITION_TO or
+    ESCALATE_TO for this condition; a human must decide whether the stale
+    backup is still worth restoring from given the alternative is no
+    recovery at all.
   - Prior findings mention a replica or primary/replica topology — this
     playbook only handles a single, standalone instance.
   - You have any doubt the instance is actually down — restore_from_backup
@@ -44,7 +55,9 @@ guidance: |
   trust the prior playbook's diagnosis alone — reconfirm status_code=0,
   backup_stale=false, and a non-empty last_backup_label yourself before
   proceeding, the same discipline run_pgbackrest_backup's own remediation
-  already applies to a stale-backup finding.
+  already applies to a stale-backup finding. If any precondition above
+  fails, stop here and follow its own instruction instead of continuing to
+  Step 2.
 
   Step 2 — Restore from the latest backup:
   Call restore_from_backup with the same connection_string (target). This
@@ -92,10 +105,12 @@ guidance: |
   restart_container/restart_service. Do NOT retry restore_from_backup more than once — if
   it fails or refuses, report the failure and stop so a human can
   investigate. Do NOT emit TRANSITION_TO or ESCALATE_TO — this is a
-  terminal action playbook. Your job ends with FINDINGS.
+  terminal action playbook. Your job ends with FINDINGS, including when a
+  PRECONDITION CHECK fails above.
 
 escalation:
   - "get_pgbackrest_status reports status_code != 0 or no successful backup ever completed"
+  - "get_pgbackrest_status reports backup_stale=true — human judgment call on whether to restore from it anyway; no automated target"
   - "restore_from_backup refuses because the instance is still accepting connections — the prior diagnosis may be wrong"
   - "restart_container/restart_service fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
   - "logs show a new PANIC/FATAL immediately after restart — escalate rather than retry"
