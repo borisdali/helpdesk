@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_health_triage
 name: pgBackRest Backup-Job Health Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -9,11 +9,16 @@ approval_mode: manual
 # Allow-list of same-domain follow-on playbooks (TRANSITION_TO targets).
 # The gateway validates emitted TRANSITION_TO directives against this list and
 # coerces anything outside it to requires_operator_approval — preventing the
-# model from inventing playbook names. Only Ending C (stale) transitions;
-# Ending B (repo broken) has no safe automated remediation — see
-# pbs_pgbackrest_backup_remediate's own description for why.
+# model from inventing playbook names. Ending C (stale) transitions to
+# pbs_pgbackrest_backup_remediate; Ending D (healthy) transitions to
+# pbs_pgbackrest_restore_remediate ONLY when prior findings flag a real
+# data-loss context (v0.31 — see Ending D's own guidance below), otherwise
+# it stays ESCALATE_TO: none as before. Ending B (repo broken) has no safe
+# automated remediation — see pbs_pgbackrest_backup_remediate's own
+# description for why.
 transitions_to:
   - pbs_pgbackrest_backup_remediate
+  - pbs_pgbackrest_restore_remediate
 problem_class: availability
 author: aiHelpDesk
 description: |
@@ -81,8 +86,17 @@ guidance: |
   Ending D — healthy (status_code=0, backup_stale=false, a backup has succeeded):
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   ROOT_CAUSE: HYPOTHESIS_1
-  FINDINGS: status_code=0; backup_stale=false; last_backup_label=<label>; last_backup_time=<timestamp>; no action needed
-  ESCALATE_TO: none
+  FINDINGS: status_code=0; backup_stale=false; last_backup_label=<label>; last_backup_time=<timestamp>
+
+  Check the findings you were handed from the prior triage (if any) before
+  choosing your next line. If they explicitly state
+  data_loss_restore_candidate=true — meaning a prior triage already
+  confirmed actual data-directory loss/corruption on this instance, not a
+  routine backup-health check — the healthy backup you just confirmed is
+  exactly what's needed to recover it:
+    TRANSITION_TO: pbs_pgbackrest_restore_remediate
+  Otherwise, this is a routine health check with nothing to do:
+    ESCALATE_TO: none
 escalation:
   - "status_code != 0 — pgBackRest cannot determine its own backup state"
   - "backup_stale=true — the most recent successful backup is older than expected"

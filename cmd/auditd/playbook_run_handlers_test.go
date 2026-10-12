@@ -113,7 +113,7 @@ func TestPlaybookRunHandlers_Update_OK(t *testing.T) {
 	// Update it.
 	body, _ := json.Marshal(map[string]string{
 		"outcome":          "escalated",
-		"escalated_to":     "pbs_db_config_recovery",
+		"escalated_to":     "pbs_db_config_triage",
 		"findings_summary": "Logs show invalid parameter value.",
 	})
 	req := httptest.NewRequest(http.MethodPatch, "/v1/fleet/playbook-runs/"+run.RunID, bytes.NewReader(body))

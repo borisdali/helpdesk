@@ -1100,7 +1100,7 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	// remediation_series_id — a target the model never mentioned — misrepresenting
 	// its own conclusion as an unresolved handoff. Found live: a wal-stale-slot
 	// triage run concluded "database healthy, false alarm" with ESCALATE_TO: none,
-	// but still surfaced transition_target: pbs_db_config_recovery and a
+	// but still surfaced transition_target: pbs_db_config_triage and a
 	// misleading "protocol violation — agent omitted" log line.
 	if req.GateEscalation && req.RemediationSeriesID != "" &&
 		prev.escalatedTo == "" && prev.transitionTo == "" &&
@@ -1842,6 +1842,38 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// run.EscalatedTo/TransitionedTo can be stale: when force-mode
+	// auto-chaining already advanced several hops deep before the gate fired
+	// (e.g. triage -> docker_inspect -> pgbackrest_health_triage, THEN gated
+	// trying to reach pgbackrest_restore_remediate), chainEscalation
+	// deliberately never overwrites the PRIMARY run's own first-hop signal
+	// once the chain has moved past it (see its own doc comment) — that
+	// guard exists to stop a downstream hop's gated transition from
+	// corrupting the triage run's persisted field and making
+	// handleGetIncident misclassify it. But it means run.EscalatedTo here
+	// still names the FIRST hop's target (already completed, its own run
+	// already exists) rather than the REAL hop awaiting this decision.
+	// Walk the prior_run_id chain forward (same mechanism
+	// fetchEscalationHops/fetchNextHop already use) to find the actual leaf —
+	// the hop with no successor yet — and act on ITS signal and RunID
+	// instead. In the common case (gate fires on the primary hop directly,
+	// chain never advanced), fetchNextHop(run.RunID) finds nothing and
+	// leafRun stays run — zero behavior change. Found live 2026-10-08: a
+	// real db-pgdata-corrupted run approved via this path re-dispatched
+	// pbs_sysadmin_host_triage (the already-completed first hop) instead
+	// of continuing from pbs_pgbackrest_health_triage's own pending
+	// TRANSITION_TO pbs_pgbackrest_restore_remediate — the real remediation
+	// playbook never ran, while the duplicate dead-ended at a second,
+	// unrelated gate (trust_not_earned).
+	leafRun := run
+	for i := 0; i < maxEscalationHops; i++ {
+		next := g.fetchNextHop(r.Context(), leafRun.RunID)
+		if next == nil {
+			break
+		}
+		leafRun = next
+	}
+
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
@@ -1869,12 +1901,13 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// remediation playbook doesn't exist, we want a clean 404 with no audit
 	// footprint — not a half-finished gate that leaves the run marked
 	// "transitioned" but with nothing actually running.
-	nextSeriesID := run.EscalatedTo
-	approvedOutcome := audit.OutcomeEscalated
-	isTransition := run.TransitionedTo != ""
+	// nextSeriesID/isTransition describe leafRun's own pending signal — the
+	// REAL hop being dispatched now, which may be several levels below the
+	// primary run (see leafRun's own comment above).
+	nextSeriesID := leafRun.EscalatedTo
+	isTransition := leafRun.TransitionedTo != ""
 	if isTransition {
-		nextSeriesID = run.TransitionedTo
-		approvedOutcome = audit.OutcomeTransitioned
+		nextSeriesID = leafRun.TransitionedTo
 	}
 	nextPB, err := g.fetchPlaybookBySeriesID(r.Context(), nextSeriesID)
 	if err != nil {
@@ -1882,10 +1915,21 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// primaryOutcome reflects the PRIMARY run's (runID's) own first-hop
+	// signal — distinct from nextSeriesID/isTransition above. chainEscalation
+	// deliberately never updates run.EscalatedTo/TransitionedTo past the
+	// first hop (see leafRun's own comment), so this is simply re-confirming
+	// whatever that original signal already was, now that the gate is
+	// resolved — it has nothing to do with which hop is actually dispatched.
+	primaryOutcome := audit.OutcomeEscalated
+	if run.TransitionedTo != "" {
+		primaryOutcome = audit.OutcomeTransitioned
+	}
+
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
 	// gate_reason passed through from run — see the denied branch above for why.
-	g.recordPlaybookRunComplete(r.Context(), runID, approvedOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
+	g.recordPlaybookRunComplete(r.Context(), runID, primaryOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
 	// Store at-gate feedback when provided. Captured before remediation runs —
 	// a cleaner signal than post-incident feedback because the operator hasn't
@@ -1923,7 +1967,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		ConnectionString: connStr,
 		Namespace:        namespace,
 		Purpose:          purpose,
-		PriorRunID:       runID,
+		PriorRunID:       leafRun.RunID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
 		IsTransition:     isTransition,
@@ -1942,19 +1986,18 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	principal := authz.PrincipalFromContext(r.Context())
 	g.enforceApprovalOverride(principal, &remReq.ApprovalMode, nextPB.ApprovalMode, remReq.ConnectionString, &warnings)
 
-	// Thread prior findings.
-	if prior, err := g.fetchPlaybookRun(r.Context(), runID); err == nil {
-		remReq.PriorFindings = prior.FindingsSummary
-	}
+	// Thread prior findings — from leafRun, the hop actually being continued
+	// from, not necessarily the primary run (see leafRun's own comment above).
+	remReq.PriorFindings = leafRun.FindingsSummary
 
 	remStartTraceID := r.Header.Get("X-Trace-ID")
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, runID, "", resolvedBy, remReq.Origin)
+	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, leafRun.RunID, "", resolvedBy, remReq.Origin)
 
 	slog.Info("playbook: gate approved — chaining to remediation",
-		"triage_run_id", runID, "remediation_series", nextSeriesID,
+		"triage_run_id", runID, "leaf_run_id", leafRun.RunID, "remediation_series", nextSeriesID,
 		"approval_mode", remReq.ApprovalMode, "resolved_by", resolvedBy)
 
 	if nextPB.ExecutionMode == "agent_approve" {
@@ -2199,7 +2242,7 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 	if req.ConnectionString != "" {
 		if pb.AgentName == agentNameSysadmin {
 			// Only pbs_db_restart_action actually calls restart_container — the
-			// other two sysadmin playbooks (pbs_sysadmin_docker_inspect,
+			// other two sysadmin playbooks (pbs_sysadmin_host_triage,
 			// pbs_wal_disk_full) explicitly forbid it in their own guidance and
 			// hand off to this playbook for the actual restart. Naming it here
 			// unconditionally for every sysadmin playbook was misleading (told the
@@ -4316,6 +4359,22 @@ func stripEscapedQuotes(s string) string {
 // losing, ever-growing battle — found live 2026-09-08, a single response
 // used three different connectors ("followed later by", "and then", "with")
 // in one quote, none of which an earlier "and"/"," -only regex recognized.
+//
+// Also splits on `;` and `—` (em dash) — not English connector words but
+// structural punctuation a model uses to glue multiple facts into one
+// quoted span without any interior `"` at all, so the `"`-only split above
+// never sees a boundary. Two real false positives found live 2026-10-07 on
+// the same db-pgdata-corrupted chain: a semicolon-joined
+// `"status_code=0; backup_stale=false; last_backup_label=..."` (each clause
+// individually present in the real tool output, but never as one contiguous
+// substring), and an em-dash-joined
+// `"PostgreSQL process has crashed... — server closed the connection
+// unexpectedly..."` (the model's own prose summary before the dash, with the
+// real verbatim log text only after it). Both are structural separators in
+// the same sense `"` already is here — a closed, finite set of punctuation
+// marks, not an open-ended connector vocabulary — so splitting on them keeps
+// the function's own reasoning rather than contradicting it.
+//
 // Every non-empty trimmed segment is verified independently, including
 // connector-phrase fragments — deliberately not trying to distinguish "a
 // separately-cited fact" from "an embedded identifier within one citation"
@@ -4327,11 +4386,13 @@ func stripEscapedQuotes(s string) string {
 // doesn't happen to appear in any real output is at worst reported noise,
 // not a missed fabrication — real facts remain independently checked
 // regardless of what glues them together. Returns a single-element slice
-// unchanged when no interior quote remains — the common case of one genuine
-// verbatim span.
+// unchanged when no interior quote/semicolon/em-dash remains — the common
+// case of one genuine verbatim span.
 func splitEvidenceQuoteParts(quote string) []string {
 	quote = stripEscapedQuotes(quote)
-	raw := strings.Split(quote, `"`)
+	raw := strings.FieldsFunc(quote, func(r rune) bool {
+		return r == '"' || r == ';' || r == '—'
+	})
 	parts := make([]string, 0, len(raw))
 	for _, p := range raw {
 		if t := strings.TrimSpace(p); t != "" {
@@ -4413,13 +4474,32 @@ func evidenceQuoteVerified(quote string, outputs []string) bool {
 // output's separately-spaced "active | f".
 var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|", " | ")
 
-// normalizeEvidenceText lowercases, canonicalizes field/value separator
-// punctuation (see evidenceSeparatorReplacer), strips literal double-quote
-// characters, and collapses whitespace runs to a single space —
+// evidenceEscapeSequenceReplacer unescapes the common whitespace escape
+// sequences a model can type literally in its EVIDENCE prose when citing
+// text it remembers as containing a newline/tab — e.g. "...connection
+// unexpectedly\n\tThis probably means..." where `\n`/`\t` are the literal
+// two-character sequences (backslash + letter), not real control characters.
+// The real tool output, already round-tripped through JSON storage, has
+// genuine newline/tab bytes there instead — normalizeEvidenceText's
+// whitespace-collapse (strings.Fields) correctly treats those as a boundary,
+// but it can't do the same for a literal backslash-n, which isn't whitespace
+// at all, so the two normalized strings never matched even though the quote
+// was byte-for-byte real. Found live 2026-10-07 on a real check_connection
+// psql error message. Same "formatting difference, not content difference"
+// principle as evidenceSeparatorReplacer/stripEscapedQuotes above — applied
+// to both the quote and the candidate output for the same reason those are,
+// even though only the quote side is expected to ever actually contain these
+// literal sequences.
+var evidenceEscapeSequenceReplacer = strings.NewReplacer(`\n`, " ", `\t`, " ", `\r`, " ")
+
+// normalizeEvidenceText lowercases, unescapes literal whitespace escape
+// sequences (see evidenceEscapeSequenceReplacer), canonicalizes field/value
+// separator punctuation (see evidenceSeparatorReplacer), strips literal
+// double-quote characters, and collapses whitespace runs to a single space —
 // deterministic, not fuzzy: closes formatting-only gaps (line breaks, double
-// spaces, casing, separator choice, embedded-quote punctuation) between a
-// verbatim-instructed quote and the raw tool output it came from, without
-// tolerating any actual content difference.
+// spaces, casing, separator choice, embedded-quote punctuation, escaped
+// whitespace) between a verbatim-instructed quote and the raw tool output it
+// came from, without tolerating any actual content difference.
 //
 // Stripping `"` (added 2026-09-08) closes a third live false positive on the
 // same fault (db-replica-disconnected, plr_25737a2d): a real Postgres log
@@ -4434,6 +4514,7 @@ var evidenceSeparatorReplacer = strings.NewReplacer("=", " | ", ":", " | ", "|",
 // can't turn a fabricated value into a verified one — same reasoning as
 // evidenceSeparatorReplacer above.
 func normalizeEvidenceText(s string) string {
+	s = evidenceEscapeSequenceReplacer.Replace(s)
 	s = evidenceSeparatorReplacer.Replace(s)
 	s = strings.ReplaceAll(s, `"`, "")
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")

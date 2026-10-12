@@ -90,7 +90,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	// before polling recovery. The chain runs asynchronously after gate approval,
 	// so without waiting here pollRecovery would start while the container is still
 	// down. waitForChildRunComplete waits for the immediate child run, which gives
-	// downstream transitions (e.g. pbs_sysadmin_docker_inspect → pbs_db_restart_action)
+	// downstream transitions (e.g. pbs_sysadmin_host_triage → pbs_db_restart_action)
 	// time to run and restart the service before we check connectivity.
 	remRunID := r.waitForChildRunComplete(ctx, gate.RunID, 5*time.Minute)
 
@@ -366,6 +366,41 @@ func (r *Remediator) waitForChildRunComplete(ctx context.Context, parentRunID st
 				return grandchild
 			}
 			return childRunID
+		case "gate_pending":
+			// Found live (2026-10-11): a SECOND objective-evidence gate can fire
+			// deeper in the chain than the one HandlePendingGate already
+			// force-approved (e.g. triage's own gate approved fine, but the
+			// pgbackrest health-triage hop it led to hit its own gate on
+			// backup_stale=true). Before this case existed, gate_pending fell
+			// into default below and was logged as "complete" — the real
+			// remediation playbook (restore_from_backup/restart_service) was
+			// never dispatched, and the 2-minute recovery-check loop ran the
+			// whole time against a database that nothing had ever tried to fix.
+			// Only auto-approve under force mode — any other mode means a
+			// human genuinely needs to see and resolve this gate themselves,
+			// same as the top-level one; silently approving a second
+			// destructive gate on their behalf outside force mode would be
+			// wrong, not just inconsistent.
+			if r.cfg.ApprovalMode != "force" {
+				slog.Info("waitForChildRunComplete: child run hit a second gate — not auto-approving outside force mode", "child", childRunID)
+				return childRunID
+			}
+			slog.Info("waitForChildRunComplete: child run hit a second gate mid-chain, force-approving", "child", childRunID)
+			if _, err := r.inner.ProceedEscalation(ctx, childRunID, faultlib.ProceedEscalationRequest{
+				Resolution:   "approved",
+				ResolvedBy:   r.cfg.OperatorID,
+				ApprovalMode: "auto",
+				Purpose:      "remediation",
+			}); err != nil {
+				slog.Warn("waitForChildRunComplete: force-approving second gate failed", "child", childRunID, "err", err)
+				return childRunID
+			}
+			remaining := time.Until(deadline)
+			grandchild := r.waitForChildRunComplete(ctx, childRunID, remaining)
+			if grandchild != "" {
+				return grandchild
+			}
+			return childRunID
 		default:
 			slog.Info("waitForChildRunComplete: child run complete", "child", childRunID, "outcome", outcome)
 			return childRunID
@@ -394,7 +429,17 @@ func printGatePreviewAndReport(preview map[string]any, report map[string]any) {
 			}
 			fmt.Println(line)
 			if desc != "" {
-				fmt.Printf("                      %s\n", desc)
+				// desc is a playbook's own YAML `description: |` block —
+				// its embedded newlines are block-literal line breaks from
+				// the source file, not paragraph breaks meant for this
+				// fixed-width display, so a plain %s left every line after
+				// the first unindented at the terminal's margin. wordWrap
+				// already collapses embedded whitespace (including
+				// newlines, via strings.Fields) and re-wraps at 70 cols
+				// with this label's own width as the continuation indent —
+				// same convention already used for Findings/Plan elsewhere
+				// in this package.
+				fmt.Printf("                      %s\n", wordWrap(desc, 70, "                      "))
 			}
 		}
 	}

@@ -494,8 +494,10 @@ failures:
     diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
     prompt: >
       Monitoring flagged that pgBackRest may not be able to report backup
-      status for this database. Please investigate backup health and
-      determine whether there's an actual problem.
+      status for this database. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      investigate backup health and determine whether there's an actual
+      problem.
     evaluation:
       expected_tools:
         - get_pgbackrest_status
@@ -511,6 +513,220 @@ failures:
         objective_evidence_signal: pgbackrest_backup_unhealthy
         narrative: "The agent should identify from get_pgbackrest_status that pgBackRest cannot access its own repository (a non-ok stanza status, likely reporting the stanza as \"[invalid]\" with a permission-denied detail in the repo-level status message), correctly distinguishing this filesystem-level failure from WAL-archiving health or a simple stale-backup finding, and recommend investigating the repo path's permissions/ownership rather than assuming a transient blip."
     timeout: 60s
+
+  - id: db-pgdata-corrupted
+    name: "Data directory corrupted — restore from latest backup"
+    category: database
+    severity: critical
+    description: >
+      The instance's own data directory is damaged beyond a simple restart
+      (pg_control missing) — the actual data-loss scenario pbs_db_data_loss_triage
+      exists for, not just a backup-health precondition like
+      db-pgbackrest-repo-unreadable. Closes v0.31's restore/recovery gap:
+      v0.30 only ever answered "is backup healthy?"; this fault proves the
+      narrowest real restore slice — restore to the latest pgBackRest
+      backup, single instance, no PITR-to-timestamp — actually works
+      end to end against real data loss.
+    # Same dedicated pgBackRest target as db-pgbackrest-repo-unreadable, for
+    # the same reason (a full-catalog sweep shares one connection string
+    # across every database-category fault; this needs its own container
+    # with a real backup already taken).
+    agent_conn_override: pgbackrest-db
+    prerequisites: |
+      Requires the dedicated pgBackRest target
+      (testing/docker/docker-compose.pgbackrest.yaml) with an initial
+      backup already taken (testing/docker/setup-pgbackrest-backup.sh), and
+      testing/docker/start-with-sshd.sh's container-survives-a-postgres-
+      crash fix (v0.31) — without it, deleting pg_control crashes the
+      whole container (postgres is PID 1), taking sshd down with it and
+      making the target unreachable by either of agents/sysadmin's
+      dispatch paths at the exact moment diagnosis/restore needs them.
+      Confirmed live, 2026-10-06.
+
+      Docker-only, same reasoning as db-pgbackrest-repo-unreadable: this
+      fault needs real filesystem access into the container, not a SQL-only
+      mechanism. No external_compat variant.
+
+      inject deliberately uses shell_exec (runs on the harness host, with
+      real `docker` CLI access), not docker_exec (which only runs inside
+      the container and cannot issue `docker restart` on itself) — the
+      crash must happen as part of the container's own supervised startup
+      so it lands in `docker logs` (get_host_logs is a literal `docker logs
+      --tail N`), not an out-of-band exec session's own stdout. Verified
+      live: a bare `rm` without a restart doesn't crash a running backend
+      (pg_control is read at startup, not continuously) — the container
+      must actually restart to make postgres attempt startup and panic.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        docker exec helpdesk-test-pg-pgbackrest rm -f /var/lib/postgresql/data/global/pg_control
+        docker restart helpdesk-test-pg-pgbackrest
+    teardown:
+      type: shell_exec
+      # Repairs infra directly, not through any agent tool — same convention
+      # every other fault's teardown uses, needed because --repeat stability
+      # runs skip remediation entirely (see docs/CONSISTENCY.md). The exact
+      # sequence verified live, 2026-10-06, against the real fixture: a
+      # stale postmaster.pid (left over from the abnormal exit) blocks
+      # pgbackrest restore outright ("[038]: unable to restore while
+      # PostgreSQL is running") until removed — --force does NOT bypass
+      # this, it means something else to pgBackRest.
+      script_inline: |
+        set -e
+        docker exec -u postgres helpdesk-test-pg-pgbackrest sh -c '
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza=main --delta restore
+        '
+        docker restart helpdesk-test-pg-pgbackrest
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    prompt: >
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
+    evaluation:
+      expected_tools:
+        - get_host_logs
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "pbs_db_data_loss_triage (DB agent) has no tool of its own to read Docker container logs. It should front-load everything it CAN determine without log evidence — single_instance, backup_tool, pitr_decided — into FINDINGS, then emit ESCALATE_TO: pbs_sysadmin_host_triage rather than guessing the rest. That playbook calls get_host_logs, recognizes \"could not find the database system\" as a genuine data-loss signature, judges whether the logs suggest anything beyond a plain restore, and — if the prior findings plus its own evidence all qualify — emits TRANSITION_TO: pbs_pgbackrest_health_triage directly (same agent, no bounce back to the DB agent for a decision it's already equipped to make). That playbook calls get_pgbackrest_status, confirms a healthy non-stale backup (Ending D), sees the data_loss_restore_candidate=true finding, and emits TRANSITION_TO: pbs_pgbackrest_restore_remediate — none of the triage/inspection playbooks perform the restore itself."
+    # 300s, not the catalog's usual 90s: this is a 4-hop chain (data_loss_triage
+    # -> docker_inspect -> pgbackrest_health_triage -> pgbackrest_restore_remediate),
+    # one hop deeper than db-replica-container-stopped's own 3-hop chain
+    # (which uses 180s), and the last hop is a genuinely slow real restore +
+    # container restart + WAL replay, not a quick docker start. Found live,
+    # 2026-10-07: 90s cut the connection mid-remediation, right as
+    # restore_from_backup was running — the chain itself was correct, only
+    # the client timeout was too short to let it finish.
+    timeout: 300s
+
+  - id: db-pgdata-corrupted-vm
+    name: "Data directory corrupted — restore from latest backup (real host/VM)"
+    category: database
+    severity: critical
+    description: >
+      Same scenario as db-pgdata-corrupted (pg_control missing, restore from
+      pgBackRest), but against a real, SSH-reachable Linux host/VM running
+      PostgreSQL as a genuine systemd service — not a Docker container. Added
+      v0.31 to prove pbs_db_data_loss_triage's full chain, and
+      agents/sysadmin's own dispatch (check_host/get_host_logs/
+      read_pg_log_file/restart_service), work against a real systemd target,
+      on par with the Docker and Kubernetes paths. Reuses the identical
+      diagnosis/remediation playbook chain — only the injection/teardown
+      mechanism and the target's own runtime differ.
+    # No agent_conn_override: unlike db-pgdata-corrupted's dedicated Docker
+    # target, this fault's target is the real VM supplied via --ssh-host —
+    # point --conn/--agent-conn at that VM's own infra-config entry.
+    prerequisites: |
+      Requires a real Linux VM (Ubuntu or RHEL/Red Hat) with PostgreSQL and
+      pgBackRest installed and an initial backup already taken — see
+      testing/docker/setup-pgbackrest-vm.sh (run once, manually, against your
+      own VM; not part of any automated `make` target, since this project
+      doesn't own or provision the VM itself). Requires a
+      testing.infra.json db_server entry for the VM with systemd_unit and
+      pg_log_dir set correctly for your distro (the setup script prints the
+      exact entry to add). Run with:
+        go run ./testing/cmd/faulttest run --ids db-pgdata-corrupted-vm \
+          --remediate --ssh-host=<user@vm-host> --ssh-port=<port> \
+          --ssh-key=<path> --conn=<vm db_server's connection_string> \
+          --agent-conn=<vm db_server's key> --infra-config=<path> ...
+
+      The injection/teardown scripts below assume the dispatch user has
+      passwordless sudo for `systemctl restart <unit>` (or runs as root) —
+      the same privilege agents/sysadmin's own restart_service dispatch
+      needs on the agent side; see the setup script's own comments for the
+      exact sudoers line. PG_UNIT below is a placeholder — Ubuntu/Debian's
+      package-managed postgresql.service is a meta-unit covering every
+      registered cluster; RHEL/Red Hat's package creates a plain
+      postgresql-<version> unit instead. Edit it to match your real VM
+      before running, same as you'd edit any other environment-specific
+      value in a customer-facing runbook.
+
+      No external_compat variant: ssh_exec always requires real OS access,
+      the same reasoning db-pg-hba-corrupt's own SSH-injectable faults
+      already establish.
+    inject:
+      type: ssh_exec
+      exec_via: "" # filled by --ssh-host at runtime
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
+        DATA_DIR=$(psql -t -c "SHOW data_directory;" 2>/dev/null | tr -d ' ')
+        if [ -z "$DATA_DIR" ]; then
+          echo "could not determine data_directory via psql — is postgres reachable?" >&2
+          exit 1
+        fi
+        rm -f "$DATA_DIR/global/pg_control"
+        # Unlike `docker restart <container>` (db-pgdata-corrupted's own
+        # equivalent line), which always exits 0 regardless of whether the
+        # containerized process subsequently crashes, `systemctl restart` is
+        # synchronous — it waits for the unit to report started/failed and
+        # returns non-zero when it fails to start. Postgres genuinely cannot
+        # start without pg_control, so this restart failing is the CORRECT,
+        # intended outcome proving the corruption took effect — not a sign
+        # injection itself failed. Found live (2026-10-09): under `set -e`,
+        # an un-tolerated failure here aborted the script and faulttest
+        # reported "injection failed" even though the fault had been
+        # successfully induced (service genuinely down, as intended).
+        sudo systemctl restart "$PG_UNIT" || true
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      # Repairs infra directly, not through any agent tool — same convention
+      # db-pgdata-corrupted's own teardown uses, needed because --repeat
+      # stability runs skip remediation entirely (see docs/CONSISTENCY.md).
+      # Reads PGDATA from pgbackrest.conf, not psql — postgres is down at
+      # teardown time.
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
+        STANZA="main" # EDIT to match your real VM's pgBackRest stanza
+        # No `sudo -u postgres` wrapper here: setup-pgbackrest-vm.sh authorizes
+        # the dispatch SSH key under ~postgres/.ssh/authorized_keys and the SSH
+        # login IS already postgres (per the recommended ssh_user: "postgres"
+        # infra entry) — its sudoers grant only covers run-as=root for
+        # `systemctl restart`/`show`, not run-as=postgres, so wrapping in
+        # `sudo -u postgres` would be rejected outright ("not allowed to
+        # execute ... as postgres"), not merely prompt for a password.
+        PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+        rm -f "$PGDATA/postmaster.pid"
+        pgbackrest --stanza="$STANZA" --delta restore
+        sudo systemctl restart "$PG_UNIT"
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    prompt: >
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
+    evaluation:
+      expected_tools:
+        - get_host_logs
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "Same chain as db-pgdata-corrupted, over a real systemd/VM target instead of Docker: pbs_db_data_loss_triage recognizes the \"[systemd: ...]\" hosting tag, front-loads single_instance/backup_tool/pitr_decided, and hands off to pbs_sysadmin_host_triage, which reads runtime=systemd from check_host, uses the systemd-specific field guidance (ActiveState/SubState/Result) instead of exitcode=/oomkilled=, and — since journalctl typically only shows service-lifecycle lines, not PostgreSQL's own output — calls read_pg_log_file for the real \"could not find the database system\" signature before transitioning to pbs_pgbackrest_health_triage, then pbs_pgbackrest_restore_remediate, which uses restart_service (not restart_container) once check_host confirms runtime=systemd."
+    # Same 300s reasoning as db-pgdata-corrupted — a 4-hop chain with a
+    # genuinely slow last hop (real restore + service restart + WAL replay).
+    timeout: 300s
 
   - id: db-connection-refused
     name: "Database connection refused"
@@ -561,7 +777,7 @@ failures:
           - "not accepting"
       expected_diagnosis:
         category: "connection_refused"
-        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections (connection refused error). The agent should note the very recent server uptime as evidence of a prior outage that has since recovered, or identify that the server is currently unreachable. For a Docker-hosted or container-hosted server, the correct action is to escalate to the sysadmin agent for container inspection (ESCALATE_TO: pbs_sysadmin_docker_inspect) since the agent cannot access Docker logs or container state directly — this escalation is the right outcome, not a premature one."
+        narrative: "The agent should identify that the PostgreSQL server is not running or not accepting connections (connection refused error). The agent should note the very recent server uptime as evidence of a prior outage that has since recovered, or identify that the server is currently unreachable. For a Docker-hosted or container-hosted server, the correct action is to escalate to the sysadmin agent for container inspection (ESCALATE_TO: pbs_sysadmin_host_triage) since the agent cannot access Docker logs or container state directly — this escalation is the right outcome, not a premature one."
     timeout: 30s
 
   - id: db-auth-failure
@@ -1613,7 +1829,7 @@ failures:
     # 60s (the old value) is enough for a single-hop response, but with
     # --approval-mode=force the gateway auto-chains synchronously within one
     # HTTP request — this fault's real chain (pbs_db_restart_triage ->
-    # ESCALATE_TO pbs_sysadmin_docker_inspect -> TRANSITION_TO
+    # ESCALATE_TO pbs_sysadmin_host_triage -> TRANSITION_TO
     # pbs_wal_disk_full) can take 3 LLM calls to complete. Live-confirmed
     # 2026-08-24: a 70s client timeout (60s + the 10s runViaPlaybook adds)
     # lost 2 of 3 --repeat reps to context deadline exceeded, even though the
@@ -1735,7 +1951,7 @@ failures:
         pg_ctl reload -D "$DATA_DIR" 2>/dev/null || kill -HUP "$(head -1 ${DATA_DIR}/postmaster.pid)"
     diagnosis_playbook_series_id: pbs_pg_hba_triage
     remediation:
-      playbook_id: pbs_db_config_recovery
+      playbook_id: pbs_db_config_triage
       verify_sql: "SELECT 1"
       verify_timeout: "120s"
     prompt: >

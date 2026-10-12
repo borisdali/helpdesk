@@ -51,8 +51,8 @@ func TestPlaybooks_SystemPlaybooksSeededAtStartup(t *testing.T) {
 		"pbs_lock_chain_remediate",
 		"pbs_replication_lag",
 		"pbs_db_restart_triage",
-		"pbs_db_config_recovery",
-		"pbs_db_pitr_recovery",
+		"pbs_db_config_triage",
+		"pbs_db_data_loss_triage",
 	}
 	seriesFound := map[string]bool{}
 	for _, pb := range playbooks {
@@ -785,15 +785,16 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 	})
 
 	t.Run("config_recovery_is_agent_with_evidence", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_db_config_recovery")
+		pb := getBySeriesID(t, "pbs_db_config_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
 		if ep, _ := pb["entry_point"].(bool); ep {
 			t.Error("entry_point = true, want false (config recovery is not an entry point)")
 		}
-		// config recovery uses transitions_to (same-domain follow-on to pitr_recovery),
-		// not escalates_to (cross-domain handoff). Directive split added in v0.16.
+		// config recovery uses transitions_to (same-domain follow-on to
+		// data_loss_triage), not escalates_to (cross-domain handoff).
+		// Directive split added in v0.16.
 		transitions, _ := pb["transitions_to"].([]any)
 		if len(transitions) == 0 {
 			t.Error("transitions_to is empty, want at least one series ID")
@@ -805,20 +806,112 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		t.Logf("config_recovery: transitions_to=%v requires_evidence=%v", transitions, evidence)
 	})
 
-	t.Run("pitr_recovery_is_agent_with_evidence", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_db_pitr_recovery")
+	t.Run("data_loss_triage_is_agent_with_evidence", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_db_data_loss_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if pt, _ := pb["playbook_type"].(string); pt != "triage" {
+			t.Errorf("playbook_type = %q, want triage", pt)
+		}
+		if am, _ := pb["approval_mode"].(string); am != "manual" {
+			t.Errorf("approval_mode = %q, want manual", am)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true, want false (reached via pbs_db_restart_triage's transition or its own evidence, not a preferred starting point)")
 		}
 		evidence, _ := pb["requires_evidence"].([]any)
 		if len(evidence) == 0 {
 			t.Error("requires_evidence is empty, want at least one pattern")
 		}
-		t.Logf("pitr_recovery: requires_evidence=%v", evidence)
+		// v0.31: escalates to pbs_sysadmin_host_triage (no log-reading tool
+		// of its own for a Docker-hosted target) and pbs_pgbackrest_health_triage
+		// (no backup-health tool of its own, Kubernetes path).
+		escalates, _ := pb["escalates_to"].([]any)
+		for _, want := range []string{"pbs_sysadmin_host_triage", "pbs_pgbackrest_health_triage"} {
+			found := false
+			for _, e := range escalates {
+				if s, _ := e.(string); s == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("pbs_db_data_loss_triage.escalates_to does not include %q; got %v", want, escalates)
+			}
+		}
+		t.Logf("data_loss_triage: requires_evidence=%v escalates_to=%v", evidence, escalates)
+	})
+
+	t.Run("docker_inspect_transitions_to_pgbackrest_health_triage", func(t *testing.T) {
+		// v0.31: a same-agent transition (both sysadmin_agent), not an
+		// escalation — pbs_sysadmin_host_triage judges the one
+		// evidence-dependent condition itself once it has real log text and
+		// acts on the combined picture, rather than bouncing back to the DB
+		// agent for a decision it's already equipped to make.
+		pb := getBySeriesID(t, "pbs_sysadmin_host_triage")
+		transitions, _ := pb["transitions_to"].([]any)
+		found := false
+		for _, tr := range transitions {
+			if s, _ := tr.(string); s == "pbs_pgbackrest_health_triage" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("pbs_sysadmin_host_triage.transitions_to does not include pbs_pgbackrest_health_triage; got %v", transitions)
+		}
+	})
+
+	t.Run("pgbackrest_health_triage_is_agent_with_restore_transition", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_pgbackrest_health_triage")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if pt, _ := pb["playbook_type"].(string); pt != "triage" {
+			t.Errorf("playbook_type = %q, want triage", pt)
+		}
+		if an, _ := pb["agent_name"].(string); an != "sysadmin_agent" {
+			t.Errorf("agent_name = %q, want sysadmin_agent", an)
+		}
+		// v0.31: Ending D (healthy) transitions to the restore remediation
+		// only when prior findings flag a real data-loss context — see
+		// docs/BACKUP.md §3. pbs_pgbackrest_backup_remediate (Ending C,
+		// stale) predates this and must still be present.
+		transitions, _ := pb["transitions_to"].([]any)
+		for _, want := range []string{"pbs_pgbackrest_backup_remediate", "pbs_pgbackrest_restore_remediate"} {
+			found := false
+			for _, tr := range transitions {
+				if s, _ := tr.(string); s == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("pbs_pgbackrest_health_triage.transitions_to does not include %q; got %v", want, transitions)
+			}
+		}
+	})
+
+	t.Run("pgbackrest_restore_remediate_is_agent_remediation", func(t *testing.T) {
+		pb := getBySeriesID(t, "pbs_pgbackrest_restore_remediate")
+		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
+			t.Errorf("execution_mode = %q, want agent", mode)
+		}
+		if pt, _ := pb["playbook_type"].(string); pt != "remediation" {
+			t.Errorf("playbook_type = %q, want remediation", pt)
+		}
+		if an, _ := pb["agent_name"].(string); an != "sysadmin_agent" {
+			t.Errorf("agent_name = %q, want sysadmin_agent", an)
+		}
+		if ep, _ := pb["entry_point"].(bool); ep {
+			t.Error("entry_point = true; remediation playbook should not be an entry point")
+		}
+		t.Logf("pgbackrest_restore_remediate: execution_mode=agent playbook_type=remediation agent_name=sysadmin_agent")
 	})
 
 	t.Run("sysadmin_docker_inspect_is_seeded", func(t *testing.T) {
-		pb := getBySeriesID(t, "pbs_sysadmin_docker_inspect")
+		pb := getBySeriesID(t, "pbs_sysadmin_host_triage")
 		if mode, _ := pb["execution_mode"].(string); mode != "agent" {
 			t.Errorf("execution_mode = %q, want agent", mode)
 		}
@@ -836,13 +929,13 @@ func TestPlaybooks_DBDownPlaybooksHaveAgentFields(t *testing.T) {
 		escalates, _ := pb["escalates_to"].([]any)
 		found := false
 		for _, e := range escalates {
-			if s, _ := e.(string); s == "pbs_sysadmin_docker_inspect" {
+			if s, _ := e.(string); s == "pbs_sysadmin_host_triage" {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("pbs_db_restart_triage.escalates_to does not include pbs_sysadmin_docker_inspect; got %v", escalates)
+			t.Errorf("pbs_db_restart_triage.escalates_to does not include pbs_sysadmin_host_triage; got %v", escalates)
 		}
 	})
 
@@ -1795,23 +1888,23 @@ func TestPlaybooks_IncidentNarrative_Full(t *testing.T) {
 	// The playbook catalog draws a hard line between diagnostic series (only
 	// ever reached via ESCALATE_TO) and remediation series (only ever reached
 	// via TRANSITION_TO) — see playbooks/database-restart-triage.yaml and
-	// playbooks/sysadmin-docker-inspect.yaml. This lets us assert the
+	// playbooks/sysadmin-host-triage.yaml. This lets us assert the
 	// classification is correct regardless of which path the LLM actually
 	// takes at runtime (direct transition, or escalate-then-transition).
 	//
 	// This is a regression test for the original bug: any successor run used
 	// to be labeled "remediation" unconditionally, so an ESCALATE_TO hop into
-	// pbs_sysadmin_docker_inspect would have wrongly appeared as remediation
+	// pbs_sysadmin_host_triage would have wrongly appeared as remediation
 	// instead of escalations[].
 	diagnosticSeries := map[string]bool{
-		"pbs_db_restart_triage":       true,
-		"pbs_sysadmin_docker_inspect": true,
+		"pbs_db_restart_triage":    true,
+		"pbs_sysadmin_host_triage": true,
 	}
 	remediationSeries := map[string]bool{
-		"pbs_db_config_recovery": true,
-		"pbs_db_pitr_recovery":   true,
-		"pbs_db_restart_action":  true,
-		"pbs_wal_disk_full":      true,
+		"pbs_db_config_triage":    true,
+		"pbs_db_data_loss_triage": true,
+		"pbs_db_restart_action":   true,
+		"pbs_wal_disk_full":       true,
 	}
 
 	escalations, _ := narrative["escalations"].([]any)

@@ -2157,17 +2157,46 @@ func fetchNextHop(gatewayURL, apiKey, runID string) *incidentRun {
 	return &result.Runs[0]
 }
 
+// playbookTypeCache memoizes isRemediationPlaybook's lookups for the
+// lifetime of one vault CLI invocation — rows in the same incidents table
+// commonly share a remediation series_id, and this process is
+// single-threaded (no goroutine fan-out), so a plain map needs no locking.
+var playbookTypeCache = map[string]string{}
+
+// isRemediationPlaybook reports whether seriesID's active playbook is
+// playbook_type "remediation" — the real classifier for "is this hop THE
+// remediation chapter", replacing the old "reached via TRANSITION_TO"
+// heuristic below. Fails open to false (treat as a diagnosis hop) on a
+// lookup error or empty seriesID, same discipline as the gateway's own
+// identically-purposed check in cmd/gateway/incident_narrative.go.
+func isRemediationPlaybook(gatewayURL, apiKey, seriesID string) bool {
+	if seriesID == "" {
+		return false
+	}
+	if v, ok := playbookTypeCache[seriesID]; ok {
+		return v == "remediation"
+	}
+	pbType := ""
+	if pb, err := fetchActivePlaybook(gatewayURL, apiKey, seriesID); err == nil {
+		pbType = pb.PlaybookType
+	}
+	playbookTypeCache[seriesID] = pbType
+	return pbType == "remediation"
+}
+
 // walkToRemediation walks the prior_run_id chain from a triage run and
-// returns the run that was reached via an explicit TRANSITION_TO signal —
+// returns the first hop whose own playbook is playbook_type "remediation" —
 // the true remediation run — or nil if the chain hasn't reached one yet
-// (still mid-escalation, or terminated without ever transitioning). This
-// mirrors the classification rule in cmd/gateway/incident_narrative.go's
-// fetchEscalationHops/handleGetIncident: a successor is classified by its
-// PREDECESSOR's EscalatedTo/TransitionedTo, not by chain position — a run
-// reached via ESCALATE_TO is another diagnosis hop, not remediation, however
-// many of those hops exist.
+// (still mid-escalation, or terminated without ever reaching one). Hops are
+// classified by their OWN playbook_type, not by which signal reached them:
+// TRANSITION_TO is also used for same-domain triage->triage hand-offs (e.g.
+// pbs_sysadmin_host_triage -> pbs_pgbackrest_health_triage), so the older
+// "reached via TRANSITION_TO" rule misclassified such a hop as remediation
+// and stopped the walk right there — found live on a real 4-hop
+// db-pgdata-corrupted chain where the true remediation run
+// (pbs_pgbackrest_restore_remediate) never appeared. Mirrors the identical
+// fix in cmd/gateway/incident_narrative.go's handleGetIncident.
 func walkToRemediation(gatewayURL, apiKey string, triageRun *incidentRun) *incidentRun {
-	predecessor := triageRun
 	seen := map[string]bool{triageRun.RunID: true}
 	cursor := triageRun.RunID
 	for i := 0; i < maxEscalationHops; i++ {
@@ -2178,17 +2207,14 @@ func walkToRemediation(gatewayURL, apiKey string, triageRun *incidentRun) *incid
 		if seen[hop.RunID] {
 			return nil // cycle — data anomaly, stop rather than loop forever
 		}
-		if predecessor.TransitionedTo != "" {
-			return hop // reached via TRANSITION_TO — this is the remediation run
+		if isRemediationPlaybook(gatewayURL, apiKey, hop.SeriesID) {
+			return hop
 		}
-		// Reached via ESCALATE_TO (or neither signal set — defensive
-		// default, never guess a hop into "remediation" without an
-		// explicit TRANSITION_TO): keep walking.
+		// Still a diagnosis hop: this playbook's own type isn't "remediation".
 		seen[hop.RunID] = true
-		predecessor = hop
 		cursor = hop.RunID
 	}
-	return nil // hit maxEscalationHops without reaching a transition
+	return nil // hit maxEscalationHops without reaching a remediation hop
 }
 
 // faultFromTraceID extracts the fault ID from a faulttest trace ID of the form
@@ -2375,10 +2401,11 @@ func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, s
 func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
-	var details bool
+	var details, summary bool
 	var origin, status, attribution string
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
+	fs.BoolVar(&summary, "summary", false, "Deep-dive mode only: print one line per hop instead of the full breakdown")
 	fs.StringVar(&origin, "origin", "", "Filter by origin: real or faulttest (all-incidents listing only)")
 	fs.StringVar(&status, "status", "", "Filter by status: open, resolved, escalated, or abandoned (all-incidents listing only)")
 	fs.StringVar(&attribution, "attribution", "", "Filter by root-cause attribution label (all-incidents listing only)")
@@ -2401,7 +2428,7 @@ func vaultIncidents(args []string) {
 			fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents <run-id>")
 			os.Exit(1)
 		}
-		printIncidentJourney(cfg.GatewayURL, cfg.GatewayAPIKey, arg)
+		printIncidentJourney(cfg.GatewayURL, cfg.GatewayAPIKey, arg, summary)
 		return
 	}
 
@@ -3445,11 +3472,12 @@ func nextVersion(current string) string {
 
 // vaultPlaybook is a minimal representation of a gateway playbook for suggest-update.
 type vaultPlaybook struct {
-	PlaybookID  string `json:"playbook_id"`
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
-	Guidance    string `json:"guidance"`
+	PlaybookID   string `json:"playbook_id"`
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	Description  string `json:"description"`
+	Guidance     string `json:"guidance"`
+	PlaybookType string `json:"playbook_type,omitempty"`
 }
 
 // fetchActivePlaybook retrieves the active playbook for the given series_id from the gateway.
@@ -5006,10 +5034,17 @@ type narrativeJourneyRef = audit.IncidentJourneyRef
 
 // narrativeEscalationHop mirrors gateway.EscalationHop for JSON decoding.
 type narrativeEscalationHop struct {
-	RunID                        string               `json:"run_id"`
-	Playbook                     string               `json:"playbook"`
-	Outcome                      string               `json:"outcome"`
-	EscalatedTo                  string               `json:"escalated_to,omitempty"`
+	RunID       string `json:"run_id"`
+	Playbook    string `json:"playbook"`
+	Outcome     string `json:"outcome"`
+	EscalatedTo string `json:"escalated_to,omitempty"`
+	// TransitionedTo is non-empty when this hop's own response was a
+	// same-domain TRANSITION_TO rather than a cross-domain ESCALATE_TO —
+	// e.g. pbs_sysadmin_host_triage transitioning to the still-triage-type
+	// pbs_pgbackrest_health_triage. A hop can land in Escalations via either
+	// signal now (see cmd/gateway/incident_narrative.go's classification
+	// fix) — never both set.
+	TransitionedTo               string               `json:"transitioned_to,omitempty"`
 	Findings                     string               `json:"findings,omitempty"`
 	DiagnosticReport             *narrativeDiagReport `json:"diagnostic_report,omitempty"`
 	Steps                        []narrativeStep      `json:"steps,omitempty"`
@@ -5054,6 +5089,7 @@ type incidentNarrative struct {
 		AcknowledgedAt time.Time `json:"acknowledged_at,omitempty"`
 		Resolution     string    `json:"resolution"`
 		Reason         string    `json:"reason,omitempty"`
+		GateReason     string    `json:"gate_reason,omitempty"`
 	} `json:"gate,omitempty"`
 	// Escalations holds every intermediate hop reached via ESCALATE_TO,
 	// strictly between Triage and the (optional) terminal Remediation.
@@ -5172,11 +5208,106 @@ func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, at
 	return result.Incidents, nil
 }
 
-func printIncidentJourney(gatewayURL, apiKey, runID string) {
+// printIncidentHopSummary prints one line per hop instead of the full
+// Findings/Hypotheses/flags breakdown printIncidentJourney gives — for a
+// 4+-hop chain, that breakdown easily runs to a full screen, and the
+// question "what actually happened, hop by hop" gets lost in it. This is
+// deliberately lossy: it shows chapter → chapter flow and a one-line gist of
+// each, not evidence/warnings/hypotheses — use the full (default) mode or
+// `vault journey <trace_id>` when those details matter. Named distinctly
+// from remediation.go's own printIncidentSummary (the live post-run block
+// printed right after a faulttest run completes) — same general idea,
+// different data source and call site, not a shared implementation.
+func printIncidentHopSummary(n *incidentNarrative) {
+	type chapter struct {
+		label    string
+		runID    string
+		playbook string
+		outcome  string
+		findings string
+	}
+	var chapters []chapter
+	chapters = append(chapters, chapter{
+		label:    "TRIAGE",
+		runID:    n.Triage.RunID,
+		playbook: n.Triage.Playbook,
+		findings: n.Triage.Findings,
+	})
+	for i, e := range n.Escalations {
+		chapters = append(chapters, chapter{
+			label:    fmt.Sprintf("ESCALATION %d", i+1),
+			runID:    e.RunID,
+			playbook: e.Playbook,
+			outcome:  e.Outcome,
+			findings: e.Findings,
+		})
+	}
+	if n.Remediation != nil {
+		chapters = append(chapters, chapter{
+			label:    "REMEDIATION",
+			runID:    n.Remediation.RunID,
+			playbook: n.Remediation.Playbook,
+			outcome:  n.Remediation.Outcome,
+			findings: n.Remediation.Findings,
+		})
+	}
+
+	status := "open"
+	if n.IncidentRecord != nil && n.IncidentRecord.Status != "" {
+		status = n.IncidentRecord.Status
+	}
+	fmt.Printf("INCIDENT %s — %s", n.IncidentID, status)
+	if n.DurationSec > 0 {
+		fmt.Printf(" in %.0fs", n.DurationSec)
+	}
+	fmt.Println()
+	fmt.Println()
+
+	const labelWidth = 13
+	for i, c := range chapters {
+		arrow := ""
+		if i+1 < len(chapters) {
+			arrow = " → " + chapters[i+1].playbook
+		} else if c.outcome != "" {
+			arrow = " (" + c.outcome + ")"
+		}
+		// The TRIAGE chapter's own run ID is always the same as the
+		// INCIDENT header's own ID (entry_run_id) — printing it again here
+		// would be redundant. Every later hop (ESCALATION/REMEDIATION) gets
+		// its own distinct run ID that's otherwise only ever visible in the
+		// original faulttest run's live log output or a raw auditd query —
+		// surface it so `vault incidents <that-hop's-run-id>` is directly
+		// reachable from this view.
+		runIDSuffix := ""
+		if c.runID != "" && c.runID != n.IncidentID {
+			runIDSuffix = "  [" + c.runID + "]"
+		}
+		fmt.Printf("%d. %-*s %s%s%s\n", i+1, labelWidth, c.label, c.playbook, arrow, runIDSuffix)
+		if c.findings != "" {
+			fmt.Printf("   %s\n", truncate(c.findings, 110))
+		}
+	}
+
+	if n.Evaluation != nil {
+		fmt.Println()
+		parts := []string{fmt.Sprintf("diagnosis %.0f%%", n.Evaluation.DiagnosisScore*100)}
+		if n.Remediation != nil {
+			parts = append(parts, fmt.Sprintf("remediation %.0f%%", n.Evaluation.RemediationScore*100))
+		}
+		fmt.Printf("Overall: %.0f%% (%s)\n", n.Evaluation.OverallScore*100, strings.Join(parts, " · "))
+	}
+}
+
+func printIncidentJourney(gatewayURL, apiKey, runID string, summary bool) {
 	n, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
+	}
+
+	if summary {
+		printIncidentHopSummary(n)
+		return
 	}
 
 	divider := strings.Repeat("═", 60)
@@ -5313,6 +5444,9 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 			gateLine += "  at " + n.Gate.AcknowledgedAt.UTC().Format("15:04 UTC")
 		}
 		fmt.Printf("Decision:  %s\n", gateLine)
+		if n.Gate.GateReason != "" {
+			fmt.Printf("Reason:    %s\n", n.Gate.GateReason)
+		}
 		// At-gate feedback
 		var gateFeedback []string
 		for _, fb := range n.Feedback {
@@ -5347,6 +5481,9 @@ func printIncidentJourney(gatewayURL, apiKey, runID string) {
 		fmt.Printf("Playbook:  %s   Outcome: %s\n", hop.Playbook, hop.Outcome)
 		if hop.EscalatedTo != "" {
 			fmt.Printf("Escalated to: %s\n", hop.EscalatedTo)
+		}
+		if hop.TransitionedTo != "" {
+			fmt.Printf("Transitioned to: %s (still a diagnosis hop, not yet remediation)\n", hop.TransitionedTo)
 		}
 		if hop.Findings != "" {
 			fmt.Printf("Findings:  %s\n", wordWrap(hop.Findings, 70, "           "))
@@ -5510,6 +5647,20 @@ func escalationHopDesc(phase string, escalations []narrativeEscalationHop) strin
 		}
 		return fallback
 	case "transitioned":
+		// A transitioned-outcome hop can land in Escalations now (its own
+		// playbook is still triage-type, e.g. pbs_sysadmin_host_triage ->
+		// pbs_pgbackrest_health_triage) — it is NOT necessarily "handed off
+		// to remediation" just because it emitted TRANSITION_TO; that claim
+		// used to be safe when any TRANSITION_TO hop was assumed remediation
+		// (the pre-2026-10-07 bug this struct's own TransitionedTo field
+		// closes). Name the real next hop instead of asserting what kind it is.
+		if hop.TransitionedTo != "" {
+			return fmt.Sprintf("intermediate hop — transitioned to %s", hop.TransitionedTo)
+		}
+		// TransitionedTo wasn't populated (e.g. older audit data predating
+		// this field) — fall back to the pre-fix wording rather than the
+		// generic fallback, since the common shape (one escalation hop
+		// immediately followed by the Remediation chapter) still matches it.
 		return "terminal escalation hop — handed off to remediation"
 	case "resolved":
 		return "terminal escalation hop — investigation concluded here"

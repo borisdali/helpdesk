@@ -211,9 +211,27 @@ parser bug (`splitOutsideQuotes`, `cmd/gateway/playbooks.go`) found while confir
 not specific to this one signal, a fix to a code path every default-confirmation signal
 shares.
 
-**Not yet instrumented:** the sysadmin agent (`check_host`/`get_host_logs` — container
-exit codes and log content are exactly the kind of typed, verifiable data this mechanism
-is built for) and every other database/K8s tool beyond the nine rules above.
+**Sysadmin agent** (`agents/sysadmin/objective_evidence.yaml`, 1 rule):
+
+| Tool | Signal | Confirmation |
+|---|---|---|
+| `get_pgbackrest_status` | `pgbackrest_backup_unhealthy` | default |
+
+`pgbackrest_backup_unhealthy` is an OR of three conditions computed from
+`PgBackRestSummary` — a non-OK stanza `status_code`, `backup_stale`, or no backup ever
+recorded (`LastBackupLabel==""`) — into one boolean, same shape as
+`replica_disconnected`'s synthesis above. This is the force-gate backing v0.31's
+restore-from-backup path: `pbs_pgbackrest_restore_remediate` only ever runs once
+`pbs_pgbackrest_health_triage`'s own `get_pgbackrest_status` call reports healthy, and if
+the model's response doesn't correctly reflect a genuinely unhealthy result, this signal
+forces a human gate regardless of `approval_mode=force` — see
+[BACKUP.md §3](BACKUP.md#3-restore-from-backup-after-data-loss) for the full writeup of
+what this does and does not cover across that playbook chain.
+
+**Not yet instrumented:** `check_host`/`get_host_logs`/`read_pg_log_file` — container exit
+codes and log content are exactly the kind of typed, verifiable data this mechanism is
+built for, and every database/K8s tool beyond the ten rules above (nine listed here plus
+`get_pgbackrest_status`'s).
 
 ## 7. Authoring a new rule
 

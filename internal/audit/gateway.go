@@ -62,7 +62,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 			Name:       req.ToolName,
 			Parameters: req.ToolParameters,
 			Result:     truncateString(req.Response, toolResultMaxLen), // Summary of result
-			Duration:   req.Duration,
+			Duration:   MillisecondsFromDuration(req.Duration),
 		}
 		if req.Status == "error" {
 			toolExec.Error = req.Error
@@ -117,7 +117,7 @@ func (a *GatewayAuditor) RecordRequest(ctx context.Context, req *GatewayRequest)
 		Outcome: &Outcome{
 			Status:       req.Status,
 			ErrorMessage: req.Error,
-			Duration:     req.Duration,
+			Duration:     MillisecondsFromDuration(req.Duration),
 		},
 	}
 
@@ -250,7 +250,7 @@ func (a *GatewayAuditor) AuditMiddleware(next http.Handler) http.Handler {
 			},
 			Outcome: &Outcome{
 				Status:   status,
-				Duration: duration,
+				Duration: MillisecondsFromDuration(duration),
 			},
 		}
 

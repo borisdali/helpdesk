@@ -95,6 +95,7 @@ type resolvedHost struct {
 	Runtime       string // container runtime binary: "docker", "podman", or "" (systemd/k8s)
 	ContainerName string // from DBServer.ContainerName (docker/podman only)
 	SystemdUnit   string // from DBServer.SystemdUnit (systemd only)
+	PgLogDir      string // from DBServer.PgLogDir; overrides pgLogDefaultDir when set
 	// SSH fields — populated from the VM entry, empty unless the VM has SSHUser
 	// set. See runOnHost (sshexec.go) for the local-vs-SSH dispatch this enables.
 	VMAddress  string
@@ -112,6 +113,38 @@ type resolvedHost struct {
 
 // connStrPort extracts the port number from a libpq connection string or
 // "host:port" address. Returns "" when no port is found.
+func connStrHost(s string) string {
+	// A bare port number (digits only, e.g. the caller passed just "58989")
+	// carries no host information at all — return empty, not the digits
+	// themselves, so callers can tell "no host known" apart from a real host
+	// that happens to parse oddly.
+	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
+		return ""
+	}
+	// libpq keyword format: "... host=myhost ..."
+	for _, field := range strings.Fields(s) {
+		if strings.HasPrefix(field, "host=") {
+			h := strings.TrimPrefix(field, "host=")
+			if h != "" {
+				return h
+			}
+		}
+	}
+	// "host:port" / URI format (after stripping scheme and userinfo)
+	s = strings.TrimPrefix(s, "postgresql://")
+	s = strings.TrimPrefix(s, "postgres://")
+	if idx := strings.LastIndex(s, "@"); idx >= 0 {
+		s = s[idx+1:]
+	}
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		return s[:idx]
+	}
+	if sl := strings.IndexAny(s, "/?"); sl >= 0 {
+		s = s[:sl]
+	}
+	return s
+}
+
 func connStrPort(s string) string {
 	// libpq keyword format: "... port=5432 ..."
 	for _, field := range strings.Fields(s) {
@@ -159,17 +192,54 @@ func resolveHost(serverID string) (resolvedHost, error) {
 	serverID = strings.TrimSpace(serverID)
 	db, ok := ic.DBServers[serverID]
 	if !ok {
-		// Fallback 1: treat target as a connection string and match by port.
+		// Fallback 1: treat target as a connection string and match by host+port.
 		// This allows the LLM to pass the connection string from triage findings
 		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
+		// Matches on host+port together, not port alone: 5432 is Postgres's own
+		// default and collides constantly across unrelated registered servers —
+		// found live (2026-10-10): a real VM target and two unrelated Docker
+		// servers all shared port 5432 in the same infra config. Port-only
+		// matching silently picked whichever candidate came first in Go's own
+		// randomized map iteration order — non-deterministic across runs, and it
+		// genuinely resolved to the wrong real server during a live diagnosis.
+		// If host+port still matches more than one server, refuse rather than
+		// guess, the same "don't guess, report and escalate" principle every
+		// other resolution failure in this function already follows.
+		// Note this is NOT the same control as the gateway's own
+		// checkTargetScope (docs/MUTATION_TOOLS.md §5.6): that one compares the
+		// connection_string a tool call *declared* against the intended target
+		// and cannot see resolution at all, so it stayed (correctly) silent
+		// while this bug silently dispatched to the wrong server. See that
+		// section for why both layers exist and what still isn't covered.
 		if port := connStrPort(serverID); port != "" {
+			// A bare port number (host == "") carries no host info to match
+			// on — fall back to port-only matching in that case specifically,
+			// still collecting every match and refusing on ambiguity exactly
+			// like the host+port path below.
+			host := connStrHost(serverID)
+			var matches []string
 			for id, candidate := range ic.DBServers {
-				if connStrPort(candidate.ConnectionString) == port {
-					db = candidate
-					serverID = id
-					ok = true
-					break
+				if connStrPort(candidate.ConnectionString) != port {
+					continue
 				}
+				if host != "" && connStrHost(candidate.ConnectionString) != host {
+					continue
+				}
+				matches = append(matches, id)
+			}
+			switch len(matches) {
+			case 0:
+				// no match — fall through to Fallback 2
+			case 1:
+				db = ic.DBServers[matches[0]]
+				serverID = matches[0]
+				ok = true
+			default:
+				infraConfigMu.RUnlock()
+				sort.Strings(matches)
+				return resolvedHost{}, fmt.Errorf(
+					"target %q matches multiple registered servers by host+port (%s) — refusing to guess which one; use the exact server ID instead",
+					serverID, strings.Join(matches, ", "))
 			}
 		}
 	}
@@ -237,6 +307,7 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		Runtime:       vm.Runtime,
 		ContainerName: db.ContainerName,
 		SystemdUnit:   db.SystemdUnit,
+		PgLogDir:      db.PgLogDir,
 		VMAddress:     vm.Address,
 		SSHUser:       vm.SSHUser,
 		SSHPort:       vm.SSHPort,
@@ -266,13 +337,19 @@ func resolveHost(serverID string) (resolvedHost, error) {
 }
 
 // execInProcess runs cmd inside the process hosting the database — either via
-// "docker/podman exec <container>" or "kubectl exec <pod>". Returns an error
-// for systemd targets (no exec primitive available).
+// "docker/podman exec <container>" or "kubectl exec <pod>", or (for a
+// systemd/VM target, where there's no container boundary to exec into —
+// the host IS the process's own filesystem namespace) directly on the host
+// via runOnHost, over real SSH when configured. Found live 2026-10-08: this
+// default case used to error outright ("no exec primitive available"),
+// silently breaking read_pg_log_file/check_memory for every systemd target
+// — dispatching via runOnHost instead is the correct equivalent of "exec
+// into the process" when there's no container to exec into.
 func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string, error) {
 	switch {
 	case host.Runtime == "docker" || host.Runtime == "podman":
 		args := append([]string{"exec", host.ContainerName}, cmd...)
-		return cmdRunner.Run(ctx, host.Runtime, args, nil)
+		return runOnHost(ctx, host, host.Runtime, args, nil)
 
 	case host.K8sPodSelector != "":
 		// Resolve the pod name from the selector first.
@@ -289,7 +366,10 @@ func execInProcess(ctx context.Context, host resolvedHost, cmd []string) (string
 		return cmdRunner.Run(ctx, "kubectl", execArgs, nil)
 
 	default:
-		return "", fmt.Errorf("cannot exec into process: target uses systemd (no exec primitive)")
+		if len(cmd) == 0 {
+			return "", fmt.Errorf("execInProcess: empty command")
+		}
+		return runOnHost(ctx, host, cmd[0], cmd[1:], nil)
 	}
 }
 
@@ -364,7 +444,7 @@ type k8sPodStatusJSON struct {
 // SystemdUnit — see checkHostImpl's dispatch), this surfaces real pod
 // status/restart/last-termination fields, and makes the "this is Kubernetes,
 // not Docker" signal unambiguous via Runtime="kubectl" — the field
-// playbooks/sysadmin-docker-inspect.yaml's guidance checks first to decide
+// playbooks/sysadmin-host-triage.yaml's guidance checks first to decide
 // whether to escalate to the K8s agent instead of continuing its
 // docker-oriented steps.
 func checkHostK8s(ctx context.Context, target string, host resolvedHost) (CheckHostResult, error) {
@@ -520,10 +600,19 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	var runtimeLabel, output string
 	var runErr error
 
+	// runOnHost (sshexec.go), not cmdRunner.Run directly: a VM entry with
+	// SSHUser/SSHKeyPath set dispatches over real SSH, falling back to
+	// today's local exec otherwise — zero behavior change for every
+	// existing Docker/local target, which never sets those fields. Found
+	// live 2026-10-08: this function (and get_host_logs/restart_container/
+	// restart_service alongside it) called cmdRunner.Run directly, bypassing
+	// the SSH dispatch every pgBackRest tool already used — a genuinely
+	// remote host/VM target would have silently run these commands on the
+	// sysadmin agent's own local host instead of the real target.
 	if runtime != "" {
 		// Docker or Podman
 		runtimeLabel = runtime
-		output, runErr = cmdRunner.Run(ctx, runtime, []string{
+		output, runErr = runOnHost(ctx, host, runtime, []string{
 			"inspect",
 			"--format",
 			"{{.State.Status}} (running={{.State.Running}}, restarting={{.State.Restarting}}, oomkilled={{.State.OOMKilled}}, dead={{.State.Dead}}, exitcode={{.State.ExitCode}})",
@@ -541,7 +630,7 @@ func checkHostImpl(ctx context.Context, args CheckHostArgs) (CheckHostResult, er
 	} else {
 		// Systemd
 		runtimeLabel = "systemd"
-		output, runErr = cmdRunner.Run(ctx, "systemctl", []string{
+		output, runErr = runOnHost(ctx, host, "systemctl", []string{
 			"show", "--property=ActiveState,SubState,Result,MainPID,ExecMainStartTimestamp",
 			host.SystemdUnit,
 		}, nil)
@@ -628,18 +717,34 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 	var runtimeLabel, out string
 	var runErr error
 
+	// Explicit shell `2>&1` merge, not a bare argv call: cmdRunner.Run (and
+	// every CommandRunner implementation) returns stdout alone on success,
+	// discarding stderr — correct for get_pgbackrest_status (stderr there is
+	// non-fatal WARN noise that would corrupt JSON parsing) but wrong here.
+	// get_host_logs' whole job is showing everything that happened in the
+	// container, and `docker logs`'s own exit code is always 0 as long as
+	// the container exists, regardless of what happened inside it — a fatal
+	// startup error written to the container's stderr (confirmed live,
+	// 2026-10-07: PostgreSQL's own "could not find the database system"
+	// message, emitted before its logging subsystem initializes, goes to
+	// stderr, not stdout) was silently and unconditionally dropped every
+	// time, with no error to signal it. Merging streams in the shell before
+	// cmdRunner.Run ever sees the output sidesteps the split entirely,
+	// without touching the shared helper's behavior other callers rely on.
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
 	if runtime != "" {
 		runtimeLabel = runtime
-		out, runErr = cmdRunner.Run(ctx, runtime, []string{
-			"logs", "--tail", fmt.Sprintf("%d", lines), host.ContainerName,
-		}, nil)
+		script := shellCommand(runtime, []string{"logs", "--tail", fmt.Sprintf("%d", lines), host.ContainerName}, nil) + " 2>&1"
+		out, runErr = runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
 	} else {
 		runtimeLabel = "systemd"
-		out, runErr = cmdRunner.Run(ctx, "journalctl", []string{
+		script := shellCommand("journalctl", []string{
 			"-u", host.SystemdUnit,
 			"-n", fmt.Sprintf("%d", lines),
 			"--no-pager",
-		}, nil)
+		}, nil) + " 2>&1"
+		out, runErr = runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
 	}
 
 	if runErr != nil && strings.TrimSpace(out) == "" {
@@ -712,20 +817,25 @@ type CheckDiskArgs struct {
 }
 
 func checkDiskImpl(ctx context.Context, args CheckDiskArgs) (DiskResult, error) {
-	// If a target is given and run_on_host is not set, exec inside the process.
+	// If a target is given and run_on_host is not set, exec inside the process
+	// — execInProcess itself now handles docker/podman/k8s exec and systemd
+	// (SSH when configured, local exec otherwise; see runOnHost) uniformly,
+	// so no fallback is needed here anymore. Before 2026-10-08, a systemd
+	// target made execInProcess return a "cannot exec into process" error
+	// that this function caught and fell back to local df for — that error
+	// can no longer occur (execInProcess's systemd branch now dispatches
+	// instead of erroring), so that fallback was dead code masked by a
+	// now-false comment; removed rather than left stale.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return DiskResult{}, err
 		}
 		out, runErr := execInProcess(ctx, host, []string{"df", "-h"})
-		if runErr == nil {
-			return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
-		}
-		// Systemd targets return "cannot exec" — fall through to local df.
-		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+		if runErr != nil {
 			return DiskResult{}, fmt.Errorf("check_disk: %w: %s", runErr, out)
 		}
+		return DiskResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 	}
 	out, err := cmdRunner.Run(ctx, "df", []string{"-h"}, nil)
 	if err != nil {
@@ -769,20 +879,18 @@ type CheckMemoryArgs struct {
 }
 
 func checkMemoryImpl(ctx context.Context, args CheckMemoryArgs) (MemoryResult, error) {
-	// If a target is given and run_on_host is not set, exec inside the process.
+	// See checkDiskImpl's identical comment: execInProcess now handles
+	// systemd dispatch (SSH-or-local) itself, so no fallback is needed here.
 	if args.Target != "" && !args.RunOnHost && infraConfig != nil {
 		host, err := resolveHost(args.Target)
 		if err != nil {
 			return MemoryResult{}, err
 		}
 		out, runErr := execInProcess(ctx, host, []string{"free", "-h"})
-		if runErr == nil {
-			return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
-		}
-		// Systemd targets return "cannot exec" — fall through to local free.
-		if !strings.Contains(runErr.Error(), "cannot exec into process") {
+		if runErr != nil {
 			return MemoryResult{}, fmt.Errorf("check_memory: %w: %s", runErr, out)
 		}
+		return MemoryResult{ServerID: args.Target, Output: strings.TrimSpace(out)}, nil
 	}
 	out, err := cmdRunner.Run(ctx, "free", []string{"-h"}, nil)
 	if err != nil {
@@ -835,7 +943,14 @@ func readPgLogFileImpl(ctx context.Context, args ReadPgLogFileArgs) (PgLogFileRe
 		return PgLogFileResult{}, err
 	}
 
+	// Precedence: explicit tool-call arg, then the target's own configured
+	// PgLogDir (real systemd/VM targets whose distro packaging logs
+	// somewhere other than the Docker image's own default — see PgLogDir's
+	// doc comment), then the Docker-image-shaped hardcoded default.
 	logDir := args.LogPath
+	if logDir == "" {
+		logDir = host.PgLogDir
+	}
 	if logDir == "" {
 		logDir = pgLogDefaultDir
 	}
@@ -1048,7 +1163,9 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	}
 
 	start := time.Now()
-	out, runErr := cmdRunner.Run(ctx, runtime, []string{"restart", host.ContainerName}, nil)
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
+	out, runErr := runOnHost(ctx, host, runtime, []string{"restart", host.ContainerName}, nil)
 	duration := time.Since(start)
 	output := strings.TrimSpace(out)
 
@@ -1114,7 +1231,22 @@ func restartServiceImpl(ctx context.Context, args RestartServiceArgs) (RestartRe
 	}
 
 	start := time.Now()
-	out, runErr := cmdRunner.Run(ctx, "systemctl", []string{"restart", host.SystemdUnit}, nil)
+	// runOnHost, not cmdRunner.Run directly — see checkHostImpl's identical
+	// comment; dispatches over real SSH for a VM target, local exec otherwise.
+	// "sudo" is required here, not optional: a NOPASSWD sudoers grant (see
+	// testing/docker/setup-pgbackrest-vm.sh) only takes effect when a command
+	// is actually invoked THROUGH sudo — a bare `systemctl restart` as an
+	// unprivileged user goes through polkit instead and is rejected outright
+	// ("Interactive authentication required"), distinct from any real service
+	// failure. Found live (2026-10-11): the dispatch user's own restart
+	// request failed this way in ~114ms — instantly, before ever reaching
+	// PostgreSQL — while PostgreSQL itself came up cleanly ~19s later via
+	// systemd's own unrelated retry policy, making it look like "the restart
+	// eventually worked" when the agent's own attempt never actually ran.
+	// `systemctl show` (read-only) needs no such prefix — only the mutating
+	// `restart` verb goes through polkit at all, which is why that call has
+	// worked unprivileged all along.
+	out, runErr := runOnHost(ctx, host, "sudo", []string{"systemctl", "restart", host.SystemdUnit}, nil)
 	duration := time.Since(start)
 	output := strings.TrimSpace(out)
 
@@ -1529,11 +1661,24 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 		if err != nil {
 			errMsg = err.Error()
 		}
+		// Audit the full structured result (status_code/backup_stale/
+		// last_backup_label/last_backup_time/last_backup_error), not just
+		// result.Output (the raw `pgbackrest info` CLI JSON embedded inside
+		// it) — those computed fields are what the model actually reasons
+		// from and cites in EVIDENCE quotes, but the raw CLI blob never
+		// contains them verbatim (e.g. backup_stale doesn't exist in
+		// pgbackrest's own output at all; last_backup_time is an RFC3339
+		// reformat of a raw Unix timestamp). Logging only the raw blob made
+		// those real, correct citations permanently unverifiable by
+		// checkEvidenceProvenance (cmd/gateway/playbooks.go) — found live
+		// 2026-10-07 on a real db-pgdata-corrupted run. Same pattern already
+		// used by agents/incident/tools.go's create_incident_bundle.
+		resultJSON, _ := json.Marshal(result)
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "get_pgbackrest_status",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
 		}, audit.ToolResult{
-			Output: result.Output,
+			Output: string(resultJSON),
 			Error:  errMsg,
 		}, duration)
 	}
@@ -1643,6 +1788,129 @@ func runPgBackRestBackupTool(ctx agent.ToolContext, args RunPgBackRestBackupArgs
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "run_pgbackrest_backup",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza, "type": args.Type},
+		}, audit.ToolResult{
+			Output: result.Output,
+			Error:  errMsg,
+		}, duration)
+	}
+	return result, err
+}
+
+// ── restore_from_backup ──────────────────────────────────────────────────────
+
+// RestoreFromBackupArgs defines arguments for the restore_from_backup tool.
+type RestoreFromBackupArgs struct {
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
+	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+}
+
+// RestoreFromBackupResult is the result of restore_from_backup.
+type RestoreFromBackupResult struct {
+	Output string `json:"output"`
+}
+
+// restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
+// (pgBackRest's own default recovery target), single stanza, single
+// instance — no PITR-to-arbitrary-timestamp, no replica rebuild. It exists
+// to remediate pbs_db_data_loss_triage's one automatable branch (a healthy,
+// non-stale backup on an intact repo, reached via TRANSITION_TO from that
+// playbook into pbs_pgbackrest_restore_remediate) — every other corruption
+// scenario (no backup, broken repo, replica topology, ambiguous scope) stays
+// a human escalation by design, same philosophy as
+// runPgBackRestBackupImpl's own refusal to touch a broken repo.
+//
+// This overwrites PGDATA, so it is classified ActionDestructive (not
+// ActionWrite like a fresh backup) and gated by two checks, both verified
+// live against a real crashed-then-restored pgBackRest fixture before this
+// was written, not assumed from documentation:
+//
+//  1. pg_isready must report the server down. Confirmed live: exit 0
+//     ("accepting connections") while healthy, exit 2 ("no response") once
+//     crashed. This is the only thing standing between "restore a dead
+//     instance" and "destroy a live one" — refuse outright if the server
+//     answers.
+//  2. A stale postmaster.pid left over from the crash must be removed
+//     before restoring. Confirmed live: `pgbackrest restore --force` does
+//     NOT bypass pgBackRest's own "[038]: unable to restore while
+//     PostgreSQL is running" refusal — `--force` means something else to
+//     pgBackRest. The real fix, and what pgBackRest's own error HINTs at, is
+//     removing the pid file once step 1 has already confirmed the server
+//     isn't actually running. $PGDATA is read from pgBackRest's own
+//     pg1-path config rather than hardcoded, so this stays correct for any
+//     real deployment's actual data directory.
+func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
+	stanza := args.Stanza
+	if stanza == "" {
+		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		if err != nil {
+			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: resolving stanza name: %w", err)
+		}
+		stanza = status.Stanza
+	}
+
+	readyScript := "pg_isready"
+	restoreScript := "PGDATA=$(grep '^pg1-path=' /etc/pgbackrest.conf | cut -d= -f2); rm -f \"$PGDATA/postmaster.pid\"; pgbackrest --stanza=" + shellQuote(stanza) + " --delta restore"
+
+	var out string
+	var err error
+	switch {
+	case args.Target != "" && infraConfig != nil:
+		var host resolvedHost
+		host, err = resolveHost(args.Target)
+		if err != nil {
+			return RestoreFromBackupResult{}, err
+		}
+		if policyEnforcer != nil {
+			policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
+			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+				policy.ActionDestructive, host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
+				slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
+				return RestoreFromBackupResult{}, err
+			}
+		}
+		switch {
+		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
+				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+			}
+			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", restoreScript})
+		default:
+			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
+				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+			}
+			out, err = runOnHost(ctx, host, "sh", []string{"-c", restoreScript}, nil)
+		}
+	case infraConfig != nil:
+		return RestoreFromBackupResult{}, fmt.Errorf(
+			"restore_from_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+	default:
+		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
+			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+		}
+		out, err = cmdRunner.Run(ctx, "sh", []string{"-c", restoreScript}, nil)
+	}
+	if err != nil {
+		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
+	}
+	return RestoreFromBackupResult{Output: out}, nil
+}
+
+func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
+	start := time.Now()
+	result, err := restoreFromBackupImpl(ctx, args)
+	duration := time.Since(start)
+	if err == nil {
+		slog.Info("tool ok", "name", "restore_from_backup", "ms", duration.Milliseconds())
+	}
+	if toolAuditor != nil {
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "restore_from_backup",
+			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
 		}, audit.ToolResult{
 			Output: result.Output,
 			Error:  errMsg,
@@ -1769,6 +2037,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := runPgBackRestBackupImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("restore_from_backup", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RestoreFromBackupArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := restoreFromBackupImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

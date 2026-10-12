@@ -118,7 +118,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_recovery", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
+	err := s.Update(ctx, run.RunID, "escalated", "pbs_db_config_triage", "", "Logs show FATAL: invalid value for parameter max_connections", "", "", nil, false, "")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPlaybookRunStore_Update(t *testing.T) {
 	if runs[0].Outcome != "escalated" {
 		t.Errorf("outcome = %q, want escalated", runs[0].Outcome)
 	}
-	if runs[0].EscalatedTo != "pbs_db_config_recovery" {
+	if runs[0].EscalatedTo != "pbs_db_config_triage" {
 		t.Errorf("escalated_to = %q", runs[0].EscalatedTo)
 	}
 	if runs[0].FindingsSummary == "" {
@@ -556,7 +556,7 @@ func TestPlaybookRunStore_ListByPriorRunID_MultiHopChain(t *testing.T) {
 		SeriesID:      "pbs_connection_triage",
 		ExecutionMode: "agent",
 		Outcome:       "escalated",
-		EscalatedTo:   "pbs_sysadmin_docker_inspect",
+		EscalatedTo:   "pbs_sysadmin_host_triage",
 		Operator:      "alice",
 		StartedAt:     time.Now().UTC().Truncate(time.Second),
 	}
@@ -566,7 +566,7 @@ func TestPlaybookRunStore_ListByPriorRunID_MultiHopChain(t *testing.T) {
 
 	hop2 := &PlaybookRun{ // sysadmin agent — escalates further
 		PlaybookID:    "pb_sysadmin1",
-		SeriesID:      "pbs_sysadmin_docker_inspect",
+		SeriesID:      "pbs_sysadmin_host_triage",
 		ExecutionMode: "agent",
 		Outcome:       "escalated",
 		EscalatedTo:   "pbs_k8s_pod_crash_triage",

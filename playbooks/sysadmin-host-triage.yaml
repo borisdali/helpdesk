@@ -1,0 +1,222 @@
+series_id: pbs_sysadmin_host_triage
+name: "Sysadmin — Host/Container Inspection"
+version: "2.3"
+playbook_type: triage
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+# Same-domain follow-ons: all handled by sysadmin_agent.
+# pbs_pgbackrest_health_triage (v0.31): reached when prior findings from
+# pbs_db_data_loss_triage (single_instance/backup_tool/pitr_decided) plus
+# this playbook's own log evidence together qualify for the one automatable
+# restore path — see the "could not find the database system" rule below.
+# A straight transition, not an escalation back to the DB agent: once this
+# playbook has the evidence, it judges the remaining condition itself
+# rather than bouncing back for a decision it's already equipped to make.
+transitions_to:
+  - pbs_db_restart_action
+  - pbs_wal_disk_full
+  - pbs_pgbackrest_health_triage
+# Cross-domain escalation: returning context to the DB agent, or forward to
+# the K8s agent when check_host reveals the target is Kubernetes-managed.
+escalates_to:
+  - pbs_db_restart_triage
+  - pbs_k8s_pod_crash_triage
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Inspect a PostgreSQL instance reported as unreachable, whether it runs in a
+  Docker/Podman container, under systemd directly on a host/VM, or (handed off
+  further) in a Kubernetes pod. Determine whether it exited cleanly (manual
+  stop / graceful shutdown) or crashed (OOM kill, panic, unexpected exit),
+  revise the prior DB agent's root cause hypothesis if necessary, and provide
+  evidence-based remediation guidance.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - clean-shutdown
+    - oom-kill
+    - wal-disk-full
+    - process-crash
+    - data-corruption
+symptoms:
+  - "DB agent diagnosed 'connection refused' but could not read the host's own container or service logs"
+  - "docker/podman-hosted or systemd-managed PostgreSQL is unreachable"
+  - "container or service status unknown — DB agent toolset cannot reach the docker daemon or systemd journal"
+guidance: |
+  You are the second stage of a two-agent diagnostic chain. The DB agent has already
+  confirmed "connection refused" — your job is to explain WHY using host/container tools.
+
+  Do NOT call any psql-based tools — the database is down.
+  Do NOT call restart_container or restart_service under any circumstances —
+  even if the root cause is unclear. Insufficient evidence is itself a finding.
+  Describe the recommended action for operator approval and stop.
+
+  Step 1 — Container/service state:
+  Call check_host with the connection_string (target). Read the `runtime`
+  field FIRST, before anything else in the result:
+  - runtime=kubectl → this target is Kubernetes-managed, NOT a Docker/Podman
+    container. Your docker/podman tools (get_host_logs in container mode,
+    check_memory, check_disk, restart_container) do not apply — the workload
+    runs in a pod on a cluster, not on this host. Do NOT proceed to Step 2
+    below. State the pod status from check_host's `details` field (phase,
+    restart_count, last_termination_reason, last_termination_exitcode) as
+    your FINDINGS, then emit exactly:
+      ESCALATE_TO: pbs_k8s_pod_crash_triage
+    The K8s agent has the tools (get_pods, describe_pod, get_pod_logs,
+    read_pod_file) to fully diagnose a Kubernetes pod crash — its exit-code
+    and OOM semantics are not the same as Docker's, so do NOT reuse the
+    exitcode=/oomkilled= reasoning below to interpret them. Do not guess or
+    perform further diagnosis yourself.
+  - runtime=docker or runtime=podman → proceed with the container inspection
+    steps below, unchanged.
+  - runtime=systemd → this target is a real host/VM, not a container — the
+    database runs as a systemd-managed service directly on the host. This is
+    NOT a hand-off case: you have the tools to diagnose this yourself
+    (check_host, get_host_logs, read_pg_log_file, check_memory,
+    restart_service all work against a systemd target already). Proceed to
+    Step 2 below, but read "Read these fields carefully (systemd targets
+    only)" instead of the docker/podman block, and use the systemd-specific
+    guidance in Step 2.
+
+  Read these fields carefully (docker/podman targets only):
+  - exitcode=0  → container was stopped CLEANLY (user, orchestrator, or graceful shutdown).
+                  This is NOT a crash. Do not speculate about OOM or disk unless logs
+                  provide direct evidence.
+  - oomkilled=true → kernel killed the process due to memory pressure. Call check_memory next.
+  - exitcode=1 or higher (and oomkilled=false) → process exited with error. Check logs.
+  - restarting=true → container is in a restart loop. Check logs immediately.
+
+  Read these fields carefully (systemd targets only — check_host's `details`
+  reports ActiveState/SubState/Result/MainPID, not exitcode=/oomkilled=):
+  - ActiveState=active, SubState=running → service is up. This is NOT a
+    crash. Do not speculate about OOM or disk unless logs provide direct
+    evidence.
+  - ActiveState=failed → the service exited with an error. Check logs.
+  - ActiveState=inactive, Result=success → service was stopped CLEANLY
+    (operator or clean shutdown), not a crash.
+  - Result=oom-kill (if present) → kernel killed the process due to memory
+    pressure. Call check_memory next.
+
+  Step 2 — Recent logs:
+  Call get_host_logs with lines=300 to retrieve recent container output — NOT
+  the tool's own 100-line default, and nowhere near the 50 this guidance used
+  to say. A single successful WAL-replay recovery can legitimately produce
+  30+ log lines on its own (found live, 2026-10-07: a long-lived test
+  instance with several prior restores behind it produced enough recovery
+  noise between crash cycles that a 50-line window sometimes missed the
+  actual crash signature entirely, even though it was genuinely in the
+  container's log history — not a hypothetical, a real miss). A small window
+  risks silently truncating the one signal this step exists to find; asking
+  for extra lines costs nothing a real incident would notice.
+
+  For a systemd target specifically: get_host_logs runs journalctl, which
+  typically shows only the service's own lifecycle (start/stop/crash-exit-
+  code messages from systemd itself), NOT PostgreSQL's own diagnostic
+  text — the distro's packaged service wrapper (e.g. Debian's pg_ctlcluster)
+  redirects postgres's actual stdout/stderr to its own log file, not to the
+  journal. Do not conclude "no evidence" from a quiet journalctl output on a
+  systemd target — always also call read_pg_log_file (do not pass log_path;
+  this target's own configured default is already correct) for the real
+  crash signature before drawing a conclusion.
+
+  Key signals:
+  - "database system was shut down"  → clean shutdown; a simple restart will recover.
+  - "out of memory" / "OOM"          → OOM kill; restart will succeed but investigate memory.
+  - "No space left on device" in pg_wal path → WAL disk full; restart will re-PANIC
+    immediately. Escalate to pbs_wal_disk_full — disk must be freed BEFORE restart.
+  - "FATAL" / "PANIC" (other)        → hard failure; do not restart without config review.
+  - "received fast shutdown request" / "smart shutdown" → pg_ctl stop or SIGTERM — clean.
+  - "invalid page" / "checksum failure" → data corruption; do NOT recommend restart.
+  - "could not find the database system" → data directory/pg_control missing
+    or corrupted — a genuine data-loss recovery scenario, not a plain
+    FATAL/PANIC config issue (added v0.31). The DB agent already handed you
+    single_instance/backup_tool/pitr_decided in its prior FINDINGS (it
+    can't read these logs itself, so it front-loaded everything it could
+    determine without them) — you only need to judge whether THESE LOGS
+    suggest anything beyond what a plain restore would fix (e.g. a
+    separate storage/hardware-level complaint, not just the missing
+    pg_control line). This log line by itself is fully diagnostic — do NOT
+    go looking for a disk-pressure or memory explanation instead of it; a
+    full disk would produce "No space left on device" in the log text
+    directly, matching the rule above, not a missing pg_control file.
+    check_disk's own output on this test fixture includes an unrelated
+    host-mount entry that happens to always read ~91% full (a Docker
+    Desktop artifact, confirmed live — it reports the *host laptop's* own
+    disk usage, not anything about this container) — treat any disk/memory
+    reading as irrelevant once this log line is already present; it is not
+    corroborating evidence, it is noise. If all of the prior findings are
+    true AND nothing in the log text itself suggests deeper damage, this
+    qualifies for the automatable restore path — see the escalation rule
+    below. Do not recommend a restart; a restore is needed, and a restart
+    would just repeat the crash.
+  If container logs lack PostgreSQL-level detail, also call read_pg_log_file
+  with filter="PANIC" to look for disk/WAL crash evidence (PostgreSQL PANIC
+  is more severe than FATAL and is what ENOSPC triggers). Also call it again
+  with filter="FATAL" to catch configuration and authentication failures.
+
+  Step 3 — Memory (only if oomkilled=true or logs mention OOM):
+  Call check_memory with target set. Report the memory headroom and recommend a
+  memory limit increase if the container is constrained.
+
+  Step 4 — Revise the prior hypothesis and escalate if appropriate:
+  If the DB agent concluded "process crashed" but exitcode=0 and logs show clean
+  shutdown, explicitly state this correction in FINDINGS.
+
+  Your FINDINGS must include:
+  - Container state: Status, ExitCode, OOMKilled (from check_host output)
+  - Log evidence: quote the specific log lines that support your conclusion,
+    e.g. "Logs show: '2026-04-30 19:00:01 UTC [1] LOG: database system is shut down'"
+    Do not paraphrase — quote the actual lines verbatim so the operator can verify.
+  - Conclusion: what happened (clean stop / OOM kill / crash / other)
+  - Recommended action and why it is safe (or not safe) to proceed
+
+  Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
+  - check_host runtime=kubectl (target is Kubernetes-managed, not docker/podman):
+    ESCALATE_TO: pbs_k8s_pod_crash_triage
+    (checked FIRST, before any docker/podman-specific rule below — a
+    Kubernetes target never falls into the docker rules that follow)
+  - exitcode=0 (docker/podman only) AND logs confirm clean shutdown AND no
+    corruption/OOM/disk signals:
+    TRANSITION_TO: pbs_db_restart_action
+    (the restart playbook will perform and confirm the restart)
+  - ActiveState=inactive, Result=success (systemd) AND logs confirm clean
+    shutdown AND no corruption/OOM/disk signals:
+    Do NOT escalate — pbs_db_restart_action only knows how to restart a
+    Docker/Podman container (`docker start`), not a systemd service, as of
+    this writing. Describe the clean-shutdown finding and recommend the
+    operator run `systemctl start <unit>` manually.
+  - logs contain "No space left on device" with a pg_wal path:
+    TRANSITION_TO: pbs_wal_disk_full
+    (disk must be freed before any restart attempt — restarting now will re-PANIC)
+  - logs contain "could not find the database system" AND the prior
+    FINDINGS from pbs_db_data_loss_triage show single_instance=true,
+    backup_tool=pgbackrest, pitr_decided=false, AND nothing in these logs
+    suggests damage beyond what a plain restore would fix:
+    FINDINGS: data_loss_restore_candidate=true; <your own log evidence,
+    quoted verbatim>
+    TRANSITION_TO: pbs_pgbackrest_health_triage
+    (it will verify backup health for real via get_pgbackrest_status
+    before anything destructive happens — checked BEFORE the generic
+    FATAL/PANIC/invalid-page rule below so it isn't swallowed by that
+    rule's own "do NOT escalate" default)
+  - logs contain "could not find the database system" but any of the
+    above conditions do NOT hold (replica topology, non-pgBackRest tool,
+    PITR already decided, or deeper damage suspected):
+    Do NOT escalate — describe the finding and why it doesn't qualify for
+    the automatable path; this needs a human DBA.
+  - exitcode=137 / oomkilled=true (docker/podman) or Result=oom-kill (systemd):
+    Do NOT escalate — describe the OOM evidence and recommend operator review
+    before restarting.
+  - FATAL / PANIC (other than WAL disk full) / "invalid page" / "checksum failure":
+    Do NOT escalate — these require config or data recovery, not an automated restart.
+  - Any ambiguity or insufficient evidence:
+    Do NOT escalate — describe what is known and what additional investigation is needed.
+
+escalation:
+  - "container logs contain 'invalid page' or 'checksum failure' — data corruption, do not restart"
+  - "container logs contain PANIC — unrecoverable state, escalate to DB config/recovery playbook"
+  - "disk full in container — restart will not help, disk space must be freed first"
+  - "container is already running — investigate the database layer, not the container"
+target_hints: []

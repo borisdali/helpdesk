@@ -278,7 +278,7 @@ curl -s http://localhost:8080/api/v1/incidents/plr_h1 \
              "trace_id": "tr_h1", "has_mismatch": false, "has_target_drift": false,
              "has_unverified_evidence": false},
   "escalations": [
-    {"run_id": "plr_h2", "playbook": "pbs_sysadmin_docker_inspect", "outcome": "escalated",
+    {"run_id": "plr_h2", "playbook": "pbs_sysadmin_host_triage", "outcome": "escalated",
      "escalated_to": "pbs_k8s_pod_crash_triage",
      "findings": "check_host runtime=kubectl — target is Kubernetes-managed, not Docker/Podman",
      "trace_id": "tr_h2", "has_mismatch": false, "has_target_drift": true,

@@ -13,24 +13,24 @@ import (
 // systemPlaybookYAML is the wire format for YAML playbook files. Explicit yaml: tags
 // are used to avoid dependency on audit.Playbook gaining yaml tags.
 type systemPlaybookYAML struct {
-	SeriesID         string   `yaml:"series_id"`
-	Name             string   `yaml:"name"`
-	Version          string   `yaml:"version"`
-	ProblemClass     string   `yaml:"problem_class"`
-	Author           string   `yaml:"author"`
-	Description      string   `yaml:"description"`
-	Symptoms         []string `yaml:"symptoms"`
-	Guidance         string   `yaml:"guidance"`
-	Escalation       []string `yaml:"escalation"`
-	TargetHints      []string `yaml:"target_hints"`
-	EntryPoint       bool     `yaml:"entry_point"`
-	EscalatesTo      []string `yaml:"escalates_to"`
-	TransitionsTo    []string `yaml:"transitions_to"`
-	RequiresEvidence []string `yaml:"requires_evidence"`
-	ExecutionMode    string   `yaml:"execution_mode"`
-	AgentName        string   `yaml:"agent_name"`
-	ApprovalMode     string   `yaml:"approval_mode"`
-	PlaybookType     string   `yaml:"playbook_type"`
+	SeriesID         string                `yaml:"series_id"`
+	Name             string                `yaml:"name"`
+	Version          string                `yaml:"version"`
+	ProblemClass     string                `yaml:"problem_class"`
+	Author           string                `yaml:"author"`
+	Description      string                `yaml:"description"`
+	Symptoms         []string              `yaml:"symptoms"`
+	Guidance         string                `yaml:"guidance"`
+	Escalation       []string              `yaml:"escalation"`
+	TargetHints      []string              `yaml:"target_hints"`
+	EntryPoint       bool                  `yaml:"entry_point"`
+	EscalatesTo      []string              `yaml:"escalates_to"`
+	TransitionsTo    []string              `yaml:"transitions_to"`
+	RequiresEvidence []string              `yaml:"requires_evidence"`
+	ExecutionMode    string                `yaml:"execution_mode"`
+	AgentName        string                `yaml:"agent_name"`
+	ApprovalMode     string                `yaml:"approval_mode"`
+	PlaybookType     string                `yaml:"playbook_type"`
 	RootCauseClasses *rootCauseClassesYAML `yaml:"root_cause_classes"`
 }
 
@@ -42,10 +42,17 @@ type rootCauseClassesYAML struct {
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
 // store as system playbooks. It is idempotent:
-//   - If the exact (series_id, version) already exists, the file is skipped.
-//   - If the series exists but this version is new, it is inserted as inactive
-//     so customers can review and promote it when ready.
-//   - If the series is brand new, the first version is inserted as active.
+//   - If the exact (series_id, version) already exists and is active, the
+//     file is skipped.
+//   - If the exact (series_id, version) already exists but is inactive (e.g.
+//     a human promoted a different generated/imported version over it), it is
+//     only re-activated when nothing else in the series is currently active —
+//     an explicit human promotion is never silently overridden by a reseed.
+//   - Otherwise (a genuinely new version, or a brand-new series), the new
+//     version is inserted and activated immediately, deactivating whatever
+//     else was active in the series. System playbooks always activate the
+//     newest version on seed — there is no separate review/promote step for
+//     an ordinary version bump, only for the inactive-reactivation case above.
 //
 // Errors from individual files are logged but do not abort the remaining files.
 // Returns the first encountered fatal error (store failures), or nil.

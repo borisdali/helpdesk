@@ -156,6 +156,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	fs.StringVar(&cfg.SSHHost, "ssh-host", "", "SSH target for ssh_exec faults (user@host or host); triggers ExternalInject mode")
 	fs.StringVar(&cfg.SSHUser, "ssh-user", os.Getenv("USER"), "SSH username for ssh_exec faults (prepended to host when no @ in --ssh-host)")
 	fs.StringVar(&cfg.SSHKeyPath, "ssh-key", "", "SSH private key path for ssh_exec faults")
+	fs.IntVar(&cfg.SSHPort, "ssh-port", 0, "SSH port for ssh_exec faults (default: 22, OpenSSH's own default, when omitted)")
 
 	// Stability / repeat mode.
 	fs.IntVar(&cfg.Repeat, "repeat", 1, "Run each fault N times (inject→triage→teardown) and print a stability report; remediation is skipped when N > 1")

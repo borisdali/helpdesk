@@ -287,7 +287,7 @@ db-lock-contention               any        pbs_lock_chain_triage      pbs_lock_
 db-max-connections               any        pbs_max_conn_triage        pbs_max_conn_remediate     2026-06-20  PASS       STABLE(5)      4 runs  100% resolved  100% accurate  last: 2026-06-20
 db-idle-in-transaction           any        pbs_db_idle_txn            (none)                     2026-06-15  PASS       UNSTABLE(5)    -
 db-connection-refused            any        pbs_db_restart_triage      pbs_db_restart_action      2026-07-10  PASS       STABLE(3)      3 runs  100% escalated  last: 2026-07-10
-db-pg-hba-corrupt                any        pbs_db_config_recovery     pbs_db_config_remediate    (never)     -          —              MISSING
+db-pg-hba-corrupt                any        pbs_db_config_triage     pbs_db_config_remediate    (never)     -          —              MISSING
 ```
 
 When a remediation playbook has two or more versions with run data, the per-version trend appears as indented rows below the fault. The `*` marks the currently active version. When more than two versions exist, a `→ vault versions <series>` pointer appears for the full history.
@@ -546,6 +546,30 @@ The `Score` line matches the `SCORE` column in `vault incidents <series-id>` —
 
 `Origin`/`Status`/`Attribution` (and, once populated, `Bundle`/`Draft playbook`) come from the same incidents-table row the all-incidents listing above reads — see [docs/INCIDENTS.md § The Incident Receipt](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full field reference. Shown only when a row exists for this run; a pre-v0.29 or never-tracked run omits this block entirely rather than showing empty values.
 
+**`--summary`: one line per hop.** A multi-hop escalation chain's full deep-dive view above can run long — add `--summary` to condense it to one line per hop (triage/escalation/remediation playbook and outcome, truncated findings) plus a final score line, with none of the hypothesis/gate/feedback detail:
+
+```bash
+faulttest vault incidents plr_t1 --summary \
+  --gateway http://gateway:8080 --api-key $HELPDESK_API_KEY
+```
+
+```
+INCIDENT plr_t1 — resolved in 145s
+
+1. TRIAGE        pbs_connection_triage → pbs_sysadmin_host_triage
+   database unreachable, escalating for host-level inspection
+2. ESCALATION 1  pbs_sysadmin_host_triage → pbs_k8s_pod_crash_remediate  [plr_e1]
+   dmesg shows OOM-killer event
+3. REMEDIATION   pbs_k8s_pod_crash_remediate (resolved)  [plr_r1]
+   pod restarted with a higher memory limit
+
+Overall: 91% (diagnosis 50% · remediation 100%)
+```
+
+Every hop beyond TRIAGE gets its own `plr_*` run ID, shown in brackets — pass it to `vault incidents <that-id>` for that hop's own full deep-dive view (gate reason, hypotheses, steps). TRIAGE's own ID is omitted since it's always the same as the `INCIDENT` header's own ID above it.
+
+Reads the same `incidentNarrative` the full view fetches — no extra API calls. Has no effect outside deep-dive mode (the fault-id/series-id list view and the no-argument all-incidents listing both ignore it).
+
 **Verification warnings appear inline, when present.** If a chapter's underlying tool calls
 weren't fully verified — the agent narrated calling a tool that never actually executed, or a real
 tool call targeted a different server than requested — an inline warning line prints right under
@@ -559,7 +583,7 @@ Findings:  Connection refused; no infra entry for this target
            ⚠ [Layer 2] unverified — no matching tool execution in the audit trail
 
 ── ESCALATION 1/1 ───────────────────────────────────────────
-Playbook:  pbs_sysadmin_docker_inspect   Outcome: escalated
+Playbook:  pbs_sysadmin_host_triage   Outcome: escalated
 Findings:  check_host runtime=kubectl — target is Kubernetes-managed
            ⚠ [Layer 2] target drift — a tool call used a different connection string
            ⚠ [Layer 3] unverified evidence (non-blocking) — "walreceiver stopped due to administrator command"
@@ -1454,9 +1478,9 @@ all, so no hop certs are ever posted; `faulttest` prints a one-time warning when
 is the case.
 
 ```
-Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+Stability certs for series pbs_sysadmin_host_triage (model: claude-sonnet-4-6)
 
-  Fault         : db-wal-disk-full-k8s::hop:pbs_sysadmin_docker_inspect  (WAL disk full (hop: pbs_sysadmin_docker_inspect))
+  Fault         : db-wal-disk-full-k8s::hop:pbs_sysadmin_host_triage  (WAL disk full (hop: pbs_sysadmin_host_triage))
   Trust         : EARNED
   Verdict       : STABLE / CLEAN
   Runs          : 3  (pass rate 100%)
@@ -1468,7 +1492,7 @@ If the series has never been reached by any `--repeat --approval-mode=force` bat
 the command prints guidance instead of an empty table:
 
 ```
-Stability certs for series pbs_sysadmin_docker_inspect (model: claude-sonnet-4-6)
+Stability certs for series pbs_sysadmin_host_triage (model: claude-sonnet-4-6)
   None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
   against a fault whose chain passes through this series to generate one.
 ```

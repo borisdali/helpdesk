@@ -13,7 +13,8 @@ scenarios beyond WAL archiving and pgBackRest are added.
 
 1. [WAL archiving failure (the backup-taking precondition)](#1-wal-archiving-failure-the-backup-taking-precondition)
 2. [pgBackRest job-level backup health](#2-pgbackrest-job-level-backup-health)
-3. [Roadmap](#3-roadmap)
+3. [Restore from backup after data loss](#3-restore-from-backup-after-data-loss)
+4. [Roadmap](#4-roadmap)
 
 ---
 
@@ -23,7 +24,7 @@ Fault: [`db-backup-archiving-broken`](https://github.com/borisdali/helpdesk/blob
 Triage playbook: [`pbs_db_backup_health_triage`](../playbooks/database-backup-health-triage.yaml)  
 Remediation playbook: [`pbs_db_backup_archiving_remediate`](../playbooks/database-backup-archiving-remediate.yaml)  
 
-Other playbooks in this category deal with the failure scenarios that cover *restoring and recovering* from a backup after a data loss. A good example is the PITR scenario and its associated [`pbs_db_pitr_recovery`](../playbooks/database-pitr-recovery.yaml) playbook, part of the "Database Down" [playbook chain/graph](PLAYBOOK_OPS.md#12-understand-the-db-down-escalation-chain). This scanrio however is different. It covers backup-*taking* failures, which is really the precondition for both PITR and most other base-backup strategies that actually depend on it.
+Other playbooks in this category deal with the failure scenarios that cover *restoring and recovering* from a backup after a data loss. A good example is the PITR scenario and its associated [`pbs_db_data_loss_triage`](../playbooks/database-data-loss-triage.yaml) playbook, part of the "Database Down" [playbook chain/graph](PLAYBOOK_OPS.md#12-understand-the-db-down-escalation-chain). This scanrio however is different. It covers backup-*taking* failures, which is really the precondition for both PITR and most other base-backup strategies that actually depend on it.
 
 **The failure mode**:   
 There are multiple reasons for a backup to fail. This particular one deals with the `archive_command` silently failing due to a broken script, a bad path, a permissions change, a full disk at the archive destination or similar reasons. Nothing in a routine health check may surface it. The database itself is unaffected and keeps serving traffic normally and the only symptom is that the WAL archive, which a recovery would need later, has silently stopped growing.
@@ -69,7 +70,7 @@ against a live container: baseline healthy → injection → real `archive_comma
 `failed_count` climbing, `archiving_stale=true` → teardown → restored, a fresh success
 recorded, `archiving_stale=false` again.
 
-**A real, architectural incompatibility found testing against a real CloudNativePG cluster**:   
+**An architectural incompatibility found testing against a real CloudNativePG cluster**:   
 This fault and `set_archive_command` are `external_compat: true`, i.e.  structurally portable pure SQL, working against any Postgres reachable over libpq. Tested
 against a real CNPG-managed cluster to confirm that in practice, not just in theory and it...
 genuinely does not work there. The reason?   
@@ -130,7 +131,7 @@ dispatch. And pgBackRest just so happened to be the first consumer of that agent
 likely to be colocated with the agent process than a Docker test target.
 
 **A second, independent backstop that doesn't depend on the model getting it right**:   
-Same [objective evidence](OBJECTIVE_EVIDENCE.md) mechanism used throughout: In this particular case it's the `pgbackrest_backup_unhealthy` [condition](../agents/sysman/objective_evidence.yaml), which flips to `true` on a non-OK stanza status, a stale backup or no backup ever recorded, force-gates the response for human review if the model's own conclusion doesn't account for it.
+Same [objective evidence](OBJECTIVE_EVIDENCE.md) mechanism used throughout: In this particular case it's the `pgbackrest_backup_unhealthy` [condition](../agents/sysadmin/objective_evidence.yaml), which flips to `true` on a non-OK stanza status, a stale backup or no backup ever recorded, force-gates the response for human review if the model's own conclusion doesn't account for it.
 
 **What's honest about the remediation, not oversold**:   
 `run_pgbackrest_backup` is deliberately narrow as it exists only to remediate a *stale* backup on an otherwise-healthy repo by taking a
@@ -221,8 +222,10 @@ found" from inside that Pod instead of a hardcoded refusal naming one specific o
 [§3](#3-roadmap) for the separate, still-open question of operator-managed (CNPG-style) backup
 visibility, which this change does not address.
 
-**A real parsing bug found live against an actual K8s Pod — and an initial wrong hypothesis,
-corrected before shipping a fix that wouldn't have worked**:   
+**A parsing bug found live against an actual K8s Pod**:  
+
+And an initial wrong hypothesis, corrected before shipping a fix that wouldn't have worked. 
+
 Deploying a self-managed Postgres+pgBackRest Pod to a real K8s cluster to prove the `kubectl exec` path above (not
 just unit-test it) surfaced `get_pgbackrest_status: parsing pgbackrest info JSON: invalid
 character 'P' looking for beginning of value`.  
@@ -242,9 +245,182 @@ unmarshaling, rather than assuming the whole string is JSON. Verified fixed agai
 with the Service-link env-var injection deliberately left in place (not worked around) — a
 regression test captures the exact live preamble.
 
-## 3. Roadmap
+## 3. Restore from backup after data loss
+
+Fault: [`db-pgdata-corrupted`](../testing/catalog/failures.yaml) (search for the fault ID, the
+file is not short)  
+Triage playbooks: [`pbs_db_data_loss_triage`](../playbooks/database-data-loss-triage.yaml) →
+[`pbs_sysadmin_host_triage`](../playbooks/sysadmin-host-triage.yaml) →
+[`pbs_pgbackrest_health_triage`](../playbooks/pgbackrest-health-triage.yaml)  
+Remediation playbook: [`pbs_pgbackrest_restore_remediate`](../playbooks/pgbackrest-restore-remediate.yaml)  
+
+§§1–2 above both answer "is backup *healthy*?" This section answers a different, more severe
+question: the data directory itself is gone or corrupted (missing `pg_control`, "could not find
+the database system") and the instance won't start at all. §1/§2's R/O checks don't apply because 
+there's nothing left to query. Recovery means overwriting the current data directory with a
+backup, which is the most destructive operation in this project. v0.31 scopes this to the
+narrowest real slice: restore to the latest available pgBackRest backup, a single standalone
+instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
+promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
+
+**The failure mode**:  
+A missing/corrupted `pg_control` file (disk corruption, an accidental delete, a bad volume
+restore) leaves PostgreSQL unable to start at all and the error message is `postgres: could not find the database
+system`. This is distinct from every scenario in §1/§2: the database isn't slow or
+misconfigured, it's *gone* and the only way back is restoring from a backup rather than fixing a
+setting.
+
+**Why aiHelpDesk doesn't make that mistake**:  
+The chain above exists because no single agent holds every tool the decision needs. The DB agent
+(`pbs_db_data_loss_triage`) has no tool to read Docker/Podman container logs; the SysAdmin agent
+has no tool to verify Postgres backup health. Rather than having each hop guess at what it can't
+see, each one **front-loads every condition it can determine without the evidence the next hop is
+about to fetch** (single instance? pgBackRest in use? PITR already decided?) into its own
+`FINDINGS`, so the next hop only has to judge the one condition it's actually equipped to answer
+and can act on the combined picture directly — no bouncing back for a decision already made. An
+earlier revision of this chain *did* bounce `pbs_sysadmin_host_triage` back to
+`pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
+safety benefit once it was clear none of the static conditions needed fresh evidence to answer —
+caught in review before it shipped, not after a slow live run.
+
+**A second, independent backstop that doesn't depend on the model getting it right:**   
+And this is the one that actually matters for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
+`pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
+it does real work: `pbs_pgbackrest_restore_remediate` is only ever reached once that hop's own
+`TRANSITION_TO` fires, which should only happen when the backup is genuinely confirmed healthy.  
+
+If the model's response claims "healthy" but the tool's own structured result says otherwise, the
+signal goes unconfirmed and the gateway forces a `pending_gate`. The import part is this: **it cannot be bypassed by
+`approval_mode=force`**.   
+
+That is, `cmd/gateway/playbooks.go`'s own force-gate mechanism exists specifically
+to override the caller's force-mode auto-chain intent when evidence contradicts the model's
+conclusion. The single most important precondition for this op — is there actually a healthy
+backup to restore from — is backed by a deterministic Go code path, not left to the model's prose.
+
+**A third protection, fails closed by design, not by accident**:  
+We found this during live debugging of something else entirely, confirmed while weeding out three separate live bugs during this chain's own testing:  
+- a stdio-buffering race that delayed when a crash message reached the log stream  
+- a log-request window too small once prior test cycles had piled up legitimate noise   
+- `get_host_logs` silently discarding stderr (where PostgreSQL's own fatal startup message actually lives)  
+
+Each of these bugs independently caused the diagnosis to miss the real corruption signature. In every one of those three cases, the diagnosis was wrong or
+incomplete and in every one, nothing destructive happened anyway. That's not luck.  
+
+`pbs_sysadmin_host_triage`'s own guidance only sets `FINDINGS: data_loss_restore_candidate=true` on a narrow, explicit conjunction — the exact
+`"could not find the database system"` signature *and* `single_instance=true` *and*
+`backup_tool=pgbackrest` *and* `pitr_decided=false` *and* "nothing in these logs suggests damage
+beyond what a plain restore would fix." Every branch where that conjunction doesn't hold says, verbatim, **"Do NOT escalate... needs a human DBA."**   
+
+`pbs_pgbackrest_health_triage` only transitions onward to `pbs_pgbackrest_restore_remediate` if that exact marker was set upstream.
+Otherwise its own guidance is `ESCALATE_TO: none`. Composed with the gateway's own chain-escalation mechanism,
+which requires an *explicit, positive* `TRANSITION_TO`/`ESCALATE_TO` signal to continue at all and
+never proceeds on silence or ambiguity, the result is that an uncertain or under-evidenced model
+doesn't need to actively decide *not* to recommend a restore. It just never produces the signal
+that would start one and the chain stops there by default.
+
+**The honest limit of this one, stated with the same care as everything else here**: this is enforced
+through LLM-interpreted playbook guidance, not a deterministic Go-level check the way the backup-health
+gate above is. The three live bugs that exercised this path were all cases of the model being
+appropriately *conservative* under incomplete evidence — it correctly never escalated. None of them
+tested the opposite failure mode: a model *confidently and wrongly* concluding corruption when there
+isn't any, then escalating on a false positive. That's a different, harder gap this property does not
+close and nothing here should be read as claiming it does.
+
+**What this does *not* cover, said plainly rather than left implicit**:  
+- `pbs_db_data_loss_triage` and `pbs_sysadmin_host_triage` have no dedicated objective-evidence
+  signal of their own — `get_host_logs` returns raw text, not a structured result with a named
+  probe the way `get_pgbackrest_status` does. Their findings (single instance? does the log text
+  suggest damage beyond what a plain restore fixes?) rest on the model's own quoted-evidence
+  discipline, not a deterministic check — the fail-closed property above narrows the blast radius of
+  that gap considerably, but, per the honest limit just stated, does not close it.
+- `restore_from_backup` itself doesn't independently re-verify `status_code`/`backup_stale` at the
+  Go level when called with an explicit stanza (the normal path from the remediation playbook's
+  own Step 1) — it relies on that playbook's LLM-mediated re-check plus the force-gate above as
+  the real backstops, not a third, redundant tool-level check. As of v0.31.x, Step 1's own
+  `backup_stale=true` precondition is an explicit, named stop (cite the staleness, do not
+  transition or escalate automatically, defer to a human) rather than unguided model judgment —
+  found live (2026-10-11) to matter: the earlier, vaguer wording let the model either invent a
+  nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
+  without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
+  check, and still doesn't know whether the WAL chain itself is intact — see the next bullet.
+- There is no verification, before or after the restore, that the WAL chain from the backup to the
+  crash point is actually contiguous — see [§4](#4-roadmap)'s "WAL-chain completeness" item. A gap
+  in the archive wouldn't be caught by anything above; Postgres replays however much WAL it can
+  find and completes recovery there, logging it the same way as legitimately reaching the true
+  end of the stream.
+
+**What's honest about the remediation, not oversold**:  
+`restore_from_backup` is restore-to-latest only — pgBackRest's own default recovery target, no
+`--type`/`--target` flag, matching the stated scope exactly. It refuses outright if `pg_isready`
+reports the instance still accepting connections — confirmed live, this is the one thing standing
+between restoring a dead instance and destroying a live one. It is classified
+`policy.ActionDestructive`, the same tier as `restart_container`/`restart_service`, flowing
+through the existing policy engine's approval/purpose rules with no special-casing.
+
+**Verified, not just claimed**:  
+The full crash → diagnose → restore → recover cycle was run live against a real pgBackRest
+fixture (`testing/docker/docker-compose.pgbackrest.yaml`) before any Go code was written: delete
+`pg_control`, crash the container, confirm `pgbackrest restore` brings it back, confirm a real
+`psql` connection succeeds afterward. That same live pass corrected two assumptions that would
+otherwise have shipped wrong: `pgbackrest restore --force` does **not** bypass its own
+`postmaster.pid`-present refusal (`--force` means something else to pgBackRest) — the real fix is
+removing the stale pid file once `pg_isready` has already confirmed the server is down; and
+deleting `pg_control` crashes the *whole container* (postgres is PID 1 in the test image), taking
+`sshd` down with it and making the target unreachable at the exact moment diagnosis needed it —
+fixed in `testing/docker/start-with-sshd.sh` by making the entrypoint survive postgres's exit
+instead of `exec`-replacing itself.
+
+A separate, targeted live test (2026-10-06) confirmed the backup-existence question specifically:
+a throwaway stanza that was never `stanza-create`'d, restored against with a canary file placed in
+the target directory first. pgBackRest refused outright — `[075]: no backup set found to
+restore`, exit code 75 — and the canary file survived untouched. pgBackRest validates that a
+selectable backup exists (it has to read `backup.info` to build a restore file-list) before it
+does anything destructive to the target — restoring against a nonexistent backup is already safe
+today, confirmed empirically rather than assumed, with zero code of our own responsible for it.
+
+**Real host/VM support, not just Docker**:  
+Everything above was built and live-verified against the dedicated Docker fixture
+(`testing/docker/docker-compose.pgbackrest.yaml`).  
+
+This same chain also works against a real, SSH-reachable Linux host/VM running PostgreSQL as a genuine systemd service. Not a disguised
+container, but via [`db-pgdata-corrupted-vm`](../testing/catalog/failures.yaml) (new fault, same diagnosis/remediation playbooks).  
+
+This required making the following SysAdmin Agent's tool more robust and portable: `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`,
+`restart_container` and `restart_service`. All of them called the local-exec path directly, ignoring a target's configured `ssh_user`/`ssh_key_path` — only `get_pgbackrest_status`/
+`run_pgbackrest_backup` (§2 above) ever actually dispatched over SSH.   
+
+See [SYSADMIN_AGENT.md §5](SYSADMIN_AGENT.md#5-container-runtime-dispatch) for the full fix and the real in-process-SSH-server tests proving it.
+
+`pbs_pgbackrest_restore_remediate` has a new `restart_service` path written from well-established
+Debian/RHEL packaging conventions (journalctl showing only service-lifecycle lines, not
+PostgreSQL's own output.   
+
+`read_pg_log_file`'s log directory differing by distro, see the new `pg_log_dir` infra-config field), not something directly observed against a real VM the way every
+other claim in this document is.  
+
+## 4. Roadmap
 
 Not yet built — tracked, not forgotten:
+
+- **WAL-chain completeness verification (§3).**  
+  Nothing today confirms, before or after a restore, that the WAL chain from the backup to the
+  crash point is actually contiguous. This is implementable without a live source instance:
+  `pgbackrest info --output=json` already reports the stanza's `archive[].max` (the latest WAL
+  segment filename physically present in the repo — not yet parsed into
+  `GetPgBackRestStatusResult`) and Postgres's own recovery log reports exactly which segments it
+  replayed (`"restored log file \"...\" from archive"`) and the final LSN (`"redo done at ..."`).
+  Comparing the two after a restore — did recovery replay through the repo's own latest segment,
+  or stop short — would turn a silent partial-recovery into a reported, CRITICAL finding instead
+  of a result that looks identical to a clean recovery from the outside.
+
+- **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
+  `pbs_sysadmin_host_triage` (§3).**  
+  Both currently reason over raw log text with no structured, named probe backing their
+  conclusions the way `get_pgbackrest_status` backs the health-check hop. Building this would mean
+  giving `get_host_logs`/`read_pg_log_file` a typed result with real signals (a specific failure
+  string present, a specific one absent) rather than leaving those two hops as the one part of the
+  chain with no deterministic backstop at all.
 
 - **`pg_basebackup` job-level health.**   
   §2 above closes this gap for pgBackRest specifically —
@@ -269,7 +445,7 @@ Not yet built — tracked, not forgotten:
   §1's `set_archive_command` cannot act
   against a real CNPG-managed cluster, at any privilege level — see §1's own "Verified, not just
   claimed" callout for the direct evidence (`postgresql.auto.conf` is mode 400, read-only even
-  for the Postgres superuser, and the container runs `readOnlyRootFilesystem: true`). This is
+  for the Postgres superuser and the container runs `readOnlyRootFilesystem: true`). This is
   CNPG's own deliberate design, not fixable by granting more access. A CNPG-native remediation
   path — patching the `Cluster` custom resource's own `archive_command` field (a K8s API write,
   reconciled by the operator) instead of running SQL — is a distinct, unbuilt capability, not an
@@ -313,8 +489,9 @@ Not yet built — tracked, not forgotten:
 ---
 
 See also: [HA_DR.md](HA_DR.md) for streaming-replication and failover diagnosis,
-[PLAYBOOKS.md](PLAYBOOKS.md) for the "Database Down" playbook graph including
-`pbs_db_pitr_recovery` (restoring *from* a backup after data loss — the other half of the
-backup story from this page's backup-*taking* focus), [FAULTTEST.md](FAULTTEST.md) for the
+[PLAYBOOKS.md](PLAYBOOKS.md) for the "Database Down" playbook graph that §3's chain is part of,
+[PLAYBOOK_OPS.md §1.2](PLAYBOOK_OPS.md#12-understand-the-db-down-escalation-chain) for that
+graph's full escalation-chain diagram, [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md) for how the
+force-gate mechanism §2/§3 both rely on actually works, [FAULTTEST.md](FAULTTEST.md) for the
 fault injection CLI and full catalog reference, [CONSISTENCY.md](CONSISTENCY.md) for how a
 playbook earns a stability certification before entering live rotation.

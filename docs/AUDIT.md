@@ -539,7 +539,7 @@ Revokes the session immediately. Returns `204 No Content`. Returns `404` if not 
 | `scope` | string | Informational label; empty when not provided |
 | `revoked` | bool | `true` if the session was explicitly revoked before expiry |
 
-A session is considered valid when: `revoked=false`, `expires_at` is in the future and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_docker_inspect`) without a separate operator call.
+A session is considered valid when: `revoked=false`, `expires_at` is in the future and the tool's action class is in `allowed_classes`. The gateway enforces all three conditions on every proxied call. The `"escalation"` class covers automatic cross-agent chaining — include it when the session should permit the gateway to chain a second agent (e.g. `pbs_sysadmin_host_triage`) without a separate operator call.
 
 See [Approval modes](PLAYBOOKS.md#approval-modes) in the Playbook docs for the full usage guide.
 

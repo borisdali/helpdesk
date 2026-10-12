@@ -99,7 +99,7 @@ func TestHandleGetDecision_Gate_Escalation(t *testing.T) {
 		RunID:           "plr_conn01",
 		SeriesID:        "pbs_connection_triage",
 		Outcome:         audit.OutcomeGatePending,
-		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		EscalatedTo:     "pbs_sysadmin_host_triage",
 		FindingsSummary: "connections 198/200; recommended=escalate",
 		Operator:        "ops-bob",
 		StartedAt:       time.Now().UTC(),
@@ -125,8 +125,8 @@ func TestHandleGetDecision_Gate_Escalation(t *testing.T) {
 		t.Errorf("extra.gate_type = %q, want escalation", gateType)
 	}
 	escTarget, _ := d.Extra["escalation_target"].(string)
-	if escTarget != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("extra.escalation_target = %q, want pbs_sysadmin_docker_inspect", escTarget)
+	if escTarget != "pbs_sysadmin_host_triage" {
+		t.Errorf("extra.escalation_target = %q, want pbs_sysadmin_host_triage", escTarget)
 	}
 	if _, hasTrans := d.Extra["transition_target"]; hasTrans {
 		t.Errorf("extra.transition_target should be absent for a true escalation gate")
@@ -554,6 +554,7 @@ func TestHandleGetIncident(t *testing.T) {
 		TransitionedTo:  "pbs_lock_chain_remediate",
 		FindingsSummary: "root blocker PID 867",
 		Operator:        "alice",
+		GateReason:      "objective_evidence:pgbackrest_backup_unhealthy",
 		StartedAt:       time.Now().Add(-30 * time.Second).UTC(),
 		CompletedAt:     time.Now().Add(-20 * time.Second).UTC(),
 	}
@@ -593,6 +594,8 @@ func TestHandleGetIncident(t *testing.T) {
 			w.Write(gateEventsData) //nolint:errcheck
 		case strings.Contains(r.URL.Path, "/feedback"):
 			http.Error(w, "not found", http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/v1/fleet/playbooks") && q.Get("series_id") == "pbs_lock_chain_remediate":
+			w.Write([]byte(`{"playbooks":[{"series_id":"pbs_lock_chain_remediate","playbook_type":"remediation"}]}`)) //nolint:errcheck
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -633,6 +636,9 @@ func TestHandleGetIncident(t *testing.T) {
 	}
 	if narrative.Gate.ApprovedBy != "bob" {
 		t.Errorf("Gate.ApprovedBy = %q, want bob", narrative.Gate.ApprovedBy)
+	}
+	if narrative.Gate.GateReason != "objective_evidence:pgbackrest_backup_unhealthy" {
+		t.Errorf("Gate.GateReason = %q, want objective_evidence:pgbackrest_backup_unhealthy", narrative.Gate.GateReason)
 	}
 	if narrative.Remediation == nil {
 		t.Fatal("Remediation chapter should be present")
@@ -689,6 +695,8 @@ func TestHandleGetIncident_JourneyRefs(t *testing.T) {
 				w.Write(triageData) //nolint:errcheck
 			case r.URL.Path == "/v1/fleet/playbook-runs" && r.URL.Query().Get("prior_run_id") == triageRun.RunID:
 				w.Write(remListData) //nolint:errcheck
+			case strings.Contains(r.URL.Path, "/v1/fleet/playbooks") && r.URL.Query().Get("series_id") == "pbs_lock_remediate":
+				w.Write([]byte(`{"playbooks":[{"series_id":"pbs_lock_remediate","playbook_type":"remediation"}]}`)) //nolint:errcheck
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}

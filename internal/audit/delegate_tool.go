@@ -178,7 +178,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 			outcome := &Outcome{
 				Status:       "error",
 				ErrorMessage: fmt.Sprintf("agent %q not found in registry", args.Agent),
-				Duration:     time.Since(start),
+				Duration:     MillisecondsFromDuration(time.Since(start)),
 			}
 			if auditor != nil {
 				_ = auditor.RecordOutcome(context.Background(), event.EventID, outcome)
@@ -223,7 +223,7 @@ func DelegateToolWithTrace(auditor Auditor, auditURL, auditAPIKey string, regist
 
 		// Record outcome
 		outcome := &Outcome{
-			Duration: duration,
+			Duration: MillisecondsFromDuration(duration),
 		}
 		if err != nil {
 			outcome.Status = "error"

@@ -103,14 +103,14 @@ func (ta *ToolAuditor) RecordToolCall(ctx context.Context, call ToolCall, result
 			RawCommand: call.RawCommand,
 			Result:     truncateString(result.Output, toolResultMaxLen),
 			Error:      result.Error,
-			Duration:   duration,
+			Duration:   MillisecondsFromDuration(duration),
 			Agent:      ta.agentName, // Track which agent executed this tool
 			PreState:   call.PreState,
 		},
 		// No Decision for tool executions - they're not LLM decisions
 		Outcome: &Outcome{
 			Status:   outcomeStatus(result.Error),
-			Duration: duration,
+			Duration: MillisecondsFromDuration(duration),
 		},
 	}
 

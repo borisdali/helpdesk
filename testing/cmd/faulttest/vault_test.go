@@ -1727,11 +1727,38 @@ func TestFetchIncidentNarrative_SendsAuth(t *testing.T) {
 
 // mockPriorRunIDServer serves GET .../playbook-runs?prior_run_id=<id>&limit=1
 // from a map, mirroring auditd's raw {"runs":[...]} response shape. Missing
-// keys return an empty runs array (no successor for that hop).
+// keys return an empty runs array (no successor for that hop). No
+// playbook_type data — any series_id looked up by isRemediationPlaybook
+// fails open to "not remediation".
 func mockPriorRunIDServer(t *testing.T, next map[string]incidentRun) *httptest.Server {
+	return mockPriorRunIDServerWithTypes(t, next, nil)
+}
+
+// mockPriorRunIDServerWithTypes is mockPriorRunIDServer plus a series_id ->
+// playbook_type map, serving GET .../fleet/playbooks?series_id=<id> so
+// walkToRemediation's isRemediationPlaybook lookup resolves to real values
+// instead of always failing open. Missing keys 404, same fail-open behavior
+// as mockPriorRunIDServer.
+func mockPriorRunIDServerWithTypes(t *testing.T, next map[string]incidentRun, playbookTypes map[string]string) *httptest.Server {
 	t.Helper()
+	// playbookTypeCache is a package-level cache (see its own doc comment) —
+	// reset it so a series_id reused by an earlier test in this same binary
+	// can't leak a stale playbook_type into this one.
+	playbookTypeCache = map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/fleet/playbooks") && r.URL.Query().Get("series_id") != "" {
+			seriesID := r.URL.Query().Get("series_id")
+			pbType, ok := playbookTypes[seriesID]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"playbooks": []map[string]any{{"series_id": seriesID, "playbook_type": pbType}},
+			})
+			return
+		}
 		priorID := r.URL.Query().Get("prior_run_id")
 		runs := []incidentRun{}
 		if hop, ok := next[priorID]; ok {
@@ -1745,7 +1772,7 @@ func mockPriorRunIDServer(t *testing.T, next map[string]incidentRun) *httptest.S
 
 func TestFetchNextHop_Success(t *testing.T) {
 	srv := mockPriorRunIDServer(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage"},
 	})
 	hop := fetchNextHop(srv.URL, "", "plr_t1")
 	if hop == nil || hop.RunID != "plr_e1" {
@@ -1765,9 +1792,9 @@ func TestFetchNextHop_NoSuccessor(t *testing.T) {
 // only successor was reached via TRANSITION_TO, so it is the remediation run.
 func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
 	triage := &incidentRun{RunID: "plr_t1", TransitionedTo: "pbs_lock_remediate"}
-	srv := mockPriorRunIDServer(t, map[string]incidentRun{
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
 		"plr_t1": {RunID: "plr_r1", SeriesID: "pbs_lock_remediate", Outcome: "resolved"},
-	})
+	}, map[string]string{"pbs_lock_remediate": "remediation"})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem == nil || rem.RunID != "plr_r1" {
 		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1", rem)
@@ -1779,9 +1806,9 @@ func TestWalkToRemediation_TwoHopTransition(t *testing.T) {
 // misclassification this whole fix closes, exercised against the
 // independently-implemented table-view walker.
 func TestWalkToRemediation_EscalationOnly(t *testing.T) {
-	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
 	srv := mockPriorRunIDServer(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "escalated"},
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "escalated"},
 	})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem != nil {
@@ -1793,14 +1820,39 @@ func TestWalkToRemediation_EscalationOnly(t *testing.T) {
 // escalation hop to find the true, terminal remediation hop — not the
 // middle one.
 func TestWalkToRemediation_ThreeHopChain(t *testing.T) {
-	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_docker_inspect"}
-	srv := mockPriorRunIDServer(t, map[string]incidentRun{
-		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_docker_inspect", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "transitioned", TransitionedTo: "pbs_k8s_pod_crash_remediate"},
 		"plr_e1": {RunID: "plr_r1", SeriesID: "pbs_k8s_pod_crash_remediate", Outcome: "resolved"},
-	})
+	}, map[string]string{"pbs_k8s_pod_crash_remediate": "remediation"})
 	rem := walkToRemediation(srv.URL, "", triage)
 	if rem == nil || rem.RunID != "plr_r1" {
 		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the terminal hop, not plr_e1)", rem)
+	}
+}
+
+// TestWalkToRemediation_TransitionToTriageHop_NotMisclassified is a
+// regression test for the real bug found live 2026-10-07 on the
+// db-pgdata-corrupted fault's actual 4-hop chain, mirroring
+// cmd/gateway/incident_narrative_test.go's identically-named/-purposed test:
+// a hop reached via TRANSITION_TO whose own playbook is still
+// playbook_type=triage (pbs_pgbackrest_health_triage, a same-domain hand-off
+// target of pbs_sysadmin_host_triage) must not be treated as remediation —
+// the walk must continue past it to the real remediation hop.
+func TestWalkToRemediation_TransitionToTriageHop_NotMisclassified(t *testing.T) {
+	triage := &incidentRun{RunID: "plr_t1", EscalatedTo: "pbs_sysadmin_host_triage"}
+	srv := mockPriorRunIDServerWithTypes(t, map[string]incidentRun{
+		"plr_t1": {RunID: "plr_e1", SeriesID: "pbs_sysadmin_host_triage", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
+		"plr_e1": {RunID: "plr_e2", SeriesID: "pbs_pgbackrest_health_triage", Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_restore_remediate"},
+		"plr_e2": {RunID: "plr_r1", SeriesID: "pbs_pgbackrest_restore_remediate", Outcome: "resolved"},
+	}, map[string]string{
+		"pbs_sysadmin_host_triage":         "triage",
+		"pbs_pgbackrest_health_triage":     "triage",
+		"pbs_pgbackrest_restore_remediate": "remediation",
+	})
+	rem := walkToRemediation(srv.URL, "", triage)
+	if rem == nil || rem.RunID != "plr_r1" {
+		t.Fatalf("walkToRemediation = %+v, want run_id=plr_r1 (the true remediation hop, not plr_e2's still-triage-type hop)", rem)
 	}
 }
 
@@ -1874,7 +1926,7 @@ func TestFetchIncidentNarrative_DecodesEscalations(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":       "plr_e1",
-					"playbook":     "pbs_sysadmin_docker_inspect",
+					"playbook":     "pbs_sysadmin_host_triage",
 					"outcome":      "transitioned",
 					"escalated_to": "",
 					"findings":     "dmesg shows OOM-killer event",
@@ -1902,8 +1954,8 @@ func TestFetchIncidentNarrative_DecodesEscalations(t *testing.T) {
 	if len(n.Escalations) != 1 {
 		t.Fatalf("Escalations len = %d, want 1", len(n.Escalations))
 	}
-	if n.Escalations[0].RunID != "plr_e1" || n.Escalations[0].Playbook != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("Escalations[0] = %+v, want run_id=plr_e1 playbook=pbs_sysadmin_docker_inspect", n.Escalations[0])
+	if n.Escalations[0].RunID != "plr_e1" || n.Escalations[0].Playbook != "pbs_sysadmin_host_triage" {
+		t.Errorf("Escalations[0] = %+v, want run_id=plr_e1 playbook=pbs_sysadmin_host_triage", n.Escalations[0])
 	}
 	if n.Escalations[0].Findings != "dmesg shows OOM-killer event" {
 		t.Errorf("Escalations[0].Findings = %q", n.Escalations[0].Findings)
@@ -1935,7 +1987,7 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":   "plr_e1",
-					"playbook": "pbs_sysadmin_docker_inspect",
+					"playbook": "pbs_sysadmin_host_triage",
 					"outcome":  "transitioned",
 					"findings": "dmesg shows OOM-killer event",
 				},
@@ -1955,13 +2007,13 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_t1")
+		printIncidentJourney(srv.URL, "", "plr_t1", false)
 	})
 
 	if !strings.Contains(out, "ESCALATION 1/1") {
 		t.Errorf("output missing ESCALATION section header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "pbs_sysadmin_docker_inspect") {
+	if !strings.Contains(out, "pbs_sysadmin_host_triage") {
 		t.Errorf("output missing escalation hop's playbook, got:\n%s", out)
 	}
 	if !strings.Contains(out, "dmesg shows OOM-killer event") {
@@ -1972,6 +2024,117 @@ func TestPrintIncidentJourney_Escalations(t *testing.T) {
 	}
 	if !strings.Contains(out, "terminal escalation hop — handed off to remediation") {
 		t.Errorf("output missing escalation:1 phase description in JOURNEYS section for outcome=transitioned, got:\n%s", out)
+	}
+}
+
+// TestPrintIncidentJourney_Summary_OneLinePerHop proves the --summary mode:
+// one line per hop (triage, each escalation, remediation) instead of the
+// full Findings/Hypotheses/flags breakdown — asked for live (2026-10-11)
+// after a real 4-hop chain's default output ran to several screens, making
+// "what actually happened, hop by hop" hard to see at a glance.
+func TestPrintIncidentJourney_Summary_OneLinePerHop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id":  "plr_t1",
+			"started_at":   time.Now().UTC().Format(time.RFC3339),
+			"duration_sec": 145.0,
+			"incident_record": map[string]any{
+				"incident_id": "plr_t1",
+				"status":      "resolved",
+			},
+			"triage": map[string]any{
+				"run_id":   "plr_t1",
+				"playbook": "pbs_connection_triage",
+				"findings": "database unreachable, escalating for host-level inspection",
+			},
+			"escalations": []map[string]any{
+				{
+					"run_id":   "plr_e1",
+					"playbook": "pbs_sysadmin_host_triage",
+					"outcome":  "transitioned",
+					"findings": "dmesg shows OOM-killer event",
+				},
+			},
+			"remediation": map[string]any{
+				"run_id":   "plr_r1",
+				"playbook": "pbs_k8s_pod_crash_remediate",
+				"outcome":  "resolved",
+				"findings": "pod restarted with a higher memory limit",
+			},
+			"evaluation": map[string]any{
+				"diagnosis_score":   0.5,
+				"remediation_score": 1.0,
+				"overall_score":     0.91,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_t1", true)
+	})
+
+	for _, want := range []string{
+		"pbs_connection_triage", "pbs_sysadmin_host_triage", "pbs_k8s_pod_crash_remediate",
+		"dmesg shows OOM-killer event", "pod restarted with a higher memory limit",
+		"resolved in 145s", "Overall: 91%",
+		// Regression (2026-10-11): each later hop's own run ID — otherwise
+		// only ever visible in the original faulttest run's live log output
+		// or a raw auditd query — must be surfaced here so it's directly
+		// reachable as `vault incidents <that-hop's-run-id>` from this view.
+		"[plr_e1]", "[plr_r1]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary output missing %q, got:\n%s", want, out)
+		}
+	}
+	// The TRIAGE chapter's own run ID (plr_t1) is already the INCIDENT
+	// header's own ID — repeating it inline would be redundant noise.
+	if strings.Contains(out, "[plr_t1]") {
+		t.Errorf("summary output should not repeat the TRIAGE run ID (already shown in the INCIDENT header), got:\n%s", out)
+	}
+	// The whole point is brevity — the full mode's own section headers and
+	// hypothesis machinery must not appear.
+	for _, absent := range []string{"Hypotheses:", "═══"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("summary output should not contain full-mode content %q, got:\n%s", absent, out)
+		}
+	}
+}
+
+// TestPrintIncidentJourney_Gate_ShowsGateReason is a regression test for a
+// real gap found live 2026-10-08: the GATE section showed who approved a
+// gate and when, but never WHY it fired — gate_reason (e.g.
+// "objective_evidence:pgbackrest_backup_unhealthy") was already computed and
+// stored server-side but never surfaced to a human reader. Proves it's now
+// rendered as its own "Reason:" line.
+func TestPrintIncidentJourney_Gate_ShowsGateReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"incident_id": "plr_gate1",
+			"started_at":  time.Now().UTC().Format(time.RFC3339),
+			"triage": map[string]any{
+				"run_id":   "plr_gate1",
+				"playbook": "pbs_db_data_loss_triage",
+			},
+			"gate": map[string]any{
+				"resolution":      "approved",
+				"approved_by":     "operator",
+				"acknowledged_at": time.Now().UTC().Format(time.RFC3339),
+				"gate_reason":     "objective_evidence:pgbackrest_backup_unhealthy",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	out := captureStdout(func() {
+		printIncidentJourney(srv.URL, "", "plr_gate1", false)
+	})
+
+	if !strings.Contains(out, "Reason:    objective_evidence:pgbackrest_backup_unhealthy") {
+		t.Errorf("output missing gate_reason line, got:\n%s", out)
 	}
 }
 
@@ -2006,7 +2169,7 @@ func TestPrintIncidentJourney_IncidentRecord_ShowsOriginStatusBundleDraft(t *tes
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec1")
+		printIncidentJourney(srv.URL, "", "plr_rec1", false)
 	})
 
 	if !strings.Contains(out, "Origin: faulttest") {
@@ -2049,7 +2212,7 @@ func TestPrintIncidentJourney_IncidentRecord_DefaultsWhenOriginStatusEmpty(t *te
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec2")
+		printIncidentJourney(srv.URL, "", "plr_rec2", false)
 	})
 
 	if !strings.Contains(out, "Origin: real") {
@@ -2088,7 +2251,7 @@ func TestPrintIncidentJourney_IncidentRecord_AbsentWhenNoTableRow(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_rec3")
+		printIncidentJourney(srv.URL, "", "plr_rec3", false)
 	})
 
 	for _, want := range []string{"Origin:", "Status:", "Attribution:", "Bundle:", "Draft playbook:"} {
@@ -2118,7 +2281,7 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 			"escalations": []map[string]any{
 				{
 					"run_id":           "plr_flags2",
-					"playbook":         "pbs_sysadmin_docker_inspect",
+					"playbook":         "pbs_sysadmin_host_triage",
 					"outcome":          "resolved",
 					"findings":         "container healthy",
 					"has_mismatch":     false,
@@ -2130,7 +2293,7 @@ func TestPrintIncidentJourney_VerificationFlags_InlineWarnings(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_flags1")
+		printIncidentJourney(srv.URL, "", "plr_flags1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] unverified") {
@@ -2174,7 +2337,7 @@ func TestPrintIncidentJourney_UnverifiedEvidence_PrimaryVsSecondary(t *testing.T
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_unvevid1")
+		printIncidentJourney(srv.URL, "", "plr_unvevid1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerContentProvenance+"] unverified evidence (non-blocking) — replica disconnected — totally invented log line") {
@@ -2213,7 +2376,7 @@ func TestPrintIncidentJourney_VerificationFlags_RemediationChapter(t *testing.T)
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_remflag1")
+		printIncidentJourney(srv.URL, "", "plr_remflag1", false)
 	})
 
 	if !strings.Contains(out, "REMEDIATION") {
@@ -2266,7 +2429,7 @@ func TestPrintIncidentJourney_ObjectiveEvidence_InlineOnAllChapters(t *testing.T
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_oevprint1")
+		printIncidentJourney(srv.URL, "", "plr_oevprint1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerObjectiveEvidence+"] unconfirmed evidence — replica_disconnected") {
@@ -2302,7 +2465,7 @@ func TestPrintIncidentJourney_VerificationFlags_ProtocolViolation(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_pvflag1")
+		printIncidentJourney(srv.URL, "", "plr_pvflag1", false)
 	})
 
 	if !strings.Contains(out, "⚠ ["+audit.LayerDelegationVerification+"] protocol violation") {
@@ -2332,7 +2495,7 @@ func TestPrintIncidentJourney_VerificationFlags_AbsentWhenClean(t *testing.T) {
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_clean1")
+		printIncidentJourney(srv.URL, "", "plr_clean1", false)
 	})
 
 	if strings.Contains(out, "⚠") {
@@ -2360,7 +2523,7 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 			"escalations": []map[string]any{
 				{
 					"run_id":       "plr_e1",
-					"playbook":     "pbs_sysadmin_docker_inspect",
+					"playbook":     "pbs_sysadmin_host_triage",
 					"outcome":      "escalated",
 					"escalated_to": "pbs_k8s_pod_crash_triage",
 					"findings":     "runtime=kubectl detected",
@@ -2382,7 +2545,7 @@ func TestPrintIncidentJourney_TwoEscalations_DistinctDescriptions(t *testing.T) 
 	defer srv.Close()
 
 	out := captureStdout(func() {
-		printIncidentJourney(srv.URL, "", "plr_t1")
+		printIncidentJourney(srv.URL, "", "plr_t1", false)
 	})
 
 	if !strings.Contains(out, "intermediate hop — escalated further to pbs_k8s_pod_crash_triage") {
@@ -2871,6 +3034,7 @@ func TestEscalationHopDesc(t *testing.T) {
 		{Outcome: "transitioned"},
 		{Outcome: "resolved"},
 		{Outcome: "some_future_outcome"},
+		{Outcome: "transitioned", TransitionedTo: "pbs_pgbackrest_health_triage"},
 	}
 
 	tests := []struct {
@@ -2883,9 +3047,10 @@ func TestEscalationHopDesc(t *testing.T) {
 		{"transitioned is terminal, handed to remediation", "escalation:3", "terminal escalation hop — handed off to remediation"},
 		{"resolved is terminal, investigation concluded", "escalation:4", "terminal escalation hop — investigation concluded here"},
 		{"unknown outcome falls back", "escalation:5", "intermediate escalation hop — further diagnosis, not yet resolved"},
-		{"index out of range falls back", "escalation:6", "intermediate escalation hop — further diagnosis, not yet resolved"},
+		{"index out of range falls back", "escalation:7", "intermediate escalation hop — further diagnosis, not yet resolved"},
 		{"unparsable index falls back", "escalation:abc", "intermediate escalation hop — further diagnosis, not yet resolved"},
 		{"merged phase suffix still resolves index 1", "escalation:1+remediation", "intermediate hop — escalated further to pbs_k8s_pod_crash_triage"},
+		{"transitioned with explicit target names it, not generic 'remediation'", "escalation:6", "intermediate hop — transitioned to pbs_pgbackrest_health_triage"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

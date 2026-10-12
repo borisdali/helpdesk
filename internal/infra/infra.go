@@ -10,17 +10,27 @@ import (
 
 // DBServer represents a managed database server (AlloyDB Omni, standalone PostgreSQL, etc.).
 type DBServer struct {
-	Name             string   `json:"name"`
-	ConnectionString string   `json:"connection_string"`
-	PasswordEnv      string   `json:"password_env,omitempty"`   // env var holding the password; appended at runtime
-	K8sCluster       string   `json:"k8s_cluster,omitempty"`
-	K8sNamespace     string   `json:"k8s_namespace,omitempty"`
-	K8sPodSelector   string   `json:"k8s_pod_selector,omitempty"` // label selector for kubectl exec (e.g. "app=postgres,instance=prod")
-	VMName           string   `json:"vm_name,omitempty"`
-	ContainerName    string   `json:"container_name,omitempty"` // container name when VM.Runtime is docker|podman
-	SystemdUnit      string   `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""
-	Tags                 []string `json:"tags,omitempty"`                   // Tags for policy matching (e.g., "production", "staging")
-	Sensitivity          []string `json:"sensitivity,omitempty"`            // Sensitivity classes (e.g., "pii", "critical")
+	Name             string `json:"name"`
+	ConnectionString string `json:"connection_string"`
+	PasswordEnv      string `json:"password_env,omitempty"` // env var holding the password; appended at runtime
+	K8sCluster       string `json:"k8s_cluster,omitempty"`
+	K8sNamespace     string `json:"k8s_namespace,omitempty"`
+	K8sPodSelector   string `json:"k8s_pod_selector,omitempty"` // label selector for kubectl exec (e.g. "app=postgres,instance=prod")
+	VMName           string `json:"vm_name,omitempty"`
+	ContainerName    string `json:"container_name,omitempty"` // container name when VM.Runtime is docker|podman
+	SystemdUnit      string `json:"systemd_unit,omitempty"`   // unit name when VM.Runtime is ""
+	// PgLogDir overrides read_pg_log_file's default PostgreSQL log
+	// directory for this instance (agents/sysadmin/tools.go's
+	// pgLogDefaultDir constant, "/var/lib/postgresql/data/log" — correct
+	// for the postgres:16 Docker image this project's own test fixtures
+	// use, but wrong for a real systemd-managed install: Debian/Ubuntu's
+	// packaged PostgreSQL logs to /var/log/postgresql/ by default, RHEL/Red
+	// Hat's to /var/lib/pgsql/<version>/data/log/ — neither matches the
+	// Docker default. Left empty, every existing target keeps using the
+	// hardcoded constant unchanged.
+	PgLogDir              string   `json:"pg_log_dir,omitempty"`
+	Tags                  []string `json:"tags,omitempty"`                    // Tags for policy matching (e.g., "production", "staging")
+	Sensitivity           []string `json:"sensitivity,omitempty"`             // Sensitivity classes (e.g., "pii", "critical")
 	ApprovalOverrideRoles []string `json:"approval_override_roles,omitempty"` // Roles allowed to request a less restrictive approval_mode than the playbook declares. Empty = unrestricted.
 }
 
@@ -50,7 +60,7 @@ type K8sCluster struct {
 // It is the operational unit for the sysadmin agent.
 type VM struct {
 	Name    string `json:"name"`
-	Address string `json:"address"`          // hostname or IP address
+	Address string `json:"address"`           // hostname or IP address
 	Runtime string `json:"runtime,omitempty"` // container runtime: "docker", "podman", or "" (systemd/direct)
 
 	// SSH fields (all optional): when SSHUser and SSHKeyPath are both set, sysadmin

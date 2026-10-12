@@ -126,7 +126,7 @@ func TestHandlePlaybookRun_AgentMode(t *testing.T) {
 		Guidance:      "Step 1: run check_connection.",
 		ExecutionMode: "agent",
 		EntryPoint:    true,
-		EscalatesTo:   []string{"pbs_db_config_recovery"},
+		EscalatesTo:   []string{"pbs_db_config_triage"},
 		IsActive:      true,
 	}
 	auditSrv := mockAuditdPlaybook(t, pb)
@@ -190,14 +190,14 @@ func TestAssembleTriagePrompt_ContainsGuidance(t *testing.T) {
 func TestAssembleTriagePrompt_EscalatesTo(t *testing.T) {
 	pb := &audit.Playbook{
 		Name:        "Restart Triage",
-		EscalatesTo: []string{"pbs_db_config_recovery", "pbs_db_pitr_recovery"},
+		EscalatesTo: []string{"pbs_db_config_triage", "pbs_db_data_loss_triage"},
 	}
 	prompt := assembleTriagePrompt(pb, PlaybookRunRequest{}, "")
 
-	if !strings.Contains(prompt, "pbs_db_config_recovery") {
+	if !strings.Contains(prompt, "pbs_db_config_triage") {
 		t.Error("prompt missing escalates_to series ID")
 	}
-	if !strings.Contains(prompt, "pbs_db_pitr_recovery") {
+	if !strings.Contains(prompt, "pbs_db_data_loss_triage") {
 		t.Error("prompt missing second escalates_to series ID")
 	}
 }
@@ -221,7 +221,7 @@ func TestAssembleTriagePrompt_ConnectionString(t *testing.T) {
 // TestAssembleTriagePrompt_SysadminRestartHint is a regression test for a real
 // bug found during live 3-hop escalation-chain verification: every
 // sysadmin-agent playbook's prompt unconditionally named restart_container in
-// its first line, even for pbs_sysadmin_docker_inspect/pbs_wal_disk_full,
+// its first line, even for pbs_sysadmin_host_triage/pbs_wal_disk_full,
 // whose own guidance explicitly forbids calling it. Since ClassifyDelegation
 // only scans this first line, "restart" appearing there classified every
 // sysadmin delegation as write — including pure-diagnosis hops that never
@@ -237,7 +237,7 @@ func TestAssembleTriagePrompt_SysadminRestartHint(t *testing.T) {
 		t.Errorf("pbs_db_restart_action's first line = %q, want it to mention restart_container", firstLine)
 	}
 
-	for _, seriesID := range []string{"pbs_sysadmin_docker_inspect", "pbs_wal_disk_full"} {
+	for _, seriesID := range []string{"pbs_sysadmin_host_triage", "pbs_wal_disk_full"} {
 		pb := &audit.Playbook{AgentName: agentNameSysadmin, SeriesID: seriesID}
 		prompt := assembleTriagePrompt(pb, req, "")
 		firstLine := strings.SplitN(prompt, "\n", 2)[0]
@@ -297,13 +297,13 @@ var _ *infra.Config
 // --- parseAgentEscalation ---
 
 func TestParseAgentEscalation_FullSignal(t *testing.T) {
-	text := "The database appears to have a corrupted WAL file.\n\nRecommendation: initiate PITR recovery.\n\nFINDINGS: WAL corruption detected; PITR recovery needed.\nESCALATE_TO: pbs_pitr_recovery\n"
+	text := "The database appears to have a corrupted WAL file.\n\nRecommendation: initiate PITR recovery.\n\nFINDINGS: WAL corruption detected; PITR recovery needed.\nESCALATE_TO: pbs_data_loss_triage\n"
 	esc := parseAgentEscalation(text)
 
 	if esc.Findings != "WAL corruption detected; PITR recovery needed." {
 		t.Errorf("findings = %q", esc.Findings)
 	}
-	if esc.EscalateTo != "pbs_pitr_recovery" {
+	if esc.EscalateTo != "pbs_data_loss_triage" {
 		t.Errorf("escalate_to = %q", esc.EscalateTo)
 	}
 	if !esc.SawSignalLine {
@@ -876,12 +876,12 @@ func TestExtractConclusionFallback_EmptyInput(t *testing.T) {
 
 func TestParseAgentEscalation_BoldFindings(t *testing.T) {
 	// LLM uses **FINDINGS:** instead of plain FINDINGS:
-	text := "Investigated the cluster.\n\n**FINDINGS:** WAL corruption on replica.\n**ESCALATE_TO:** pbs_pitr_recovery\n"
+	text := "Investigated the cluster.\n\n**FINDINGS:** WAL corruption on replica.\n**ESCALATE_TO:** pbs_data_loss_triage\n"
 	esc := parseAgentEscalation(text)
 	if esc.Findings != "WAL corruption on replica." {
 		t.Errorf("Findings = %q", esc.Findings)
 	}
-	if esc.EscalateTo != "pbs_pitr_recovery" {
+	if esc.EscalateTo != "pbs_data_loss_triage" {
 		t.Errorf("EscalateTo = %q", esc.EscalateTo)
 	}
 }
@@ -1006,7 +1006,7 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	traceID := audit.NewTraceIDWithPrefix("tr_")
 
 	gw.recordEscalationDecision(context.Background(), traceID, principal,
-		pb, "pbs_db_config_recovery", "connection pool exhaustion detected", false)
+		pb, "pbs_db_config_triage", "connection pool exhaustion detected", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -1029,8 +1029,8 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	if ev.Decision == nil {
 		t.Fatal("Decision is nil")
 	}
-	if ev.Decision.Agent != "pbs_db_config_recovery" {
-		t.Errorf("Decision.Agent = %q, want pbs_db_config_recovery", ev.Decision.Agent)
+	if ev.Decision.Agent != "pbs_db_config_triage" {
+		t.Errorf("Decision.Agent = %q, want pbs_db_config_triage", ev.Decision.Agent)
 	}
 	if ev.Decision.RequestCategory != audit.CategoryIncident {
 		t.Errorf("RequestCategory = %q, want %q", ev.Decision.RequestCategory, audit.CategoryIncident)
@@ -1045,7 +1045,7 @@ func TestRecordEscalationDecision_EmitsEvent(t *testing.T) {
 	if !strings.Contains(ev.Decision.ReasoningChain[0], "pbs_db_restart_triage") {
 		t.Errorf("ReasoningChain[0] should mention source playbook: %q", ev.Decision.ReasoningChain[0])
 	}
-	if !strings.Contains(ev.Decision.ReasoningChain[1], "pbs_db_config_recovery") {
+	if !strings.Contains(ev.Decision.ReasoningChain[1], "pbs_db_config_triage") {
 		t.Errorf("ReasoningChain[1] should mention target playbook: %q", ev.Decision.ReasoningChain[1])
 	}
 	if ev.Principal == nil || ev.Principal.UserID != "ops@example.com" {
@@ -1069,7 +1069,7 @@ func TestRecordEscalationDecision_NoFindingsOmitsThirdStep(t *testing.T) {
 
 	pb := &audit.Playbook{SeriesID: "pbs_db_restart_triage"}
 	gw.recordEscalationDecision(context.Background(), "tr_test123",
-		identity.ResolvedPrincipal{}, pb, "pbs_db_config_recovery", "", false)
+		identity.ResolvedPrincipal{}, pb, "pbs_db_config_triage", "", false)
 
 	ta.mu.Lock()
 	events := ta.events
@@ -2511,12 +2511,91 @@ func TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated(t *testing.T) {
 	}
 }
 
+// TestCheckEvidenceProvenance_SemicolonJoinedCompoundQuote reproduces the
+// live false positive found 2026-10-07 on db-pgdata-corrupted: a model
+// citing get_pgbackrest_status's own field summary as one semicolon-joined
+// quote (no interior `"` at all) with no genuine fabrication — each clause
+// is individually real, just never contiguous as one string in the tool
+// output's own formatting.
+func TestCheckEvidenceProvenance_SemicolonJoinedCompoundQuote(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_pgbackrest_status",
+			Result: `{"status_code":0,"backup_stale":false,"last_backup_label":"20261007-full"}`,
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "status_code=0; backup_stale=false; last_backup_label=20261007-full"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (every semicolon-joined clause is real), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_LiteralEscapeSequenceInEvidence reproduces the
+// live false positive found 2026-10-07 on db-pgdata-corrupted (run
+// plr_c01b34d8): the model's EVIDENCE citation of check_connection's real
+// psql error used literal `\n`/`\t` characters instead of real
+// newline/tab — a byte-for-byte-real quote that failed verification purely
+// because of this representational mismatch, confirmed directly against the
+// real audit trail (repr() on the stored tool.Result showed genuine control
+// characters, not literal backslash sequences).
+func TestCheckEvidenceProvenance_LiteralEscapeSequenceInEvidence(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "check_connection",
+			Result: "psql: error: connection to server at \"localhost\" (::1), port 15435 failed: server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: `server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally`},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg3", time.Now().Add(-time.Minute), report)
+	if len(primary) != 0 || len(secondary) != 0 {
+		t.Errorf("expected no unverified quotes (same content, just a literal-escape-sequence vs. real-whitespace representational mismatch), got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
+// TestCheckEvidenceProvenance_EmDashJoinedProsePrefix reproduces the other
+// live false positive found 2026-10-07 on db-pgdata-corrupted: a model
+// prefixing a real verbatim log quote with its own prose summary, joined by
+// an em dash rather than a quote mark. Before the fix, the whole blob failed
+// verification as one unit — a false positive on the genuinely real log
+// text. After the fix, splitting isolates the two halves: the real log text
+// verifies silently, and only the model's own prose characterization (which
+// is not literal tool output, so correctly stays unverified — same "report
+// noise, not the whole compound quote" behavior as
+// TestCheckEvidenceProvenance_CompoundQuoteOnePartFabricated) is flagged.
+func TestCheckEvidenceProvenance_EmDashJoinedProsePrefix(t *testing.T) {
+	events := []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{
+			Name:   "get_host_logs",
+			Result: "2026-10-07 12:00:00 UTC [1] LOG:  server closed the connection unexpectedly\n",
+		}},
+	}
+	srv := serveFakeToolEvents(t, events)
+	report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "PostgreSQL process has crashed — server closed the connection unexpectedly"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_pg2", time.Now().Add(-time.Minute), report)
+	if len(primary) != 1 || primary[0] != "PostgreSQL process has crashed" {
+		t.Errorf("expected only the model's own prose prefix flagged, not the real log text after the dash, got primary=%v secondary=%v", primary, secondary)
+	}
+}
+
 // TestSplitEvidenceQuoteParts covers the quote-boundary splitting a compound
 // EVIDENCE quote can leave behind — every literal quote character is a split
 // point, so connector words/phrases come back as their own segments too (see
 // evidenceQuoteVerified's isEvidenceGlueOnly for how those get filtered out
 // later, not here) — and confirms a quote with no interior quote (the common
-// case) is returned unchanged as a single element.
+// case) is returned unchanged as a single element. Also covers the two real
+// false positives found live 2026-10-07 (db-pgdata-corrupted) that motivated
+// also splitting on `;` and `—`: a semicolon-joined compound fact with no
+// interior `"` at all, and an em-dash-joined prose-prefix-then-verbatim-quote
+// pattern.
 func TestSplitEvidenceQuoteParts(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -2530,6 +2609,21 @@ func TestSplitEvidenceQuoteParts(t *testing.T) {
 		{"uppercase AND-joined", `fact one" AND "fact two`, []string{"fact one", "AND", "fact two"}},
 		{"unusual connector phrase", `fact one" followed later by "fact two`, []string{"fact one", "followed later by", "fact two"}},
 		{"backslash-escaped inner quotes are stripped before splitting", `host \"172.18.0.4\", user \"postgres\"`, []string{"host", "172.18.0.4", ", user", "postgres"}},
+		{
+			"semicolon-joined compound fact, no interior quotes at all",
+			"status_code=0; backup_stale=false; last_backup_label=20261007-full",
+			[]string{"status_code=0", "backup_stale=false", "last_backup_label=20261007-full"},
+		},
+		{
+			"em-dash-joined prose prefix then verbatim log quote",
+			"PostgreSQL process has crashed — server closed the connection unexpectedly",
+			[]string{"PostgreSQL process has crashed", "server closed the connection unexpectedly"},
+		},
+		{
+			"semicolon and em-dash combined with an inner quote",
+			`a=1; b="c" — trailing note`,
+			[]string{"a=1", "b=", "c", "trailing note"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2722,6 +2816,26 @@ func TestEvidenceQuoteVerified_SeparatorPunctuationNormalized(t *testing.T) {
 	}
 }
 
+// TestEvidenceQuoteVerified_LiteralEscapeSequencesNormalized reproduces a
+// live false positive found 2026-10-07 on db-pgdata-corrupted (run
+// plr_c01b34d8): a model's EVIDENCE citation of a real psql error message
+// used the literal two-character sequences `\n`/`\t` (as if writing a JSON
+// string literal in prose) where the real check_connection tool output —
+// already round-tripped through JSON audit storage — has genuine newline/tab
+// bytes instead. Same content, different whitespace representation. Also
+// checks a genuinely wrong value still fails regardless of unescaping.
+func TestEvidenceQuoteVerified_LiteralEscapeSequencesNormalized(t *testing.T) {
+	output := "psql: error: connection to server at \"localhost\" (::1), port 15435 failed: server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\n"
+	quote := `server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally`
+	if !evidenceQuoteVerified(quote, []string{output}) {
+		t.Error("expected true — same content, model just wrote literal \\n/\\t instead of real whitespace")
+	}
+	wrong := `server closed the connection unexpectedly\n\tThis definitely means the disk is full`
+	if evidenceQuoteVerified(wrong, []string{output}) {
+		t.Error("expected false — genuinely different text must still fail regardless of escape-sequence unescaping")
+	}
+}
+
 // TestEvidenceQuoteVerified_DroppedEmbeddedQuotes reproduces a fourth live
 // false positive found 2026-09-08 on db-replica-disconnected (plr_25737a2d),
 // confirmed directly against the real audit trail: a Postgres log line names
@@ -2841,9 +2955,9 @@ func TestBuildSuggestedNext_PopulatesFields(t *testing.T) {
 		ConnectionString: "prod-db",
 		ApprovalMode:     "session",
 	}
-	result := buildSuggestedNext("pbs_sysadmin_docker_inspect", req, "run_123", "container stopped cleanly")
+	result := buildSuggestedNext("pbs_sysadmin_host_triage", req, "run_123", "container stopped cleanly")
 
-	if result["playbook_series_id"] != "pbs_sysadmin_docker_inspect" {
+	if result["playbook_series_id"] != "pbs_sysadmin_host_triage" {
 		t.Errorf("playbook_series_id = %v", result["playbook_series_id"])
 	}
 	if result["reason"] != "container stopped cleanly" {
@@ -3076,7 +3190,7 @@ func TestAppendChainedText_ChainedError(t *testing.T) {
 func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
 	chain := []chainEntry{
 		{Step: 1, PlaybookSeriesID: "pbs_db_triage", ToolCalls: []string{"check_connection", "get_saved_snapshots"}},
-		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_host_triage", ToolCalls: []string{"check_host", "get_host_logs", "check_connection"}},
 	}
 
 	got := aggregateChainToolCalls(chain)
@@ -3095,7 +3209,7 @@ func TestAggregateChainToolCalls_UnionAcrossHops(t *testing.T) {
 func TestAggregateChainToolCalls_NoToolCalls(t *testing.T) {
 	chain := []chainEntry{
 		{Step: 1, PlaybookSeriesID: "pbs_db_triage"},
-		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_docker_inspect"},
+		{Step: 2, PlaybookSeriesID: "pbs_sysadmin_host_triage"},
 	}
 	if got := aggregateChainToolCalls(chain); len(got) != 0 {
 		t.Errorf("aggregateChainToolCalls() = %v, want empty", got)
@@ -5575,6 +5689,110 @@ func TestHandleProceedEscalation_Approved_Transition(t *testing.T) {
 	}
 }
 
+// TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal is a
+// regression test for a real bug found live 2026-10-08 on a real
+// db-pgdata-corrupted run: when force-mode auto-chaining already advanced
+// several hops deep (triage -> docker_inspect -> pgbackrest_health_triage)
+// before an objective-evidence gate fired trying to reach
+// pgbackrest_restore_remediate, chainEscalation deliberately leaves the
+// PRIMARY run's own EscalatedTo unchanged — it still names the FIRST hop's
+// target (pbs_sysadmin_host_triage), already completed, not the real
+// pending hop (see chainEscalation's own "len(chain) == 0" comment).
+// Approving the gate via /proceed-escalation, before this fix, re-read that
+// stale signal and re-dispatched the already-completed first hop instead of
+// continuing from the real leaf's own pending TRANSITION_TO — the real
+// remediation playbook never ran; a duplicate, dead-end branch ran instead.
+// Locks in the fix: handleProceedEscalation walks the prior_run_id chain
+// forward to the real leaf hop and dispatches from there.
+func TestHandleProceedEscalation_Approved_WalksPastStalePrimarySignal(t *testing.T) {
+	primary := &audit.PlaybookRun{
+		RunID:       "plr_top",
+		Outcome:     audit.OutcomeGatePending,
+		EscalatedTo: "pbs_sysadmin_host_triage", // stale: the FIRST hop's target, already completed
+	}
+	mid1 := &audit.PlaybookRun{
+		RunID:          "plr_mid1",
+		SeriesID:       "pbs_sysadmin_host_triage",
+		Outcome:        audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_pgbackrest_health_triage",
+		PriorRunID:     "plr_top",
+	}
+	mid2 := &audit.PlaybookRun{
+		RunID:           "plr_mid2",
+		SeriesID:        "pbs_pgbackrest_health_triage",
+		Outcome:         audit.OutcomeTransitioned,
+		TransitionedTo:  "pbs_pgbackrest_restore_remediate", // the REAL pending hop
+		FindingsSummary: "real findings from the leaf hop",
+		PriorRunID:      "plr_mid1",
+	}
+	remedPB := &audit.Playbook{
+		PlaybookID:    "pb_restore01",
+		SeriesID:      "pbs_pgbackrest_restore_remediate",
+		Name:          "pgBackRest Restore",
+		ExecutionMode: "agent",
+		IsActive:      true,
+	}
+
+	runsByID := map[string]*audit.PlaybookRun{"plr_top": primary, "plr_mid1": mid1, "plr_mid2": mid2}
+	nextByPrior := map[string]*audit.PlaybookRun{"plr_top": mid1, "plr_mid1": mid2}
+
+	var patchBody, startedPriorRunID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("prior_run_id") != "":
+			priorID := r.URL.Query().Get("prior_run_id")
+			runs := []*audit.PlaybookRun{}
+			if next, ok := nextByPrior[priorID]; ok {
+				runs = []*audit.PlaybookRun{next}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"runs": runs}) //nolint:errcheck
+		case r.Method == http.MethodGet && r.URL.Query().Get("series_id") != "":
+			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{remedPB}}) //nolint:errcheck
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			run, ok := runsByID[id]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			data, _ := json.Marshal(run)
+			w.Write(data) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			b, _ := io.ReadAll(r.Body)
+			var parsed audit.PlaybookRun
+			json.Unmarshal(b, &parsed) //nolint:errcheck
+			startedPriorRunID = parsed.PriorRunID
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_newrem"}) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	gw := makePlaybookRunGateway(srv.URL, nil)
+	rec := postProceedEscalation(t, gw, "plr_top",
+		`{"resolution":"approved","resolved_by":"ops-alice","approval_mode":"auto"}`)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("got %d, want 502 (no A2A client wired — confirms the agent-chain dispatch path was reached); body: %s", rec.Code, rec.Body.String())
+	}
+	if startedPriorRunID != "plr_mid2" {
+		t.Errorf("recordPlaybookRunStart's prior_run_id = %q, want plr_mid2 (the real leaf hop) — the duplicate-dispatch bug re-sends plr_top instead", startedPriorRunID)
+	}
+	// patchBody is the PRIMARY run's (plr_top) own finalization — confirms it
+	// still reflects plr_top's own original (now-harmless) first-hop signal,
+	// untouched by this fix, which only changes what gets DISPATCHED next.
+	if !strings.Contains(patchBody, "pbs_sysadmin_host_triage") {
+		t.Errorf("PATCH body for the primary run should still reference its own original escalated_to; got: %s", patchBody)
+	}
+}
+
 // TestHandleProceedEscalation_PreservesGateReason is a regression guard for a
 // real bug found during review: recordPlaybookRunComplete's Update SQL sets
 // gate_reason unconditionally (no COALESCE), so a resolve call that passed ""
@@ -5709,13 +5927,13 @@ func TestHandleProceedEscalation_PurposeFallsBackToTriageRun(t *testing.T) {
 	run := &audit.PlaybookRun{
 		RunID:           "plr_gate_purpose01",
 		Outcome:         audit.OutcomeGatePending,
-		EscalatedTo:     "pbs_sysadmin_docker_inspect",
+		EscalatedTo:     "pbs_sysadmin_host_triage",
 		FindingsSummary: "Pod is Kubernetes-managed; sysadmin investigation required.",
 		Purpose:         "diagnostic",
 	}
 	remedPB := &audit.Playbook{
 		PlaybookID:    "pb_sysadmin_rem01",
-		SeriesID:      "pbs_sysadmin_docker_inspect",
+		SeriesID:      "pbs_sysadmin_host_triage",
 		Name:          "Sysadmin — Docker Inspect",
 		ExecutionMode: "agent",
 		IsActive:      true,
@@ -5969,7 +6187,7 @@ func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
 	// (e.g. sysadmin-level action). This is NOT a same-series pipeline transition.
 	agentText := "Blocker session is making external calls. OS-level escalation needed.\n\n" +
 		"FINDINGS: connections 198/200 (99%); blocker=PID 4321 (active, 45m, has_writes=true); recommended=escalate\n" +
-		"ESCALATE_TO: pbs_sysadmin_docker_inspect\n"
+		"ESCALATE_TO: pbs_sysadmin_host_triage\n"
 
 	auditSrv := mockGateAuditdPlaybook(t, pb)
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -5987,8 +6205,8 @@ func TestHandlePlaybookRun_GateEscalation_TrueEscalation(t *testing.T) {
 	if resp["status"] != "pending_gate" {
 		t.Errorf("status = %q, want pending_gate", resp["status"])
 	}
-	if resp["escalation_target"] != "pbs_sysadmin_docker_inspect" {
-		t.Errorf("escalation_target = %q, want pbs_sysadmin_docker_inspect", resp["escalation_target"])
+	if resp["escalation_target"] != "pbs_sysadmin_host_triage" {
+		t.Errorf("escalation_target = %q, want pbs_sysadmin_host_triage", resp["escalation_target"])
 	}
 	if resp["gate_type"] != "escalation" {
 		t.Errorf("gate_type = %q, want escalation", resp["gate_type"])
@@ -6741,7 +6959,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "pod_restarted"}},
 		})
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		hop := agentRunResult{traceID: "tr_1", escalatedTo: "pbs_sysadmin_host_triage"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop escalated, got %v", extra["evidence_warnings"])
@@ -6753,7 +6971,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 		})
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_recovery"}
+		hop := agentRunResult{traceID: "tr_1", transitionTo: "pbs_db_config_triage"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		if _, ok := extra["evidence_warnings"]; ok {
 			t.Errorf("expected no evidence_warnings when hop transitioned, got %v", extra["evidence_warnings"])
@@ -6791,7 +7009,7 @@ func TestRecordEvidenceWithoutEscalationWarning(t *testing.T) {
 			{ObjectiveEvidence: &audit.ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed"}},
 		})
 		extra := map[string]any{"evidence_warnings": []string{"prior hop warning"}}
-		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_docker_inspect", agentName: "sysadmin_agent"}
+		hop := agentRunResult{traceID: "tr_2", playbookSeriesID: "pbs_sysadmin_host_triage", agentName: "sysadmin_agent"}
 		recordSignalLessWarnings(extra, srv.URL, "", untyped, hop)
 		warnings, ok := extra["evidence_warnings"].([]string)
 		if !ok || len(warnings) != 2 {
@@ -6859,7 +7077,7 @@ func TestRecordSignalLessWarnings_ProtocolViolation(t *testing.T) {
 
 	t.Run("hop escalated — no-op regardless of playbook type", func(t *testing.T) {
 		extra := map[string]any{}
-		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_docker_inspect"}
+		hop := agentRunResult{traceID: "tr_5", escalatedTo: "pbs_sysadmin_host_triage"}
 		if fired := recordSignalLessWarnings(extra, srv.URL, "", triage, hop); fired {
 			t.Error("expected no protocol violation when hop escalated")
 		}
@@ -7067,7 +7285,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_MultipleSignals(t *testi
 		"HYPOTHESIS_1: pod restarted and was evicted due to node pressure | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithMultipleEvidence(t, pb, []string{"pod_restarted", "evicted"})
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -7115,7 +7333,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
@@ -7138,8 +7356,8 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate(t *testing.T) {
 	if resp["gate_reason"] != "objective_evidence:pod_restarted" {
 		t.Errorf("gate_reason = %q, want objective_evidence:pod_restarted", resp["gate_reason"])
 	}
-	if resp["transition_target"] != "pbs_db_config_recovery" {
-		t.Errorf("transition_target = %q, want pbs_db_config_recovery", resp["transition_target"])
+	if resp["transition_target"] != "pbs_db_config_triage" {
+		t.Errorf("transition_target = %q, want pbs_db_config_triage", resp["transition_target"])
 	}
 	signals, ok := resp["objective_evidence_signals"].([]any)
 	if !ok || len(signals) != 1 || signals[0] != "pod_restarted" {
@@ -7171,7 +7389,7 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *t
 		"HYPOTHESIS_1: pod restarted due to a transient error and has recovered | CONFIDENCE: 0.85 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod recovered; no further action needed\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	var patchBodies [][]byte
 	var mu sync.Mutex
@@ -7275,7 +7493,7 @@ func TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason(
 		"HYPOTHESIS_1: transient issue, may have resolved | CONFIDENCE: 0.35 | EVIDENCE: \"restart_count=2\"\n" +
 		"ROOT_CAUSE: HYPOTHESIS_1\n" +
 		"FINDINGS: pod state uncertain\n" +
-		"TRANSITION_TO: pbs_db_config_recovery\n"
+		"TRANSITION_TO: pbs_db_config_triage\n"
 
 	auditSrv := mockGateAuditdPlaybookWithEvidence(t, pb, "pod_restarted")
 	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)

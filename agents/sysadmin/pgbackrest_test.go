@@ -114,6 +114,66 @@ func TestGetPgBackRestStatusTool_BrokenRepo_RecordsObjectiveEvidence(t *testing.
 	}
 }
 
+// TestGetPgBackRestStatusTool_AuditsStructuredResultNotRawCLIOutput is a
+// regression test for a real bug found live 2026-10-07: the audit trail for
+// get_pgbackrest_status only recorded result.Output (the raw `pgbackrest
+// info --output=json` CLI blob) rather than the full structured result
+// (status_code/backup_stale/last_backup_label/last_backup_time/
+// last_backup_error) the model actually receives and cites in EVIDENCE
+// quotes. Those computed fields never appear verbatim in the raw CLI
+// output — backup_stale doesn't exist in pgbackrest's own JSON at all, and
+// last_backup_time is an RFC3339 reformat of a raw Unix timestamp — so any
+// EVIDENCE quote citing them could never verify against the old audit
+// record, regardless of how good the evidence-provenance parser is. Fixed
+// by auditing json.Marshal(result) instead, same pattern already used by
+// agents/incident/tools.go's create_incident_bundle.
+func TestGetPgBackRestStatusTool_AuditsStructuredResultNotRawCLIOutput(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	defer withMockRunner(realPgBackRestInfoJSON, nil)()
+
+	ctx := mockToolContext{context.Background()}
+	if _, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Stanza: "main"}); err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolExecution})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 tool_execution event, got %d", len(events))
+	}
+	auditedOutput := events[0].Tool.Result
+	// The raw CLI blob never contains these computed field names/values
+	// verbatim — confirming the fix actually audits the structured result,
+	// not just a bigger string that happens to still include the raw JSON.
+	for _, want := range []string{
+		`"status_code":0`,
+		`"backup_stale":`, // present at all is the point — the raw CLI JSON has no such key, computed or not
+		`"last_backup_label":"20260926-040922F"`,
+		`"last_backup_time":"`, // RFC3339-formatted; exact value checked via the decoded struct below
+	} {
+		if !strings.Contains(auditedOutput, want) {
+			t.Errorf("audited tool result missing %q — audit trail still logging only the raw CLI blob, not the structured result.\ngot: %s", want, auditedOutput)
+		}
+	}
+	// Parse it back to confirm it's genuinely the structured result, not a
+	// string that merely happens to contain these substrings coincidentally.
+	var decoded GetPgBackRestStatusResult
+	if err := json.Unmarshal([]byte(auditedOutput), &decoded); err != nil {
+		t.Fatalf("audited tool result is not valid GetPgBackRestStatusResult JSON: %v\ngot: %s", err, auditedOutput)
+	}
+	// realPgBackRestInfoJSON's backup timestamp (2026-09-26) is genuinely
+	// stale relative to this fixture's fixed default MaxAgeHours — this test
+	// isn't about staleness logic (see TestParsePgBackRestInfo_StaleBackup/
+	// _FreshBackup for that), only that the real computed value made it into
+	// the audit trail at all, whatever it is.
+	if decoded.StatusCode != 0 || decoded.LastBackupLabel != "20260926-040922F" || decoded.LastBackupTime != "2026-09-26T04:09:27Z" {
+		t.Errorf("decoded audited result = %+v, want the real parsed fields from realPgBackRestInfoJSON", decoded)
+	}
+}
+
 func TestParsePgBackRestInfo_RealCapturedSchema(t *testing.T) {
 	// maxAge=0 disables staleness checking here — this test is only about
 	// correct field extraction from real output, not time-relative logic

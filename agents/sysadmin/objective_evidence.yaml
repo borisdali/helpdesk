@@ -24,10 +24,26 @@
 # applies from GetPgBackRestStatusResult's own StatusMessage/BackupStale/
 # LastBackupTime fields; this gate only needs to know "is there something a
 # human should look at," not which specific sub-case.
+#
+# confirmation_probe changed from resource_named_in_quote to
+# evidence_quote_contains_value (2026-10-08) — found live on two real
+# db-pgdata-corrupted runs with the IDENTICAL backup_unhealthy=true
+# condition: one gated, one didn't, purely because resource_named_in_quote
+# checks whether the stanza name ("main") appears ANYWHERE in the model's
+# full, multi-paragraph response text. Confirmed directly (SQL against the
+# real audit trail): the gated run's response never happened to say "main";
+# the other run's did, in an unrelated sentence — neither run's choice of
+# words had anything to do with whether it actually reasoned about the
+# staleness risk. evidence_quote_contains_value is scoped to the PRIMARY
+# hypothesis's own EVIDENCE field specifically (required by protocol to be a
+# short verbatim quote from real tool output, not free narration) and checks
+# for the actual fired value ("true") rather than an incidental resource
+# name — tighter, though still not a perfect semantic-engagement check; see
+# project memory for the fuller writeup if this needs revisiting again.
 - tool: get_pgbackrest_status
   probe: backup_unhealthy
   operator: "=="
   threshold: true
   signal: pgbackrest_backup_unhealthy
   detail: "pgBackRest backup unhealthy — most recent backup: %s"
-  confirmation_probe: resource_named_in_quote
+  confirmation_probe: evidence_quote_contains_value

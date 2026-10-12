@@ -518,6 +518,45 @@ func TestRestartService_Success(t *testing.T) {
 	}
 }
 
+// TestRestartService_DispatchesViaSudo is a regression test for a real bug
+// found live (2026-10-11): restart_service dispatched a bare
+// `systemctl restart <unit>`, never through sudo, so the NOPASSWD sudoers
+// grant set up for exactly this command never actually took effect — a
+// bare, unprivileged systemctl mutation goes through polkit instead and is
+// rejected ("Interactive authentication required"), distinct from any real
+// service failure. The agent's own restart request silently never worked
+// all night; PostgreSQL happened to come back up moments later via an
+// unrelated systemd retry, masking the gap.
+func TestRestartService_DispatchesViaSudo(t *testing.T) {
+	withSystemdInfra(t)
+	capture := &argCapturingRunner{responses: []mockResponse{{output: "", err: nil}}}
+	oldRunner := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = oldRunner }()
+
+	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{
+		Target: "prod_db",
+		Reason: "test",
+	})
+	if err != nil {
+		t.Fatalf("restartServiceImpl: %v", err)
+	}
+	if len(capture.calls) != 1 {
+		t.Fatalf("expected exactly 1 dispatched call, got %d: %v", len(capture.calls), capture.calls)
+	}
+	got := capture.calls[0]
+	want := []string{"sudo", "systemctl", "restart", "postgresql-16"}
+	if len(got) != len(want) {
+		t.Fatalf("dispatched command = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("dispatched command = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 func TestRestartService_WrongType(t *testing.T) {
 	withDockerInfra(t)
 	_, err := restartServiceImpl(context.Background(), RestartServiceArgs{
@@ -773,7 +812,7 @@ func TestCheckMemory_K8s(t *testing.T) {
 // resolveHost never populates Runtime on the K8s path), so a K8s target
 // silently fell into the systemd branch with an empty SystemdUnit instead of
 // ever revealing it was Kubernetes-managed. Runtime="kubectl" is the
-// discriminator playbooks/sysadmin-docker-inspect.yaml's guidance now checks
+// discriminator playbooks/sysadmin-host-triage.yaml's guidance now checks
 // first to decide whether to escalate to the K8s agent.
 func TestCheckHost_K8s_Running(t *testing.T) {
 	withK8sInfra(t)
@@ -808,7 +847,7 @@ func TestCheckHost_K8s_Running(t *testing.T) {
 }
 
 // TestCheckHost_K8s_CrashLoopBackOff verifies the restarting/CrashLoopBackOff
-// branch — the scenario a chain hop from pbs_sysadmin_docker_inspect would
+// branch — the scenario a chain hop from pbs_sysadmin_host_triage would
 // actually hit for a genuinely crashing pod.
 func TestCheckHost_K8s_CrashLoopBackOff(t *testing.T) {
 	withK8sInfra(t)
@@ -928,6 +967,71 @@ func TestReadPgLogFile_CustomLogPath(t *testing.T) {
 	}
 	if result.Logs == "" {
 		t.Error("Logs is empty")
+	}
+}
+
+// argCapturingRunner records the args of each Run call (in addition to
+// returning canned responses in order) — used where a test needs to assert
+// exactly what command was dispatched, not just that some mocked response
+// came back.
+type argCapturingRunner struct {
+	responses []mockResponse
+	idx       int
+	calls     [][]string
+}
+
+func (m *argCapturingRunner) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
+	m.calls = append(m.calls, append([]string{name}, args...))
+	if m.idx >= len(m.responses) {
+		return "", nil
+	}
+	r := m.responses[m.idx]
+	m.idx++
+	return r.output, r.err
+}
+
+// TestReadPgLogFile_UsesConfiguredPgLogDir is a regression test for a real
+// gap found live 2026-10-08: readPgLogFileImpl always defaulted to
+// pgLogDefaultDir ("/var/lib/postgresql/data/log", correct for the
+// postgres:16 Docker image this project's own fixtures use) regardless of
+// the target — wrong for a real systemd-managed install (Debian/Ubuntu logs
+// to /var/log/postgresql/, RHEL to /var/lib/pgsql/<ver>/data/log/ by
+// default). Confirms a target's own configured PgLogDir is used when the
+// tool call doesn't specify log_path explicitly.
+func TestReadPgLogFile_UsesConfiguredPgLogDir(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"vm_db": {
+				Name:             "vm_db",
+				ConnectionString: "host=localhost",
+				VMName:           "vm",
+				SystemdUnit:      "postgresql@16-main",
+				PgLogDir:         "/var/log/postgresql",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"vm": {Name: "vm", Address: "localhost", Runtime: ""},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	old := cmdRunner
+	runner := &argCapturingRunner{responses: []mockResponse{
+		{output: "postgresql-16-main.log\n", err: nil},
+		{output: pgLogContent, err: nil},
+	}}
+	cmdRunner = runner
+	defer func() { cmdRunner = old }()
+
+	result, err := readPgLogFileImpl(context.Background(), ReadPgLogFileArgs{Target: "vm_db"})
+	if err != nil {
+		t.Fatalf("readPgLogFileImpl: %v", err)
+	}
+	if result.Logs == "" {
+		t.Error("Logs is empty")
+	}
+	if len(runner.calls) == 0 || !strings.Contains(strings.Join(runner.calls[0], " "), "/var/log/postgresql") {
+		t.Errorf("first dispatched command = %v, want it to reference the configured PgLogDir /var/log/postgresql", runner.calls)
 	}
 }
 
@@ -1201,6 +1305,98 @@ func TestResolveHost_PortFallback_NoMatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("error %q should mention 'not found'", err.Error())
+	}
+}
+
+// withTwoServersSamePort registers two real, distinct db_servers that both
+// use port 5432 but different hosts — the exact shape found live (2026-10-10):
+// a real VM target and an unrelated Docker server both on Postgres's own
+// default port in the same infra config.
+func withTwoServersSamePort(t *testing.T) {
+	t.Helper()
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"vm-target": {
+				Name:             "vm-target",
+				ConnectionString: "host=real-vm.test port=5432 dbname=postgres user=postgres",
+				VMName:           "__vm__",
+				SystemdUnit:      "postgresql",
+			},
+			"docker-target": {
+				Name:             "docker-target",
+				ConnectionString: "host=localhost port=5432 dbname=postgres user=postgres",
+				VMName:           "__docker__",
+				ContainerName:    "unrelated-container",
+			},
+		},
+		VMs: map[string]infra.VM{
+			"__vm__":     {Name: "__vm__", Runtime: ""},
+			"__docker__": {Name: "__docker__", Runtime: "docker"},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// TestResolveHost_PortFallback_HostDisambiguates proves the fix: two servers
+// sharing port 5432 but different hosts no longer collide — the host in the
+// target connection string correctly picks the one that actually matches,
+// instead of whichever candidate Go's randomized map iteration happened to
+// visit first.
+func TestResolveHost_PortFallback_HostDisambiguates(t *testing.T) {
+	withTwoServersSamePort(t)
+	defer withMockRunner("running (running=true, restarting=false, oomkilled=false, dead=false, exitcode=0)", nil)()
+
+	result, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=localhost port=5432 dbname=postgres user=postgres",
+	})
+	if err != nil {
+		t.Fatalf("checkHostImpl: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Errorf("Runtime = %q, want docker (should have resolved to docker-target, not vm-target)", result.Runtime)
+	}
+}
+
+// TestResolveHost_PortFallback_AmbiguousHostPort proves the real bug found
+// live (2026-10-10): two servers sharing the exact same host AND port must
+// refuse rather than silently pick one.
+func TestResolveHost_PortFallback_AmbiguousHostPort(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"server-a": {Name: "server-a", ConnectionString: "host=shared.test port=5432 dbname=a user=postgres", VMName: "__a__"},
+			"server-b": {Name: "server-b", ConnectionString: "host=shared.test port=5432 dbname=b user=postgres", VMName: "__b__"},
+		},
+		VMs: map[string]infra.VM{
+			"__a__": {Name: "__a__", Runtime: "docker"},
+			"__b__": {Name: "__b__", Runtime: "docker"},
+		},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{
+		Target: "host=shared.test port=5432 dbname=x user=postgres",
+	})
+	if err == nil {
+		t.Fatal("expected a refusal error for an ambiguous host+port match, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple registered servers") {
+		t.Errorf("error %q should explain the ambiguity, not silently resolve", err.Error())
+	}
+}
+
+// TestResolveHost_PortFallback_BarePortAmbiguous: a bare port number carries
+// no host info to disambiguate with — when it matches more than one server,
+// refuse the same way the host+port case does, rather than falling back to
+// the old pick-first-in-map-order behavior.
+func TestResolveHost_PortFallback_BarePortAmbiguous(t *testing.T) {
+	withTwoServersSamePort(t)
+
+	_, err := checkHostImpl(context.Background(), CheckHostArgs{Target: "5432"})
+	if err == nil {
+		t.Fatal("expected a refusal error for an ambiguous bare-port match, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple registered servers") {
+		t.Errorf("error %q should explain the ambiguity, not silently resolve", err.Error())
 	}
 }
 
