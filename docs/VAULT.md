@@ -558,13 +558,15 @@ INCIDENT plr_t1 — resolved in 145s
 
 1. TRIAGE        pbs_connection_triage → pbs_sysadmin_host_triage
    database unreachable, escalating for host-level inspection
-2. ESCALATION 1  pbs_sysadmin_host_triage → pbs_k8s_pod_crash_remediate
+2. ESCALATION 1  pbs_sysadmin_host_triage → pbs_k8s_pod_crash_remediate  [plr_e1]
    dmesg shows OOM-killer event
-3. REMEDIATION   pbs_k8s_pod_crash_remediate (resolved)
+3. REMEDIATION   pbs_k8s_pod_crash_remediate (resolved)  [plr_r1]
    pod restarted with a higher memory limit
 
 Overall: 91% (diagnosis 50% · remediation 100%)
 ```
+
+Every hop beyond TRIAGE gets its own `plr_*` run ID, shown in brackets — pass it to `vault incidents <that-id>` for that hop's own full deep-dive view (gate reason, hypotheses, steps). TRIAGE's own ID is omitted since it's always the same as the `INCIDENT` header's own ID above it.
 
 Reads the same `incidentNarrative` the full view fetches — no extra API calls. Has no effect outside deep-dive mode (the fault-id/series-id list view and the no-argument all-incidents listing both ignore it).
 

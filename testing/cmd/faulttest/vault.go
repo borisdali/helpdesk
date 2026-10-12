@@ -5221,6 +5221,7 @@ func fetchIncidentsList(gatewayURL, apiKey string, limit int, origin, status, at
 func printIncidentHopSummary(n *incidentNarrative) {
 	type chapter struct {
 		label     string
+		runID     string
 		playbook  string
 		outcome   string
 		findings  string
@@ -5229,12 +5230,14 @@ func printIncidentHopSummary(n *incidentNarrative) {
 	var chapters []chapter
 	chapters = append(chapters, chapter{
 		label:    "TRIAGE",
+		runID:    n.Triage.RunID,
 		playbook: n.Triage.Playbook,
 		findings: n.Triage.Findings,
 	})
 	for i, e := range n.Escalations {
 		chapters = append(chapters, chapter{
 			label:    fmt.Sprintf("ESCALATION %d", i+1),
+			runID:    e.RunID,
 			playbook: e.Playbook,
 			outcome:  e.Outcome,
 			findings: e.Findings,
@@ -5243,6 +5246,7 @@ func printIncidentHopSummary(n *incidentNarrative) {
 	if n.Remediation != nil {
 		chapters = append(chapters, chapter{
 			label:    "REMEDIATION",
+			runID:    n.Remediation.RunID,
 			playbook: n.Remediation.Playbook,
 			outcome:  n.Remediation.Outcome,
 			findings: n.Remediation.Findings,
@@ -5268,7 +5272,18 @@ func printIncidentHopSummary(n *incidentNarrative) {
 		} else if c.outcome != "" {
 			arrow = " (" + c.outcome + ")"
 		}
-		fmt.Printf("%d. %-*s %s%s\n", i+1, labelWidth, c.label, c.playbook, arrow)
+		// The TRIAGE chapter's own run ID is always the same as the
+		// INCIDENT header's own ID (entry_run_id) — printing it again here
+		// would be redundant. Every later hop (ESCALATION/REMEDIATION) gets
+		// its own distinct run ID that's otherwise only ever visible in the
+		// original faulttest run's live log output or a raw auditd query —
+		// surface it so `vault incidents <that-hop's-run-id>` is directly
+		// reachable from this view.
+		runIDSuffix := ""
+		if c.runID != "" && c.runID != n.IncidentID {
+			runIDSuffix = "  [" + c.runID + "]"
+		}
+		fmt.Printf("%d. %-*s %s%s%s\n", i+1, labelWidth, c.label, c.playbook, arrow, runIDSuffix)
 		if c.findings != "" {
 			fmt.Printf("   %s\n", truncate(c.findings, 110))
 		}

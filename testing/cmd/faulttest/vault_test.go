@@ -2079,10 +2079,20 @@ func TestPrintIncidentJourney_Summary_OneLinePerHop(t *testing.T) {
 		"pbs_connection_triage", "pbs_sysadmin_host_triage", "pbs_k8s_pod_crash_remediate",
 		"dmesg shows OOM-killer event", "pod restarted with a higher memory limit",
 		"resolved in 145s", "Overall: 91%",
+		// Regression (2026-10-11): each later hop's own run ID — otherwise
+		// only ever visible in the original faulttest run's live log output
+		// or a raw auditd query — must be surfaced here so it's directly
+		// reachable as `vault incidents <that-hop's-run-id>` from this view.
+		"[plr_e1]", "[plr_r1]",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary output missing %q, got:\n%s", want, out)
 		}
+	}
+	// The TRIAGE chapter's own run ID (plr_t1) is already the INCIDENT
+	// header's own ID — repeating it inline would be redundant noise.
+	if strings.Contains(out, "[plr_t1]") {
+		t.Errorf("summary output should not repeat the TRIAGE run ID (already shown in the INCIDENT header), got:\n%s", out)
 	}
 	// The whole point is brevity — the full mode's own section headers and
 	// hypothesis machinery must not appear.
