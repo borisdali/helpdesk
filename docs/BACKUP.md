@@ -337,7 +337,13 @@ close and nothing here should be read as claiming it does.
 - `restore_from_backup` itself doesn't independently re-verify `status_code`/`backup_stale` at the
   Go level when called with an explicit stanza (the normal path from the remediation playbook's
   own Step 1) — it relies on that playbook's LLM-mediated re-check plus the force-gate above as
-  the real backstops, not a third, redundant tool-level check.
+  the real backstops, not a third, redundant tool-level check. As of v0.31.x, Step 1's own
+  `backup_stale=true` precondition is an explicit, named stop (cite the staleness, do not
+  transition or escalate automatically, defer to a human) rather than unguided model judgment —
+  found live (2026-10-11) to matter: the earlier, vaguer wording let the model either invent a
+  nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
+  without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
+  check, and still doesn't know whether the WAL chain itself is intact — see the next bullet.
 - There is no verification, before or after the restore, that the WAL chain from the backup to the
   crash point is actually contiguous — see [§4](#4-roadmap)'s "WAL-chain completeness" item. A gap
   in the archive wouldn't be caught by anything above; Postgres replays however much WAL it can
