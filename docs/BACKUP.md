@@ -263,6 +263,23 @@ narrowest real slice: restore to the latest available pgBackRest backup, a singl
 instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
 promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
 
+**Three layers stand between a diagnosis and `restore_from_backup`**, on top of the general
+[AI Governance](AIGOVERNANCE.md) every playbook run already gets (the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
+[Evidence-Provenance](OBJECTIVE_EVIDENCE.md) checks, the [`trust_not_earned`](CONSISTENCY.md) certification gate):
+
+1. [**Each hop decides only what it can see**](#layer-1-each-hop-decides-only-what-it-can-see):  
+   The chain is split so no agent ever has to infer a condition it has no tool to observe.
+2. [**The backup-health gate is deterministic code, not model prose**](#layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose):  
+   The `pgbackrest_backup_unhealthy` objective-evidence signal force-gates the chain, even under `approval_mode=force`.
+3. [**Fails closed by design, not by accident**](#layer-3-fails-closed-by-design-not-by-accident):  
+   A restore needs an explicit, narrow conjunction of findings and a silence or ambiguity flat out stops the chain.
+
+Only Layer 2 is fully independent of the model. Layers 1 and 3 are carried out through
+LLM-interpreted playbook guidance (see [the honest limit](#layer-3-fails-closed-by-design-not-by-accident)
+under Layer 3). Underneath all three, the tool itself refuses to run against a live instance
+and pgBackRest refuses to restore without a selectable backup. See
+[Underneath the layers](#underneath-the-layers-whats-honest-about-the-remediation-not-oversold) below for details.
+
 **The failure mode**:  
 A missing/corrupted `pg_control` file (disk corruption, an accidental delete, a bad volume
 restore) leaves PostgreSQL unable to start at all and the error message is `postgres: could not find the database
@@ -270,27 +287,30 @@ system`. This is distinct from every scenario in §1/§2: the database isn't slo
 misconfigured, it's *gone* and the only way back is restoring from a backup rather than fixing a
 setting.
 
-**Why aiHelpDesk doesn't make that mistake**:  
-The chain above exists because no single agent holds every tool the decision needs. The DB agent
-(`pbs_db_data_loss_triage`) has no tool to read Docker/Podman container logs; the SysAdmin agent
+#### Layer 1: each hop decides only what it can see
+
+The chain above exists because no single agent holds every tool the decision needs.   
+
+The Database Agent (`pbs_db_data_loss_triage`) has no tool to read Docker/Podman container logs. The SysAdmin Agent
 has no tool to verify Postgres backup health. Rather than having each hop guess at what it can't
 see, each one **front-loads every condition it can determine without the evidence the next hop is
 about to fetch** (single instance? pgBackRest in use? PITR already decided?) into its own
 `FINDINGS`, so the next hop only has to judge the one condition it's actually equipped to answer
-and can act on the combined picture directly — no bouncing back for a decision already made. An
-earlier revision of this chain *did* bounce `pbs_sysadmin_host_triage` back to
-`pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
-safety benefit once it was clear none of the static conditions needed fresh evidence to answer —
-caught in review before it shipped, not after a slow live run.
+and can act on the combined picture directly.   
 
-**A second, independent backstop that doesn't depend on the model getting it right:**   
-And this is the one that actually matters for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
+**No bouncing back for a decision already made**. An earlier revision of this chain *did* bounce `pbs_sysadmin_host_triage` back to
+`pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
+safety benefit once it was clear none of the static conditions needed fresh evidence to answer (which was caught in review before it shipped, not after a slow live run).
+
+#### Layer 2: the backup-health gate is deterministic code, not model prose
+
+The only layer that doesn't depend on the model getting it right and the one that actually matters most for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
 `pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
 it does real work: `pbs_pgbackrest_restore_remediate` is only ever reached once that hop's own
 `TRANSITION_TO` fires, which should only happen when the backup is genuinely confirmed healthy.  
 
 If the model's response claims "healthy" but the tool's own structured result says otherwise, the
-signal goes unconfirmed and the gateway forces a `pending_gate`. The import part is this: **it cannot be bypassed by
+signal goes unconfirmed and the gateway forces a `pending_gate`. The important part is this: **it cannot be bypassed by
 `approval_mode=force`**.   
 
 That is, `cmd/gateway/playbooks.go`'s own force-gate mechanism exists specifically
@@ -298,7 +318,8 @@ to override the caller's force-mode auto-chain intent when evidence contradicts 
 conclusion. The single most important precondition for this op — is there actually a healthy
 backup to restore from — is backed by a deterministic Go code path, not left to the model's prose.
 
-**A third protection, fails closed by design, not by accident**:  
+#### Layer 3: fails closed by design, not by accident
+
 We found this during live debugging of something else entirely, confirmed while weeding out three separate live bugs during this chain's own testing:  
 - a stdio-buffering race that delayed when a crash message reached the log stream  
 - a log-request window too small once prior test cycles had piled up legitimate noise   
@@ -327,7 +348,8 @@ tested the opposite failure mode: a model *confidently and wrongly* concluding c
 isn't any, then escalating on a false positive. That's a different, harder gap this property does not
 close and nothing here should be read as claiming it does.
 
-**What this does *not* cover, said plainly rather than left implicit**:  
+#### What this does *not* cover, said plainly rather than left implicit
+
 - `pbs_db_data_loss_triage` and `pbs_sysadmin_host_triage` have no dedicated objective-evidence
   signal of their own — `get_host_logs` returns raw text, not a structured result with a named
   probe the way `get_pgbackrest_status` does. Their findings (single instance? does the log text
@@ -343,14 +365,15 @@ close and nothing here should be read as claiming it does.
   found live (2026-10-11) to matter: the earlier, vaguer wording let the model either invent a
   nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
   without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
-  check, and still doesn't know whether the WAL chain itself is intact — see the next bullet.
+  check and still doesn't know whether the WAL chain itself is intact — see the next bullet.
 - There is no verification, before or after the restore, that the WAL chain from the backup to the
   crash point is actually contiguous — see [§4](#4-roadmap)'s "WAL-chain completeness" item. A gap
   in the archive wouldn't be caught by anything above; Postgres replays however much WAL it can
   find and completes recovery there, logging it the same way as legitimately reaching the true
   end of the stream.
 
-**What's honest about the remediation, not oversold**:  
+#### Underneath the layers: what's honest about the remediation, not oversold
+
 `restore_from_backup` is restore-to-latest only — pgBackRest's own default recovery target, no
 `--type`/`--target` flag, matching the stated scope exactly. It refuses outright if `pg_isready`
 reports the instance still accepting connections — confirmed live, this is the one thing standing
@@ -358,7 +381,8 @@ between restoring a dead instance and destroying a live one. It is classified
 `policy.ActionDestructive`, the same tier as `restart_container`/`restart_service`, flowing
 through the existing policy engine's approval/purpose rules with no special-casing.
 
-**Verified, not just claimed**:  
+#### Verified, not just claimed
+
 The full crash → diagnose → restore → recover cycle was run live against a real pgBackRest
 fixture (`testing/docker/docker-compose.pgbackrest.yaml`) before any Go code was written: delete
 `pg_control`, crash the container, confirm `pgbackrest restore` brings it back, confirm a real
@@ -379,7 +403,8 @@ selectable backup exists (it has to read `backup.info` to build a restore file-l
 does anything destructive to the target — restoring against a nonexistent backup is already safe
 today, confirmed empirically rather than assumed, with zero code of our own responsible for it.
 
-**Real host/VM support, not just Docker**:  
+#### Real host/VM support, not just Docker
+
 Everything above was built and live-verified against the dedicated Docker fixture
 (`testing/docker/docker-compose.pgbackrest.yaml`).  
 
