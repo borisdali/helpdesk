@@ -56,6 +56,12 @@ type (
 type HarnessConfig struct {
 	faultlib.HarnessConfig
 
+	// ExternalDefaulted records that External was switched on implicitly
+	// (standalone binary, no --external flag) rather than by the caller, so a
+	// run that then matches nothing can say why instead of a bare
+	// "No failures match".
+	ExternalDefaulted bool
+
 	// Repeat is the number of inject→triage→teardown cycles to run per fault.
 	// Values > 1 enable stability testing: remediation is skipped and a
 	// StabilityReport is printed after all cycles complete. Default 1.

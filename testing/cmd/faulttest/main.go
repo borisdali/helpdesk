@@ -237,6 +237,7 @@ func loadConfig(fs *flag.FlagSet, args []string) *HarnessConfig {
 	// non-SQL faults. The caller can still override with --external=false.
 	if cfg.CatalogPath == "" && !explicitFlags["external"] {
 		cfg.External = true
+		cfg.ExternalDefaulted = true
 	}
 
 	testutil.DockerComposeDir = filepath.Join(cfg.TestingDir, "docker")
@@ -312,6 +313,30 @@ func cmdList(args []string) {
 	fmt.Printf("\nTotal: %d failure modes\n", len(failures))
 }
 
+// printExternalDefaultHint explains an empty match caused by the standalone
+// binary's implicit --external=true: faults that need real OS access (e.g.
+// ssh_exec injection against a VM) are filtered out even when the caller
+// named them by --ids. Self-contained ssh_exec faults (script_inline) run fine
+// from the standalone binary with --external=false.
+func printExternalDefaultHint(cat *Catalog, cfg *HarnessConfig) {
+	if !cfg.ExternalDefaulted {
+		return
+	}
+	probe := *cfg
+	probe.External = false
+	var ids []string
+	for _, f := range FilterFailures(cat, &probe) {
+		ids = append(ids, f.ID)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Note: standalone binary mode defaults to --external=true, which only runs external_compat faults.\n"+
+		"Excluded for that reason: %s\n"+
+		"Pass --external=false to run them (they need real Docker/SSH/OS access to the target).\n",
+		strings.Join(ids, ", "))
+}
+
 // ── run ──────────────────────────────────────────────────────────────────
 
 func cmdRun(args []string) {
@@ -353,6 +378,7 @@ func cmdRun(args []string) {
 	failures := FilterFailures(cat, cfg)
 	if len(failures) == 0 {
 		fmt.Fprintln(os.Stderr, "No failures match the specified filters.")
+		printExternalDefaultHint(cat, cfg)
 		os.Exit(1)
 	}
 
