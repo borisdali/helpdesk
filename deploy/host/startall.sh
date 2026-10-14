@@ -45,6 +45,16 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
     set +a
 fi
 
+# Relative file paths from .env (e.g. PGPASSFILE=./.pgpass) are interpreted
+# relative to SCRIPT_DIR (where .env lives), not the caller's cwd — otherwise
+# libpq silently finds no .pgpass when startall.sh is run from elsewhere.
+for var in PGPASSFILE HELPDESK_INFRA_CONFIG; do
+    val="${!var:-}"
+    if [[ -n "$val" && "$val" != /* && "$val" != "~"* ]]; then
+        export "$var=$SCRIPT_DIR/${val#./}"
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # Validate
 # ---------------------------------------------------------------------------
