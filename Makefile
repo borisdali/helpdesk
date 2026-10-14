@@ -549,6 +549,7 @@ binaries:
 		cp agents.json $$outdir/; \
 		cp agents/database/objective_evidence.yaml $$outdir/objective_evidence-database.yaml; \
 		cp agents/k8s/objective_evidence.yaml $$outdir/objective_evidence-k8s.yaml; \
+		cp agents/sysadmin/objective_evidence.yaml $$outdir/objective_evidence-sysadmin.yaml; \
 		if [ "$$os" = "linux" ]; then \
 			cp -r deploy/host/systemd $$outdir/systemd; \
 			chmod +x $$outdir/systemd/install-systemd.sh; \
@@ -573,10 +574,12 @@ bundle:
 	cp users.example.yaml $$bundledir/docker-compose/; \
 	cp agents/database/objective_evidence.yaml $$bundledir/docker-compose/objective_evidence-database.yaml; \
 	cp agents/k8s/objective_evidence.yaml $$bundledir/docker-compose/objective_evidence-k8s.yaml; \
+	cp agents/sysadmin/objective_evidence.yaml $$bundledir/docker-compose/objective_evidence-sysadmin.yaml; \
 	sed -e '/^    build:/,/^      dockerfile:/d' \
 	    -e 's|image: helpdesk:latest|image: $(IMAGE):$(VERSION)|' \
 	    -e 's|../../agents/database/objective_evidence.yaml|./objective_evidence-database.yaml|' \
 	    -e 's|../../agents/k8s/objective_evidence.yaml|./objective_evidence-k8s.yaml|' \
+	    -e 's|../../agents/sysadmin/objective_evidence.yaml|./objective_evidence-sysadmin.yaml|' \
 	    deploy/docker-compose/docker-compose.yaml \
 	    > $$bundledir/docker-compose/docker-compose.yaml; \
 	\
@@ -599,6 +602,7 @@ bundle:
 	cp policies.example.yaml $$bundledir/host/; \
 	cp agents/database/objective_evidence.yaml $$bundledir/host/objective_evidence-database.yaml; \
 	cp agents/k8s/objective_evidence.yaml $$bundledir/host/objective_evidence-k8s.yaml; \
+	cp agents/sysadmin/objective_evidence.yaml $$bundledir/host/objective_evidence-sysadmin.yaml; \
 	cp -r deploy/host/systemd $$bundledir/host/systemd; \
 	chmod +x $$bundledir/host/startall.sh $$bundledir/host/systemd/install-systemd.sh; \
 	\

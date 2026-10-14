@@ -250,12 +250,14 @@ stakes):
 ```bash
 HELPDESK_K8S_EVIDENCE_RULES=/etc/helpdesk/k8s-objective-evidence.yaml
 HELPDESK_DB_EVIDENCE_RULES=/etc/helpdesk/db-objective-evidence.yaml
+HELPDESK_SYSADMIN_EVIDENCE_RULES=/etc/helpdesk/sysadmin-objective-evidence.yaml
 ```
 
 Unset means no rules load — the agent runs fine, just without this backstop.
 
 **On by default across all three deployment platforms** (Docker Compose, Helm, host/systemd)
-as of v0.27.0 — each ships the bundled rule files and sets both env vars out of the box.
+as of v0.27.0 (database-agent, k8s-agent) and v0.31.1 (sysadmin-agent) — each ships the
+bundled rule files and sets every agent's env var out of the box.
 This wasn't always true: earlier in that same release, none of the three shipped
 deployment configs set either variable at all, so a fresh install via any of the
 documented paths deployed a database-agent/k8s-agent with the entire framework silently
@@ -263,7 +265,22 @@ inactive (fail-open on an unset env var — no error, no warning). Found and fix
 advertising this mechanism publicly, precisely because shipping a differentiating feature
 that's off by default on every documented install path would have undercut the claim.
 See `deploy/docker-compose/docker-compose.yaml`, `deploy/helm/helpdesk/values.yaml`
-(`agents.{database,k8s}.objectiveEvidence`), and `deploy/host/.env.example`.
+(`agents.{database,k8s,sysadmin}.objectiveEvidence`), and `deploy/host/.env.example`.
+
+**The same gap came back in v0.31 for the sysadmin agent**, which gained its own rules file
+(`get_pgbackrest_status` → `pgbackrest_backup_unhealthy`, the restore chain's
+[Layer 2](BACKUP.md#layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose))
+in v0.30 without anyone revisiting the packaging. No deployment path shipped or pointed at
+it, so every packaged install ran the restore chain's one deterministic gate disabled.
+Every live test had set the env var by hand or run from the repo, so none caught it. The
+same review also found the Helm chart's hand-copied database rules
+(`files/objective-evidence-database.yaml`) had drifted, missing v0.30's
+`backup_archiving_stale` rule. Fixed in v0.31.1, and this time enforced rather than
+remembered: `testing/helm/evidence_packaging_test.go` discovers every
+`agents/*/objective_evidence.yaml` and fails if any packaging path (Makefile tarball and
+bundle, `startall.sh`, both `.env.example` files, `docker-compose.yaml`, the Helm chart)
+doesn't wire it, or if the chart's copy differs from the source by a single byte. A future
+agent's rules file fails that test until it's packaged everywhere.
 
 ## 8. History: from gate-on-presence to gate-on-contradiction
 

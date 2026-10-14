@@ -370,8 +370,8 @@ func TestPolicyEnvVarsPropagate(t *testing.T) {
 	}
 }
 
-// TestObjectiveEvidenceEnabledByDefault verifies that both database-agent and
-// k8s-agent get the objective-evidence env var, volume mount, and that the
+// TestObjectiveEvidenceEnabledByDefault verifies that database-agent,
+// k8s-agent and sysadmin-agent all get the objective-evidence env var, volume mount, and that the
 // chart's own ConfigMap is populated with the bundled rule files — on by
 // default, no values overrides needed.
 func TestObjectiveEvidenceEnabledByDefault(t *testing.T) {
@@ -388,12 +388,16 @@ func TestObjectiveEvidenceEnabledByDefault(t *testing.T) {
 	if _, ok := data["objective-evidence-k8s.yaml"]; !ok {
 		t.Error("ConfigMap/test-config missing objective-evidence-k8s.yaml key")
 	}
+	if _, ok := data["objective-evidence-sysadmin.yaml"]; !ok {
+		t.Error("ConfigMap/test-config missing objective-evidence-sysadmin.yaml key")
+	}
 
 	components := []struct {
 		deployment, container, envVar, subPath string
 	}{
 		{"Deployment/test-database-agent", "database-agent", "HELPDESK_DB_EVIDENCE_RULES", "objective-evidence-database.yaml"},
 		{"Deployment/test-k8s-agent", "k8s-agent", "HELPDESK_K8S_EVIDENCE_RULES", "objective-evidence-k8s.yaml"},
+		{"Deployment/test-sysadmin-agent", "sysadmin-agent", "HELPDESK_SYSADMIN_EVIDENCE_RULES", "objective-evidence-sysadmin.yaml"},
 	}
 	for _, tc := range components {
 		t.Run(tc.container, func(t *testing.T) {

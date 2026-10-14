@@ -15,6 +15,7 @@ helpdesk-vX.Y.Z-linux-amd64/
 ├── users.example.yaml          # Identity & access template (static provider)
 ├── objective_evidence-database.yaml  # Forced-gate evidence rules for database-agent
 ├── objective_evidence-k8s.yaml       # Forced-gate evidence rules for k8s-agent
+├── objective_evidence-sysadmin.yaml  # Forced-gate evidence rules for sysadmin-agent
 │
 ├── helpdesk                    # Interactive Orchestrator (multi-agent REPL)
 ├── helpdesk-client             # Authenticated gateway CLI (operators, scripts, CI)

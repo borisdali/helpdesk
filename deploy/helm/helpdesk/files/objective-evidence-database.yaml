@@ -76,3 +76,25 @@
   threshold: 20
   signal: replica_stalled
   detail: "replica %s has not sent a reply in %v seconds — connected but not communicating"
+
+# backup_archiving_stale (v0.30): WAL archiving is configured (archive_mode=on)
+# but the most recent archiving attempt failed and hasn't since been followed
+# by a success. archiving_stale itself is computed in SQL from
+# pg_stat_archiver (last_failed_time > last_archived_time, or a failure with
+# no success ever — see GetBackupStatusResult's own doc comment for why this
+# is a cumulative-counter view, not a simple failed_count>0 check: an old,
+# since-retried-and-succeeded failure is not evidence anything is currently
+# wrong). No numeric threshold to tune here — deliberately a fixed logical
+# condition, same shape as replica_disconnected above, not a duration like
+# replica_stalled's 20s.
+#
+# Gated in Go (backupArchiverEvidenceSchema) on archive_mode=="on" — a
+# deployment that never configured archiving at all is a policy choice, not
+# a failure, and must never trip this.
+- tool: get_backup_status
+  probe: archiving_stale
+  operator: "=="
+  threshold: true
+  signal: backup_archiving_stale
+  detail: "WAL archiving failing — most recent attempt (%s) has not been followed by a success"
+  confirmation_probe: resource_named_in_quote

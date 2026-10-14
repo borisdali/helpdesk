@@ -190,10 +190,15 @@ services:
       HELPDESK_POLICY_FILE: /etc/helpdesk/policies.yaml
       HELPDESK_APPROVAL_ENABLED: ${HELPDESK_APPROVAL_ENABLED:-false}
       HELPDESK_APPROVAL_TIMEOUT: ${HELPDESK_APPROVAL_TIMEOUT:-5m}
+      # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): deterministic,
+      # code-derived rules that force-gate a response when a tool result crosses
+      # a threshold, independent of what the diagnosing model concludes.
+      HELPDESK_SYSADMIN_EVIDENCE_RULES: /etc/helpdesk/objective_evidence.yaml
     volumes:
       - ${HELPDESK_USERS_FILE_HOST:-./users.example.yaml}:/etc/helpdesk/users.yaml:ro
       - ${HELPDESK_INFRA_CONFIG:-./infrastructure.json}:/etc/helpdesk/infrastructure.json:ro
       - ${HELPDESK_POLICY_FILE_HOST:-./policies.example.yaml}:/etc/helpdesk/policies.yaml:ro
+      - ${HELPDESK_SYSADMIN_EVIDENCE_RULES_HOST:-../../agents/sysadmin/objective_evidence.yaml}:/etc/helpdesk/objective_evidence.yaml:ro
       # SSH private key for real host/VM dispatch (check_host, restart_service,
       # get_host_logs, etc. — see agents/sysadmin/sshexec.go). Not COPY'd into
       # the image by the Dockerfile, so it must be bind-mounted explicitly;

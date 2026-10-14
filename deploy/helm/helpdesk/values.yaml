@@ -104,6 +104,14 @@ agents:
       # narrower than the k8s agent's ClusterRole, since this agent only
       # ever inspects a single pod, never manages deployments/jobs/nodes.
       create: true
+    # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): see
+    # agents.database.objectiveEvidence above for the full explanation. On by
+    # default, using the chart-bundled ruleset (files/objective-evidence-sysadmin.yaml,
+    # kept in sync with agents/sysadmin/objective_evidence.yaml). Backs the
+    # pgbackrest_backup_unhealthy force-gate the restore chain relies on.
+    objectiveEvidence:
+      enabled: true
+      configMap: ""
 
   incident:
     replicas: 1

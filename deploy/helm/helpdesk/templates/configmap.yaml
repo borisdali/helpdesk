@@ -34,3 +34,7 @@ data:
   objective-evidence-k8s.yaml: |
 {{ .Files.Get "files/objective-evidence-k8s.yaml" | indent 4 }}
   {{- end }}
+  {{- if and .Values.agents.sysadmin.objectiveEvidence.enabled (not .Values.agents.sysadmin.objectiveEvidence.configMap) }}
+  objective-evidence-sysadmin.yaml: |
+{{ .Files.Get "files/objective-evidence-sysadmin.yaml" | indent 4 }}
+  {{- end }}
