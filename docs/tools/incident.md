@@ -18,6 +18,8 @@ Collect diagnostic data from database, Kubernetes, OS, and storage layers, then 
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "Create a diagnostic bundle for the production database"; "Collect incident data for the database running on Kubernetes"
+- **See also:**
+  - [INCIDENTS.md › What an Incident Contains](../INCIDENTS.md#what-an-incident-contains)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -41,5 +43,7 @@ List all previously created incident bundles with their IDs, timestamps, infrast
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "Show me all previous incident bundles"
+- **See also:**
+  - [INCIDENTS.md › Listing and Retrieving Incidents](../INCIDENTS.md#listing-and-retrieving-incidents)
 
 No parameters.

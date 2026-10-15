@@ -68,7 +68,9 @@ test-nocache:
 # The same tests run in `make test` and CI in compare mode and fail when a page
 # is stale or a tool lacks a capability or action class.
 docs-tools:
-	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run 'TestToolReference|TestCapabilityVocabularyDoc' ./agentutil/toolref/ ./agents/...
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestToolReference ./agents/...
+	@# capabilities.md is built from the agent pages, so it must come second.
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestCapabilityVocabularyDoc ./agentutil/toolref/
 	@echo "Regenerated docs/tools/. Review and commit the changes."
 
 # ---------------------------------------------------------------------------

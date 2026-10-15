@@ -18,5 +18,7 @@ Performs a Google search to retrieve information from the web.
 - **Capabilities:** `web_search`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [API.md › `POST /api/v1/research`](../API.md#post-apiv1research)
 
 No parameters.

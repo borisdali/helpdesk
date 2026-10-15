@@ -25,6 +25,8 @@ Show disk utilization on the host (df -h). Use to determine whether the database
 - **Capabilities:** `host_disk`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [SYSADMIN_AGENT.md › `check_disk`](../SYSADMIN_AGENT.md#check_disk)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -40,10 +42,12 @@ Check the status of the database process on the host. For Docker/Podman targets,
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "Is the alloydb-omni container running?"
+- **See also:**
+  - [SYSADMIN_AGENT.md › `check_host`](../SYSADMIN_AGENT.md#check_host)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `target` | string | yes | required,Server ID from infrastructure config (e.g. 'prod_db'), or a connection string / port (e.g. 'host=127.0.0.1 port=5432' or '5432') when the server ID is unknown — resolved by port matching. |
+| `target` | string | yes | Server ID from infrastructure config (e.g. 'prod_db'), or a connection string / port (e.g. 'host=127.0.0.1 port=5432' or '5432') when the server ID is unknown — resolved by port matching. |
 
 ## `check_memory`
 
@@ -53,6 +57,8 @@ Show memory utilization on the host (free -h). Use to detect OOM conditions that
 - **Capabilities:** `host_memory`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [SYSADMIN_AGENT.md › `check_memory`](../SYSADMIN_AGENT.md#check_memory)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -68,10 +74,12 @@ Retrieve recent log lines from the database process. For Docker/Podman uses 'doc
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "Show the last 200 log lines from the prod_db container"
+- **See also:**
+  - [SYSADMIN_AGENT.md › `get_host_logs`](../SYSADMIN_AGENT.md#get_host_logs)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `target` | string | yes | required,Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
+| `target` | string | yes | Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
 | `filter` | string | no | Optional substring to filter log lines (case-sensitive). |
 | `lines` | integer | no | Number of recent log lines to return (default 100). |
 
@@ -84,6 +92,10 @@ Check pgBackRest backup-job health: stanza status, the most recent backup's labe
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "Check whether pgBackRest's last backup for prod_db is stale"
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.13 `get_pgbackrest_status` — read-only inspector](../MUTATION_TOOLS.md#113-get_pgbackrest_status--read-only-inspector)
+  - [SYSADMIN_AGENT.md › `get_pgbackrest_status`](../SYSADMIN_AGENT.md#get_pgbackrest_status)
+  - [BACKUP.md › 2. pgBackRest job-level backup health](../BACKUP.md#2-pgbackrest-job-level-backup-health)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -99,10 +111,12 @@ Read the PostgreSQL log file directly from inside the container or pod (via exec
 - **Capabilities:** `logs`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [SYSADMIN_AGENT.md › `read_pg_log_file`](../SYSADMIN_AGENT.md#read_pg_log_file)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `target` | string | yes | required,Server ID from infrastructure config. |
+| `target` | string | yes | Server ID from infrastructure config. |
 | `filter` | string | no | Only return lines containing this string (case-insensitive). Useful for: ERROR, FATAL, PANIC, OOM, 'no space'. |
 | `lines` | integer | no | Number of recent log lines to return (default 100). |
 | `log_path` | string | no | Override the log directory path inside the container. Default: /var/lib/postgresql/data/log. |
@@ -116,11 +130,14 @@ Restart a Docker or Podman container hosting the database. Requires the server t
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** yes
 - **Example prompts:** "Restart the prod_db container — crash loop detected"
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.11 `restart_container` — container restart](../MUTATION_TOOLS.md#111-restart_container--container-restart)
+  - [SYSADMIN_AGENT.md › `restart_container`](../SYSADMIN_AGENT.md#restart_container)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `reason` | string | yes | required,Human-readable reason for the restart. Logged for audit trail. |
-| `target` | string | yes | required,Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
+| `reason` | string | yes | Human-readable reason for the restart. Logged for audit trail. |
+| `target` | string | yes | Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
 
 ## `restart_service`
 
@@ -130,11 +147,14 @@ Restart a systemd service hosting the database (systemctl restart). Requires the
 - **Capabilities:** `process_restart`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** yes
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.12 `restart_service` — systemd service restart](../MUTATION_TOOLS.md#112-restart_service--systemd-service-restart)
+  - [SYSADMIN_AGENT.md › `restart_service`](../SYSADMIN_AGENT.md#restart_service)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `reason` | string | yes | required,Human-readable reason for the restart. Logged for audit trail. |
-| `target` | string | yes | required,Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
+| `reason` | string | yes | Human-readable reason for the restart. Logged for audit trail. |
+| `target` | string | yes | Server ID from infrastructure config, or a connection string / port — resolved by port matching. |
 
 ## `restore_from_backup`
 
@@ -144,6 +164,9 @@ Restore the database from the latest pgBackRest backup, overwriting the current 
 - **Capabilities:** `data_restore`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.15 `restore_from_backup` — restore from latest pgBackRest backup](../MUTATION_TOOLS.md#115-restore_from_backup--restore-from-latest-pgbackrest-backup)
+  - [BACKUP.md › 3. Restore from backup after data loss](../BACKUP.md#3-restore-from-backup-after-data-loss)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -158,6 +181,10 @@ Take a fresh pgBackRest backup (default type=full). Requires operator approval (
 - **Capabilities:** `backup_run`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.14 `run_pgbackrest_backup` — manual backup](../MUTATION_TOOLS.md#114-run_pgbackrest_backup--manual-backup)
+  - [SYSADMIN_AGENT.md › `run_pgbackrest_backup`](../SYSADMIN_AGENT.md#run_pgbackrest_backup)
+  - [BACKUP.md › 2. pgBackRest job-level backup health](../BACKUP.md#2-pgbackrest-job-level-backup-health)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

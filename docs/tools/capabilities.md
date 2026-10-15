@@ -2,67 +2,67 @@
 
 # Capability vocabulary
 
-Every tool in the [Tool Registry](../TOOL_REGISTRY.md) declares at least one capability from this closed vocabulary (defined in `internal/toolregistry/capabilities.go`). **Observe** capabilities describe information a tool returns; **effect** capabilities describe state a tool changes. A tool classified `write` or `destructive` must declare at least one effect capability, and a `read` tool must declare none.
+Every tool in the [Tool Registry](../TOOL_REGISTRY.md) declares at least one capability from this closed vocabulary (defined in `internal/toolregistry/capabilities.go`), and every capability here is declared by at least one tool. **Observe** capabilities describe information a tool returns; **effect** capabilities describe state a tool changes. A tool classified `write` or `destructive` must declare at least one effect capability, and a `read` tool must declare none.
 
 Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](sysadmin.md), [incident](incident.md), [research](research.md).
 
 ## Observe
 
-| Capability | Domain | Constant | Meaning |
+| Capability | Domain | Meaning | Declared by |
 |---|---|---|---|
-| `uptime` | database | `CapUptime` | Server start time and uptime. |
-| `version` | database | `CapVersion` | Server version. |
-| `connection_count` | database | `CapConnectionCount` | Connection counts (total, active, idle, waiting). |
-| `cache_hit_ratio` | database | `CapCacheHitRatio` | Buffer cache hit ratio. |
-| `active_queries` | database | `CapActiveQueries` | Currently running queries and their sessions. |
-| `lock_info` | database | `CapLockInfo` | Locks held and lock waits, including blocker/blocked pairs. |
-| `replication` | database | `CapReplication` | Replication role, slots and lag. |
-| `table_stats` | database | `CapTableStats` | Per-table size, row counts and scan statistics. |
-| `database_list` | database | `CapDatabaseList` | Databases on the server with size and owner. |
-| `config` | database | `CapConfig` | Configuration parameter values. |
-| `connectivity` | database | `CapConnectivity` | Whether the server accepts connections. |
-| `session_inspect` | database | `CapSessionInspect` | Detail for one backend session (transaction age, uncommitted work). |
-| `disk_usage` | database | `CapDiskUsage` | Database and table on-disk sizes. |
-| `extensions` | database | `CapExtensions` | Installed extensions and versions. |
-| `database_stats` | database | `CapDatabaseStats` | Database-level counters (commits, rollbacks, conflicts, deadlocks). |
-| `wal_archiving` | database | `CapWALArchiving` | WAL archiving health (pg_stat_archiver). |
-| `query_stats` | database | `CapQueryStats` | Aggregated per-statement execution statistics (pg_stat_statements). |
-| `query_plan` | database | `CapQueryPlan` | Execution plan for a query (EXPLAIN). |
-| `vacuum_status` | database | `CapVacuumStatus` | Dead tuples and (auto)vacuum/analyze history. |
-| `checkpoint_stats` | database | `CapCheckpointStats` | Checkpoint and background-writer I/O statistics. |
-| `wait_events` | database | `CapWaitEvents` | Current wait events by type and name. |
-| `snapshot_history` | database | `CapSnapshotHistory` | Previously recorded tool outputs from the audit history. |
-| `pod_list` | kubernetes | `CapPodList` | Pods with status, restarts and placement. |
-| `pod_detail` | kubernetes | `CapPodDetail` | Detailed state of one pod (conditions, containers, events). |
-| `node_list` | kubernetes | `CapNodeList` | Cluster nodes with roles, version and capacity. |
-| `node_health` | kubernetes | `CapNodeHealth` | Node pressure conditions and allocatable resources. |
-| `event_list` | kubernetes | `CapEventList` | Cluster events. |
-| `service_info` | kubernetes | `CapServiceInfo` | Services, their selectors, ports and endpoints. |
-| `resource_usage` | kubernetes | `CapResourceUsage` | Container CPU/memory requests, limits and live usage. |
-| `kernel_log` | kubernetes | `CapKernelLog` | Kernel ring buffer (dmesg) from a node. |
-| `process_status` | host | `CapProcessStatus` | Whether the database process (container or systemd unit) is running. |
-| `host_disk` | host | `CapHostDisk` | Host filesystem utilization. |
-| `host_memory` | host | `CapHostMemory` | Host memory utilization. |
-| `backup_status` | host | `CapBackupStatus` | Backup repository health and the most recent backup's age. |
-| `logs` | cross-domain | `CapLogs` | Log lines from the database, its process, a pod, or an uploaded file. |
-| `incident_history` | incident | `CapIncidentHistory` | Previously created incident bundles. |
-| `web_search` | research | `CapWebSearch` | Web search results. |
+| `uptime` | database | Server start time and uptime. | [`get_baseline`](database.md#get_baseline), [`get_server_info`](database.md#get_server_info), [`get_status_summary`](database.md#get_status_summary) |
+| `version` | database | Server version. | [`check_connection`](database.md#check_connection), [`get_baseline`](database.md#get_baseline), [`get_server_info`](database.md#get_server_info), [`get_status_summary`](database.md#get_status_summary) |
+| `connection_count` | database | Connection counts (total, active, idle, waiting). | [`get_connection_stats`](database.md#get_connection_stats), [`get_status_summary`](database.md#get_status_summary) |
+| `cache_hit_ratio` | database | Buffer cache hit ratio. | [`get_database_stats`](database.md#get_database_stats), [`get_status_summary`](database.md#get_status_summary) |
+| `active_queries` | database | Currently running queries and their sessions. | [`get_active_connections`](database.md#get_active_connections) |
+| `lock_info` | database | Locks held and lock waits, including blocker/blocked pairs. | [`get_blocking_queries`](database.md#get_blocking_queries), [`get_lock_info`](database.md#get_lock_info) |
+| `replication` | database | Replication role, slots and lag. | [`get_replication_status`](database.md#get_replication_status) |
+| `table_stats` | database | Per-table size, row counts and scan statistics. | [`get_table_stats`](database.md#get_table_stats) |
+| `database_list` | database | Databases on the server with size and owner. | [`get_database_info`](database.md#get_database_info) |
+| `config` | database | Configuration parameter values. | [`get_baseline`](database.md#get_baseline), [`get_config_parameter`](database.md#get_config_parameter), [`get_pg_settings`](database.md#get_pg_settings) |
+| `connectivity` | database | Whether the server accepts connections. | [`check_connection`](database.md#check_connection) |
+| `session_inspect` | database | Detail for one backend session (transaction age, uncommitted work). | [`get_session_info`](database.md#get_session_info) |
+| `disk_usage` | database | Database and table on-disk sizes. | [`get_baseline`](database.md#get_baseline), [`get_disk_usage`](database.md#get_disk_usage) |
+| `extensions` | database | Installed extensions and versions. | [`get_baseline`](database.md#get_baseline), [`get_extensions`](database.md#get_extensions) |
+| `database_stats` | database | Database-level counters (commits, rollbacks, conflicts, deadlocks). | [`get_database_stats`](database.md#get_database_stats) |
+| `wal_archiving` | database | WAL archiving health (pg_stat_archiver). | [`get_backup_status`](database.md#get_backup_status) |
+| `query_stats` | database | Aggregated per-statement execution statistics (pg_stat_statements). | [`get_slow_queries`](database.md#get_slow_queries) |
+| `query_plan` | database | Execution plan for a query (EXPLAIN). | [`explain_query`](database.md#explain_query) |
+| `vacuum_status` | database | Dead tuples and (auto)vacuum/analyze history. | [`get_table_stats`](database.md#get_table_stats), [`get_vacuum_status`](database.md#get_vacuum_status) |
+| `checkpoint_stats` | database | Checkpoint and background-writer I/O statistics. | [`get_bgwriter_stats`](database.md#get_bgwriter_stats) |
+| `wait_events` | database | Current wait events by type and name. | [`get_wait_events`](database.md#get_wait_events) |
+| `snapshot_history` | database | Previously recorded tool outputs from the audit history. | [`get_saved_snapshots`](database.md#get_saved_snapshots) |
+| `pod_list` | kubernetes | Pods with status, restarts and placement. | [`get_pods`](k8s.md#get_pods) |
+| `pod_detail` | kubernetes | Detailed state of one pod (conditions, containers, events). | [`describe_pod`](k8s.md#describe_pod) |
+| `node_list` | kubernetes | Cluster nodes with roles, version and capacity. | [`get_nodes`](k8s.md#get_nodes) |
+| `node_health` | kubernetes | Node pressure conditions and allocatable resources. | [`get_node_status`](k8s.md#get_node_status) |
+| `event_list` | kubernetes | Cluster events. | [`get_events`](k8s.md#get_events) |
+| `service_info` | kubernetes | Services, their selectors, ports and endpoints. | [`describe_service`](k8s.md#describe_service), [`get_endpoints`](k8s.md#get_endpoints), [`get_service`](k8s.md#get_service) |
+| `resource_usage` | kubernetes | Container CPU/memory requests, limits and live usage. | [`get_pod_resources`](k8s.md#get_pod_resources) |
+| `kernel_log` | kubernetes | Kernel ring buffer (dmesg) from a node. | [`debug_node_dmesg`](k8s.md#debug_node_dmesg) |
+| `process_status` | host | Whether the database process (container or systemd unit) is running. | [`check_host`](sysadmin.md#check_host) |
+| `host_disk` | host | Host filesystem utilization. | [`check_disk`](sysadmin.md#check_disk) |
+| `host_memory` | host | Host memory utilization. | [`check_memory`](sysadmin.md#check_memory) |
+| `backup_status` | host | Backup repository health and the most recent backup's age. | [`get_pgbackrest_status`](sysadmin.md#get_pgbackrest_status) |
+| `logs` | cross-domain | Log lines from the database, its process, a pod, or an uploaded file. | [`read_pg_log`](database.md#read_pg_log), [`read_uploaded_file`](database.md#read_uploaded_file), [`get_pod_logs`](k8s.md#get_pod_logs), [`read_pod_file`](k8s.md#read_pod_file), [`get_host_logs`](sysadmin.md#get_host_logs), [`read_pg_log_file`](sysadmin.md#read_pg_log_file) |
+| `incident_history` | incident | Previously created incident bundles. | [`list_incidents`](incident.md#list_incidents) |
+| `web_search` | research | Web search results. | [`google_search`](research.md#google_search) |
 
 ## Effect
 
-| Capability | Domain | Constant | Meaning |
+| Capability | Domain | Meaning | Declared by |
 |---|---|---|---|
-| `query_cancel` | database | `CapQueryCancel` | Cancels a running query; the session stays open. |
-| `connection_terminate` | database | `CapConnectionTerminate` | Terminates one or more database sessions. |
-| `replication_change` | database | `CapReplicationChange` | Changes replication state (resume replay, drop a slot). |
-| `vacuum_run` | database | `CapVacuumRun` | Runs VACUUM/ANALYZE on a table. |
-| `config_change` | database | `CapConfigChange` | Changes a configuration parameter and reloads it. |
-| `stats_reset` | database | `CapStatsReset` | Resets statistics counters. |
-| `workload_restart` | kubernetes | `CapWorkloadRestart` | Restarts pods (delete for reschedule, or a rollout restart). |
-| `deployment_scale` | kubernetes | `CapDeploymentScale` | Changes a deployment's replica count. |
-| `resource_limits_change` | kubernetes | `CapResourceLimitsChange` | Changes container resource requests/limits. |
-| `debug_pod_create` | kubernetes | `CapDebugPodCreate` | Creates a short-lived debug pod on a node. |
-| `process_restart` | host | `CapProcessRestart` | Restarts the database process (container or systemd unit). |
-| `backup_run` | host | `CapBackupRun` | Takes a new backup. |
-| `data_restore` | host | `CapDataRestore` | Overwrites the data directory from a backup. |
-| `bundle_create` | incident | `CapBundleCreate` | Writes a diagnostic bundle to disk. |
+| `query_cancel` | database | Cancels a running query; the session stays open. | [`cancel_query`](database.md#cancel_query) |
+| `connection_terminate` | database | Terminates one or more database sessions. | [`terminate_connection`](database.md#terminate_connection), [`terminate_idle_connections`](database.md#terminate_idle_connections) |
+| `replication_change` | database | Changes replication state (resume replay, drop a slot). | [`drop_replication_slot`](database.md#drop_replication_slot), [`resume_wal_replay`](database.md#resume_wal_replay) |
+| `vacuum_run` | database | Runs VACUUM/ANALYZE on a table. | [`run_vacuum`](database.md#run_vacuum) |
+| `config_change` | database | Changes a configuration parameter and reloads it. | [`reset_pg_setting`](database.md#reset_pg_setting), [`set_archive_command`](database.md#set_archive_command) |
+| `stats_reset` | database | Resets statistics counters. | [`reset_cache_stats`](database.md#reset_cache_stats) |
+| `workload_restart` | kubernetes | Restarts pods (delete for reschedule, or a rollout restart). | [`delete_pod`](k8s.md#delete_pod), [`patch_deployment_resources`](k8s.md#patch_deployment_resources), [`restart_deployment`](k8s.md#restart_deployment) |
+| `deployment_scale` | kubernetes | Changes a deployment's replica count. | [`scale_deployment`](k8s.md#scale_deployment) |
+| `resource_limits_change` | kubernetes | Changes container resource requests/limits. | [`patch_deployment_resources`](k8s.md#patch_deployment_resources) |
+| `debug_pod_create` | kubernetes | Creates a short-lived debug pod on a node. | [`debug_node_dmesg`](k8s.md#debug_node_dmesg) |
+| `process_restart` | host | Restarts the database process (container or systemd unit). | [`restart_container`](sysadmin.md#restart_container), [`restart_service`](sysadmin.md#restart_service) |
+| `backup_run` | host | Takes a new backup. | [`run_pgbackrest_backup`](sysadmin.md#run_pgbackrest_backup) |
+| `data_restore` | host | Overwrites the data directory from a backup. | [`restore_from_backup`](sysadmin.md#restore_from_backup) |
+| `bundle_create` | incident | Writes a diagnostic bundle to disk. | [`create_incident_bundle`](incident.md#create_incident_bundle) |

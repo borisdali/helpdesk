@@ -31,10 +31,12 @@ Pull the kernel ring buffer (dmesg) from a Kubernetes worker node via a short-li
 - **Capabilities:** `kernel_log`, `debug_pod_create`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.10 `debug_node_dmesg` — worker-node kernel log pull](../MUTATION_TOOLS.md#110-debug_node_dmesg--worker-node-kernel-log-pull)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `node_name` | string | yes | required,The exact node name to pull dmesg from. Use get_nodes, get_node_status, or the 'node' field returned by get_pods/describe_pod to find it. |
+| `node_name` | string | yes | The exact node name to pull dmesg from. Use get_nodes, get_node_status, or the 'node' field returned by get_pods/describe_pod to find it. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `lines` | integer | no | Number of most recent dmesg lines to return (default 200, max 2000). |
 
@@ -46,11 +48,13 @@ Delete a Kubernetes pod by name. The deployment controller will reschedule it. U
 - **Capabilities:** `workload_restart`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.7 `delete_pod` — single pod deletion](../MUTATION_TOOLS.md#17-delete_pod--single-pod-deletion)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `namespace` | string | yes | required,The Kubernetes namespace of the pod. |
-| `pod_name` | string | yes | required,The exact pod name to delete. Use get_pods to find the name. |
+| `namespace` | string | yes | The Kubernetes namespace of the pod. |
+| `pod_name` | string | yes | The exact pod name to delete. Use get_pods to find the name. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `grace_period_seconds` | integer | no | Seconds for graceful termination (default: pod's terminationGracePeriodSeconds). Use 0 for immediate deletion. |
 
@@ -62,10 +66,12 @@ Get detailed information about a Kubernetes pod including status, conditions, ev
 - **Capabilities:** `pod_detail`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.6 `describe_pod` — read-only inspector](../MUTATION_TOOLS.md#16-describe_pod--read-only-inspector)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pod_name` | string | yes | required,The exact pod name to describe. |
+| `pod_name` | string | yes | The exact pod name to describe. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `namespace` | string | no | The Kubernetes namespace of the pod (e.g., 'default', 'kube-system'). |
 
@@ -157,7 +163,7 @@ Retrieve logs from a Kubernetes pod. Can get logs from specific containers and p
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pod_name` | string | yes | required,The exact pod name to get logs from (e.g., 'nginx-7d6877d777-abc12'). |
+| `pod_name` | string | yes | The exact pod name to get logs from (e.g., 'nginx-7d6877d777-abc12'). |
 | `container` | string | no | Container name, only needed if pod has multiple containers. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `namespace` | string | no | The Kubernetes namespace of the pod (e.g., 'default', 'kube-system'). |
@@ -175,7 +181,7 @@ Show CPU and memory requests, limits, and live usage (from metrics-server) for c
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `namespace` | string | yes | required,The Kubernetes namespace to query. |
+| `namespace` | string | yes | The Kubernetes namespace to query. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `pod_name` | string | no | Specific pod name. If empty, returns resources for all pods in the namespace. |
 
@@ -222,10 +228,10 @@ Patch a deployment's container memory limit and request (e.g. to fix an undersiz
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `deployment` | string | yes | required,The name of the deployment to patch. Use get_pods or kubectl get deployments to find the name. |
-| `memory_limit` | string | yes | required,New memory limit (e.g. '1Gi' or '512Mi'). Use get_pod_resources first to determine the current limit and calculate the new one. |
-| `memory_request` | string | yes | required,New memory request (e.g. '768Mi'). Should not exceed memory_limit. |
-| `namespace` | string | yes | required,The Kubernetes namespace of the deployment. |
+| `deployment` | string | yes | The name of the deployment to patch. Use get_pods or kubectl get deployments to find the name. |
+| `memory_limit` | string | yes | New memory limit (e.g. '1Gi' or '512Mi'). Use get_pod_resources first to determine the current limit and calculate the new one. |
+| `memory_request` | string | yes | New memory request (e.g. '768Mi'). Should not exceed memory_limit. |
+| `namespace` | string | yes | The Kubernetes namespace of the deployment. |
 | `container` | string | no | Specific container name to patch. If empty, applies to all containers in the pod template (kubectl's default). |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 
@@ -240,8 +246,8 @@ Read a file directly from inside a running pod via kubectl exec. Use when Postgr
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `file_path` | string | yes | required,Absolute path of the file to read inside the container (e.g. '/var/lib/postgresql/data/log/postgresql.log'). |
-| `pod_name` | string | yes | required,The exact pod name to read a file from. |
+| `file_path` | string | yes | Absolute path of the file to read inside the container (e.g. '/var/lib/postgresql/data/log/postgresql.log'). |
+| `pod_name` | string | yes | The exact pod name to read a file from. |
 | `container` | string | no | Container name, only needed if pod has multiple containers. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 | `filter` | string | no | Optional string to filter lines (case-insensitive grep). Use to focus on FATAL, PANIC, or other keywords. |
@@ -256,11 +262,13 @@ Perform a rolling restart of all pods in a deployment (kubectl rollout restart).
 - **Capabilities:** `workload_restart`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.8 `restart_deployment` — rolling restart](../MUTATION_TOOLS.md#18-restart_deployment--rolling-restart)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `deployment` | string | yes | required,The name of the deployment to restart. Use get_pods or kubectl get deployments to find the name. |
-| `namespace` | string | yes | required,The Kubernetes namespace of the deployment. |
+| `deployment` | string | yes | The name of the deployment to restart. Use get_pods or kubectl get deployments to find the name. |
+| `namespace` | string | yes | The Kubernetes namespace of the deployment. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |
 
 ## `scale_deployment`
@@ -271,10 +279,13 @@ Scale a deployment to the specified number of replicas. Can scale up to add capa
 - **Capabilities:** `deployment_scale`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.9 `scale_deployment` — replica count change](../MUTATION_TOOLS.md#19-scale_deployment--replica-count-change)
+  - [ROLLBACK.md › 3.1 Kubernetes](../ROLLBACK.md#31-kubernetes)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `deployment` | string | yes | required,The name of the deployment to scale. |
-| `namespace` | string | yes | required,The Kubernetes namespace of the deployment. |
-| `replicas` | integer | yes | required,Target replica count. Use 0 to scale down completely. |
+| `deployment` | string | yes | The name of the deployment to scale. |
+| `namespace` | string | yes | The Kubernetes namespace of the deployment. |
+| `replicas` | integer | yes | Target replica count. Use 0 to scale down completely. |
 | `context` | string | no | Kubernetes context to use. If empty, uses current context. |

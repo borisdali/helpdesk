@@ -258,17 +258,37 @@ Each agent keeps its card options in a `cardOptions(tools)` function in `agents/
 - **Supersedes**: only declare a tool as superseding another when the superseding tool's output is a strict superset of the superseded tool's output under all circumstances. When in doubt, do not declare supersedes.
 - **Capability parity**: if tool A supersedes tool B, tool A's capabilities list must include every capability listed for tool B.
 - **No stale keys**: every key in the card option maps names the agent's root skill or one of its tools.
+- **No unused capabilities**: every vocabulary entry is declared by at least one tool. A capability nothing provides is either a missing declaration or a dead entry to remove.
+- **See-also links resolve**: a tool's links to longer write-ups (below) must point at an existing document and match exactly one heading in it.
 
 All of these are enforced, not just documented. Each agent has a `TestToolReference` test (`agents/<agent>/tools_reference_test.go`) that runs the checks in `agentutil/toolref` against the agent's real `createTools()` and `cardOptions()`, and fails on any violation. The same test compares the agent's [reference page](#aihelpdesk-tool-registry) with the code.
+
+The unused-capability rule spans agents, which no single agent package can see. `TestCapabilityVocabularyDoc` (`agentutil/toolref`) reads the generated agent pages instead (each one is guaranteed current by its own agent test), fails on any vocabulary entry no tool declares, and writes the "Declared by" column of the [capability vocabulary](tools/capabilities.md).
+
+### Linking a tool to its longer write-up
+
+When a tool is covered in depth elsewhere (e.g. `MUTATION_TOOLS.md` §1.15 for `restore_from_backup`), add it to the `SeeAlso` map in the agent's `tools_reference_test.go`. The tool's reference page then lists it under **See also**:
+
+```go
+SeeAlso: map[string][]toolref.Link{
+    "restore_from_backup": {
+        {Doc: "MUTATION_TOOLS.md", Section: "1.15 `restore_from_backup`"},
+        {Doc: "BACKUP.md", Section: "3. Restore from backup after data loss"},
+    },
+},
+```
+
+`Section` is the start of the target heading's text. Include the tool name, not just a section number, because "1.1" also prefixes "1.10" to "1.16". The link anchor is computed from the heading, so renaming or removing that heading fails the test instead of leaving a dead link.
 
 ### Adding a new tool
 
 1. Define the tool in the agent's `createTools()`.
 2. Add its action class to `audit.ToolClassification`.
 3. Add a `SkillCapabilities` entry in the agent's `card.go`.
-4. Run `make docs-tools` and commit the regenerated `docs/tools/` page.
+4. If the tool has a longer write-up (e.g. a `MUTATION_TOOLS.md` section for a write or destructive tool), add a `SeeAlso` link for it.
+5. Run `make docs-tools` and commit the regenerated `docs/tools/` pages.
 
-`make test` and CI fail until all four are done.
+`make test` and CI fail until steps 1–3 and 5 are done.
 
 ### Wire format (internal)
 

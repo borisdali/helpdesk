@@ -50,10 +50,12 @@ Cancel a running query by sending SIGINT to the backend process (pg_cancel_backe
 - **Capabilities:** `query_cancel`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.2 `cancel_query` — soft interrupt](../MUTATION_TOOLS.md#12-cancel_query--soft-interrupt)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pid` | integer | yes | required,The process ID (pid) of the backend to cancel. Use get_active_connections to find pids. |
+| `pid` | integer | yes | The process ID (pid) of the backend to cancel. Use get_active_connections to find pids. |
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 
 ## `check_connection`
@@ -81,7 +83,7 @@ Drop an inactive replication slot to allow WAL recycling. Irreversible — once 
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `slot_name` | string | yes | required,Name of the inactive replication slot to drop. Irreversible — the replica cannot reconnect after the slot is dropped. |
+| `slot_name` | string | yes | Name of the inactive replication slot to drop. Irreversible — the replica cannot reconnect after the slot is dropped. |
 | `connection_string` | string | no | PostgreSQL connection string or server ID from infrastructure config. |
 
 ## `explain_query`
@@ -95,7 +97,7 @@ Run EXPLAIN (ANALYZE, BUFFERS) on a SQL query and return the full execution plan
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `query` | string | yes | required,SQL query to explain. Must be a SELECT/WITH statement unless allow_dml is true. |
+| `query` | string | yes | SQL query to explain. Must be a SELECT/WITH statement unless allow_dml is true. |
 | `allow_dml` | boolean | no | If false (default), rejects non-SELECT/WITH statements. If true, runs EXPLAIN ANALYZE inside BEGIN/ROLLBACK so DML executes but is never committed. |
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 
@@ -122,6 +124,8 @@ Get WAL archiving health from pg_stat_archiver: whether archive_mode is on, and 
 - **Capabilities:** `wal_archiving`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [BACKUP.md › 1. WAL archiving failure (the backup-taking precondition)](../BACKUP.md#1-wal-archiving-failure-the-backup-taking-precondition)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -136,6 +140,8 @@ Collect a comprehensive server baseline: server info, non-default PostgreSQL set
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Supersedes:** [`get_server_info`](#get_server_info), [`get_pg_settings`](#get_pg_settings), [`get_extensions`](#get_extensions), [`get_disk_usage`](#get_disk_usage)
+- **See also:**
+  - [PLAYBOOK_OPS.md › 1.1 Schedule regular baselines (required for DB-down diagnosis)](../PLAYBOOK_OPS.md#11-schedule-regular-baselines-required-for-db-down-diagnosis)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -298,6 +304,8 @@ Retrieve previously recorded outputs of a tool from the audit history. Use this 
 - **Capabilities:** `snapshot_history`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [PLAYBOOK_OPS.md › 1.1 Schedule regular baselines (required for DB-down diagnosis)](../PLAYBOOK_OPS.md#11-schedule-regular-baselines-required-for-db-down-diagnosis)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -328,10 +336,12 @@ Inspect a specific backend session by PID: current state, open transaction age, 
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
 - **Example prompts:** "How much uncommitted work does the session with pid 38553 have?"; "Is it safe to terminate PID 12345?"
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.1 `get_session_info` — read-only inspector](../MUTATION_TOOLS.md#11-get_session_info--read-only-inspector)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pid` | integer | yes | required,The process ID of the session to inspect. |
+| `pid` | integer | yes | The process ID of the session to inspect. |
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 
 ## `get_slow_queries`
@@ -427,6 +437,8 @@ Read a file that an operator has uploaded via POST /api/v1/fleet/uploads. Use th
 - **Capabilities:** `logs`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [API.md › Operator file uploads](../API.md#operator-file-uploads)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -458,7 +470,7 @@ Reset a PostgreSQL configuration parameter to its compiled-in default using ALTE
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `setting_name` | string | yes | required,Name of the PostgreSQL setting to reset to its compiled-in default via ALTER SYSTEM RESET, followed by pg_reload_conf(). Example: bgwriter_lru_maxpages. |
+| `setting_name` | string | yes | Name of the PostgreSQL setting to reset to its compiled-in default via ALTER SYSTEM RESET, followed by pg_reload_conf(). Example: bgwriter_lru_maxpages. |
 | `connection_string` | string | no | PostgreSQL connection string or server ID from infrastructure config. |
 
 ## `resume_wal_replay`
@@ -485,7 +497,7 @@ Run VACUUM (optionally with ANALYZE) on a specific table to reclaim dead tuple s
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `table` | string | yes | required,Table to vacuum in schema.table format (e.g. public.orders). |
+| `table` | string | yes | Table to vacuum in schema.table format (e.g. public.orders). |
 | `analyze` | boolean | no | Also run ANALYZE to refresh planner statistics. Defaults to true. |
 | `connection_string` | string | no | PostgreSQL connection string or server ID from infrastructure config. |
 
@@ -497,10 +509,13 @@ Set archive_command to a specific, explicit value via ALTER SYSTEM SET, then pg_
 - **Capabilities:** `config_change`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.5 `set_archive_command` — change WAL archive_command](../MUTATION_TOOLS.md#15-set_archive_command--change-wal-archive_command)
+  - [BACKUP.md › 1. WAL archiving failure (the backup-taking precondition)](../BACKUP.md#1-wal-archiving-failure-the-backup-taking-precondition)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | yes | required,The exact archive_command value to set via ALTER SYSTEM SET, followed by pg_reload_conf(). Must be an explicit, known-correct value — e.g. one confirmed from a get_saved_snapshots reading recorded before the failure, or one an operator supplied directly. Never guess or invent a plausible-looking command. |
+| `command` | string | yes | The exact archive_command value to set via ALTER SYSTEM SET, followed by pg_reload_conf(). Must be an explicit, known-correct value — e.g. one confirmed from a get_saved_snapshots reading recorded before the failure, or one an operator supplied directly. Never guess or invent a plausible-looking command. |
 | `connection_string` | string | no | PostgreSQL connection string or server ID from infrastructure config. |
 
 ## `terminate_connection`
@@ -511,10 +526,12 @@ Forcefully terminate a database connection by pid (pg_terminate_backend). Use wh
 - **Capabilities:** `connection_terminate`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.3 `terminate_connection` — hard disconnect](../MUTATION_TOOLS.md#13-terminate_connection--hard-disconnect)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `pid` | integer | yes | required,The process ID (pid) of the backend to terminate. Use get_active_connections to find pids. |
+| `pid` | integer | yes | The process ID (pid) of the backend to terminate. Use get_active_connections to find pids. |
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 
 ## `terminate_idle_connections`
@@ -525,10 +542,12 @@ Terminate all idle connections older than idle_minutes minutes. Use dry_run=true
 - **Capabilities:** `connection_terminate`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.4 `terminate_idle_connections` — bulk terminator](../MUTATION_TOOLS.md#14-terminate_idle_connections--bulk-terminator)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `idle_minutes` | integer | yes | required,Terminate connections idle longer than this many minutes. Use 0 to terminate all idle connections regardless of age (no minimum). The default recommended minimum is 5 to protect legitimate short-lived connections; use 0 only when an explicit connection overload requires terminating all idle sessions. |
+| `idle_minutes` | integer | yes | Terminate connections idle longer than this many minutes. Use 0 to terminate all idle connections regardless of age (no minimum). The default recommended minimum is 5 to protect legitimate short-lived connections; use 0 only when an explicit connection overload requires terminating all idle sessions. |
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 | `database` | string | no | Limit termination to connections in this specific database. If empty, targets all databases. |
 | `dry_run` | boolean | no | If true, only list connections that would be terminated without actually terminating them. Defaults to false. |

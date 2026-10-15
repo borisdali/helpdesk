@@ -12,9 +12,11 @@ package toolref
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"unicode"
 
 	"google.golang.org/adk/tool"
 
@@ -124,11 +126,143 @@ func Validate(agentName string, tools []tool.Tool, opts agentutil.CardOptions) [
 	return problems
 }
 
-// Render returns the markdown reference page for the agent's tools. Each note
-// is added as a paragraph after the introduction.
-func Render(agentName string, tools []tool.Tool, opts agentutil.CardOptions, notes ...string) string {
+// Page describes one agent's reference page.
+type Page struct {
+	Agent string                // full agent name, e.g. "sysadmin_agent"
+	Tools []tool.Tool           // the agent's real tools (createTools)
+	Opts  agentutil.CardOptions // the agent's real card options (cardOptions)
+	// Path is the page's path relative to the test's package directory,
+	// e.g. "../../docs/tools/sysadmin.md". Its parent's parent is docs/.
+	Path string
+	// Notes are added as paragraphs after the page introduction.
+	Notes []string
+	// SeeAlso maps a tool name to longer write-ups of that tool elsewhere in docs/.
+	SeeAlso map[string][]Link
+}
+
+// Link points at a section of a document under docs/.
+type Link struct {
+	Doc string // file name under docs/, e.g. "MUTATION_TOOLS.md"
+	// Section is the start of the target heading's text, e.g.
+	// "1.15 `restore_from_backup`". It must match exactly one heading.
+	// Empty links the document itself.
+	Section string
+}
+
+type resolvedLink struct {
+	text, href string
+}
+
+// resolveLinks checks every SeeAlso entry against the real documents and
+// returns the rendered links per tool, plus a problem for each tool that
+// isn't the agent's, each missing document, and each heading that matches
+// zero or several times.
+func resolveLinks(p Page) (map[string][]resolvedLink, []string) {
+	var problems []string
+	docsDir := filepath.Dir(filepath.Dir(p.Path))
+	toolNames := make(map[string]bool, len(p.Tools))
+	for _, t := range p.Tools {
+		toolNames[t.Name()] = true
+	}
+	headingsByDoc := map[string][]heading{}
+	out := map[string][]resolvedLink{}
+	for _, name := range mapKeys(p.SeeAlso) {
+		if !toolNames[name] {
+			problems = append(problems, fmt.Sprintf("SeeAlso key %q does not match any tool of %s", name, p.Agent))
+			continue
+		}
+		for _, l := range p.SeeAlso[name] {
+			hs, ok := headingsByDoc[l.Doc]
+			if !ok {
+				data, err := os.ReadFile(filepath.Join(docsDir, l.Doc))
+				if err != nil {
+					problems = append(problems, fmt.Sprintf("%s: see-also document %s: %v", name, l.Doc, err))
+					continue
+				}
+				hs = parseHeadings(string(data))
+				headingsByDoc[l.Doc] = hs
+			}
+			if l.Section == "" {
+				out[name] = append(out[name], resolvedLink{text: l.Doc, href: "../" + l.Doc})
+				continue
+			}
+			var matches []heading
+			for _, h := range hs {
+				if strings.HasPrefix(h.text, l.Section) {
+					matches = append(matches, h)
+				}
+			}
+			if len(matches) != 1 {
+				problems = append(problems, fmt.Sprintf("%s: see-also section %q matches %d headings in %s, want 1", name, l.Section, len(matches), l.Doc))
+				continue
+			}
+			out[name] = append(out[name], resolvedLink{
+				text: l.Doc + " › " + matches[0].text,
+				href: "../" + l.Doc + "#" + matches[0].anchor,
+			})
+		}
+	}
+	return out, problems
+}
+
+type heading struct {
+	text, anchor string
+}
+
+// parseHeadings returns the document's ATX headings outside code fences, with
+// the anchors GitHub generates for them (including -1, -2 for repeats).
+func parseHeadings(doc string) []heading {
+	var hs []heading
+	seen := map[string]int{}
+	inFence := false
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || !strings.HasPrefix(line, "#") {
+			continue
+		}
+		text := strings.TrimLeft(line, "#")
+		if len(text) == len(line) || len(line)-len(text) > 6 || !strings.HasPrefix(text, " ") {
+			continue
+		}
+		text = strings.TrimSpace(text)
+		a := githubSlug(text)
+		if n := seen[a]; n > 0 {
+			seen[a] = n + 1
+			a = fmt.Sprintf("%s-%d", a, n)
+		} else {
+			seen[a] = 1
+		}
+		hs = append(hs, heading{text: text, anchor: a})
+	}
+	return hs
+}
+
+// githubSlug mirrors GitHub's heading-anchor rule: lowercase, drop everything
+// except letters, digits, spaces, hyphens and underscores, then turn spaces
+// into hyphens.
+func githubSlug(text string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_':
+			b.WriteRune(r)
+		case r == ' ':
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
+
+// Render returns the markdown reference page for the agent's tools, plus a
+// problem for each see-also link that doesn't resolve.
+func Render(p Page) (string, []string) {
+	agentName, tools, opts := p.Agent, p.Tools, p.Opts
 	short := toolregistry.NormalizeAgentName(agentName)
 	schemas := agentutil.ComputeInputSchemas(tools)
+	links, problems := resolveLinks(p)
 
 	sorted := make([]tool.Tool, len(tools))
 	copy(sorted, tools)
@@ -142,7 +276,7 @@ func Render(agentName string, tools []tool.Tool, opts agentutil.CardOptions, not
 	b.WriteString("This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, ")
 	b.WriteString("action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. ")
 	b.WriteString("Capability names are defined in the [capability vocabulary](capabilities.md).\n\n")
-	for _, n := range notes {
+	for _, n := range p.Notes {
 		b.WriteString(strings.TrimSpace(n) + "\n\n")
 	}
 
@@ -164,11 +298,11 @@ func Render(agentName string, tools []tool.Tool, opts agentutil.CardOptions, not
 		fmt.Fprintf(&b, "- **Fleet eligible:** %s\n", yesNo(opts.SkillFleetEligible[id]))
 		fmt.Fprintf(&b, "- **Auto-remediation eligible:** %s\n", yesNo(opts.SkillAutoRemediationEligible[id]))
 		if sup := opts.SkillSupersedes[id]; len(sup) > 0 {
-			links := make([]string, len(sup))
+			ls := make([]string, len(sup))
 			for i, s := range sup {
-				links[i] = fmt.Sprintf("[`%s`](#%s)", s, anchor(s))
+				ls[i] = fmt.Sprintf("[`%s`](#%s)", s, anchor(s))
 			}
-			fmt.Fprintf(&b, "- **Supersedes:** %s\n", strings.Join(links, ", "))
+			fmt.Fprintf(&b, "- **Supersedes:** %s\n", strings.Join(ls, ", "))
 		}
 		if ex := opts.SkillExamples[id]; len(ex) > 0 {
 			quoted := make([]string, len(ex))
@@ -177,19 +311,94 @@ func Render(agentName string, tools []tool.Tool, opts agentutil.CardOptions, not
 			}
 			fmt.Fprintf(&b, "- **Example prompts:** %s\n", strings.Join(quoted, "; "))
 		}
+		if ls := links[name]; len(ls) > 0 {
+			b.WriteString("- **See also:**\n")
+			for _, l := range ls {
+				fmt.Fprintf(&b, "  - [%s](%s)\n", l.text, l.href)
+			}
+		}
 		writeParams(&b, schemas[name])
 	}
-	return b.String()
+	return b.String(), problems
+}
+
+// ToolRef names one tool on one generated agent page.
+type ToolRef struct {
+	Page string // page file name, e.g. "sysadmin.md"
+	Tool string
+}
+
+// ScanDeclaredCapabilities reads the generated agent pages in dir and returns,
+// for each capability, the tools that declare it. The per-agent
+// TestToolReference tests guarantee those pages match the code, so this is
+// the cross-agent view of the taxonomy that no single agent package can see.
+func ScanDeclaredCapabilities(dir string) (map[string][]ToolRef, error) {
+	pages, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]ToolRef{}
+	for _, path := range pages {
+		base := filepath.Base(path)
+		if base == vocabularyPage {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		current := ""
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "## `") {
+				current = strings.Trim(strings.TrimPrefix(line, "## "), "`")
+				continue
+			}
+			if current == "" || !strings.HasPrefix(line, capabilitiesPrefix) {
+				continue
+			}
+			for _, c := range strings.Split(strings.TrimPrefix(line, capabilitiesPrefix), ",") {
+				c = strings.Trim(strings.TrimSpace(c), "`")
+				if c != "" && c != "—" {
+					out[c] = append(out[c], ToolRef{Page: base, Tool: current})
+				}
+			}
+		}
+	}
+	for c := range out {
+		sort.Slice(out[c], func(i, j int) bool {
+			if out[c][i].Page != out[c][j].Page {
+				return out[c][i].Page < out[c][j].Page
+			}
+			return out[c][i].Tool < out[c][j].Tool
+		})
+	}
+	return out, nil
+}
+
+const (
+	vocabularyPage     = "capabilities.md"
+	capabilitiesPrefix = "- **Capabilities:** "
+)
+
+// UnusedCapabilities returns the vocabulary entries no tool declares.
+func UnusedCapabilities(declared map[string][]ToolRef) []string {
+	var unused []string
+	for _, c := range toolregistry.Vocabulary {
+		if len(declared[c.Name]) == 0 {
+			unused = append(unused, c.Name)
+		}
+	}
+	return unused
 }
 
 // RenderVocabulary returns the markdown page for the capability vocabulary
-// (docs/tools/capabilities.md).
-func RenderVocabulary() string {
+// (docs/tools/capabilities.md), listing the tools that declare each entry.
+func RenderVocabulary(declared map[string][]ToolRef) string {
 	var b strings.Builder
 	b.WriteString("<!-- Code generated by `make docs-tools`; DO NOT EDIT. -->\n\n")
 	b.WriteString("# Capability vocabulary\n\n")
 	b.WriteString("Every tool in the [Tool Registry](../TOOL_REGISTRY.md) declares at least one capability from this closed vocabulary ")
-	b.WriteString("(defined in `internal/toolregistry/capabilities.go`). ")
+	b.WriteString("(defined in `internal/toolregistry/capabilities.go`), and every capability here is declared by at least one tool. ")
 	b.WriteString("**Observe** capabilities describe information a tool returns; **effect** capabilities describe state a tool changes. ")
 	b.WriteString("A tool classified `write` or `destructive` must declare at least one effect capability, and a `read` tool must declare none.\n\n")
 	b.WriteString("Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](sysadmin.md), [incident](incident.md), [research](research.md).\n")
@@ -199,30 +408,41 @@ func RenderVocabulary() string {
 		} else {
 			b.WriteString("\n## Effect\n\n")
 		}
-		b.WriteString("| Capability | Domain | Constant | Meaning |\n|---|---|---|---|\n")
+		b.WriteString("| Capability | Domain | Meaning | Declared by |\n|---|---|---|---|\n")
 		for _, c := range toolregistry.Vocabulary {
 			if c.Kind != kind {
 				continue
 			}
-			fmt.Fprintf(&b, "| `%s` | %s | `%s` | %s |\n", c.Name, c.Domain, c.Constant, cell(c.Description))
+			refs := make([]string, len(declared[c.Name]))
+			for i, r := range declared[c.Name] {
+				refs[i] = fmt.Sprintf("[`%s`](%s#%s)", r.Tool, r.Page, anchor(r.Tool))
+			}
+			by := strings.Join(refs, ", ")
+			if by == "" {
+				by = "—"
+			}
+			fmt.Fprintf(&b, "| `%s` | %s | %s | %s |\n", c.Name, c.Domain, cell(c.Description), by)
 		}
 	}
 	return b.String()
 }
 
-// Check validates the agent's taxonomy and compares its rendered reference
-// page with the committed file at docPath (relative to the test's package
-// directory). With HELPDESK_UPDATE_TOOL_DOCS=1 it rewrites the file instead.
-// Notes are passed through to Render.
-func Check(t *testing.T, agentName string, tools []tool.Tool, opts agentutil.CardOptions, docPath string, notes ...string) {
+// Check validates the agent's taxonomy and see-also links, and compares the
+// rendered reference page with the committed file at p.Path. With
+// HELPDESK_UPDATE_TOOL_DOCS=1 it rewrites the file instead.
+func Check(t *testing.T, p Page) {
 	t.Helper()
-	if len(tools) == 0 {
-		t.Fatalf("%s: no tools to check", agentName)
+	if len(p.Tools) == 0 {
+		t.Fatalf("%s: no tools to check", p.Agent)
 	}
-	for _, p := range Validate(agentName, tools, opts) {
-		t.Errorf("tool taxonomy: %s", p)
+	for _, prob := range Validate(p.Agent, p.Tools, p.Opts) {
+		t.Errorf("tool taxonomy: %s", prob)
 	}
-	CheckGolden(t, docPath, Render(agentName, tools, opts, notes...))
+	content, linkProblems := Render(p)
+	for _, prob := range linkProblems {
+		t.Errorf("tool see-also: %s", prob)
+	}
+	CheckGolden(t, p.Path, content)
 }
 
 // CheckGolden compares content with the file at path, or rewrites the file
@@ -273,6 +493,9 @@ func writeParams(b *strings.Builder, schema map[string]any) {
 	for _, n := range names {
 		p, _ := props[n].(map[string]any)
 		desc, _ := p["description"].(string)
+		// The schema generator copies the whole `jsonschema:"required,..."` tag
+		// into the description; the Required column already says it.
+		desc = strings.TrimPrefix(desc, "required,")
 		fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n", n, schemaType(p), yesNo(required[n]), cell(desc))
 	}
 }
