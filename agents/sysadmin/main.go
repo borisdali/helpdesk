@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
@@ -19,7 +18,6 @@ import (
 	"helpdesk/agentutil"
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
-	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
@@ -140,37 +138,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	const agentName = "sysadmin_agent"
-
-	cardOpts := agentutil.CardOptions{
-		Version:  buildinfo.Version,
-		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
-		SkillTags: map[string][]string{
-			agentName:                            {"host", "infrastructure", "diagnostics"},
-			agentName + "-check_host":            {"host", "container", "status"},
-			agentName + "-get_host_logs":         {"host", "container", "logs"},
-			agentName + "-check_disk":            {"host", "storage", "diagnostics"},
-			agentName + "-check_memory":          {"host", "memory", "diagnostics"},
-			agentName + "-read_pg_log_file":      {"host", "postgres", "logs", "diagnostics"},
-			agentName + "-restart_container":     {"host", "container", "remediation"},
-			agentName + "-restart_service":       {"host", "systemd", "remediation"},
-			agentName + "-get_pgbackrest_status": {"host", "backup", "diagnostics"},
-			agentName + "-run_pgbackrest_backup": {"host", "backup", "remediation"},
-			agentName + "-restore_from_backup":   {"host", "backup", "remediation"},
-		},
-		SkillExamples: map[string][]string{
-			agentName + "-check_host":            {"Is the alloydb-omni container running?"},
-			agentName + "-get_host_logs":         {"Show the last 200 log lines from the prod_db container"},
-			agentName + "-restart_container":     {"Restart the prod_db container — crash loop detected"},
-			agentName + "-get_pgbackrest_status": {"Check whether pgBackRest's last backup for prod_db is stale"},
-		},
-		SkillAutoRemediationEligible: map[string]bool{
-			agentName + "-restart_container": true,
-			agentName + "-restart_service":   true,
-		},
-		SkillSchemaHash: agentutil.ComputeSchemaFingerprints(agentName, tools),
-		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
-	}
+	cardOpts := cardOptions(tools)
 
 	if err := agentserve.ServeWithTracingAndDirectTools(ctx, sysadminAgent, cfg, traceStore, auditStore, NewSysadminDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)

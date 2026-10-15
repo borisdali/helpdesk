@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -63,6 +63,13 @@ test:
 test-nocache:
 	-go test -v --count=1 ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
 	@$(SUMMARY_CMD) $(TEST_LOG)
+
+# Regenerate the per-tool reference pages in docs/tools/ from the agents' code.
+# The same tests run in `make test` and CI in compare mode and fail when a page
+# is stale or a tool lacks a capability or action class.
+docs-tools:
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run 'TestToolReference|TestCapabilityVocabularyDoc' ./agentutil/toolref/ ./agents/...
+	@echo "Regenerated docs/tools/. Review and commit the changes."
 
 # ---------------------------------------------------------------------------
 # Helm chart template tests (requires helm in PATH; no Kubernetes cluster needed)
