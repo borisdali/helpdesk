@@ -2873,3 +2873,25 @@ func TestGetTraceIDByRunID(t *testing.T) {
 		t.Errorf("GetTraceIDByRunID(unknown) = %q, want empty string", got)
 	}
 }
+
+func TestRedactDSN(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"audit.db", "audit.db"},
+		{"/var/lib/helpdesk/audit.db", "/var/lib/helpdesk/audit.db"},
+		{"postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable",
+			"postgres://postgres:xxxxx@localhost:15434/auditd_test?sslmode=disable"},
+		{"postgresql://u:p%40ss@db:5432/a", "postgresql://u:xxxxx@db:5432/a"},
+		{"postgres://u@db/a?password=secret&sslmode=require", "postgres://u@db/a?password=xxxxx&sslmode=require"},
+		{"postgres://u@db/a", "postgres://u@db/a"},
+		{"postgres://u:secret@db:bad port/a", "postgres://<unparseable DSN redacted>"},
+	}
+	for _, tc := range cases {
+		got := RedactDSN(tc.in)
+		if got != tc.want {
+			t.Errorf("RedactDSN(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if strings.Contains(got, "secret") || strings.Contains(got, "auditdtestpass") {
+			t.Errorf("RedactDSN(%q) leaked a password: %q", tc.in, got)
+		}
+	}
+}

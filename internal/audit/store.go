@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1282,4 +1283,24 @@ func (s *Store) notifyListeners(eventJSON []byte) {
 		s.listeners = live
 		s.mu.Unlock()
 	}()
+}
+
+// RedactDSN returns dsn safe to log: a postgres:// or postgresql:// DSN has
+// its userinfo password and any password= query parameter replaced with
+// "xxxxx"; anything else (a SQLite file path) is returned unchanged. A DSN
+// that doesn't parse as a URL is reduced to its scheme rather than risk
+// echoing a password back.
+func RedactDSN(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return dsn
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn[:strings.Index(dsn, "://")+3] + "<unparseable DSN redacted>"
+	}
+	if q := u.Query(); q.Has("password") {
+		q.Set("password", "xxxxx")
+		u.RawQuery = q.Encode()
+	}
+	return u.Redacted()
 }

@@ -428,7 +428,7 @@ func main() {
 	slog.Info("audit service starting",
 		"version", buildinfo.Version,
 		"listen", cfg.listenAddr,
-		"db", cfg.dbPath,
+		"db", audit.RedactDSN(cfg.dbPath),
 		"backend", backend,
 		"socket", cfg.socketPath,
 		"authz_enforcing", enforcing)
