@@ -106,6 +106,16 @@ func reorderArgs(fs *flag.FlagSet, args []string) []string {
 		if eq := strings.Index(name, "="); eq >= 0 {
 			name = name[:eq]
 		}
+		// Go's flag package only accepts "--bool=false"; "--bool false" sets
+		// the flag to true and leaves "false" as a positional arg, which
+		// commands taking --ids then silently ignore (found live: `vault list
+		// --external false` listed nothing). Fold it into the = form.
+		if fs.Lookup(name) != nil && !valuedFlags[name] && !strings.Contains(arg, "=") &&
+			i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
+			flagArgs = append(flagArgs, arg+"="+args[i+1])
+			i += 2
+			continue
+		}
 		flagArgs = append(flagArgs, arg)
 		i++
 		if valuedFlags[name] && !strings.Contains(arg, "=") && i < len(args) && !strings.HasPrefix(args[i], "-") {

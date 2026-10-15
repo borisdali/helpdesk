@@ -746,6 +746,44 @@ func TestReorderArgs(t *testing.T) {
 	}
 }
 
+// TestReorderArgs_BoolFlagSpaceValue covers "--bool false" (space, not =):
+// Go's flag package would set the flag true and leave "false" positional.
+// Found live: `vault list --ids a,b --external false` silently listed
+// nothing, because --external stayed true and "false" was ignored.
+func TestReorderArgs_BoolFlagSpaceValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		wantJSON bool
+		wantPos  []string
+	}{
+		{"space false", []string{"--json", "false", "--gateway", "http://x"}, false, nil},
+		{"space true", []string{"--json", "true"}, true, nil},
+		{"equals false unchanged", []string{"--json=false", "pb_abc"}, false, []string{"pb_abc"}},
+		{"bare bool then positional", []string{"--json", "pb_abc"}, true, []string{"pb_abc"}},
+		{"valued flag value literally false", []string{"--gateway", "false"}, false, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			gw := fs.String("gateway", "", "")
+			j := fs.Bool("json", false, "")
+			if err := fs.Parse(reorderArgs(fs, tc.input)); err != nil {
+				t.Fatalf("Parse after reorder: %v", err)
+			}
+			if *j != tc.wantJSON {
+				t.Errorf("--json = %v, want %v", *j, tc.wantJSON)
+			}
+			if tc.name == "valued flag value literally false" && *gw != "false" {
+				t.Errorf("--gateway = %q, want %q", *gw, "false")
+			}
+			if strings.Join(fs.Args(), " ") != strings.Join(tc.wantPos, " ") {
+				t.Errorf("positional = %v, want %v", fs.Args(), tc.wantPos)
+			}
+		})
+	}
+}
+
 // TestLoadConfig_InfraConfigPath_FromEnv is a regression test for a real bug
 // found during v0.26 item 6's manual testing: --infra-config had no
 // FAULTTEST_INFRA_CONFIG env-var fallback at all, unlike every other major
