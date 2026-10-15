@@ -427,6 +427,24 @@ func RenderVocabulary(declared map[string][]ToolRef) string {
 	return b.String()
 }
 
+// MissingWriteUps returns a problem for each write or destructive tool with
+// no SeeAlso link. A tool that changes state must have a longer write-up
+// (normally a MUTATION_TOOLS.md section) covering its safeguards and limits.
+func MissingWriteUps(p Page) []string {
+	var problems []string
+	for _, t := range p.Tools {
+		switch audit.ClassifyTool(t.Name()) {
+		case audit.ActionWrite, audit.ActionDestructive:
+			if len(p.SeeAlso[t.Name()]) == 0 {
+				problems = append(problems, fmt.Sprintf("%s is classified %s but links to no write-up: document it (normally in MUTATION_TOOLS.md) and add a SeeAlso entry",
+					t.Name(), audit.ClassifyTool(t.Name())))
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
 // Check validates the agent's taxonomy and see-also links, and compares the
 // rendered reference page with the committed file at p.Path. With
 // HELPDESK_UPDATE_TOOL_DOCS=1 it rewrites the file instead.
@@ -439,7 +457,7 @@ func Check(t *testing.T, p Page) {
 		t.Errorf("tool taxonomy: %s", prob)
 	}
 	content, linkProblems := Render(p)
-	for _, prob := range linkProblems {
+	for _, prob := range append(linkProblems, MissingWriteUps(p)...) {
 		t.Errorf("tool see-also: %s", prob)
 	}
 	CheckGolden(t, p.Path, content)

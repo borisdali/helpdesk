@@ -63,6 +63,7 @@ The table below lists just the initial set of aiHelpDesk mutations, their revers
 | Tool | Reversibility | Mechanism |
 |------|--------------|-----------|
 | `scale_deployment` | **Yes** | Restore replica count from `ScalePreState` captured before scaling |
+| `patch_deployment_resources` | **Yes** | Patch back to the memory limit/request in `ResourcePatchPreState` captured before patching |
 | `exec_update` | **Yes** | Tier 1 SELECT snapshot or Tier 2 WAL decode → per-row UPDATE |
 | `exec_delete` | **Yes** | Tier 1 SELECT snapshot or Tier 2 WAL decode → re-INSERT |
 | `exec_insert` | **Yes** | `INSERT … RETURNING` captures inserted PKs → DELETE |
@@ -104,6 +105,26 @@ the scale command. The snapshot is stored inline in the `tool_execution` audit e
 Pre-state capture is **best-effort** — a kubectl read failure logs a warning but does
 not abort the scale. If `pre_state` is absent the derived plan has `reversibility: "no"`
 with an explanation.
+
+`patch_deployment_resources` works the same way. Before `kubectl set resources`, it
+reads the container's current memory limit and request from the pod template and stores
+them as `pre_state`:
+
+```json
+{
+  "namespace": "production",
+  "deployment": "postgres",
+  "container": "postgres",
+  "previous_memory_limit": "512Mi",
+  "previous_memory_request": "384Mi"
+}
+```
+
+The derived inverse is another `patch_deployment_resources` call with those values. If
+either value could not be read, the plan has `reversibility: "no"`. When the original
+call omitted `container`, the patch applied to every container in the pod template, but
+the pre-state holds only the first container's values, and the inverse sets every
+container back to them. For multi-container pods, pass `container` explicitly.
 
 ### 3.2 Database (Tier 1 — row-capture)
 

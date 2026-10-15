@@ -14,11 +14,11 @@ architecture see [here](AIGOVERNANCE.md). For AI Governance Policy Engine's
 decision history see [here](GOVEXPLAIN.md).
 For AI Governance Compliance sub-module see [here](COMPLIANCE.md).
 
-> **Important:** The three database-agent mutation tools and four K8s-agent mutation tools
+> **Important:** The database-agent and K8s-agent mutation tools
 > documented here are presented solely for the purpose of testing aiHelpDesk
 > AI Governance features.
 >
-> Specifically and crucially, **these seven tools are not ready for PROD use yet!!!**
+> Specifically and crucially, **these tools are not ready for PROD use yet!!!**
 >
 > Please wait until we are fully comfortable with the AI Governance module
 > to release these — and many more — mutation tools to you.
@@ -30,8 +30,8 @@ databases or your infra.
 ## Table of Contents
 
 1. [Tools](#1-tools)
-   - [Database agent (1.1–1.5)](#database-agent)
-   - [Kubernetes agent (1.6–1.10)](#kubernetes-agent)
+   - [Database agent (1.1–1.5, 1.17–1.21)](#database-agent)
+   - [Kubernetes agent (1.6–1.10, 1.22)](#kubernetes-agent)
    - [SysAdmin agent (1.11–1.15)](#sysadmin-agent)
 2. [Two-step review-and-confirm](#2-two-step-review-and-confirm-process)
 3. [Enforcement mechanisms](#3-enforcement-mechanisms)
@@ -195,10 +195,131 @@ Runs `ALTER SYSTEM SET archive_command = '<command>';` followed by `SELECT pg_re
 
 ---
 
+#### 1.17 `resume_wal_replay` — resume a paused standby
+
+**Action class**: `write` (policy pre-check)
+
+```
+connection_string   string   optional — the REPLICA (standby), not the primary
+```
+
+Runs `SELECT pg_wal_replay_resume();` on the standby. This undoes an earlier `pg_wal_replay_pause()`: the standby starts applying the WAL it has been receiving but holding back, and replication lag drains. It changes nothing on the primary and loses no data. A standby that wasn't paused is unaffected.
+
+**Execution sequence**:
+
+1. Policy pre-check (`CheckDatabase` with `ActionWrite`) against the connection string's infra tags
+2. Execute `SELECT pg_wal_replay_resume()`
+3. Record the tool call in the audit log and return the output
+
+**Safeguards**: the tool itself checks nothing beyond policy. Two things keep it narrow:
+- **PostgreSQL refuses it on a primary.** `pg_wal_replay_resume()` errors when recovery is not in progress, so pointing it at the wrong instance fails instead of doing something unexpected.
+- **The playbook decides when it's needed.** `pbs_replication_remediate` (faults `db-replication-lag`, `db-replica-disconnected`) calls it only after `get_replication_status` on the primary shows `replay_paused=true`. When the standby is merely behind, the playbook escalates to investigate network or load instead.
+
+---
+
+#### 1.18 `run_vacuum` — VACUUM one table
+
+**Action class**: `write` (policy pre-check)
+
+```
+connection_string   string   optional
+table               string   required — schema.table, e.g. public.orders
+analyze             bool     optional — also run ANALYZE; defaults to true
+```
+
+Runs `VACUUM ANALYZE "schema"."table"` (or plain `VACUUM` with `analyze=false`) to reclaim dead-tuple space and refresh planner statistics. It is always a plain, non-`FULL` VACUUM. That means it doesn't block normal reads or writes on the table and doesn't rewrite it. Freed space mostly stays inside the table for reuse. Disk space goes back to the operating system only when VACUUM can truncate empty pages at the end of the table.
+
+**Execution sequence**:
+
+1. Validate `table` against `^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$` and quote both parts. Anything else, including an unqualified table name, is rejected before policy is consulted. This is the SQL-injection guard.
+2. Policy pre-check (`CheckDatabase` with `ActionWrite`)
+3. Execute the VACUUM with `lock_timeout=10s`. VACUUM needs a `SHARE UPDATE EXCLUSIVE` lock. If another VACUUM, `ANALYZE` or DDL already holds a conflicting one, the call fails after 10 seconds instead of queueing behind it.
+4. Record the tool call and return the output
+
+**Safeguards**: one table per call, with a strict name check and no `FULL` option. `pbs_vacuum_remediate` (faults `db-table-bloat`, `db-vacuum-needed`) vacuums the worst tables first, with a separate approval for each. Before each one, it reports any long-open transactions that will stop VACUUM from removing dead tuples.
+
+---
+
+#### 1.19 `drop_replication_slot` — drop an inactive slot
+
+**Action class**: `destructive` (policy pre-check, always requires approval on production-tagged databases)
+
+```
+connection_string   string   optional
+slot_name           string   required — name of the inactive slot to drop
+```
+
+Runs `SELECT pg_drop_replication_slot('<slot_name>')`. An inactive slot pins WAL on the primary from its `restart_lsn` onward, so a forgotten slot of a decommissioned replica grows `pg_wal` until the disk fills. Dropping it lets the next checkpoint recycle that WAL.
+
+**This cannot be undone.** Once the slot is gone, the replica it belonged to can no longer resume streaming from where it stopped. It has to be rebuilt from a new base backup.
+
+**Execution sequence**:
+
+1. Validate `slot_name` against `^[a-zA-Z0-9_][a-zA-Z0-9_.]*$`, then quote it as a SQL literal. The quoting is redundant given the regex and is kept as a second guard.
+2. Policy pre-check (`CheckDatabase` with `ActionDestructive`)
+3. Execute `pg_drop_replication_slot`
+4. Record the tool call and return the output
+
+**Safeguards**:
+- **PostgreSQL refuses to drop a slot that is active.** A slot with a replica connected errors out instead of being dropped, so the tool can't cut off a live replica.
+- **What the code cannot check** is whether an *inactive* slot's replica is gone for good or just down for maintenance. `pbs_stale_slot_remediate` (fault `db-wal-stale-slot`) puts that question to a human. Before requesting approval, the playbook states the slot name, how much WAL it retains, and that the drop is irreversible. Each slot is dropped under its own approval.
+
+---
+
+#### 1.20 `reset_pg_setting` — reset a parameter to its default
+
+**Action class**: `write` (policy pre-check)
+
+```
+connection_string   string   optional
+setting_name        string   required — e.g. bgwriter_lru_maxpages
+```
+
+Runs `ALTER SYSTEM RESET <setting_name>`, which removes the setting's entry from `postgresql.auto.conf`, followed by `SELECT pg_reload_conf()`. Used to undo a bad `ALTER SYSTEM SET`.
+
+**Execution sequence**:
+
+1. Validate `setting_name` against `^[a-zA-Z0-9_][a-zA-Z0-9_.]*$`. The dot allows extension settings such as `pg_stat_statements.max`.
+2. Policy pre-check (`CheckDatabase` with `ActionWrite`) and execute `ALTER SYSTEM RESET` as its own `psql` call. `ALTER SYSTEM` can't run inside the implicit transaction that a multi-statement `psql -c` would open.
+3. A second policy pre-check, then `SELECT pg_reload_conf()` as a separate call. The audit log therefore records two entries for one `reset_pg_setting`.
+4. Return both outputs
+
+**What it does not do, stated plainly**:
+- **It resets only what `ALTER SYSTEM` set.** If the value comes from `postgresql.conf` itself, `ALTER SYSTEM RESET` removes nothing and the setting keeps its current value. `pbs_bgwriter_remediate` (fault `db-checkpoint-warning`) checks the value again afterwards and escalates if it hasn't changed.
+- **Some parameters need a restart.** For those (`shared_buffers`, `max_connections`, ...) the reload doesn't apply the new value. It stays pending until the next restart, and the tool doesn't report that.
+- **It doesn't record the old value**, so there's no rollback plan (§1.16). A value from an earlier baseline can still be found with `get_saved_snapshots`.
+- **Any setting name is accepted.** There is no allow-list. What can be reset is governed by policy rules on the tool and the database's tags.
+
+---
+
+#### 1.21 `reset_cache_stats` — reset statistics counters
+
+**Action class**: `write` (policy pre-check)
+
+```
+connection_string   string   optional
+```
+
+Runs `SELECT pg_stat_reset()`. This is used after a one-off large sequential scan has dragged down the cache hit ratio. Counting starts again from zero, so the ratio reflects only current activity.
+
+Despite the name, it clears more than the cache counters. `pg_stat_reset()` zeroes **every** cumulative statistics counter for the database the connection points at. That covers the `pg_stat_database` block counters (`blks_hit`/`blks_read`), and also the per-table and per-index counters behind `get_table_stats` and `get_vacuum_status`. Autovacuum decides when to run from those same per-table counters, so expect it to be slower to pick up a busy table until the counters build up again. Other databases on the server are not affected.
+
+**Execution sequence**:
+
+1. Policy pre-check (`CheckDatabase` with `ActionWrite`)
+2. Execute `SELECT pg_stat_reset()`
+3. Record the tool call and return the output with a note that the ratio now reflects only post-reset activity
+
+**Safeguards**: none in the tool beyond policy, and the reset cannot be undone. No data changes, but the history in the counters is lost. `pbs_cache_miss_remediate` (fault `db-high-cache-miss`) first checks whether the ratio is already healthy, and calls the tool only when it isn't. Afterwards it checks the ratio again and escalates to a `shared_buffers` review if the ratio stays low.
+
+---
+
 ### Kubernetes agent
 
-All three K8s mutation tools share the same action class (`destructive`)
-and follow the same pre-check / execute / post-check pattern. Unlike the
+The four K8s remediation tools (`delete_pod`, `restart_deployment`,
+`scale_deployment`, `patch_deployment_resources`) share the same action class
+(`destructive`) and follow the same pre-check / execute / post-check pattern;
+`debug_node_dmesg` (§1.10) is a `write`-class diagnostic. Unlike the
 database tools, there is **no structural guard** inside the mutation tool that
 forces an inspection call — the enforce-first discipline relies on the system
 prompt (Mechanism A) and the approval context (Mechanism C) only.
@@ -383,6 +504,43 @@ orphaned by a previous failed run for the same node.
 
 ---
 
+#### 1.22 `patch_deployment_resources` — change memory limit/request
+
+**Action class**: `destructive` (policy pre-check + post-execution blast-radius check). It is classified like `restart_deployment` because applying the change rolls every pod in the deployment.
+
+```
+context          string   optional
+namespace        string   required
+deployment       string   required
+memory_limit     string   required — e.g. 1Gi, 512Mi
+memory_request   string   required — e.g. 768Mi; Kubernetes rejects a request above the limit
+container        string   optional — one container; default is every container in the pod template
+```
+
+Runs `kubectl set resources deployment <name> --limits memory=<limit> --requests memory=<request>` (plus `--containers <name>` when given). The pod template changes, so Kubernetes rolls out new pods with the new values. The usual reason is an undersized limit that keeps getting the database OOMKilled.
+
+**Execution sequence**:
+
+1. Resolve the namespace and context; policy pre-check (`ActionDestructive`)
+2. **Capture the pre-state** for rollback: the current memory limit and request, read from the pod template. This is best-effort. If the read fails the patch still goes ahead, and the event is then marked non-reversible (the same trade-off `scale_deployment` makes).
+3. Execute `kubectl set resources ...`, recording the pre-state in the audit event
+4. Post-execution blast-radius check (`checkK8sPolicyResult`)
+5. **Level 2 safeguard + automatic recovery**: re-read the limit from the deployment until it equals `memory_limit`, using the same `WaitUntilResolved` loop as `scale_deployment`. Returns `VERIFICATION WARNING` only after all attempts are exhausted. See [§4](#4-safeguards-and-automatic-recovery).
+6. Return kubectl output to the orchestrator
+
+**Rollback**: reversible (§1.16). The derived inverse is another `patch_deployment_resources` back to the captured limit and request.
+
+**Limitation**: when `container` is omitted, the patch applies to every container, but the pre-state capture and the step-5 check read only the first container. For multi-container pods, pass `container` so that rollback and verification cover the container that actually changed.
+
+**Safeguards**: `pbs_k8s_pod_crash_remediate` (faults `k8s-oomkilled`, `k8s-crashloop`) uses this tool only after triage has attributed the crashes to OOM. It sizes the new limit by a fixed rule:
+- under 1Gi: double it
+- 1–4Gi: add 1Gi
+- above 4Gi: add 2Gi
+
+The request is set to 75% of the new limit. Before requesting approval, the playbook states the current limit, the OOMKill count, the proposed values, and whether a memory leak is suspected. Disk-full and data-corruption cases are escalated to a human and never patched.
+
+---
+
 ### SysAdmin agent
 
 The SysAdmin agent operates at the OS and container-runtime level. Most of its mutation tools restart a database process rather than operating on data — a restart is recoverable and leaves data intact. `restore_from_backup` (§1.15, added v0.31) is the exception: it overwrites the current data directory with a backup, the most destructive operation in this project. The policy and audit enforcement is identical across all of them regardless of severity. See [SYSADMIN_AGENT.md](SYSADMIN_AGENT.md) for the agent's full documentation including the server ID resolution model and the remediation permission tiers.
@@ -522,6 +680,12 @@ Every mutation tool captures state before it executes so the operation can be re
 | `cancel_query` | **No** | Query cancellation is instantaneous; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_connection` | **No** | Connection closure is irreversible; `get_session_info` pre-flight surfaces cost before execution |
 | `terminate_idle_connections` | **No** | Same as above — pre-flight assessment is the control |
+| `patch_deployment_resources` | **Yes** | Captures the previous memory limit/request before patching; inverse = patch back (§1.22) |
+| `resume_wal_replay` | **No** | Nothing to undo in practice: the standby was only applying WAL it already had. Re-pausing is a manual `pg_wal_replay_pause()` |
+| `run_vacuum` | **No** | Dead tuples removed by VACUUM are gone; no data a query could see is changed |
+| `drop_replication_slot` | **No** | Irreversible: the replica cannot resume from the dropped slot and must be rebuilt; human confirmation that the replica is decommissioned is the control |
+| `reset_pg_setting` | **No** | The previous value is not captured; `get_saved_snapshots` can show it from an earlier baseline |
+| `reset_cache_stats` | **No** | Cumulative statistics are zeroed; the counters' history is lost |
 | `restart_container` | **No** | Restart is instantaneous; pre-flight `check_host`/`get_host_logs` is the control |
 | `restart_service` | **No** | Same as above |
 | `restore_from_backup` | **No** | The restore itself overwrites the pre-state being restored from; `pg_isready` pre-flight refusal and the non-bypassable objective-evidence gate (§1.15) are the controls, not a post-hoc rollback |

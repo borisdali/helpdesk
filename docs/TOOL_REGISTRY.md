@@ -260,6 +260,7 @@ Each agent keeps its card options in a `cardOptions(tools)` function in `agents/
 - **No stale keys**: every key in the card option maps names the agent's root skill or one of its tools.
 - **No unused capabilities**: every vocabulary entry is declared by at least one tool. A capability nothing provides is either a missing declaration or a dead entry to remove.
 - **See-also links resolve**: a tool's links to longer write-ups (below) must point at an existing document and match exactly one heading in it.
+- **Mutation tools are written up**: every `write` or `destructive` tool links to at least one longer write-up, normally its `MUTATION_TOOLS.md` section covering what it changes, its safeguards and whether it can be rolled back.
 
 All of these are enforced, not just documented. Each agent has a `TestToolReference` test (`agents/<agent>/tools_reference_test.go`) that runs the checks in `agentutil/toolref` against the agent's real `createTools()` and `cardOptions()`, and fails on any violation. The same test compares the agent's [reference page](#aihelpdesk-tool-registry) with the code.
 
@@ -285,10 +286,10 @@ SeeAlso: map[string][]toolref.Link{
 1. Define the tool in the agent's `createTools()`.
 2. Add its action class to `audit.ToolClassification`.
 3. Add a `SkillCapabilities` entry in the agent's `card.go`.
-4. If the tool has a longer write-up (e.g. a `MUTATION_TOOLS.md` section for a write or destructive tool), add a `SeeAlso` link for it.
+4. Add a `SeeAlso` link to any longer write-up. This is required for a `write` or `destructive` tool: write its `MUTATION_TOOLS.md` section first.
 5. Run `make docs-tools` and commit the regenerated `docs/tools/` pages.
 
-`make test` and CI fail until steps 1–3 and 5 are done.
+`make test` and CI fail until all five are done (step 4 only for write and destructive tools).
 
 ### Wire format (internal)
 

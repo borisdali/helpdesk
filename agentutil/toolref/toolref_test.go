@@ -289,3 +289,16 @@ func TestScanDeclaredCapabilities_AndUnused(t *testing.T) {
 		t.Errorf("unused = %v", unused)
 	}
 }
+
+func TestMissingWriteUps(t *testing.T) {
+	// cancel_query is write, terminate_connection destructive, check_connection read.
+	p := Page{
+		Agent:   "a",
+		Tools:   tools("cancel_query", "terminate_connection", "check_connection"),
+		SeeAlso: map[string][]Link{"cancel_query": {{Doc: "MUTATION_TOOLS.md"}}},
+	}
+	got := MissingWriteUps(p)
+	if len(got) != 1 || !strings.Contains(got[0], "terminate_connection is classified destructive but links to no write-up") {
+		t.Errorf("MissingWriteUps = %v, want only terminate_connection", got)
+	}
+}

@@ -80,6 +80,8 @@ Drop an inactive replication slot to allow WAL recycling. Irreversible — once 
 - **Capabilities:** `replication_change`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.19 `drop_replication_slot` — drop an inactive slot](../MUTATION_TOOLS.md#119-drop_replication_slot--drop-an-inactive-slot)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -454,6 +456,8 @@ Reset buffer cache statistics by calling pg_stat_reset(), clearing blks_hit and 
 - **Capabilities:** `stats_reset`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.21 `reset_cache_stats` — reset statistics counters](../MUTATION_TOOLS.md#121-reset_cache_stats--reset-statistics-counters)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -467,6 +471,8 @@ Reset a PostgreSQL configuration parameter to its compiled-in default using ALTE
 - **Capabilities:** `config_change`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.20 `reset_pg_setting` — reset a parameter to its default](../MUTATION_TOOLS.md#120-reset_pg_setting--reset-a-parameter-to-its-default)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -481,6 +487,8 @@ Resume WAL replay on a paused standby (replica) by calling pg_wal_replay_resume(
 - **Capabilities:** `replication_change`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.17 `resume_wal_replay` — resume a paused standby](../MUTATION_TOOLS.md#117-resume_wal_replay--resume-a-paused-standby)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -494,6 +502,8 @@ Run VACUUM (optionally with ANALYZE) on a specific table to reclaim dead tuple s
 - **Capabilities:** `vacuum_run`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.18 `run_vacuum` — VACUUM one table](../MUTATION_TOOLS.md#118-run_vacuum--vacuum-one-table)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

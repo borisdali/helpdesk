@@ -28,6 +28,10 @@ func TestToolReference(t *testing.T) {
 				{Doc: "ROLLBACK.md", Section: "3.1 Kubernetes"},
 			},
 			"debug_node_dmesg": {{Doc: "MUTATION_TOOLS.md", Section: "1.10 `debug_node_dmesg`"}},
+			"patch_deployment_resources": {
+				{Doc: "MUTATION_TOOLS.md", Section: "1.22 `patch_deployment_resources`"},
+				{Doc: "ROLLBACK.md", Section: "3.1 Kubernetes"},
+			},
 		},
 	})
 }

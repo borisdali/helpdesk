@@ -225,6 +225,9 @@ Patch a deployment's container memory limit and request (e.g. to fix an undersiz
 - **Capabilities:** `resource_limits_change`, `workload_restart`
 - **Fleet eligible:** no
 - **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.22 `patch_deployment_resources` — change memory limit/request](../MUTATION_TOOLS.md#122-patch_deployment_resources--change-memory-limitrequest)
+  - [ROLLBACK.md › 3.1 Kubernetes](../ROLLBACK.md#31-kubernetes)
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
