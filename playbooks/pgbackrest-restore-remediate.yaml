@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.3"
+version: "1.4"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -25,7 +25,8 @@ guidance: |
   You are the remediation stage of a diagnostic chain. The prior playbook
   has already confirmed: data-directory loss or corruption on this
   instance, a healthy non-stale pgBackRest backup available to restore
-  from, and no replica topology to worry about. Your target for every tool
+  from, its archived WAL continuous to the end of the archive, and no
+  replica topology to worry about. Your target for every tool
   call below is the connection_string stated at the top of this prompt.
 
   PRECONDITION CHECK — abort and escalate (do not call restore_from_backup)
@@ -33,12 +34,19 @@ guidance: |
   - get_pgbackrest_status (Step 1 below) reports status_code != 0 (broken
     repo/stanza) — there is nothing safe to restore from.
   - get_pgbackrest_status reports no successful backup has ever completed.
+  - get_pgbackrest_status reports wal_continuity.status other than
+    continuous. broken means WAL between the backup and the end of the
+    archive is missing (or the backup is off the newest timeline): the
+    restore would stop at the gap, or PostgreSQL could not start at all
+    (consistency_reachable=false), after PGDATA has already been
+    overwritten. unverified means that can't be ruled out.
+    restore_from_backup itself refuses in both cases. Quote
+    wal_continuity.detail in FINDINGS for the human who decides next.
   - get_pgbackrest_status reports backup_stale=true — the most recent
-    backup is older than expected, and this system does not currently
-    verify that the WAL needed to reach a consistent recovery point from it
-    is actually present and continuous in the repo (staleness here is a
-    pure backup-age check, nothing more). Taking a fresh backup is not a
-    fallback: the data directory is already confirmed corrupted/missing
+    backup is older than expected. Even with wal_continuity continuous,
+    restoring it means replaying everything since it was taken, and this
+    playbook does not decide whether that is acceptable. Taking a fresh
+    backup is not a fallback: the data directory is already confirmed corrupted/missing
     pg_control, so there is nothing valid left to back up from, online or
     offline. This is a human judgment call — do not emit TRANSITION_TO or
     ESCALATE_TO for this condition; a human must decide whether the stale
@@ -53,7 +61,8 @@ guidance: |
   Step 1 — Reconfirm backup health:
   Call get_pgbackrest_status with the connection_string (target). Do not
   trust the prior playbook's diagnosis alone — reconfirm status_code=0,
-  backup_stale=false, and a non-empty last_backup_label yourself before
+  backup_stale=false, wal_continuity.status=continuous, and a non-empty
+  last_backup_label yourself before
   proceeding, the same discipline run_pgbackrest_backup's own remediation
   already applies to a stale-backup finding. If any precondition above
   fails, stop here and follow its own instruction instead of continuing to
@@ -95,7 +104,9 @@ guidance: |
   Emit FINDINGS with:
   - Whether the restore and restart both succeeded
   - The backup label/timestamp that was restored from (from Step 1's
-    last_backup_label/last_backup_time)
+    last_backup_label/last_backup_time), and how far the archived WAL
+    reached (Step 1's wal_continuity.archive_end_wal/archive_end_time):
+    changes made after that time were never archived and are not restored
   - Container state and log evidence after restart (quote the actual log
     line, do not paraphrase)
   - Any anomalies (restart_container failed, instance crashed again after
@@ -111,6 +122,8 @@ guidance: |
 escalation:
   - "get_pgbackrest_status reports status_code != 0 or no successful backup ever completed"
   - "get_pgbackrest_status reports backup_stale=true — human judgment call on whether to restore from it anyway; no automated target"
+  - "get_pgbackrest_status reports wal_continuity.status broken or unverified — the restore can't be confirmed to reach the end of the archive"
+  - "restore_from_backup refuses on WAL continuity — do not retry; a human decides"
   - "restore_from_backup refuses because the instance is still accepting connections — the prior diagnosis may be wrong"
   - "restart_container/restart_service fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
   - "logs show a new PANIC/FATAL immediately after restart — escalate rather than retry"

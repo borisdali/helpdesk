@@ -53,6 +53,64 @@ const realPgBackRestInfoJSON = `[
     }
 ]`
 
+// realInfoArchiveTop and realInfoWALListing are the repo reads the
+// WAL-continuity check makes, shaped like real repo-ls output and matching
+// realPgBackRestInfoJSON's backup (WAL 000000010000000000000015, timeline 1,
+// archive 16-1): its one segment is present, so the chain is continuous.
+const realInfoArchiveTop = "0000000100000000\n"
+
+var realInfoWALListing = `{".":{"type":"path"},"0000000100000000":{"type":"path"},` +
+	`"0000000100000000/000000010000000000000015-` + strings.Repeat("e", 40) + `.gz":{"type":"file","size":16456,"time":1790395767}}`
+
+// pgbackrestRouter is a cmdRunner fake that answers each command by what it
+// is rather than by call position, since get_pgbackrest_status and
+// restore_from_backup now make several pgbackrest reads per call.
+type pgbackrestRouter struct {
+	calls      [][]string
+	info       string
+	walListing string // defaults to realInfoWALListing
+	readyOut   string
+	readyErr   error
+	restoreOut string
+	restoreErr error
+}
+
+func (r *pgbackrestRouter) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
+	r.calls = append(r.calls, args)
+	joined := name + " " + strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "pg_isready"):
+		return r.readyOut, r.readyErr
+	case strings.Contains(joined, "--delta restore"):
+		return r.restoreOut, r.restoreErr
+	case strings.Contains(joined, "repo-ls") && strings.Contains(joined, "--recurse"):
+		if r.walListing != "" {
+			return r.walListing, nil
+		}
+		return realInfoWALListing, nil
+	case strings.Contains(joined, "repo-ls"):
+		return realInfoArchiveTop, nil
+	case strings.Contains(joined, "repo-get"):
+		return "", fmt.Errorf("unexpected repo-get: %s", joined)
+	case strings.Contains(joined, "'info'") || strings.Contains(joined, "info --output=json"):
+		return r.info, nil
+	case containsSeq(args, "get", "pod"):
+		return "pg-prod-db-0\n", nil
+	}
+	return "", fmt.Errorf("unexpected command: %s", joined)
+}
+
+// callsContaining returns the calls whose joined args contain substr.
+func (r *pgbackrestRouter) callsContaining(substr string) [][]string {
+	var out [][]string
+	for _, c := range r.calls {
+		if strings.Contains(strings.Join(c, " "), substr) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // realPgBackRestBrokenRepoJSON is the exact output captured live
 // (2026-09-27) from the same install after `chmod 000` on the repo path —
 // the literal injection db-pgbackrest-repo-unreadable performs. Not a
@@ -432,7 +490,7 @@ func withPgBackRestDockerInfra(t *testing.T) {
 // manually verified live against the real container during development.
 func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
 	withPgBackRestDockerInfra(t)
-	capture := &sequencedRunner{outputs: []string{realPgBackRestInfoJSON}}
+	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON}
 	old := cmdRunner
 	cmdRunner = capture
 	defer func() { cmdRunner = old }()
@@ -445,8 +503,18 @@ func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
 	if result.Stanza != "main" {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
 	}
-	if len(capture.calls) != 1 {
-		t.Fatalf("expected 1 docker exec call, got %d: %v", len(capture.calls), capture.calls)
+	// info, then the WAL-continuity reads (archive listing, segment listing),
+	// all through the same docker exec dispatch.
+	if len(capture.calls) != 3 {
+		t.Fatalf("expected 3 docker exec calls (info + 2 WAL reads), got %d: %v", len(capture.calls), capture.calls)
+	}
+	for _, c := range capture.calls {
+		if len(c) < 2 || c[0] != "exec" || c[1] != "helpdesk-test-pg-pgbackrest" || !strings.Contains(strings.Join(c, " "), "su postgres -c") {
+			t.Errorf("call = %v, want every pgbackrest read via docker exec as the postgres OS user", c)
+		}
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
+		t.Errorf("WALContinuity = %+v, want continuous", result.WALContinuity)
 	}
 	args := capture.calls[0]
 	if len(args) < 2 || args[0] != "exec" || args[1] != "helpdesk-test-pg-pgbackrest" {
@@ -575,10 +643,16 @@ func TestGetPgBackRestStatusTool_SSHDispatch(t *testing.T) {
 	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
 
 	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
-		if !strings.Contains(cmd, "pgbackrest") || !strings.Contains(cmd, "info") || !strings.Contains(cmd, "--output=json") {
-			return "unexpected command: " + cmd, 1
+		switch {
+		case !strings.Contains(cmd, "pgbackrest"):
+		case strings.Contains(cmd, "repo-ls") && strings.Contains(cmd, "--recurse"):
+			return realInfoWALListing, 0
+		case strings.Contains(cmd, "repo-ls"):
+			return realInfoArchiveTop, 0
+		case strings.Contains(cmd, "info") && strings.Contains(cmd, "--output=json"):
+			return realPgBackRestInfoJSON, 0
 		}
-		return realPgBackRestInfoJSON, 0
+		return "unexpected command: " + cmd, 1
 	})
 	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
 	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
@@ -594,6 +668,10 @@ func TestGetPgBackRestStatusTool_SSHDispatch(t *testing.T) {
 	}
 	if result.Stanza != "main" {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
+	}
+	// The WAL-continuity reads go over the same SSH session path.
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
+		t.Errorf("WALContinuity = %+v, want continuous over SSH", result.WALContinuity)
 	}
 }
 
@@ -668,6 +746,85 @@ func TestGetPgBackRestStatusTool_StaleBackup_RecordsObjectiveEvidence(t *testing
 	}
 	if events[0].ObjectiveEvidence == nil || events[0].ObjectiveEvidence.Signal != "pgbackrest_backup_unhealthy" {
 		t.Errorf("ObjectiveEvidence = %+v, want signal=pgbackrest_backup_unhealthy", events[0].ObjectiveEvidence)
+	}
+}
+
+// TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence loads the
+// real shipped rules file and checks a broken WAL chain fires
+// pgbackrest_wal_chain_broken, alongside the WAL_continuity result itself.
+func TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence(t *testing.T) {
+	orig := pgbackrestEvidenceRules
+	pgbackrestEvidenceRules = loadSysadminEvidenceRules("objective_evidence.yaml")
+	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON, walListing: `{".":{"type":"path"}}`}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALBroken || result.WALContinuity.ConsistencyReachable {
+		t.Fatalf("WALContinuity = %+v, want broken with consistency unreachable", result.WALContinuity)
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var signals []string
+	for _, e := range events {
+		if e.ObjectiveEvidence != nil {
+			signals = append(signals, e.ObjectiveEvidence.Signal)
+		}
+	}
+	found := false
+	for _, s := range signals {
+		if s == "pgbackrest_wal_chain_broken" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("signals = %v, want pgbackrest_wal_chain_broken", signals)
+	}
+}
+
+// An unverified check is not evidence of a broken chain: no WAL signal.
+func TestGetPgBackRestStatusTool_UnverifiedWAL_NoWALEvidence(t *testing.T) {
+	orig := pgbackrestEvidenceRules
+	pgbackrestEvidenceRules = loadSysadminEvidenceRules("objective_evidence.yaml")
+	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	inner := &pgbackrestRouter{info: realPgBackRestInfoJSON}
+	old := cmdRunner
+	cmdRunner = runnerFunc(func(ctx context.Context, name string, args []string, env []string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "repo-ls") {
+			return "", fmt.Errorf("exit status 31")
+		}
+		return inner.Run(ctx, name, args, env)
+	})
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALUnverified {
+		t.Fatalf("WALContinuity = %+v, want unverified", result.WALContinuity)
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, e := range events {
+		if e.ObjectiveEvidence != nil && e.ObjectiveEvidence.Signal == "pgbackrest_wal_chain_broken" {
+			t.Errorf("pgbackrest_wal_chain_broken fired on an unverified check")
+		}
 	}
 }
 
@@ -893,7 +1050,7 @@ func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *test
 // more informative than a hardcoded refusal naming one specific operator.
 func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
 	withK8sInfra(t)
-	capture := &sequencedRunner{outputs: []string{"pg-prod-db-0\n", realPgBackRestInfoJSON}}
+	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON}
 	old := cmdRunner
 	cmdRunner = capture
 	defer func() { cmdRunner = old }()
@@ -906,8 +1063,13 @@ func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
 	if result.Stanza != "main" {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
 	}
-	if len(capture.calls) != 2 {
-		t.Fatalf("expected 2 kubectl calls (get pod, exec), got %d: %v", len(capture.calls), capture.calls)
+	// Each exec resolves the pod first: (get pod, exec) for info and for each
+	// of the 2 WAL-continuity reads.
+	if len(capture.calls) != 6 {
+		t.Fatalf("expected 6 kubectl calls (get pod + exec, x3), got %d: %v", len(capture.calls), capture.calls)
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
+		t.Errorf("WALContinuity = %+v, want continuous", result.WALContinuity)
 	}
 	// Both calls carry the configured --context prefix (gke_project_region_prod-cluster),
 	// so "get"/"exec" aren't necessarily at index 0 — search for them instead.

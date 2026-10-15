@@ -29,6 +29,7 @@ import (
 	"net"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,5 +175,92 @@ func TestIntegration_RestoreFromBackup_RefusesWhenServerIsUp(t *testing.T) {
 	_, err = restoreFromBackupImpl(context.Background(), RestoreFromBackupArgs{Target: "pgbackrest-db", Stanza: "main"})
 	if err == nil {
 		t.Fatal("restoreFromBackupImpl succeeded against a live instance — want a refusal")
+	}
+}
+
+// TestIntegration_RestoreFromBackup_RefusesOnRealWALGap is the v0.32
+// WAL-continuity check end to end, against the real repo: the latest
+// backup's own start segment is moved out of the archive, so PostgreSQL
+// could never reach consistency from that backup. get_pgbackrest_status must
+// report the chain broken, and after a real crash restore_from_backup must
+// refuse without touching PGDATA (a canary file placed in PGDATA survives).
+// The segment is moved back and the fixture repaired afterwards, whatever
+// the outcome.
+func TestIntegration_RestoreFromBackup_RefusesOnRealWALGap(t *testing.T) {
+	skipIfNoPgBackRestDocker(t)
+
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := infra.Load(filepath.Join(repoRoot, "testing", "testing.infra.json"))
+	if err != nil {
+		t.Fatalf("loading infra config: %v", err)
+	}
+	oldInfra := infraConfig
+	infraConfig = cfg
+	t.Cleanup(func() { infraConfig = oldInfra })
+	// Registered first so it runs last, after the segment is back.
+	t.Cleanup(func() { restoreIntegrationTeardown(t) })
+
+	ctx := context.Background()
+	before, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+	if err != nil {
+		t.Fatalf("precondition: getPgBackRestStatusImpl failed: %v", err)
+	}
+	if before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
+		t.Fatalf("precondition: WAL continuity = %+v, want continuous on the healthy fixture", before.WALContinuity)
+	}
+	seg := before.WALContinuity.BackupStartWAL
+	archiveDir := "/var/lib/pgbackrest/archive/main/" + before.WALContinuity.ArchiveID + "/" + seg[:16]
+
+	// Move the backup's start segment aside (same directory, a name the WAL
+	// parser ignores), and always move it back.
+	hide := `set -e; f=$(ls ` + archiveDir + `/` + seg + `-*); mv "$f" "$f.hidden-by-test"`
+	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c", hide); err != nil {
+		t.Fatalf("hiding WAL segment %s: %v", seg, err)
+	}
+	t.Cleanup(func() {
+		unhide := `for f in ` + archiveDir + `/*.hidden-by-test; do mv "$f" "${f%.hidden-by-test}"; done`
+		if _, err := testutil.DockerExec(context.Background(), restoreIntegrationContainer, "sh", "-c", unhide); err != nil {
+			t.Errorf("cleanup: restoring WAL segment %s: %v", seg, err)
+		}
+	})
+
+	after, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusImpl with the segment hidden: %v", err)
+	}
+	wal := after.WALContinuity
+	if wal == nil || wal.Status != WALBroken || wal.ConsistencyReachable {
+		t.Fatalf("WAL continuity = %+v, want broken with consistency unreachable", wal)
+	}
+	if len(wal.Gaps) == 0 || wal.Gaps[0].FirstMissing != seg {
+		t.Errorf("gaps = %+v, want the first gap at %s", wal.Gaps, seg)
+	}
+
+	// Crash the instance the same way the real restore test does, and drop a
+	// canary into PGDATA: a refused restore must leave it in place.
+	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c",
+		"rm -f /var/lib/postgresql/data/global/pg_control && touch /var/lib/postgresql/data/walcheck-canary"); err != nil {
+		t.Fatalf("corrupting pg_control: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testutil.DockerExec(context.Background(), restoreIntegrationContainer, "rm", "-f", "/var/lib/postgresql/data/walcheck-canary")
+	})
+	if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
+		t.Fatalf("docker restart (to trigger the crash): %v", err)
+	}
+	time.Sleep(5 * time.Second)
+
+	_, err = restoreFromBackupImpl(ctx, RestoreFromBackupArgs{Target: "pgbackrest-db", Stanza: "main"})
+	if err == nil {
+		t.Fatal("restoreFromBackupImpl succeeded with the backup's own WAL missing, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "WAL continuity is broken") {
+		t.Errorf("error = %v, want a WAL-continuity refusal", err)
+	}
+	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "test", "-f", "/var/lib/postgresql/data/walcheck-canary"); err != nil {
+		t.Errorf("canary file is gone from PGDATA: the refused restore touched the data directory")
 	}
 }

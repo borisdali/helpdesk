@@ -211,11 +211,20 @@ parser bug (`splitOutsideQuotes`, `cmd/gateway/playbooks.go`) found while confir
 not specific to this one signal, a fix to a code path every default-confirmation signal
 shares.
 
-**Sysadmin agent** (`agents/sysadmin/objective_evidence.yaml`, 1 rule):
+**Sysadmin agent** (`agents/sysadmin/objective_evidence.yaml`, 2 rules):
 
 | Tool | Signal | Confirmation |
 |---|---|---|
-| `get_pgbackrest_status` | `pgbackrest_backup_unhealthy` | default |
+| `get_pgbackrest_status` | `pgbackrest_wal_chain_broken` | `evidence_quote_contains_value` |
+| `get_pgbackrest_status` | `pgbackrest_backup_unhealthy` | `evidence_quote_contains_value` |
+
+`pgbackrest_wal_chain_broken` (v0.32) fires when the WAL-continuity check finds the latest
+backup can't be restored to the end of the archive: a missing segment, or a backup off the
+newest timeline's history. It doesn't fire when the check couldn't run (`unverified`). It's
+listed first because only the first matching rule per result is recorded, and a broken chain is
+the more severe finding when the backup is also stale. It makes a human look; what stops a
+restore is `restore_from_backup`'s own refusal. See
+[BACKUP.md §3](BACKUP.md#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).
 
 `pgbackrest_backup_unhealthy` is an OR of three conditions computed from
 `PgBackRestSummary` — a non-OK stanza `status_code`, `backup_stale`, or no backup ever
@@ -230,8 +239,8 @@ what this does and does not cover across that playbook chain.
 
 **Not yet instrumented:** `check_host`/`get_host_logs`/`read_pg_log_file` — container exit
 codes and log content are exactly the kind of typed, verifiable data this mechanism is
-built for, and every database/K8s tool beyond the ten rules above (nine listed here plus
-`get_pgbackrest_status`'s).
+built for, and every database/K8s tool beyond the eleven rules above (nine listed here plus
+`get_pgbackrest_status`'s two).
 
 ## 7. Authoring a new rule
 

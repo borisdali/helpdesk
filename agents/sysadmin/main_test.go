@@ -63,3 +63,17 @@ func TestObjectiveEvidenceYAML_PgBackRestBackupUnhealthy_UsesEvidenceQuoteProbe(
 		t.Fatal("expected a pgbackrest_backup_unhealthy rule in the real shipped file")
 	}
 }
+
+// TestObjectiveEvidenceYAML_WALChainBroken_Shipped verifies the shipped rules
+// file activates the v0.32 WAL-continuity signal.
+func TestObjectiveEvidenceYAML_WALChainBroken_Shipped(t *testing.T) {
+	for _, r := range loadSysadminEvidenceRules("objective_evidence.yaml") {
+		if r.Signal == "pgbackrest_wal_chain_broken" {
+			if r.Probe != "wal_chain_broken" || r.Tool != "get_pgbackrest_status" {
+				t.Errorf("rule = %+v, want probe wal_chain_broken on get_pgbackrest_status", r)
+			}
+			return
+		}
+	}
+	t.Fatal("expected a pgbackrest_wal_chain_broken rule in the real shipped file")
+}

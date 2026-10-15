@@ -277,7 +277,9 @@ promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#
 Only Layer 2 is fully independent of the model. Layers 1 and 3 are carried out through
 LLM-interpreted playbook guidance (see [the honest limit](#layer-3-fails-closed-by-design-not-by-accident)
 under Layer 3). Underneath all three, the tool itself refuses to run against a live instance
-and pgBackRest refuses to restore without a selectable backup. See
+or onto a WAL chain it can't confirm reaches the end of the archive (v0.32, see
+[WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)), and pgBackRest
+refuses to restore without a selectable backup. See
 [Underneath the layers](#underneath-the-layers-whats-honest-about-the-remediation-not-oversold) below for details.
 
 **The failure mode**:  
@@ -356,21 +358,77 @@ close and nothing here should be read as claiming it does.
   suggest damage beyond what a plain restore fixes?) rest on the model's own quoted-evidence
   discipline, not a deterministic check — the fail-closed property above narrows the blast radius of
   that gap considerably, but, per the honest limit just stated, does not close it.
-- `restore_from_backup` itself doesn't independently re-verify `status_code`/`backup_stale` at the
-  Go level when called with an explicit stanza (the normal path from the remediation playbook's
-  own Step 1) — it relies on that playbook's LLM-mediated re-check plus the force-gate above as
-  the real backstops, not a third, redundant tool-level check. As of v0.31.x, Step 1's own
+- `restore_from_backup` itself doesn't re-verify `backup_stale` at the Go level — it relies on
+  the remediation playbook's LLM-mediated re-check plus the force-gate above. (Since v0.32 it does
+  refuse on a non-zero `status_code` and on any WAL-continuity status other than `continuous`,
+  see [WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).) As of v0.31.x, Step 1's own
   `backup_stale=true` precondition is an explicit, named stop (cite the staleness, do not
   transition or escalate automatically, defer to a human) rather than unguided model judgment —
   found live (2026-10-11) to matter: the earlier, vaguer wording let the model either invent a
   nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
   without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
-  check and still doesn't know whether the WAL chain itself is intact — see the next bullet.
-- There is no verification, before or after the restore, that the WAL chain from the backup to the
-  crash point is actually contiguous — see [§4](#4-roadmap)'s "WAL-chain completeness" item. A gap
-  in the archive wouldn't be caught by anything above; Postgres replays however much WAL it can
-  find and completes recovery there, logging it the same way as legitimately reaching the true
-  end of the stream.
+  check.
+- WAL that never reached the archive can't be seen by anything here. The WAL-continuity check
+  proves the chain is complete up to the newest *archived* segment; whatever the dead instance
+  wrote after that (still in its own `pg_wal`, or never archived because archiving was broken) is
+  lost by a restore-to-latest. `wal_continuity.archive_end_time` says exactly how far a restore
+  reaches, and the remediation playbook reports it, but nothing decides for a human whether that
+  loss is acceptable.
+
+#### WAL continuity: the restore refuses a chain it can't finish
+
+*Added in v0.32.* A restore is only as good as the WAL behind it. `pgbackrest --delta restore`
+lays down the latest backup and PostgreSQL then replays archived WAL from that backup's start to
+the end of the archive, following timeline history to the newest timeline. If a segment on that
+path is missing, recovery either can't reach a consistent state at all (PostgreSQL won't start) or
+silently stops at the gap and comes up with older data, and in both cases PGDATA has already been
+overwritten. Backup age (`backup_stale`) says nothing about this: a fresh backup can sit on a
+broken chain.
+
+`get_pgbackrest_status` now returns a `wal_continuity` block, computed from the repo alone, with no
+live instance needed:
+
+1. The backup's own WAL start/stop segments and LSNs, from `pgbackrest info`.
+2. The newest timeline, from the archive's `.history` files, and that file's contents: every
+   ancestor timeline and the LSN where each one forked (`pgbackrest repo-get`).
+3. The segment files on the timelines along that path (one `pgbackrest repo-ls`, filtered to
+   those timelines).
+
+It then walks the segments in the order PostgreSQL would read them: up to each fork from the
+parent timeline, from the fork's segment onward from the child. `.partial` segments don't count,
+since `restore_command` never fetches them. The WAL segment size isn't recorded anywhere
+pgBackRest reports, so it's derived from the backup's start LSN and start segment name; only one
+size maps one to the other. The result:
+
+| `status` | Meaning |
+|---|---|
+| `continuous` | Every segment from the backup to the archive end is present. |
+| `broken` | A segment is missing (`gaps` lists them; `consistency_reachable=false` when it's one the backup itself needs, `recoverable_to_wal` is where recovery would stop), or the backup isn't on the newest timeline's history. |
+| `unverified` | The check couldn't run, e.g. pgBackRest older than 2.26 (no `repo-ls`). |
+| `no_backup` | There is no backup to check. |
+
+Three things use it:
+
+- **`restore_from_backup` refuses unless the status is `continuous`**, `unverified` included.
+  This is a Go-level check next to the `pg_isready` refusal, independent of any model or gate. It
+  runs after the policy check and `pg_isready`, immediately before the restore.
+- **A new objective-evidence signal, `pgbackrest_wal_chain_broken`,** force-gates a response
+  when the chain is definitely `broken` (not on `unverified`, so an older pgBackRest doesn't gate
+  every routine triage). It's listed ahead of `pgbackrest_backup_unhealthy`, since only the first
+  matching rule per result is recorded and a broken chain is the more severe finding.
+- **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
+  a human escalation, and only transitions to the restore when the chain is `continuous`.
+  `pbs_pgbackrest_restore_remediate` (v1.4) has a matching precondition and reports how far the
+  archive reached.
+
+**Verified, not just claimed**: the unit tests run against real output captured from the
+Docker fixture's repo, an archive that had been through 29 timeline switches from earlier restore
+tests, with `.partial` segments at several of them. Removing segments from that real listing
+gives each `broken` case. An integration test
+(`TestIntegration_RestoreFromBackup_RefusesOnRealWALGap`) moves the backup's own WAL segment out
+of the real repo, crashes the instance, and checks that `restore_from_backup` refuses and a canary
+file in PGDATA survives. The existing real crash-and-restore test now passes through the check on
+its way to a successful restore.
 
 #### Underneath the layers: what's honest about the remediation, not oversold
 
@@ -428,16 +486,13 @@ other claim in this document is.
 
 Not yet built — tracked, not forgotten:
 
-- **WAL-chain completeness verification (§3).**  
-  Nothing today confirms, before or after a restore, that the WAL chain from the backup to the
-  crash point is actually contiguous. This is implementable without a live source instance:
-  `pgbackrest info --output=json` already reports the stanza's `archive[].max` (the latest WAL
-  segment filename physically present in the repo — not yet parsed into
-  `GetPgBackRestStatusResult`) and Postgres's own recovery log reports exactly which segments it
-  replayed (`"restored log file \"...\" from archive"`) and the final LSN (`"redo done at ..."`).
-  Comparing the two after a restore — did recovery replay through the repo's own latest segment,
-  or stop short — would turn a silent partial-recovery into a reported, CRITICAL finding instead
-  of a result that looks identical to a clean recovery from the outside.
+- **Post-restore WAL verification (§3).**  
+  Since v0.32 the WAL chain is checked *before* a restore ([WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)).
+  Still not done: confirming *afterwards* that recovery actually replayed through
+  `recoverable_to_wal`, by reading PostgreSQL's own recovery log (`"restored log file \"...\" from archive"`,
+  `"redo done at ..."`). The pre-restore check verifies that segments are present, not their
+  contents; `pgbackrest verify` checks contents too, but it reads every file in the repo, which is
+  too slow to run on the restore path for a large repo.
 
 - **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
   `pbs_sysadmin_host_triage` (§3).**  

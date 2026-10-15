@@ -16,6 +16,28 @@
 # typo) fails the agent's startup loudly; it never silently just does
 # nothing.
 
+# wal_chain_broken (v0.32): true when the WAL-continuity check on
+# get_pgbackrest_status finds the latest backup cannot be restored to the end
+# of the archive — a segment between the backup and the archive end is
+# missing, or the backup isn't on the newest timeline's history (see
+# agents/sysadmin/walcheck.go). Fires on that definite finding only, not on
+# "unverified" (the check couldn't run). This gate makes a human look at the
+# finding; it is not what stops a restore — restore_from_backup itself
+# refuses whenever WAL continuity isn't "continuous", whatever any model or
+# gate concludes. The confirmation probe matches backup_unhealthy's.
+#
+# Listed FIRST on purpose: evidence.Evaluate records only the first matching
+# rule per tool result, and a broken chain is the more severe and more
+# specific finding when the backup is also stale. The stale/never-backed-up
+# details are still in the tool result itself.
+- tool: get_pgbackrest_status
+  probe: wal_chain_broken
+  operator: "=="
+  threshold: true
+  signal: pgbackrest_wal_chain_broken
+  detail: "pgBackRest WAL chain from the latest backup is broken — stanza: %s"
+  confirmation_probe: evidence_quote_contains_value
+
 # backup_unhealthy (v0.30 Part C): true when pgBackRest's own stanza status
 # is non-ok, the most recent backup is older than the requested/default
 # staleness bound, or no backup has ever succeeded. Deliberately a single

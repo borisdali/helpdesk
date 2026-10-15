@@ -85,7 +85,7 @@ Retrieve recent log lines from the database process. For Docker/Podman uses 'doc
 
 ## `get_pgbackrest_status`
 
-Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, and whether it's stale relative to the expected schedule. This is the backup-taking precondition — distinct from the database agent's get_backup_status, which checks WAL archiving health via pg_stat_archiver.
+Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, whether it's stale relative to the expected schedule, and wal_continuity — whether the archived WAL needed to restore that backup to the end of the archive is present and unbroken (status continuous, broken, unverified or no_backup; broken lists the gaps and where recovery would stop). This is the backup-taking precondition — distinct from the database agent's get_backup_status, which checks WAL archiving health via pg_stat_archiver.
 
 - **Action class:** read
 - **Capabilities:** `backup_status`
@@ -158,7 +158,7 @@ Restart a systemd service hosting the database (systemctl restart). Requires the
 
 ## `restore_from_backup`
 
-Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready). Use only when get_pgbackrest_status confirms a healthy, non-stale backup exists and the instance is confirmed down — never against a broken repo/stanza or a live instance.
+Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance.
 
 - **Action class:** destructive
 - **Capabilities:** `data_restore`

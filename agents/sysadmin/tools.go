@@ -1312,6 +1312,15 @@ type PgBackRestBackup struct {
 	Error     bool      `json:"error"`
 	StartTime time.Time `json:"start_time"`
 	StopTime  time.Time `json:"stop_time"`
+	// WALStart/WALStop are the first and last WAL segments the backup needs
+	// to reach a consistent state; LSNStart/LSNStop the matching LSNs.
+	WALStart string `json:"wal_start,omitempty"`
+	WALStop  string `json:"wal_stop,omitempty"`
+	LSNStart string `json:"lsn_start,omitempty"`
+	LSNStop  string `json:"lsn_stop,omitempty"`
+	// archiveID is the repo archive directory (e.g. "16-1") holding this
+	// backup's WAL, matched through the backup's database id.
+	archiveID string
 }
 
 // GetPgBackRestStatusResult is the structured result for get_pgbackrest_status.
@@ -1365,6 +1374,39 @@ type GetPgBackRestStatusResult struct {
 	// never hinge on whether the model correctly reconstructs a boolean from
 	// its absence.
 	BackupStale bool `json:"backup_stale"`
+	// WALContinuity says whether the latest backup can actually be restored
+	// to the end of the archived WAL — see walcheck.go. Nil only when the
+	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
+	// be asked anything further.
+	WALContinuity *WALContinuity `json:"wal_continuity,omitempty"`
+}
+
+// walCheckInput returns what the WAL-continuity check needs about the latest
+// backup, or false when there is no backup to check.
+func (r GetPgBackRestStatusResult) walCheckInput() (walCheckInput, bool) {
+	var last *PgBackRestBackup
+	for i := range r.Backups {
+		if last == nil || r.Backups[i].StopTime.After(last.StopTime) {
+			last = &r.Backups[i]
+		}
+	}
+	if last == nil {
+		return walCheckInput{}, false
+	}
+	var hints []lsnSegment
+	for _, b := range r.Backups {
+		hints = append(hints, lsnSegment{b.LSNStart, b.WALStart}, lsnSegment{b.LSNStop, b.WALStop})
+	}
+	return walCheckInput{
+		SizeHints:   hints,
+		Stanza:      r.Stanza,
+		BackupLabel: last.Label,
+		ArchiveID:   last.archiveID,
+		WALStart:    last.WALStart,
+		WALStop:     last.WALStop,
+		LSNStart:    last.LSNStart,
+		LSNStop:     last.LSNStop,
+	}, true
 }
 
 // PgBackRestSummary is the single synthesized item get_pgbackrest_status'
@@ -1377,6 +1419,7 @@ type PgBackRestSummary struct {
 	BackupStale     bool
 	NeverBackedUp   bool
 	LastBackupLabel string
+	WALStatus       string // WALContinuity.Status, empty when not checked
 }
 
 // pgbackrestEvidenceSchema declares get_pgbackrest_status' probe:
@@ -1401,6 +1444,14 @@ var pgbackrestEvidenceSchema = evidence.NewToolSchema[PgBackRestSummary]("get_pg
 }).
 	Bool("backup_unhealthy", func(s PgBackRestSummary) bool {
 		return s.StatusCode != 0 || s.BackupStale || s.NeverBackedUp
+	}).
+	// wal_chain_broken (v0.32): true only on a definite finding — a missing
+	// segment or a backup off the newest timeline's history. "unverified"
+	// deliberately doesn't fire it: restore_from_backup already refuses
+	// anything not "continuous", and gating every routine triage on a host
+	// whose pgBackRest predates repo-ls would bury the real signal.
+	Bool("wal_chain_broken", func(s PgBackRestSummary) bool {
+		return s.WALStatus == WALBroken
 	}).
 	Register()
 
@@ -1433,6 +1484,17 @@ type pgBackRestRawStanza struct {
 		} `json:"status"`
 	} `json:"repo"`
 	Backup []pgBackRestRawBackup `json:"backup"`
+	// Archive lists the stanza's WAL archive directories, one per database
+	// version (a stanza-upgrade adds one). Each backup's WAL lives in the one
+	// whose database id matches the backup's.
+	Archive []struct {
+		Database struct {
+			ID int `json:"id"`
+		} `json:"database"`
+		ID  string `json:"id"`
+		Min string `json:"min"`
+		Max string `json:"max"`
+	} `json:"archive"`
 }
 
 type pgBackRestRawBackup struct {
@@ -1443,6 +1505,17 @@ type pgBackRestRawBackup struct {
 		Start int64 `json:"start"`
 		Stop  int64 `json:"stop"`
 	} `json:"timestamp"`
+	Archive struct {
+		Start string `json:"start"`
+		Stop  string `json:"stop"`
+	} `json:"archive"`
+	LSN struct {
+		Start string `json:"start"`
+		Stop  string `json:"stop"`
+	} `json:"lsn"`
+	Database struct {
+		ID int `json:"id"`
+	} `json:"database"`
 }
 
 // jsonArrayPrefix strips any non-JSON preamble before the first `[`,
@@ -1525,6 +1598,10 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 		result.RepoStatusCode = stanza.Repo[0].Status.Code
 		result.RepoStatusMessage = stanza.Repo[0].Status.Message
 	}
+	archiveIDs := map[int]string{}
+	for _, a := range stanza.Archive {
+		archiveIDs[a.Database.ID] = a.ID
+	}
 	for _, b := range stanza.Backup {
 		result.Backups = append(result.Backups, PgBackRestBackup{
 			Label:     b.Label,
@@ -1532,6 +1609,11 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 			Error:     b.Error,
 			StartTime: time.Unix(b.Timestamp.Start, 0).UTC(),
 			StopTime:  time.Unix(b.Timestamp.Stop, 0).UTC(),
+			WALStart:  b.Archive.Start,
+			WALStop:   b.Archive.Stop,
+			LSNStart:  b.LSN.Start,
+			LSNStop:   b.LSN.Stop,
+			archiveID: archiveIDs[b.Database.ID],
 		})
 	}
 
@@ -1556,20 +1638,19 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 	return result, nil
 }
 
-func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
-	cmdArgs := []string{"info", "--output=json"}
-	if args.Stanza != "" {
-		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
-	}
-
+// runPgBackRestOnTarget runs one read-only pgbackrest command (info, repo-ls,
+// repo-get) against target, using the same dispatch get_pgbackrest_status has
+// always used: docker/podman/kubectl exec as the postgres OS user, SSH or
+// local via runOnHost, or bare local when no infrastructure config exists.
+func runPgBackRestOnTarget(ctx context.Context, toolName, target string, cmdArgs []string) (string, error) {
 	var out string
 	var err error
 	switch {
-	case args.Target != "" && infraConfig != nil:
+	case target != "" && infraConfig != nil:
 		var host resolvedHost
-		host, err = resolveHost(args.Target)
+		host, err = resolveHost(target)
 		if err != nil {
-			return GetPgBackRestStatusResult{}, err
+			return "", err
 		}
 		switch {
 		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
@@ -1613,15 +1694,32 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 		// error that read like "pgBackRest isn't installed" when the real
 		// problem was "this agent process was never told about this
 		// target." Refuse loudly instead of letting that ambiguity through.
-		return GetPgBackRestStatusResult{}, fmt.Errorf(
-			"get_pgbackrest_status: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
-				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+		return "", fmt.Errorf(
+			"%s: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — "+
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target", toolName)
 	default:
 		// No infra config loaded at all — the only sensible reading is a
 		// genuinely colocated deployment, where this agent process runs on
 		// the same host as the pgBackRest repo it's checking.
 		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
 	}
+	return out, err
+}
+
+func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	return readPgBackRestStatus(ctx, args, true)
+}
+
+// readPgBackRestStatus is get_pgbackrest_status. withWAL=false skips the
+// WAL-continuity reads for callers that only need the stanza name
+// (run_pgbackrest_backup, restore_from_backup's stanza resolution).
+func readPgBackRestStatus(ctx context.Context, args GetPgBackRestStatusArgs, withWAL bool) (GetPgBackRestStatusResult, error) {
+	cmdArgs := []string{"info", "--output=json"}
+	if args.Stanza != "" {
+		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
+	}
+
+	out, err := runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, cmdArgs)
 	if err != nil {
 		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w: %s", err, out)
 	}
@@ -1636,6 +1734,15 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 	}
 	result.Output = out
 
+	// WAL continuity for the latest backup — only meaningful when pgBackRest
+	// reports the stanza healthy enough to answer further questions.
+	if withWAL && result.StatusCode == 0 {
+		wal := checkWALContinuity(result, func(walArgs []string) (string, error) {
+			return runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, walArgs)
+		})
+		result.WALContinuity = &wal
+	}
+
 	if toolAuditor != nil {
 		summary := []PgBackRestSummary{{
 			Stanza:          result.Stanza,
@@ -1644,6 +1751,9 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 			NeverBackedUp:   result.LastBackupTime == "",
 			LastBackupLabel: result.LastBackupLabel,
 		}}
+		if result.WALContinuity != nil {
+			summary[0].WALStatus = result.WALContinuity.Status
+		}
 		evidence.Evaluate(ctx, toolAuditor, pgbackrestEvidenceSchema, summary, pgbackrestEvidenceRules)
 	}
 	return result, nil
@@ -1723,7 +1833,7 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 	// than pushing that requirement onto every caller.
 	stanza := args.Stanza
 	if stanza == "" {
-		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target}, false)
 		if err != nil {
 			return RunPgBackRestBackupResult{}, fmt.Errorf("run_pgbackrest_backup: resolving stanza name: %w", err)
 		}
@@ -1820,7 +1930,7 @@ type RestoreFromBackupResult struct {
 // runPgBackRestBackupImpl's own refusal to touch a broken repo.
 //
 // This overwrites PGDATA, so it is classified ActionDestructive (not
-// ActionWrite like a fresh backup) and gated by two checks, both verified
+// ActionWrite like a fresh backup) and gated by three checks, verified
 // live against a real crashed-then-restored pgBackRest fixture before this
 // was written, not assumed from documentation:
 //
@@ -1829,7 +1939,14 @@ type RestoreFromBackupResult struct {
 //     crashed. This is the only thing standing between "restore a dead
 //     instance" and "destroy a live one" — refuse outright if the server
 //     answers.
-//  2. A stale postmaster.pid left over from the crash must be removed
+//  2. The WAL from the latest backup to the end of the archive must be
+//     present and continuous (walcheck.go). Overwriting PGDATA with a backup
+//     that can't reach consistency, or that would silently stop recovering at
+//     a gap, is worse than not restoring: the original data directory is
+//     gone either way. Anything other than "continuous" — including
+//     "unverified" — refuses. The check runs after policy and pg_isready,
+//     so a denied caller still triggers no command at all.
+//  3. A stale postmaster.pid left over from the crash must be removed
 //     before restoring. Confirmed live: `pgbackrest restore --force` does
 //     NOT bypass pgBackRest's own "[038]: unable to restore while
 //     PostgreSQL is running" refusal — `--force` means something else to
@@ -1841,11 +1958,21 @@ type RestoreFromBackupResult struct {
 func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
 	stanza := args.Stanza
 	if stanza == "" {
-		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target}, false)
 		if err != nil {
 			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: resolving stanza name: %w", err)
 		}
 		stanza = status.Stanza
+	}
+	// checkWAL runs after policy and pg_isready, immediately before the
+	// restore: the WAL-continuity check for the backup pgbackrest restore is
+	// about to use (the latest one).
+	checkWAL := func() error {
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target, Stanza: stanza}, true)
+		if err != nil {
+			return fmt.Errorf("restore_from_backup: refusing to restore — could not read the backup state to check WAL continuity: %w", err)
+		}
+		return walRestoreRefusal(status)
 	}
 
 	readyScript := "pg_isready"
@@ -1873,10 +2000,16 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
 				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
 			}
+			if err := checkWAL(); err != nil {
+				return RestoreFromBackupResult{}, err
+			}
 			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", restoreScript})
 		default:
 			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
 				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
+			}
+			if err := checkWAL(); err != nil {
+				return RestoreFromBackupResult{}, err
 			}
 			out, err = runOnHost(ctx, host, "sh", []string{"-c", restoreScript}, nil)
 		}
@@ -1888,12 +2021,37 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
 			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
 		}
+		if err := checkWAL(); err != nil {
+			return RestoreFromBackupResult{}, err
+		}
 		out, err = cmdRunner.Run(ctx, "sh", []string{"-c", restoreScript}, nil)
 	}
 	if err != nil {
 		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
 	}
 	return RestoreFromBackupResult{Output: out}, nil
+}
+
+// walRestoreRefusal returns the error restore_from_backup refuses with when
+// the latest backup's WAL chain isn't confirmed continuous, or nil.
+func walRestoreRefusal(status GetPgBackRestStatusResult) error {
+	if status.StatusCode != 0 {
+		return fmt.Errorf("restore_from_backup: refusing to restore — pgBackRest reports the stanza unhealthy (status_code=%d: %s)", status.StatusCode, status.StatusMessage)
+	}
+	wal := status.WALContinuity
+	if wal == nil {
+		return fmt.Errorf("restore_from_backup: refusing to restore — the WAL continuity of the latest backup was not checked")
+	}
+	switch wal.Status {
+	case WALContinuous:
+		return nil
+	case WALNoBackup:
+		return fmt.Errorf("restore_from_backup: refusing to restore — %s", wal.Detail)
+	default:
+		return fmt.Errorf("restore_from_backup: refusing to restore — WAL continuity is %s for backup %s: %s. "+
+			"A human must decide whether a restore that can't be verified to reach the end of the archive is still worth it",
+			wal.Status, wal.BackupLabel, wal.Detail)
+	}
 }
 
 func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {

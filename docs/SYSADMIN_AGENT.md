@@ -289,13 +289,29 @@ Runs `pgbackrest info --output=json [--stanza=<name>]` via the dispatch describe
   "last_backup_label":   "20260927-035616F",
   "last_backup_time":    "2026-09-27T03:56:21Z",
   "last_backup_error":   false,
-  "backup_stale":        false
+  "backup_stale":        false,
+  "wal_continuity": {
+    "status":                "continuous",
+    "backup_label":          "20260927-035616F",
+    "archive_id":            "16-1",
+    "backup_start_wal":      "000000010000000000000003",
+    "backup_stop_wal":       "000000010000000000000003",
+    "consistency_reachable": true,
+    "latest_timeline":       2,
+    "timeline_path":         [1, 2],
+    "recoverable_to_wal":    "000000020000000000000005",
+    "archive_end_wal":       "000000020000000000000005",
+    "archive_end_time":      "2026-09-27T04:10:02Z",
+    "segment_size_bytes":    16777216
+  }
 }
 ```
 
 Three fields, three different conclusions — the agent is instructed not to conflate them: `status_code != 0` means the repo/stanza itself is broken (a filesystem/permissions problem — the stanza name may show as `"[invalid]"` in this case, with the real diagnostic detail in `repo_status_message` rather than the generic `status_message`); `backup_stale=true` with `status_code=0` means the repo is fine but the most recent backup is older than `max_age_hours`; `last_backup_time` being empty with `status_code=0` means no backup has ever been taken — a policy question, not a failure.
 
-Also feeds the `pgbackrest_backup_unhealthy` objective-evidence signal (`agents/sysadmin/objective_evidence.yaml`) — true on a non-ok stanza status, a stale backup, or no backup ever recorded — which force-gates the response for human review if the model's own conclusion doesn't account for it, the same backstop mechanism used throughout [BACKUP.md](BACKUP.md).
+`wal_continuity` (v0.32) answers a fourth question: can the latest backup actually be restored to the end of the archive? It follows the newest timeline's history and checks every WAL segment on that path is in the repo, with three extra read-only pgBackRest calls through the same dispatch. `status` is `continuous`, `broken` (with `gaps`, `recoverable_to_wal` and `consistency_reachable`), `unverified` (the check couldn't run, e.g. pgBackRest older than 2.26) or `no_backup`. `restore_from_backup` refuses unless it's `continuous`. See [BACKUP.md §3](BACKUP.md#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).
+
+Also feeds two objective-evidence signals: `pgbackrest_wal_chain_broken` (v0.32) when `wal_continuity.status` is `broken`, and the `pgbackrest_backup_unhealthy` signal (`agents/sysadmin/objective_evidence.yaml`) — true on a non-ok stanza status, a stale backup, or no backup ever recorded — which force-gates the response for human review if the model's own conclusion doesn't account for it, the same backstop mechanism used throughout [BACKUP.md](BACKUP.md).
 
 ---
 
