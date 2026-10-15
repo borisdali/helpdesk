@@ -389,7 +389,7 @@ Now the question you are probably asking is why the lack of certs didn't stop an
 Well, if you are a SQL person, just query `fault_stability_cert` table. If your playbook has been stability certified for a particular model, it should have a row. There are four playbooks at play here, so all four should present a cert badge to bypass the gate and in this case... there are none (it's a fresh install, no history yet for any of the certs in fact):
 
 ```
-[boris@~/cassiopeia/helpdesk]$ PGPASSWORD=auditdtestpass psql -h localhost -p 15434 -U postgres -d auditd_test -c "select * from fault_stability_cert";
+[boris@ /tmp/helpdesk-v0.31.0-darwin-arm64$ PGPASSWORD=auditdtestpass psql -h localhost -p 15434 -U postgres -d auditd_test -c "select * from fault_stability_cert";
  fault_id | fault_name | playbook_series_id | model | diagnosis_model | n_runs | pass_rate | conf_range_pp | is_stable | tested_at | primary_attribution | attribution_consistent | attribution_distribution | judge_spread | taxonomy_version | warning_count | is_clean | warning_distribution | confirmed_distribution | playbook_version | playbook_updated_at | playbook_id
 ----------+------------+--------------------+-------+-----------------+--------+-----------+---------------+-----------+-----------+---------------------+------------------------+--------------------------+--------------+------------------+---------------+----------+----------------------+------------------------+------------------+---------------------+-------------
 (0 rows)
@@ -423,7 +423,7 @@ And if you don't like SQL or API, there's a CLI there too :-) and `vault list` i
    --gateway $HELPDESK_GATEWAY_URL \
    --api-key $HELPDESK_API_KEY
 
-Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: cassiopeia
+Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: <your-host>
 
 FAULT                            PLATFORM   DIAG PLAYBOOK                   REMED PLAYBOOK                   LAST TEST              STABLE         INCIDENTS
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -450,28 +450,28 @@ So no cert yet, but let's use `hop-certs` to get the breakdown by playbook (`vau
   done;
 
 === pbs_db_data_loss_triage
-Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: cassiopeia
+Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: <your-host>
 
 
 Stability certs for series pbs_db_data_loss_triage (model: claude-haiku-4-5-20251001)
   None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
   against a fault whose chain passes through this series to generate one.
 === pbs_sysadmin_host_triage
-Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: cassiopeia
+Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: <your-host>
 
 
 Stability certs for series pbs_sysadmin_host_triage (model: claude-haiku-4-5-20251001)
   None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
   against a fault whose chain passes through this series to generate one.
 === pbs_pgbackrest_health_triage
-Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: cassiopeia
+Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: <your-host>
 
 
 Stability certs for series pbs_pgbackrest_health_triage (model: claude-haiku-4-5-20251001)
   None — this series has never been certified. Run `faulttest run --repeat N --approval-mode=force`
   against a fault whose chain passes through this series to generate one.
 === pbs_pgbackrest_restore_remediate
-Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: cassiopeia
+Gateway: http://localhost:8080  ·  version: v0.31.0-bfec14e  ·  host: <your-host>
 
 
 Stability certs for series pbs_pgbackrest_restore_remediate (model: claude-haiku-4-5-20251001)
