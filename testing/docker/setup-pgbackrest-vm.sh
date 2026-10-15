@@ -91,16 +91,13 @@ esac
 systemctl enable --now "$SSH_UNIT"
 systemctl enable --now "$PG_UNIT"
 
-# A stock OpenSSH install auto-generates ed25519, ECDSA, and RSA host keys —
-# same issue Dockerfile.pgbackrest already hit and fixed the same way: a real
-# SSH client's own host-key-algorithm negotiation can pick a different type
-# than whatever's pinned in a dispatching agent's known_hosts, producing
-# "knownhosts: key mismatch" even though the right key is present and
-# correct, just under a type the client didn't ask for. Removing the other
-# types outright means sshd can only ever offer the one we actually pin.
-rm -f /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key.pub \
-      /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key.pub
-systemctl restart "$SSH_UNIT"
+# No host-key changes needed. A stock OpenSSH install offers ed25519, ECDSA
+# and RSA host keys; agents/sysadmin derives HostKeyAlgorithms from whatever
+# types known_hosts already pins for this host (knownHostKeyAlgorithms), so a
+# single pinned ed25519 entry is enough. This script used to delete the RSA/
+# ECDSA keys instead, which didn't stick: openssh-server's package upgrade
+# (Debian/Ubuntu) and sshd-keygen at every sshd start (RHEL) regenerate
+# missing host keys, silently bringing back "knownhosts: key mismatch".
 
 # ── 3. Authorize the project's existing test SSH key ────────────────────
 # Reuses the same key pair Dockerfile.pgbackrest already authorizes for its

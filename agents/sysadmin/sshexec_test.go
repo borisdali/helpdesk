@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -267,6 +270,81 @@ func TestRunOnHost_WrongHostKey_Rejected(t *testing.T) {
 	defer cancel()
 	if _, err := runOnHost(ctx, host, "echo", []string{"should not run"}, nil); err == nil {
 		t.Fatal("runOnHost() error = nil, want a host-key mismatch error")
+	}
+}
+
+// TestRunOnHost_MultipleHostKeys_KnownHostsPinsOne reproduces a stock
+// Ubuntu/RHEL sshd, which offers RSA, ECDSA and ed25519 host keys, against a
+// known_hosts file pinning only one of them (what `ssh-keyscan -t ed25519`
+// or an OpenSSH client's first connect typically records). Without
+// knownHostKeyAlgorithms, x/crypto/ssh negotiates its own preferred type and
+// fails with "knownhosts: key mismatch" on a correctly pinned host.
+func TestRunOnHost_MultipleHostKeys_KnownHostsPinsOne(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signers := map[string]ssh.Signer{}
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if bytes.Equal(key.Marshal(), clientPub.Marshal()) {
+				return &ssh.Permissions{}, nil
+			}
+			return nil, fmt.Errorf("unauthorized public key")
+		},
+	}
+	for _, k := range []any{rsaKey, ecKey, edKey} {
+		s, err := ssh.NewSignerFromKey(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signers[s.PublicKey().Type()] = s
+		config.AddHostKey(s)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() }) //nolint:errcheck
+	go func() {
+		for {
+			nConn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go serveTestSSHConn(nConn, config, func(string) (string, uint32) { return "ok\n", 0 })
+		}
+	}()
+	addr, port := hostPortOf(t, listener.Addr().String())
+	host := resolvedHost{VMAddress: addr, SSHUser: "testuser", SSHPort: port, SSHKeyPath: keyPath}
+
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) }) //nolint:errcheck
+	for keyType, s := range signers {
+		t.Run(keyType, func(t *testing.T) {
+			os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, listener.Addr().String(), s.PublicKey())) //nolint:errcheck
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			out, err := runOnHost(ctx, host, "true", nil, nil)
+			if err != nil {
+				t.Fatalf("runOnHost() with known_hosts pinning only %s: %v", keyType, err)
+			}
+			if out != "ok\n" {
+				t.Errorf("output = %q, want %q", out, "ok\n")
+			}
+		})
 	}
 }
 

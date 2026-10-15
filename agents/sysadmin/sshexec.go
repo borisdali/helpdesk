@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -67,6 +69,7 @@ func sshRun(ctx context.Context, host resolvedHost, name string, args []string, 
 	if err != nil {
 		return "", fmt.Errorf("ssh: dial %s: %w", addr, err)
 	}
+	config.HostKeyAlgorithms = knownHostKeyAlgorithms(hostKeyCallback, addr, conn.RemoteAddr())
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	if err != nil {
 		conn.Close()
@@ -186,6 +189,54 @@ func loadSSHAuth(keyPath string) (ssh.Signer, error) {
 		return nil, fmt.Errorf("building certificate signer from %s: %w", certPath, err)
 	}
 	return certSigner, nil
+}
+
+// knownHostKeyAlgorithms returns the host-key algorithms known_hosts already
+// holds a key for at addr, for ClientConfig.HostKeyAlgorithms — so the
+// handshake negotiates a key type the callback can actually verify. Without
+// it, x/crypto/ssh picks from its own default preference order regardless of
+// known_hosts, and a server that also has other host-key types (stock
+// Ubuntu/RHEL sshd generates RSA, ECDSA and ed25519 at install time) presents
+// one known_hosts doesn't pin: "knownhosts: key mismatch", even though the
+// operator's own ssh CLI connects fine with the identical file (OpenSSH does
+// this same known-key-first ordering). Found live 2026-10-14 against a real
+// Ubuntu VM, after v0.30 had only removed the extra host keys from the
+// pgBackRest test container's sshd.
+//
+// Returns nil (x/crypto's defaults) when addr has no entry or the callback
+// isn't a knownhosts one, leaving verification itself unchanged either way.
+func knownHostKeyAlgorithms(cb ssh.HostKeyCallback, addr string, remote net.Addr) []string {
+	// Probe with a throwaway key: knownhosts reports every key it holds for
+	// this host in KeyError.Want when the presented key doesn't match.
+	probe, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil
+	}
+	probeKey, err := ssh.NewPublicKey(probe)
+	if err != nil {
+		return nil
+	}
+	var keyErr *knownhosts.KeyError
+	if !errors.As(cb(addr, remote, probeKey), &keyErr) || len(keyErr.Want) == 0 {
+		return nil
+	}
+	var algos []string
+	seen := make(map[string]bool)
+	add := func(a string) {
+		if !seen[a] {
+			seen[a] = true
+			algos = append(algos, a)
+		}
+	}
+	for _, k := range keyErr.Want {
+		if k.Key.Type() == ssh.KeyAlgoRSA {
+			// An RSA key can be verified via any of its signature algorithms.
+			add(ssh.KeyAlgoRSASHA512)
+			add(ssh.KeyAlgoRSASHA256)
+		}
+		add(k.Key.Type())
+	}
+	return algos
 }
 
 // sshHostKeyCallback builds a host-key verification callback from the
