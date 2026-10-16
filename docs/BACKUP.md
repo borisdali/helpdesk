@@ -393,12 +393,33 @@ live instance needed:
    ancestor timeline and the LSN where each one forked (`pgbackrest repo-get`).
 3. The segment files on the timelines along that path (one `pgbackrest repo-ls`, filtered to
    those timelines).
+4. The WAL segment size, from the page header of the smallest of those segments
+   (`pgbackrest repo-get`).
 
 It then walks the segments in the order PostgreSQL would read them: up to each fork from the
 parent timeline, from the fork's segment onward from the child. `.partial` segments don't count,
-since `restore_command` never fetches them. The WAL segment size isn't recorded anywhere
-pgBackRest reports, so it's derived from the backup's start LSN and start segment name; only one
-size maps one to the other. The result:
+since `restore_command` never fetches them.
+
+The walk depends on the WAL segment size: it's 16 MiB by default, but `initdb --wal-segsize` can
+set any power of two from 1 MiB to 1 GiB, and the size decides which segment name follows which
+(at 64 MiB, `…0000003F` is followed by the next logical id's `…00000000`). pgBackRest doesn't
+record it in `pgbackrest info`, `archive.info`, `backup.info` or the backup manifest, and the usual
+sources (`SHOW wal_segment_size`, `pg_controldata`) need the data directory a restore is about to
+replace. So it comes from two places that must agree:
+
+- **The segment's own page header.** Every WAL segment starts with a header recording the
+  cluster's segment size (`xlp_seg_size`), in a layout unchanged since PostgreSQL 8.3. The check
+  fetches the smallest gz, bz2 or uncompressed segment on the path (usually a few KB compressed)
+  and decodes it; `repo-get` decrypts but doesn't decompress. lz4 and zst segments aren't read.
+- **The backups' LSNs.** Each backup's start/stop LSN and segment name fit only one size, unless
+  every backup starts in the first 1 MiB of a 4 GiB logical WAL id.
+
+If the header contradicts the LSNs, the status is `unverified`. If no header could be read, the
+LSNs decide, and if they're ambiguous too, PostgreSQL's 16 MiB default is assumed. That fallback
+fails safe: a wrong size only makes real segments look missing, never a broken chain look
+complete. `segment_size_source` (`wal_header`, `backup_lsns` or `default`) says which applied.
+
+The result:
 
 | `status` | Meaning |
 |---|---|

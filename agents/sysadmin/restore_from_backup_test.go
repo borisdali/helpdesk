@@ -59,13 +59,13 @@ func TestRestoreFromBackupTool_Success(t *testing.T) {
 	}
 	// pg_isready, then the WAL-continuity check (info + 2 repo reads), then
 	// the restore — in that order, so the restore only runs once both pass.
-	if len(capture.calls) != 5 {
-		t.Fatalf("expected 5 calls (pg_isready, info, 2 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
+	if len(capture.calls) != 6 {
+		t.Fatalf("expected 6 calls (pg_isready, info, 3 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
 	}
 	if len(capture.calls[0]) != 0 || !strings.Contains(strings.Join(capture.calls[1], " "), "info") {
 		t.Errorf("calls = %v, want pg_isready (no args) first, then the info read", capture.calls)
 	}
-	restoreScript := strings.Join(capture.calls[4], " ")
+	restoreScript := strings.Join(capture.calls[5], " ")
 	if !strings.Contains(restoreScript, "postmaster.pid") || !strings.Contains(restoreScript, "pg1-path") {
 		t.Errorf("restore script = %q, want it to clear a stale postmaster.pid using pgBackRest's own pg1-path config", restoreScript)
 	}
@@ -121,8 +121,8 @@ func TestRestoreFromBackupTool_DockerDispatch(t *testing.T) {
 	if _, err := restoreFromBackupTool(ctx, RestoreFromBackupArgs{Target: "pgbackrest_db", Stanza: "main"}); err != nil {
 		t.Fatalf("restoreFromBackupTool() error = %v", err)
 	}
-	if len(capture.calls) != 5 {
-		t.Fatalf("expected 5 docker exec calls (pg_isready, info, 2 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
+	if len(capture.calls) != 6 {
+		t.Fatalf("expected 6 docker exec calls (pg_isready, info, 3 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
 	}
 	for _, c := range capture.calls {
 		if len(c) < 2 || c[0] != "exec" || c[1] != "helpdesk-test-pg-pgbackrest" {
@@ -136,7 +136,7 @@ func TestRestoreFromBackupTool_DockerDispatch(t *testing.T) {
 	if !strings.Contains(strings.Join(readyCall, " "), "pg_isready") {
 		t.Errorf("ready call = %v, want it to run pg_isready", readyCall)
 	}
-	restoreCall := strings.Join(capture.calls[4], " ")
+	restoreCall := strings.Join(capture.calls[5], " ")
 	if !strings.Contains(restoreCall, "su") || !strings.Contains(restoreCall, "postgres") {
 		t.Errorf("restore call = %q, want it to run as the postgres OS user via su", restoreCall)
 	}
@@ -186,8 +186,8 @@ func TestRestoreFromBackupTool_SSHDispatch(t *testing.T) {
 
 // TestRestoreFromBackupTool_K8sDispatch mirrors
 // TestGetPgBackRestStatusTool_K8sDispatch. Every execInProcess call resolves
-// the pod name via `kubectl get pod` first, so each of the 5 steps
-// (pg_isready, info, 2 WAL reads, restore) is a get-pod/exec pair.
+// the pod name via `kubectl get pod` first, so each of the 6 steps
+// (pg_isready, info, 3 WAL reads, restore) is a get-pod/exec pair.
 func TestRestoreFromBackupTool_K8sDispatch(t *testing.T) {
 	withK8sInfra(t)
 	capture := &pgbackrestRouter{
@@ -208,13 +208,13 @@ func TestRestoreFromBackupTool_K8sDispatch(t *testing.T) {
 	if !strings.Contains(result.Output, "completed successfully") {
 		t.Errorf("Output = %q, want it to contain completed successfully", result.Output)
 	}
-	if len(capture.calls) != 10 {
-		t.Fatalf("expected 10 kubectl calls (get pod + exec for 5 steps), got %d: %v", len(capture.calls), capture.calls)
+	if len(capture.calls) != 12 {
+		t.Fatalf("expected 12 kubectl calls (get pod + exec for 6 steps), got %d: %v", len(capture.calls), capture.calls)
 	}
 	if !containsSeq(capture.calls[1], "exec", "pg-prod-db-0") || !strings.Contains(strings.Join(capture.calls[1], " "), "pg_isready") {
 		t.Errorf("call[1] = %v, want a pg_isready exec against pg-prod-db-0", capture.calls[1])
 	}
-	restoreExec := strings.Join(capture.calls[9], " ")
+	restoreExec := strings.Join(capture.calls[11], " ")
 	if !strings.Contains(restoreExec, "su postgres -c") || !strings.Contains(restoreExec, "--delta") {
 		t.Errorf("call[9] = %q, want a su postgres -c ... --delta restore invocation", restoreExec)
 	}
@@ -281,14 +281,14 @@ func TestRestoreFromBackupTool_DefaultsStanzaViaStatus(t *testing.T) {
 	}
 	// Stanza resolution is an info-only read (no WAL reads) ahead of policy
 	// and pg_isready; the WAL check then reads info again with the stanza.
-	if len(capture.calls) != 6 {
-		t.Fatalf("expected 6 calls (resolve stanza, pg_isready, info, 2 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
+	if len(capture.calls) != 7 {
+		t.Fatalf("expected 7 calls (resolve stanza, pg_isready, info, 3 WAL reads, restore), got %d: %v", len(capture.calls), capture.calls)
 	}
 	if !strings.Contains(strings.Join(capture.calls[0], " "), "info") || strings.Contains(strings.Join(capture.calls[1], " "), "repo-ls") {
 		t.Errorf("calls = %v, want stanza resolution to be a bare info read", capture.calls)
 	}
-	if !strings.Contains(strings.Join(capture.calls[5], " "), "--stanza='main'") {
-		t.Errorf("restore call = %v, want the resolved stanza name from the info call", capture.calls[5])
+	if !strings.Contains(strings.Join(capture.calls[6], " "), "--stanza='main'") {
+		t.Errorf("restore call = %v, want the resolved stanza name from the info call", capture.calls[6])
 	}
 }
 

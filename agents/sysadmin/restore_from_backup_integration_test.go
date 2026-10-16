@@ -211,6 +211,9 @@ func TestIntegration_RestoreFromBackup_RefusesOnRealWALGap(t *testing.T) {
 	if before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
 		t.Fatalf("precondition: WAL continuity = %+v, want continuous on the healthy fixture", before.WALContinuity)
 	}
+	if before.WALContinuity.SegmentSizeSource != SegmentSizeFromWALHeader {
+		t.Errorf("SegmentSizeSource = %q, want the size read from a real segment header", before.WALContinuity.SegmentSizeSource)
+	}
 	seg := before.WALContinuity.BackupStartWAL
 	archiveDir := "/var/lib/pgbackrest/archive/main/" + before.WALContinuity.ArchiveID + "/" + seg[:16]
 

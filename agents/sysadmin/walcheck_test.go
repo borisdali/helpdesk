@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -242,8 +245,13 @@ func TestInferSegmentSize_AmbiguousFirstMiB(t *testing.T) {
 	}
 }
 
-// checkWALContinuity issues exactly the three repo reads, reads the newest
-// timeline's history file, and filters the listing to the path's timelines.
+// realHeaderSegment is the smallest segment in multi_timeline_listing.json,
+// the one checkWALContinuity fetches for its header.
+const realHeaderSegment = "0000000100000000/000000010000000000000002-c02bf304dc2675e6864e6c858b0a7a326ee14802.gz"
+
+// checkWALContinuity issues exactly the four repo reads, reads the newest
+// timeline's history file, filters the listing to the path's timelines, and
+// takes the segment size from the smallest segment's header.
 func TestCheckWALContinuity_CommandsAndResult(t *testing.T) {
 	res, err := parsePgBackRestInfo(readFixture(t, "multi_timeline_info.json"), "", 25*time.Hour)
 	if err != nil {
@@ -254,8 +262,10 @@ func TestCheckWALContinuity_CommandsAndResult(t *testing.T) {
 		joined := strings.Join(args, " ")
 		calls = append(calls, joined)
 		switch {
-		case strings.Contains(joined, "repo-get"):
+		case strings.Contains(joined, ".history"):
 			return readFixture(t, "multi_timeline_0000001E.history"), nil
+		case strings.Contains(joined, "repo-get"):
+			return readFixture(t, "multi_timeline_000000010000000000000002.gz"), nil
 		case strings.Contains(joined, "--recurse"):
 			return readFixture(t, "multi_timeline_listing.json"), nil
 		case strings.Contains(joined, "repo-ls"):
@@ -267,8 +277,8 @@ func TestCheckWALContinuity_CommandsAndResult(t *testing.T) {
 	if got.Status != WALContinuous {
 		t.Fatalf("Status = %s (%s), want continuous", got.Status, got.Detail)
 	}
-	if len(calls) != 3 {
-		t.Fatalf("calls = %v, want 3 repo reads", calls)
+	if len(calls) != 4 {
+		t.Fatalf("calls = %v, want 4 repo reads", calls)
 	}
 	if calls[0] != "--stanza=main repo-ls --output=text archive/main/16-1" {
 		t.Errorf("call[0] = %q", calls[0])
@@ -278,6 +288,206 @@ func TestCheckWALContinuity_CommandsAndResult(t *testing.T) {
 	}
 	if !strings.Contains(calls[2], "--filter=^(00000001|00000002|") || !strings.Contains(calls[2], "|0000001E)[0-9A-F]{8}/") {
 		t.Errorf("call[2] = %q, want a listing filtered to timelines 1..30", calls[2])
+	}
+	if calls[3] != "--stanza=main repo-get archive/main/16-1/"+realHeaderSegment {
+		t.Errorf("call[3] = %q, want the smallest segment in the listing", calls[3])
+	}
+	if got.SegmentSizeBytes != 16<<20 || got.SegmentSizeSource != SegmentSizeFromWALHeader {
+		t.Errorf("segment size = %d from %q, want 16 MiB from the WAL header", got.SegmentSizeBytes, got.SegmentSizeSource)
+	}
+}
+
+// fakeWALRun answers checkWALContinuity's reads from the multi_timeline
+// fixtures, with segment as the repo-get output for the header segment.
+func fakeWALRun(t *testing.T, segment string, segmentErr error) pgbackrestRunner {
+	return func(args []string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, ".history"):
+			return readFixture(t, "multi_timeline_0000001E.history"), nil
+		case strings.Contains(joined, "repo-get"):
+			return segment, segmentErr
+		case strings.Contains(joined, "--recurse"):
+			return readFixture(t, "multi_timeline_listing.json"), nil
+		case strings.Contains(joined, "repo-ls"):
+			return readFixture(t, "multi_timeline_top.txt"), nil
+		}
+		return "", fmt.Errorf("unexpected command %q", joined)
+	}
+}
+
+// A segment that can't be read leaves the decision to the backups' LSNs,
+// which pin 16 MiB on their own here.
+func TestCheckWALContinuity_HeaderUnreadable_FallsBackToLSNs(t *testing.T) {
+	res, err := parsePgBackRestInfo(readFixture(t, "multi_timeline_info.json"), "", 25*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := checkWALContinuity(res, fakeWALRun(t, "", fmt.Errorf("permission denied")))
+	if got.Status != WALContinuous || got.SegmentSizeBytes != 16<<20 || got.SegmentSizeSource != SegmentSizeFromBackupLSNs {
+		t.Fatalf("Status = %s (%s), size = %d from %q, want continuous, 16 MiB from backup_lsns",
+			got.Status, got.Detail, got.SegmentSizeBytes, got.SegmentSizeSource)
+	}
+}
+
+// A header that contradicts the backups' LSNs means something about the repo
+// isn't what it seems: neither source is trusted, and the restore refuses.
+func TestCheckWALContinuity_HeaderContradictsLSNs_Unverified(t *testing.T) {
+	res, err := parsePgBackRestInfo(readFixture(t, "multi_timeline_info.json"), "", 25*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg := gzipBytes(t, syntheticSegmentHeader(binary.LittleEndian, "000000010000000000000002", 64<<20))
+	got := checkWALContinuity(res, fakeWALRun(t, string(seg), nil))
+	if got.Status != WALUnverified || !strings.Contains(got.Detail, "64 MiB") {
+		t.Fatalf("Status = %s, Detail = %q, want unverified naming the header's 64 MiB", got.Status, got.Detail)
+	}
+}
+
+// syntheticSegmentHeader builds the first 8 KiB page of a WAL segment as
+// PostgreSQL 16 writes it, in the given byte order.
+func syntheticSegmentHeader(order binary.ByteOrder, name string, segSize uint64) []byte {
+	_, logID, seg, err := parseSegmentName(name)
+	if err != nil {
+		panic(err)
+	}
+	b := make([]byte, 8192)
+	order.PutUint16(b[0:2], 0xD113) // xlp_magic, PostgreSQL 16
+	order.PutUint16(b[2:4], 0x0006) // XLP_LONG_HEADER | XLP_BKP_REMOVABLE
+	order.PutUint32(b[4:8], 1)      // xlp_tli
+	per := segsPerLogID(segSize)
+	order.PutUint64(b[8:16], (logID*per+seg)*segSize) // xlp_pageaddr
+	order.PutUint64(b[24:32], 7693779635926569000)    // xlp_sysid
+	order.PutUint32(b[32:36], uint32(segSize))        // xlp_seg_size
+	order.PutUint32(b[36:40], 8192)                   // xlp_xlog_blcksz
+	return b
+}
+
+func gzipBytes(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// The real segment from the test container: a 16 MiB cluster, gzip as
+// pgBackRest archives by default, and the same segment recompressed with
+// bzip2.
+func TestSegmentSizeFromHeader_RealSegment(t *testing.T) {
+	const name = "000000010000000000000002"
+	for _, c := range []struct{ fixture, compression string }{
+		{"multi_timeline_000000010000000000000002.gz", "gz"},
+		{"multi_timeline_000000010000000000000002.bz2", "bz2"},
+	} {
+		data := []byte(readFixture(t, c.fixture))
+		file := headerSegment{path: "0000000100000000/" + name + "." + c.compression, name: name, compression: c.compression}
+		got, err := segmentSizeFromHeader(data, file)
+		if err != nil || got != 16<<20 {
+			t.Errorf("%s: got %d, %v; want 16 MiB", c.fixture, got, err)
+		}
+		// pgBackRest under Kubernetes prints WARN lines on stdout first.
+		got, err = segmentSizeFromHeader(append([]byte("WARN: environment contains invalid option 'service-port'\n"), data...), file)
+		if err != nil || got != 16<<20 {
+			t.Errorf("%s with a WARN preamble: got %d, %v; want 16 MiB", c.fixture, got, err)
+		}
+	}
+}
+
+func TestSegmentSizeFromHeader_Uncompressed(t *testing.T) {
+	const name = "0000000100000003000000A1"
+	file := headerSegment{path: "0000000100000003/" + name, name: name}
+	raw := syntheticSegmentHeader(binary.LittleEndian, name, 16<<20)
+	for _, data := range [][]byte{raw, append([]byte("WARN: noise\nWARN: more noise\n"), raw...)} {
+		if got, err := segmentSizeFromHeader(data, file); err != nil || got != 16<<20 {
+			t.Errorf("got %d, %v; want 16 MiB", got, err)
+		}
+	}
+}
+
+func TestParseWALLongHeader(t *testing.T) {
+	cases := []struct {
+		order binary.ByteOrder
+		name  string
+		size  uint64
+	}{
+		{binary.LittleEndian, "000000010000000000000003", 16 << 20},
+		{binary.LittleEndian, "00000001000000050000003F", 64 << 20}, // last segment of a logical id at 64 MiB
+		{binary.LittleEndian, "000000020000000000000000", 1 << 30},
+		{binary.BigEndian, "000000010000000000000003", 16 << 20}, // e.g. s390x
+		{binary.LittleEndian, "0000000100000000000003FF", 1 << 20},
+	}
+	for _, c := range cases {
+		got, err := parseWALLongHeader(syntheticSegmentHeader(c.order, c.name, c.size), c.name)
+		if err != nil || got != c.size {
+			t.Errorf("%s at %d MiB: got %d, %v", c.name, c.size>>20, got, err)
+		}
+	}
+
+	// A header copied from another segment: its page address doesn't match.
+	if _, err := parseWALLongHeader(syntheticSegmentHeader(binary.LittleEndian, "000000010000000000000004", 16<<20), "000000010000000000000003"); err == nil {
+		t.Error("expected an error for a header whose page address belongs to another segment")
+	}
+	// Not the first page of a segment (no long header).
+	short := syntheticSegmentHeader(binary.LittleEndian, "000000010000000000000003", 16<<20)
+	binary.LittleEndian.PutUint16(short[2:4], 0x0004)
+	if _, err := parseWALLongHeader(short, "000000010000000000000003"); err == nil {
+		t.Error("expected an error without XLP_LONG_HEADER")
+	}
+	// Not WAL at all.
+	if _, err := parseWALLongHeader(make([]byte, walLongHeaderLen), "000000010000000000000003"); err == nil {
+		t.Error("expected an error for zeros")
+	}
+}
+
+func TestPickHeaderSegment(t *testing.T) {
+	got, ok := pickHeaderSegment(readFixture(t, "multi_timeline_listing.json"))
+	if !ok || got.path != realHeaderSegment || got.compression != "gz" || got.name != "000000010000000000000002" {
+		t.Fatalf("got %+v, %v; want the 16405-byte %s", got, ok, realHeaderSegment)
+	}
+
+	sha := strings.Repeat("a", 40)
+	listing := `{"0000000100000000/000000010000000000000003-` + sha + `.zst":{"type":"file","size":10},` +
+		`"0000000100000000/000000010000000000000004-` + sha + `.lz4":{"type":"file","size":11},` +
+		`"0000000100000000/000000010000000000000005.partial-` + sha + `.gz":{"type":"file","size":12},` +
+		`"0000000100000000/000000010000000000000006-` + sha + `":{"type":"file","size":` + fmt.Sprint(int64(maxHeaderSegmentBytes)+1) + `},` +
+		`"0000000100000000/000000010000000000000007-` + sha + `.bz2":{"type":"file","size":900}}`
+	got, ok = pickHeaderSegment(listing)
+	if !ok || got.name != "000000010000000000000007" || got.compression != "bz2" {
+		t.Fatalf("got %+v, %v; want the bz2 segment (zst, lz4, .partial and oversized raw skipped)", got, ok)
+	}
+	if _, ok := pickHeaderSegment(`{"0000000100000000/000000010000000000000003-` + sha + `.zst":{"type":"file","size":10}}`); ok {
+		t.Error("want no pick when every segment is zst")
+	}
+}
+
+func TestResolveSegmentSize(t *testing.T) {
+	pinned := []lsnSegment{{"0/3000028", "000000010000000000000003"}}
+	ambiguous := []lsnSegment{{"1/00000028", "000000010000000100000000"}}
+	cases := []struct {
+		name       string
+		pairs      []lsnSegment
+		header     uint64
+		wantSize   uint64
+		wantSource string
+		wantErr    bool
+	}{
+		{"header agrees", pinned, 16 << 20, 16 << 20, SegmentSizeFromWALHeader, false},
+		{"header contradicts", pinned, 64 << 20, 0, "", true},
+		{"header resolves ambiguity", ambiguous, 64 << 20, 64 << 20, SegmentSizeFromWALHeader, false},
+		{"lsns pin it", pinned, 0, 16 << 20, SegmentSizeFromBackupLSNs, false},
+		{"ambiguous, no header", ambiguous, 0, 16 << 20, SegmentSizeAssumedDefault, false},
+	}
+	for _, c := range cases {
+		size, source, err := resolveSegmentSize(c.pairs, c.header)
+		if (err != nil) != c.wantErr || size != c.wantSize || source != c.wantSource {
+			t.Errorf("%s: got %d, %q, %v; want %d, %q, err=%v", c.name, size, source, err, c.wantSize, c.wantSource, c.wantErr)
+		}
 	}
 }
 

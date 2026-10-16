@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -62,6 +65,16 @@ const realInfoArchiveTop = "0000000100000000\n"
 var realInfoWALListing = `{".":{"type":"path"},"0000000100000000":{"type":"path"},` +
 	`"0000000100000000/000000010000000000000015-` + strings.Repeat("e", 40) + `.gz":{"type":"file","size":16456,"time":1790395767}}`
 
+// realInfoHeaderSegment is the gzip'd first page of segment
+// 000000010000000000000015 of a 16 MiB cluster.
+func realInfoHeaderSegment() string {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(syntheticSegmentHeader(binary.LittleEndian, "000000010000000000000015", 16<<20)) //nolint:errcheck
+	zw.Close()                                                                                //nolint:errcheck
+	return buf.String()
+}
+
 // pgbackrestRouter is a cmdRunner fake that answers each command by what it
 // is rather than by call position, since get_pgbackrest_status and
 // restore_from_backup now make several pgbackrest reads per call.
@@ -90,6 +103,9 @@ func (r *pgbackrestRouter) Run(_ context.Context, name string, args []string, _ 
 		return realInfoWALListing, nil
 	case strings.Contains(joined, "repo-ls"):
 		return realInfoArchiveTop, nil
+	case strings.Contains(joined, "repo-get") && strings.Contains(joined, "000000010000000000000015-"):
+		// The header segment checkWALContinuity picks from realInfoWALListing.
+		return realInfoHeaderSegment(), nil
 	case strings.Contains(joined, "repo-get"):
 		return "", fmt.Errorf("unexpected repo-get: %s", joined)
 	case strings.Contains(joined, "'info'") || strings.Contains(joined, "info --output=json"):
@@ -505,8 +521,8 @@ func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
 	}
 	// info, then the WAL-continuity reads (archive listing, segment listing),
 	// all through the same docker exec dispatch.
-	if len(capture.calls) != 3 {
-		t.Fatalf("expected 3 docker exec calls (info + 2 WAL reads), got %d: %v", len(capture.calls), capture.calls)
+	if len(capture.calls) != 4 {
+		t.Fatalf("expected 4 docker exec calls (info + 3 WAL reads), got %d: %v", len(capture.calls), capture.calls)
 	}
 	for _, c := range capture.calls {
 		if len(c) < 2 || c[0] != "exec" || c[1] != "helpdesk-test-pg-pgbackrest" || !strings.Contains(strings.Join(c, " "), "su postgres -c") {
@@ -1064,9 +1080,9 @@ func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
 	}
 	// Each exec resolves the pod first: (get pod, exec) for info and for each
-	// of the 2 WAL-continuity reads.
-	if len(capture.calls) != 6 {
-		t.Fatalf("expected 6 kubectl calls (get pod + exec, x3), got %d: %v", len(capture.calls), capture.calls)
+	// of the 3 WAL-continuity reads.
+	if len(capture.calls) != 8 {
+		t.Fatalf("expected 8 kubectl calls (get pod + exec, x4), got %d: %v", len(capture.calls), capture.calls)
 	}
 	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
 		t.Errorf("WALContinuity = %+v, want continuous", result.WALContinuity)
