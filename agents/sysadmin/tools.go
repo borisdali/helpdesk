@@ -1336,8 +1336,11 @@ type PgBackRestBackup struct {
 // most likely marks a softer, file-level issue (e.g. a checksum problem),
 // not "the last attempt failed to run" — that case shows up as staleness
 // instead, since no successful completion ever updates LastBackupTime.
+// Field order is JSON order, and the audit trail keeps only the first 8 KB
+// of a tool result (internal/audit toolResultMaxLen): the verdict fields come
+// first, then wal_continuity, then the per-backup list, which grows with
+// retention, and the raw CLI output last.
 type GetPgBackRestStatusResult struct {
-	Output        string `json:"output"`
 	Stanza        string `json:"stanza,omitempty"`
 	StatusCode    int    `json:"status_code"`
 	StatusMessage string `json:"status_message,omitempty"`
@@ -1346,11 +1349,10 @@ type GetPgBackRestStatusResult struct {
 	// as a generic "other" but RepoStatusMessage holds the real detail (e.g.
 	// a PathOpenError naming the exact path and errno). Always prefer this
 	// over StatusMessage when both are present.
-	RepoStatusCode    int                `json:"repo_status_code,omitempty"`
-	RepoStatusMessage string             `json:"repo_status_message,omitempty"`
-	Backups           []PgBackRestBackup `json:"backups,omitempty"`
-	LastBackupLabel   string             `json:"last_backup_label,omitempty"`
-	LastBackupTime    string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
+	RepoStatusCode    int    `json:"repo_status_code,omitempty"`
+	RepoStatusMessage string `json:"repo_status_message,omitempty"`
+	LastBackupLabel   string `json:"last_backup_label,omitempty"`
+	LastBackupTime    string `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
 	// LastBackupError deliberately has no `omitempty` — unlike LastBackupTime
 	// (where "absent" and "empty" are the same real state: no backup ever
 	// succeeded), false here is a meaningful, distinct answer from "not
@@ -1378,7 +1380,11 @@ type GetPgBackRestStatusResult struct {
 	// to the end of the archived WAL — see walcheck.go. Nil only when the
 	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
 	// be asked anything further.
-	WALContinuity *WALContinuity `json:"wal_continuity,omitempty"`
+	WALContinuity *WALContinuity     `json:"wal_continuity,omitempty"`
+	Backups       []PgBackRestBackup `json:"backups,omitempty"`
+	// Output is the raw `pgbackrest info` JSON. It is left out of the audited
+	// copy of a successful call (see getPgBackRestStatusTool).
+	Output string `json:"output,omitempty"`
 }
 
 // walCheckInput returns what the WAL-continuity check needs about the latest
@@ -1783,7 +1789,17 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 		// checkEvidenceProvenance (cmd/gateway/playbooks.go) — found live
 		// 2026-10-07 on a real db-pgdata-corrupted run. Same pattern already
 		// used by agents/incident/tools.go's create_incident_bundle.
-		resultJSON, _ := json.Marshal(result)
+		//
+		// On success the raw blob itself is left out: every value in it is
+		// already in the parsed fields, which are what the model quotes, and
+		// at ~650 bytes per backup it pushed wal_continuity past the audit
+		// trail's 8 KB cut by about 8 backups. On failure it stays, since it's
+		// the only record of what pgBackRest actually printed.
+		audited := result
+		if err == nil {
+			audited.Output = ""
+		}
+		resultJSON, _ := json.Marshal(audited)
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "get_pgbackrest_status",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},

@@ -515,6 +515,13 @@ Not yet built — tracked, not forgotten:
   contents; `pgbackrest verify` checks contents too, but it reads every file in the repo, which is
   too slow to run on the restore path for a large repo.
 
+- **Backup-check history (planned for v0.32).**  
+  Each `get_pgbackrest_status` result is kept today only as a tool-call record in the audit
+  trail, as JSON. A dedicated auditd table, one row per check (stanza, last backup, `backup_stale`,
+  WAL status, `recoverable_to_wal`, `archive_end_time`, gaps, segment size and its source, trace
+  ID), would answer questions pgBackRest's own history can't: when the WAL chain first broke, how
+  far behind the archive was at each check, and exactly what a refused restore saw.
+
 - **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
   `pbs_sysadmin_host_triage` (§3).**  
   Both currently reason over raw log text with no structured, named probe backing their

@@ -458,6 +458,91 @@ func TestParsePgBackRestInfo_NonOkStatus(t *testing.T) {
 	}
 }
 
+// A successful call is audited without the raw `pgbackrest info` blob, and
+// with wal_continuity ahead of the per-backup list, so that a stanza with a
+// month of daily backups still has its WAL verdict inside the audit trail's
+// 8 KB cut. Before, about 8 backups pushed it out.
+func TestGetPgBackRestStatusTool_AuditKeepsWALVerdictWithManyBackups(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	var info []map[string]any
+	if err := json.Unmarshal([]byte(realPgBackRestInfoJSON), &info); err != nil {
+		t.Fatal(err)
+	}
+	latest := info[0]["backup"].([]any)[0].(map[string]any)
+	var backups []any
+	for i := 29; i >= 1; i-- {
+		stop := float64(1790395767 - i*86400)
+		backups = append(backups, map[string]any{
+			"archive":   map[string]any{"start": "000000010000000000000014", "stop": "000000010000000000000014"},
+			"backrest":  latest["backrest"],
+			"database":  latest["database"],
+			"error":     false,
+			"info":      latest["info"],
+			"label":     fmt.Sprintf("20260926-040922F_202609%02d-040922I", i),
+			"lsn":       map[string]any{"start": "0/14000028", "stop": "0/14000138"},
+			"prior":     "20260926-040922F",
+			"reference": []string{"20260926-040922F"},
+			"timestamp": map[string]any{"start": stop - 5, "stop": stop},
+			"type":      "incr",
+		})
+	}
+	info[0]["backup"] = append(backups, latest)
+	infoJSON, _ := json.Marshal(info)
+
+	capture := &pgbackrestRouter{info: string(infoJSON)}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if len(result.Backups) != 30 || result.Output == "" {
+		t.Fatalf("got %d backups, output %d bytes; want 30 and the raw output still returned to the model", len(result.Backups), len(result.Output))
+	}
+	if full, _ := json.Marshal(result); len(full) <= 8192 {
+		t.Fatalf("the full result is %d bytes; the fixture must exceed the 8 KB audit cut to test anything", len(full))
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolExecution})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("Query: %d events, %v; want 1", len(events), err)
+	}
+	audited := events[0].Tool.Result
+	if strings.Contains(audited, `"output":`) {
+		t.Error("audited result still contains the raw pgbackrest info output")
+	}
+	if !strings.Contains(audited, `"wal_continuity":{"status":"continuous"`) ||
+		!strings.Contains(audited, `"segment_size_source":"wal_header"`) {
+		t.Errorf("audited result (%d bytes) lost the WAL verdict:\n%s", len(audited), audited)
+	}
+	if strings.Index(audited, `"wal_continuity"`) > strings.Index(audited, `"backups"`) {
+		t.Error("wal_continuity should come before backups in the audited JSON")
+	}
+}
+
+// A failed call keeps the raw output in the audit trail: it's the only
+// record of what pgBackRest printed.
+func TestGetPgBackRestStatusTool_FailureAuditKeepsRawOutput(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	defer withMockRunner("ERROR: [055]: unable to load info file", fmt.Errorf("exit status 55"))()
+
+	if _, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolExecution})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("Query: %d events, %v; want 1", len(events), err)
+	}
+	if !strings.Contains(events[0].Tool.Result, "unable to load info file") {
+		t.Errorf("audited result = %q, want the raw pgBackRest output", events[0].Tool.Result)
+	}
+}
+
 func TestGetPgBackRestStatusTool_Success(t *testing.T) {
 	defer withMockRunner(realPgBackRestInfoJSON, nil)()
 

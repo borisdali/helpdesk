@@ -312,6 +312,8 @@ Three fields, three different conclusions — the agent is instructed not to con
 
 `wal_continuity` (v0.32) answers a fourth question: can the latest backup actually be restored to the end of the archive? It follows the newest timeline's history and checks every WAL segment on that path is in the repo, with four extra read-only pgBackRest calls through the same dispatch (the last fetches one small archived segment to read the WAL segment size from its header). `status` is `continuous`, `broken` (with `gaps`, `recoverable_to_wal` and `consistency_reachable`), `unverified` (the check couldn't run, e.g. pgBackRest older than 2.26) or `no_backup`. `restore_from_backup` refuses unless it's `continuous`. See [BACKUP.md §3](BACKUP.md#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).
 
+The result also carries `backups` (one entry per backup in the stanza) and `output` (the raw `pgbackrest info` JSON), in that order, after `wal_continuity`. The audit trail stores the result without `output` on a successful call: the parsed fields hold the same values, and the audit record keeps only the first 8 KB of a result, so the raw text used to push `wal_continuity` out of it once a stanza had about 8 backups. A failed call keeps `output`, since it's the only record of what pgBackRest printed.
+
 Also feeds two objective-evidence signals: `pgbackrest_wal_chain_broken` (v0.32) when `wal_continuity.status` is `broken`, and the `pgbackrest_backup_unhealthy` signal (`agents/sysadmin/objective_evidence.yaml`) — true on a non-ok stanza status, a stale backup, or no backup ever recorded — which force-gates the response for human review if the model's own conclusion doesn't account for it, the same backstop mechanism used throughout [BACKUP.md](BACKUP.md).
 
 ---
