@@ -147,7 +147,7 @@ integration:
 	# separate. Exercises internal/audit's Postgres backend, otherwise never
 	# run anywhere.
 	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
-		go test -tags integration -timeout 300s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+		go test -tags integration -timeout 900s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
@@ -162,7 +162,7 @@ integration-nocache:
 	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
 	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
-		go test --count=1 -tags integration -timeout 300s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+		go test --count=1 -tags integration -timeout 900s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v

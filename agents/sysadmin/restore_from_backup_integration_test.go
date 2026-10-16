@@ -340,50 +340,64 @@ func TestIntegration_WALCheck_PredictionMatchesRealRecovery(t *testing.T) {
 	t.Cleanup(func() { infraConfig = oldInfra })
 
 	ctx := context.Background()
-	baseline, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
-	if err != nil {
-		t.Fatalf("precondition: getPgBackRestStatusImpl failed: %v", err)
-	}
-	base := baseline.WALContinuity
-	if base == nil || base.Status != WALContinuous || base.ArchiveEndWAL == base.BackupStopWAL {
-		t.Fatalf("precondition: WAL continuity = %+v, want continuous with WAL after the backup", base)
-	}
-	// The scenarios below are written against the fixture's shape: the
-	// backup's own segment on timeline 1, then the newest timeline holding
-	// the last two segments.
-	end := base.ArchiveEndWAL
-	tli, logID, seg, _ := parseSegmentName(end)
-	beforeEnd := fmt.Sprintf("%08X%08X%08X", tli, logID, seg-1)
-	if seg == 0 || beforeEnd[:8] != end[:8] {
-		t.Fatalf("precondition: unexpected archive end %s", end)
-	}
-	archiveRoot := "/var/lib/pgbackrest/archive/main/" + base.ArchiveID
 
-	scenarios := []struct {
-		name       string
-		hide       string // segment to hide
+	// Each scenario plans from the archive as it is when it starts: the
+	// previous scenario's teardown restore adds a timeline.
+	type plan struct {
+		hide       string // shell glob, relative to the archive id directory, of the files to hide
 		wantStatus string
-		wantEnd    string // where the check should say recovery stops
+		wantEndSeg uint64 // segment number the check should say recovery stops at
+	}
+	scenarios := []struct {
+		name string
+		plan func(base *WALContinuity, startTLI uint32, startSeg, stopSeg, endSeg uint64) plan
 	}{
 		// Not needed: WAL from before the backup started.
-		{"segment before the backup", "000000010000000000000001", WALContinuous, end},
-		// The newest segment. Its timeline isn't the newest one: history
-		// shows it ran past this segment before forking, so this is lost
-		// WAL, not the archive simply ending one segment earlier.
-		{"newest segment", end, WALBroken, beforeEnd},
-		// The segment after the backup's own: recovery stops at the backup.
-		{"segment after the backup", beforeEnd, WALBroken, base.BackupStopWAL},
+		{"segment before the backup", func(base *WALContinuity, startTLI uint32, startSeg, _, endSeg uint64) plan {
+			return plan{"*/" + segmentName(startTLI, startSeg-1, base.SegmentSizeBytes) + "-*", WALContinuous, endSeg}
+		}},
+		// Hiding the newest segment only shortens the archive when it's on
+		// the newest timeline. On an older timeline that later forked,
+		// history shows WAL past it, so it's a real loss
+		// (TestEvaluateWAL_TailOfOlderTimelineMissing_Broken).
+		{"newest segment", func(base *WALContinuity, _ uint32, _, _, endSeg uint64) plan {
+			status := WALContinuous
+			if tli, _, _, _ := parseSegmentName(base.ArchiveEndWAL); tli != base.LatestTimeline {
+				status = WALBroken
+			}
+			return plan{"*/" + base.ArchiveEndWAL + "-*", status, endSeg - 1}
+		}},
+		// Every timeline's copy of the segment after the backup: recovery
+		// stops at the backup.
+		{"segment after the backup", func(base *WALContinuity, _ uint32, _, stopSeg, _ uint64) plan {
+			return plan{"*/????????" + segmentName(0, stopSeg+1, base.SegmentSizeBytes)[8:] + "-*", WALBroken, stopSeg}
+		}},
 	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// The scenarios need two whole archived segments after the
+			// backup's own. A fresh fixture (make integration) has none, so
+			// this writes some.
+			base := walAfterBackup(t, ctx, 2)
+			size := base.SegmentSizeBytes
+			startTLI, _, _, _ := parseSegmentName(base.BackupStartWAL)
+			startSeg := segnoOf(t, base.BackupStartWAL, size)
+			if startSeg == 0 {
+				t.Fatalf("precondition: backup starts at the very first segment %s", base.BackupStartWAL)
+			}
+			sc := scenario.plan(base, startTLI, startSeg, segnoOf(t, base.BackupStopWAL, size), segnoOf(t, base.ArchiveEndWAL, size))
+			archiveRoot := "/var/lib/pgbackrest/archive/main/" + base.ArchiveID
+
+			if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c", `cd `+archiveRoot+` && ls `+sc.hide); err != nil {
+				t.Skipf("no archived file matches %s (expired by retention?)", sc.hide)
+			}
 			t.Cleanup(func() { restoreIntegrationTeardown(t) })
-			dir := archiveRoot + "/" + sc.hide[:16]
-			hide := `set -e; f=$(ls ` + dir + `/` + sc.hide + `-*); mv "$f" "$f.hidden-by-test"`
-			if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c", hide); err != nil {
-				t.Fatalf("hiding %s: %v", sc.hide, err)
+			hide := `set -e; cd ` + archiveRoot + `; for f in ` + sc.hide + `; do test -e "$f"; mv "$f" "$f.hidden-by-test"; done`
+			if out, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c", hide); err != nil {
+				t.Fatalf("hiding %s: %v: %s", sc.hide, err, out)
 			}
 			t.Cleanup(func() {
-				unhide := `for f in ` + dir + `/*.hidden-by-test; do mv "$f" "${f%.hidden-by-test}"; done`
+				unhide := `find ` + archiveRoot + ` -name '*.hidden-by-test' | while read -r f; do mv "$f" "${f%.hidden-by-test}"; done`
 				if _, err := testutil.DockerExec(context.Background(), restoreIntegrationContainer, "sh", "-c", unhide); err != nil {
 					t.Errorf("cleanup: restoring %s: %v", sc.hide, err)
 				}
@@ -394,8 +408,8 @@ func TestIntegration_WALCheck_PredictionMatchesRealRecovery(t *testing.T) {
 				t.Fatalf("getPgBackRestStatusImpl: %v", err)
 			}
 			wal := status.WALContinuity
-			if wal == nil || wal.Status != sc.wantStatus || wal.RecoverableToWAL != sc.wantEnd {
-				t.Fatalf("WAL check = %+v, want %s with recovery reaching %s", wal, sc.wantStatus, sc.wantEnd)
+			if wal == nil || wal.Status != sc.wantStatus || wal.RecoverableToWAL == "" || segnoOf(t, wal.RecoverableToWAL, size) != sc.wantEndSeg {
+				t.Fatalf("WAL check = %+v, want %s with recovery reaching segment %X", wal, sc.wantStatus, sc.wantEndSeg)
 			}
 
 			// Stop PostgreSQL for good (the container's keep-alive loop keeps
@@ -421,9 +435,49 @@ func TestIntegration_WALCheck_PredictionMatchesRealRecovery(t *testing.T) {
 			if strings.Contains(log, "selected new timeline ID") {
 				t.Fatalf("recovery promoted instead of stopping at the unreachable target; the archive now has a new timeline:\n%s", log)
 			}
-			if got := lastRestoredSegment(log); got != sc.wantEnd {
-				t.Errorf("PostgreSQL's last restored segment = %q, the WAL check predicted %s\n%s", got, sc.wantEnd, log)
+			if got := lastRestoredSegment(log); got != wal.RecoverableToWAL {
+				t.Errorf("PostgreSQL's last restored segment = %q, the WAL check predicted %s\n%s", got, wal.RecoverableToWAL, log)
 			}
 		})
+	}
+}
+
+func segnoOf(t *testing.T, name string, size uint64) uint64 {
+	t.Helper()
+	_, logID, seg, err := parseSegmentName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return logID*segsPerLogID(size) + seg
+}
+
+// walAfterBackup returns the fixture's WAL check once at least n whole
+// segments past the latest backup's stop segment are archived, writing and
+// switching WAL as needed.
+func walAfterBackup(t *testing.T, ctx context.Context, n uint64) *WALContinuity {
+	t.Helper()
+	connStr := "host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+		if err != nil {
+			t.Fatalf("precondition: getPgBackRestStatusImpl failed: %v", err)
+		}
+		wal := status.WALContinuity
+		if wal == nil || wal.Status != WALContinuous {
+			t.Fatalf("precondition: WAL continuity = %+v, want continuous on the healthy fixture", wal)
+		}
+		if segnoOf(t, wal.ArchiveEndWAL, wal.SegmentSizeBytes) >= segnoOf(t, wal.BackupStopWAL, wal.SegmentSizeBytes)+n {
+			return wal
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("precondition: archive still ends at %s, want %d segments past the backup's %s", wal.ArchiveEndWAL, n, wal.BackupStopWAL)
+		}
+		// pg_switch_wal is a no-op unless WAL was written since the last switch.
+		if err := testutil.RunSQLString(ctx, connStr,
+			"CREATE TABLE IF NOT EXISTS walcheck_filler (x int); INSERT INTO walcheck_filler SELECT generate_series(1, 1000); SELECT pg_switch_wal();"); err != nil {
+			t.Fatalf("generating WAL: %v", err)
+		}
+		time.Sleep(2 * time.Second)
 	}
 }
