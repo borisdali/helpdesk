@@ -278,7 +278,7 @@ Only Layer 2 is fully independent of the model. Layers 1 and 3 are carried out t
 LLM-interpreted playbook guidance (see [the honest limit](#layer-3-fails-closed-by-design-not-by-accident)
 under Layer 3). Underneath all three, the tool itself refuses to run against a live instance
 or onto a WAL chain it can't confirm reaches the end of the archive (v0.32, see
-[WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)), and pgBackRest
+[WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)) and pgBackRest
 refuses to restore without a selectable backup. See
 [Underneath the layers](#underneath-the-layers-whats-honest-about-the-remediation-not-oversold) below for details.
 
@@ -370,9 +370,9 @@ close and nothing here should be read as claiming it does.
   check.
 - WAL that never reached the archive can't be seen by anything here. The WAL-continuity check
   proves the chain is complete up to the newest *archived* segment; whatever the dead instance
-  wrote after that (still in its own `pg_wal`, or never archived because archiving was broken) is
+  wrote after that (still in its own `pg_wal` or never archived because archiving was broken) is
   lost by a restore-to-latest. `wal_continuity.archive_end_time` says exactly how far a restore
-  reaches, and the remediation playbook reports it, but nothing decides for a human whether that
+  reaches and the remediation playbook reports it, but nothing decides for a human whether that
   loss is acceptable.
 
 #### WAL continuity: the restore refuses a chain it can't finish
@@ -381,7 +381,7 @@ close and nothing here should be read as claiming it does.
 lays down the latest backup and PostgreSQL then replays archived WAL from that backup's start to
 the end of the archive, following timeline history to the newest timeline. If a segment on that
 path is missing, recovery either can't reach a consistent state at all (PostgreSQL won't start) or
-silently stops at the gap and comes up with older data, and in both cases PGDATA has already been
+silently stops at the gap and comes up with older data and in both cases PGDATA has already been
 overwritten. Backup age (`backup_stale`) says nothing about this: a fresh backup can sit on a
 broken chain.
 
@@ -389,7 +389,7 @@ broken chain.
 live instance needed:
 
 1. The backup's own WAL start/stop segments and LSNs, from `pgbackrest info`.
-2. The newest timeline, from the archive's `.history` files, and that file's contents: every
+2. The newest timeline, from the archive's `.history` files and that file's contents: every
    ancestor timeline and the LSN where each one forked (`pgbackrest repo-get`).
 3. The segment files on the timelines along that path (one `pgbackrest repo-ls`, filtered to
    those timelines).
@@ -401,9 +401,9 @@ parent timeline, from the fork's segment onward from the child. `.partial` segme
 since `restore_command` never fetches them.
 
 The walk depends on the WAL segment size: it's 16 MiB by default, but `initdb --wal-segsize` can
-set any power of two from 1 MiB to 1 GiB, and the size decides which segment name follows which
+set any power of two from 1 MiB to 1 GiB and the size decides which segment name follows which
 (at 64 MiB, `…0000003F` is followed by the next logical id's `…00000000`). pgBackRest doesn't
-record it in `pgbackrest info`, `archive.info`, `backup.info` or the backup manifest, and the usual
+record it in `pgbackrest info`, `archive.info`, `backup.info` or the backup manifest and the usual
 sources (`SHOW wal_segment_size`, `pg_controldata`) need the data directory a restore is about to
 replace. So it comes from two places that must agree:
 
@@ -415,7 +415,7 @@ replace. So it comes from two places that must agree:
   every backup starts in the first 1 MiB of a 4 GiB logical WAL id.
 
 If the header contradicts the LSNs, the status is `unverified`. If no header could be read, the
-LSNs decide, and if they're ambiguous too, PostgreSQL's 16 MiB default is assumed. That fallback
+LSNs decide and if they're ambiguous too, PostgreSQL's 16 MiB default is assumed. That fallback
 fails safe: a wrong size only makes real segments look missing, never a broken chain look
 complete. `segment_size_source` (`wal_header`, `backup_lsns` or `default`) says which applied.
 
@@ -424,7 +424,7 @@ The result:
 | `status` | Meaning |
 |---|---|
 | `continuous` | Every segment from the backup to the archive end is present. |
-| `broken` | A segment is missing (`gaps` lists them; `consistency_reachable=false` when it's one the backup itself needs, `recoverable_to_wal` is where recovery would stop), or the backup isn't on the newest timeline's history. |
+| `broken` | A segment is missing (`gaps` lists them; `consistency_reachable=false` when it's one the backup itself needs, `recoverable_to_wal` is where recovery would stop) or the backup isn't on the newest timeline's history. |
 | `unverified` | The check couldn't run, e.g. pgBackRest older than 2.26 (no `repo-ls`). |
 | `no_backup` | There is no backup to check. |
 
@@ -438,7 +438,7 @@ Three things use it:
   every routine triage). It's listed ahead of `pgbackrest_backup_unhealthy`, since only the first
   matching rule per result is recorded and a broken chain is the more severe finding.
 - **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
-  a human escalation, and only transitions to the restore when the chain is `continuous`.
+  a human escalation and only transitions to the restore when the chain is `continuous`.
   `pbs_pgbackrest_restore_remediate` (v1.4) has a matching precondition and reports how far the
   archive reached.
 
@@ -447,9 +447,23 @@ Docker fixture's repo, an archive that had been through 29 timeline switches fro
 tests, with `.partial` segments at several of them. Removing segments from that real listing
 gives each `broken` case. An integration test
 (`TestIntegration_RestoreFromBackup_RefusesOnRealWALGap`) moves the backup's own WAL segment out
-of the real repo, crashes the instance, and checks that `restore_from_backup` refuses and a canary
-file in PGDATA survives. The existing real crash-and-restore test now passes through the check on
-its way to a successful restore.
+of the real repo, crashes the instance and checks that `restore_from_backup` refuses and a canary
+file in PGDATA survives.
+
+The check is also tested against PostgreSQL itself. `TestIntegration_WALCheck_PredictionMatchesRealRecovery`
+hides one segment at a time (one from before the backup, the segment right after it, the newest
+one), asks the check where recovery would stop, then runs a real `pgbackrest restore` and reads
+PostgreSQL's log for the last segment it actually restored. All three agree, including the case
+the check gets right and a backup-age view never could: the newest segment of a timeline that
+later forked is lost WAL, not the archive simply ending one segment earlier. (Those restores set a
+recovery target past any WAL, so PostgreSQL stops instead of promoting and the shared archive
+gains no new timeline.) The real crash-and-restore test now also checks PostgreSQL's log against
+the check: the last segment restored is `archive_end_wal` and the new timeline is
+`latest_timeline + 1`.
+
+Fault: [`db-pgbackrest-wal-gap`](../testing/catalog/failures.yaml) hides the latest backup's own
+start segment on a healthy instance and expects the health triage to report the broken chain
+(signal `pgbackrest_wal_chain_broken`) and hand the decision to a human.
 
 #### Underneath the layers: what's honest about the remediation, not oversold
 
@@ -520,7 +534,7 @@ Not yet built — tracked, not forgotten:
   trail, as JSON. A dedicated auditd table, one row per check (stanza, last backup, `backup_stale`,
   WAL status, `recoverable_to_wal`, `archive_end_time`, gaps, segment size and its source, trace
   ID), would answer questions pgBackRest's own history can't: when the WAL chain first broke, how
-  far behind the archive was at each check, and exactly what a refused restore saw.
+  far behind the archive was at each check and exactly what a refused restore saw.
 
 - **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
   `pbs_sysadmin_host_triage` (§3).**  

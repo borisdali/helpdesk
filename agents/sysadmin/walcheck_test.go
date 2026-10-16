@@ -513,3 +513,168 @@ func TestCheckWALContinuity_NoBackup(t *testing.T) {
 		t.Fatalf("Status = %s, want no_backup", got.Status)
 	}
 }
+
+// segListing builds a recursive repo-ls JSON listing holding the given
+// segments, each as a gzip'd file.
+func segListing(names ...string) string {
+	entries := make([]string, len(names))
+	for i, name := range names {
+		entries[i] = fmt.Sprintf(`"%s/%s-%s.gz":{"type":"file","size":100,"time":%d}`, name[:16], name, strings.Repeat("f", 40), 1790000000+i)
+	}
+	return "{" + strings.Join(entries, ",") + "}"
+}
+
+// threeTimelines: a backup in segment 3 of timeline 1, timeline 2 forked at
+// 0/5000000 (segment 5) and timeline 3 at 0/8000000 (segment 8). Replay reads
+// 1:3-4, 2:5-7, 3:8 onward.
+var threeTimelines = struct {
+	in      walCheckInput
+	top     string
+	history string
+}{
+	in:      walCheckInput{BackupLabel: "b", ArchiveID: "16-1", WALStart: "000000010000000000000003", WALStop: "000000010000000000000003", LSNStart: "0/3000028", LSNStop: "0/3000100"},
+	top:     "0000000100000000\n0000000200000000\n0000000300000000\n00000002.history\n00000003.history\n",
+	history: "1\t0/5000000\tno recovery target specified\n\n# comment\n2\t0/8000000\tno recovery target specified\n",
+}
+
+func TestEvaluateWAL_ThreeTimelines_Continuous(t *testing.T) {
+	tl := threeTimelines
+	// Timeline 1's copy of segment 5 is never read (timeline 2's is), so its
+	// absence is normal; its presence must not hide a missing child copy.
+	got := evaluateWALContinuity(tl.in, tl.top, tl.history, segListing(
+		"000000010000000000000003", "000000010000000000000004",
+		"000000020000000000000005", "000000020000000000000006", "000000020000000000000007",
+		"000000030000000000000008", "000000030000000000000009"))
+	if got.Status != WALContinuous || got.ArchiveEndWAL != "000000030000000000000009" {
+		t.Fatalf("Status = %s (%s), ArchiveEndWAL = %s; want continuous to 000000030000000000000009", got.Status, got.Detail, got.ArchiveEndWAL)
+	}
+	if fmt.Sprint(got.TimelinePath) != "[1 2 3]" {
+		t.Errorf("TimelinePath = %v, want [1 2 3]", got.TimelinePath)
+	}
+}
+
+// A hole on a timeline in the middle of the path, neither the backup's nor
+// the newest.
+func TestEvaluateWAL_GapOnMiddleTimeline(t *testing.T) {
+	tl := threeTimelines
+	got := evaluateWALContinuity(tl.in, tl.top, tl.history, segListing(
+		"000000010000000000000003", "000000010000000000000004",
+		"000000020000000000000005", "000000020000000000000007",
+		"000000030000000000000008"))
+	if got.Status != WALBroken || !got.ConsistencyReachable {
+		t.Fatalf("Status = %s, ConsistencyReachable = %v; want broken but reachable", got.Status, got.ConsistencyReachable)
+	}
+	if len(got.Gaps) != 1 || got.Gaps[0].Timeline != 2 || got.Gaps[0].FirstMissing != "000000020000000000000006" {
+		t.Errorf("Gaps = %+v, want 000000020000000000000006 on timeline 2", got.Gaps)
+	}
+	if got.RecoverableToWAL != "000000020000000000000005" || got.ArchiveEndWAL != "000000030000000000000008" {
+		t.Errorf("RecoverableToWAL = %s, ArchiveEndWAL = %s; want 000000020000000000000005 and 000000030000000000000008", got.RecoverableToWAL, got.ArchiveEndWAL)
+	}
+}
+
+// The fork segment must come from the child timeline: the parent's copy
+// holds the parent's WAL past the fork point, which replay must not use.
+func TestEvaluateWAL_ForkSegmentOnlyOnParent_Broken(t *testing.T) {
+	tl := threeTimelines
+	got := evaluateWALContinuity(tl.in, tl.top, tl.history, segListing(
+		"000000010000000000000003", "000000010000000000000004", "000000010000000000000005",
+		"000000020000000000000006", "000000020000000000000007",
+		"000000030000000000000008"))
+	if got.Status != WALBroken || len(got.Gaps) != 1 || got.Gaps[0].FirstMissing != "000000020000000000000005" {
+		t.Fatalf("Status = %s, Gaps = %+v; want broken with timeline 2's copy of segment 5 missing", got.Status, got.Gaps)
+	}
+}
+
+// A backup spanning several segments needs all of them to reach consistency.
+func TestEvaluateWAL_GapInsideMultiSegmentBackup_Unreachable(t *testing.T) {
+	in := walCheckInput{BackupLabel: "b", ArchiveID: "16-1", WALStart: "000000010000000000000003", WALStop: "000000010000000000000006", LSNStart: "0/3000028", LSNStop: "0/6000100"}
+	got := evaluateWALContinuity(in, "0000000100000000\n", "", segListing(
+		"000000010000000000000003", "000000010000000000000004", "000000010000000000000006", "000000010000000000000007"))
+	if got.Status != WALBroken || got.ConsistencyReachable {
+		t.Fatalf("Status = %s, ConsistencyReachable = %v; want broken and unreachable", got.Status, got.ConsistencyReachable)
+	}
+	if !strings.Contains(got.Detail, "000000010000000000000005") || !strings.Contains(got.Detail, "could not start") {
+		t.Errorf("Detail = %q, want it to name 000000010000000000000005 and say PostgreSQL could not start", got.Detail)
+	}
+}
+
+func TestEvaluateWAL_GapListIsCapped(t *testing.T) {
+	in := walCheckInput{BackupLabel: "b", ArchiveID: "16-1", WALStart: "000000010000000000000001", WALStop: "000000010000000000000001", LSNStart: "0/1000028", LSNStop: "0/1000100"}
+	var names []string
+	for seg := 1; seg <= 61; seg += 2 { // every other segment: 30 one-segment gaps
+		names = append(names, fmt.Sprintf("0000000100000000%08X", seg))
+	}
+	got := evaluateWALContinuity(in, "0000000100000000\n", "", segListing(names...))
+	if got.Status != WALBroken || len(got.Gaps) != maxReportedWALGaps {
+		t.Fatalf("Status = %s, %d gaps; want broken with the list capped at %d", got.Status, len(got.Gaps), maxReportedWALGaps)
+	}
+	if got.RecoverableToWAL != "000000010000000000000001" || got.ArchiveEndWAL != "00000001000000000000003D" {
+		t.Errorf("RecoverableToWAL = %s, ArchiveEndWAL = %s", got.RecoverableToWAL, got.ArchiveEndWAL)
+	}
+}
+
+func TestEvaluateWAL_MalformedHistory_Unverified(t *testing.T) {
+	tl := threeTimelines
+	for _, history := range []string{"1\tnot-an-lsn\tx\n", "one\t0/5000000\tx\n", "1\n", ""} {
+		got := evaluateWALContinuity(tl.in, tl.top, history, "{}")
+		if got.Status != WALUnverified {
+			t.Errorf("history %q: Status = %s (%s), want unverified", history, got.Status, got.Detail)
+		}
+	}
+}
+
+func TestCheckWALContinuity_ReadFailures_Unverified(t *testing.T) {
+	res, err := parsePgBackRestInfo(readFixture(t, "multi_timeline_info.json"), "", 25*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fail := range []string{".history", "--recurse"} {
+		run := fakeWALRun(t, readFixture(t, "multi_timeline_000000010000000000000002.gz"), nil)
+		got := checkWALContinuity(res, func(args []string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), fail) {
+				return "", fmt.Errorf("permission denied")
+			}
+			return run(args)
+		})
+		if got.Status != WALUnverified || !strings.Contains(got.Detail, "permission denied") {
+			t.Errorf("failing %s: Status = %s, Detail = %q; want unverified with the error", fail, got.Status, got.Detail)
+		}
+	}
+}
+
+func TestSegmentSizeFromHeader_Unusable(t *testing.T) {
+	const name = "000000010000000000000002"
+	gz := []byte(readFixture(t, "multi_timeline_000000010000000000000002.gz"))
+	file := headerSegment{path: name + ".gz", name: name, compression: "gz"}
+	if _, err := segmentSizeFromHeader(gz[:12], file); err == nil {
+		t.Error("want an error for a gzip stream cut off before the header")
+	}
+	if _, err := segmentSizeFromHeader([]byte("ERROR: [039]: HTTP request failed\n"), file); err == nil {
+		t.Error("want an error when the output holds no gzip stream")
+	}
+	// The real segment under another name: its page address doesn't match.
+	if _, err := segmentSizeFromHeader(gz, headerSegment{path: "x.gz", name: "000000010000000000000007", compression: "gz"}); err == nil {
+		t.Error("want an error for a header that belongs to another segment")
+	}
+	if _, err := segmentSizeFromHeader([]byte("short"), headerSegment{path: name, name: name}); err == nil {
+		t.Error("want an error for uncompressed output shorter than a header")
+	}
+}
+
+// The last segments of an older timeline missing, with nothing archived
+// after them: history shows that timeline ran on to its fork, so this is
+// lost WAL, not the end of the archive (found against real PostgreSQL by
+// TestIntegration_WALCheck_PredictionMatchesRealRecovery).
+func TestEvaluateWAL_TailOfOlderTimelineMissing_Broken(t *testing.T) {
+	tl := threeTimelines
+	got := evaluateWALContinuity(tl.in, tl.top, tl.history, segListing(
+		"000000010000000000000003", "000000010000000000000004",
+		"000000020000000000000005", "000000020000000000000006"))
+	if got.Status != WALBroken || got.RecoverableToWAL != "000000020000000000000006" || got.ArchiveEndWAL != "000000020000000000000006" {
+		t.Fatalf("Status = %s, RecoverableToWAL = %s, ArchiveEndWAL = %s; want broken, both 000000020000000000000006",
+			got.Status, got.RecoverableToWAL, got.ArchiveEndWAL)
+	}
+	if !strings.Contains(got.Detail, "000000020000000000000007 on timeline 2 is missing") || !strings.Contains(got.Detail, "history shows WAL past it") {
+		t.Errorf("Detail = %q", got.Detail)
+	}
+}

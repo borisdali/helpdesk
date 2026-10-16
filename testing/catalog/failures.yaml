@@ -514,6 +514,80 @@ failures:
         narrative: "The agent should identify from get_pgbackrest_status that pgBackRest cannot access its own repository (a non-ok stanza status, likely reporting the stanza as \"[invalid]\" with a permission-denied detail in the repo-level status message), correctly distinguishing this filesystem-level failure from WAL-archiving health or a simple stale-backup finding, and recommend investigating the repo path's permissions/ownership rather than assuming a transient blip."
     timeout: 60s
 
+  - id: db-pgbackrest-wal-gap
+    name: "pgBackRest WAL chain broken"
+    category: database
+    severity: high
+    description: >
+      A WAL segment the latest backup needs is missing from the pgBackRest
+      archive, while the database itself is healthy and pgBackRest reports
+      the stanza ok. Nothing is wrong today, but the backup can no longer be
+      restored: PostgreSQL could not reach a consistent state from it, and a
+      restore would overwrite PGDATA for nothing. Exercises v0.32's
+      wal_continuity check, the pgbackrest_wal_chain_broken signal and
+      pbs_pgbackrest_health_triage's broken-chain ending, none of which the
+      backup-age check (backup_stale) can see.
+    # Same dedicated pgBackRest target as db-pgbackrest-repo-unreadable.
+    agent_conn_override: pgbackrest-db
+    prerequisites: |
+      Requires the dedicated pgBackRest target
+      (testing/docker/docker-compose.pgbackrest.yaml) with an initial backup
+      already taken (testing/docker/setup-pgbackrest-backup.sh).
+
+      inject moves the latest backup's own start segment aside inside the
+      repo (a name the WAL check ignores), so the chain is broken at the
+      backup itself (consistency_reachable=false). teardown moves it back and
+      is safe to run more than once. Neither touches PGDATA or the running
+      instance, and nothing is written to the archive.
+
+      Either health-triage ending that escalates to a human is correct here:
+      Ending E (broken chain) when the backup is fresh, or Ending C (stale
+      backup, with wal_continuity=broken in its findings) when it isn't, as
+      on a fixture whose only backup was taken days ago. Both record the
+      pgbackrest_wal_chain_broken signal, which is listed first in
+      agents/sysadmin/objective_evidence.yaml.
+
+      Docker-only, same reasoning as db-pgbackrest-repo-unreadable. No
+      external_compat variant.
+    inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: |
+        set -e
+        seg=$(su postgres -c 'pgbackrest --stanza=main info --output=json' | grep -o '"start":"[0-9A-F]\{24\}"' | tail -1 | cut -d'"' -f4)
+        test -n "$seg"
+        f=$(ls /var/lib/pgbackrest/archive/main/*/"$(echo "$seg" | cut -c1-16)"/"$seg"-*)
+        mv "$f" "$f.hidden-by-fault"
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: |
+        for f in $(find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'); do
+          mv "$f" "${f%.hidden-by-fault}"
+        done
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      A routine backup audit wants confirmation that this database's latest
+      pgBackRest backup can actually be restored. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      check backup health and say whether a restore from the latest backup
+      would work.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "wal_continuity"
+          - "WAL chain"
+          - "missing"
+          - "consistent state"
+          - "broken"
+      expected_diagnosis:
+        category: "pgbackrest_wal_chain_broken"
+        objective_evidence_signal: pgbackrest_wal_chain_broken
+        narrative: "The agent should read wal_continuity from get_pgbackrest_status and report that the chain is broken: the segment the latest backup itself needs (wal_continuity.gaps, consistency_reachable=false) is missing from the repo, so PostgreSQL could not start from that backup and a restore must not be attempted. It should not take the healthy stanza status (status_code=0) as proof the backup is usable, and should hand the decision to a human (take a new full backup, or recover the segment) rather than call run_pgbackrest_backup or restore_from_backup itself."
+    timeout: 90s
+
   - id: db-pgdata-corrupted
     name: "Data directory corrupted — restore from latest backup"
     category: database

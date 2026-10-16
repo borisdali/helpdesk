@@ -530,8 +530,18 @@ func evaluateWALContinuity(in walCheckInput, topListing, historyText, listingJSO
 		}
 	case broken:
 		res.Status = WALBroken
-		res.Detail = fmt.Sprintf("WAL is missing from %s on timeline %d: recovery would stop at %s instead of reaching the end of the archive (%s)",
-			gaps[0].FirstMissing, gaps[0].Timeline, res.RecoverableToWAL, res.ArchiveEndWAL)
+		missing := gaps[0].FirstMissing
+		if gaps[0].Count > 1 {
+			missing += " to " + gaps[0].LastMissing
+		}
+		res.Detail = fmt.Sprintf("WAL segment %s on timeline %d is missing: recovery would stop at %s", missing, gaps[0].Timeline, res.RecoverableToWAL)
+		if res.ArchiveEndWAL != res.RecoverableToWAL {
+			res.Detail += fmt.Sprintf(" instead of reaching the end of the archive (%s)", res.ArchiveEndWAL)
+		} else {
+			// Nothing later survives, but timeline history shows this
+			// timeline ran past the gap before the next one forked.
+			res.Detail += fmt.Sprintf(", although timeline %d's history shows WAL past it", gaps[0].Timeline)
+		}
 	default:
 		res.Status = WALContinuous
 	}

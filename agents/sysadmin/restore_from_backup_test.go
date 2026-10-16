@@ -394,3 +394,29 @@ type runnerFunc func(ctx context.Context, name string, args []string, env []stri
 func (f runnerFunc) Run(ctx context.Context, name string, args []string, env []string) (string, error) {
 	return f(ctx, name, args, env)
 }
+
+// walRestoreRefusal lets a restore through only on a continuous chain.
+func TestWALRestoreRefusal(t *testing.T) {
+	cases := []struct {
+		name   string
+		status GetPgBackRestStatusResult
+		want   string // substring of the refusal; empty means allowed
+	}{
+		{"continuous", GetPgBackRestStatusResult{WALContinuity: &WALContinuity{Status: WALContinuous}}, ""},
+		{"stanza unhealthy", GetPgBackRestStatusResult{StatusCode: 99, StatusMessage: "other", WALContinuity: &WALContinuity{Status: WALContinuous}}, "status_code=99"},
+		{"not checked", GetPgBackRestStatusResult{}, "was not checked"},
+		{"no backup", GetPgBackRestStatusResult{WALContinuity: &WALContinuity{Status: WALNoBackup, Detail: "no backup has completed"}}, "no backup has completed"},
+		{"broken", GetPgBackRestStatusResult{WALContinuity: &WALContinuity{Status: WALBroken, BackupLabel: "b"}}, "WAL continuity is broken"},
+		{"unverified", GetPgBackRestStatusResult{WALContinuity: &WALContinuity{Status: WALUnverified, BackupLabel: "b"}}, "WAL continuity is unverified"},
+		{"unknown status", GetPgBackRestStatusResult{WALContinuity: &WALContinuity{Status: "something-new"}}, "WAL continuity is something-new"},
+	}
+	for _, c := range cases {
+		err := walRestoreRefusal(c.status)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s: refused (%v), want allowed", c.name, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s: err = %v, want a refusal containing %q", c.name, err, c.want)
+		}
+	}
+}

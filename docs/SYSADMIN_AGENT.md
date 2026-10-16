@@ -2,9 +2,9 @@
 
 The **SysAdmin agent** is the host-level layer of aiHelpDesk. Where the database agent speaks `psql` and the Kubernetes agent speaks `kubectl` or `client-go`, the SysAdmin agent operates at the OS and container-runtime level of the machines running your database services.
 
-Its primary role is **diagnostic**: it can check whether a container or systemd service is running, retrieve recent logs, inspect disk and memory pressure, check pgBackRest's own backup-job health, and — when a playbook with the right permission tier authorises it — restart the container or service, or take a fresh pgBackRest backup. All write and restart operations are policy-checked and fully audited.
+Its primary role is **diagnostic**: it can check whether a container or systemd service is running, retrieve recent logs, inspect disk and memory pressure, check pgBackRest's own backup-job health and — when a playbook with the right permission tier authorises it — restart the container or service or take a fresh pgBackRest backup. All write and restart operations are policy-checked and fully audited.
 
-The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks, and for the `pbs_sysadmin_host_triage` system Playbook (see [Playbooks](PLAYBOOKS.md)). For a Docker/Podman-hosted or systemd-managed database that goes unreachable, the DB agent's restart triage escalates to the SysAdmin agent automatically, which then reads container or service state and logs to confirm or revise the root-cause hypothesis.
+The SysAdmin agent is the execution backend for `execution_mode: agent_approve` and `execution_mode: agent_auto` playbooks and for the `pbs_sysadmin_host_triage` system Playbook (see [Playbooks](PLAYBOOKS.md)). For a Docker/Podman-hosted or systemd-managed database that goes unreachable, the DB agent's restart triage escalates to the SysAdmin agent automatically, which then reads container or service state and logs to confirm or revise the root-cause hypothesis.
 
 ---
 
@@ -57,7 +57,7 @@ curl -X POST http://localhost:8080/api/v1/query \
 
 ## 2. Infrastructure config — VM and DBServer fields
 
-The SysAdmin agent requires each database server to reference a VM entry in `infrastructure.json`. The **container runtime** (`docker`, `podman`, or empty for systemd) belongs on the **VM**, because it is a machine-level property shared by all databases on that host. The **process handle** (`container_name` or `systemd_unit`) belongs on the **db_server**, because it is specific to that database instance.
+The SysAdmin agent requires each database server to reference a VM entry in `infrastructure.json`. The **container runtime** (`docker`, `podman` or empty for systemd) belongs on the **VM**, because it is a machine-level property shared by all databases on that host. The **process handle** (`container_name` or `systemd_unit`) belongs on the **db_server**, because it is specific to that database instance.
 
 ```json
 {
@@ -122,7 +122,7 @@ The SysAdmin agent requires each database server to reference a VM entry in `inf
 |---|---|---|
 | `name` | string | Human-readable VM name. |
 | `address` | string | Hostname or IP address of the machine. |
-| `runtime` | string | Container runtime: `"docker"`, `"podman"`, or `""` (systemd/direct). Applies to all databases on this VM. |
+| `runtime` | string | Container runtime: `"docker"`, `"podman"` or `""` (systemd/direct). Applies to all databases on this VM. |
 | `ssh_user` | string | Optional. Enables SSH dispatch when set alongside `ssh_key_path` — as of v0.31, every SysAdmin tool that reaches the host (`check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`, `restart_container`, `restart_service`, plus `get_pgbackrest_status`/`run_pgbackrest_backup` since v0.30) dispatches via SSH when this is set, falling back to local/container exec otherwise — see [§5](#5-container-runtime-dispatch). Before v0.31, only the pgBackRest tool pair honored this field; the other six silently ran locally regardless of it, a real gap found and closed live. |
 | `ssh_port` | int | Optional, default `22`. Only meaningful when `ssh_user` is set. |
 | `ssh_key_path` | string | Optional. Path to a private key, read fresh on every connection — never cached, so a Vault-issued short-lived credential refreshed at this path works transparently. A sibling `<path>-cert.pub` file, if present, is loaded as an SSH certificate for certificate-based auth. |
@@ -151,11 +151,11 @@ check_host(target="prod-db")
                   └─ Runtime=""         → systemctl status postgresql-16
 ```
 
-If the server ID is not found, has no `vm_name`, or the referenced VM is not defined, the tool returns an error immediately without executing any system command.
+If the server ID is not found, has no `vm_name` or the referenced VM is not defined, the tool returns an error immediately without executing any system command.
 
 The agent is instructed to use the server's friendly name or the server ID from the user's prompt — never to invent or guess connection strings or container names, which are resolved internally.
 
-Every tool that reaches the host resolves a **VM-level SSH connection** when the VM entry carries `ssh_user`/`ssh_key_path` (and optional `ssh_port`, default 22) — the mechanism that lets any of them reach a host that isn't colocated with the agent process or running Docker/Podman on it. `get_pgbackrest_status`/`run_pgbackrest_backup` were the first two wired for this (v0.30); `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`, `restart_container`, and `restart_service` were wired the same way in v0.31, closing a real gap where they silently ran locally regardless of this field. See [§5](#5-container-runtime-dispatch) for the full dispatch table.
+Every tool that reaches the host resolves a **VM-level SSH connection** when the VM entry carries `ssh_user`/`ssh_key_path` (and optional `ssh_port`, default 22) — the mechanism that lets any of them reach a host that isn't colocated with the agent process or running Docker/Podman on it. `get_pgbackrest_status`/`run_pgbackrest_backup` were the first two wired for this (v0.30); `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`, `restart_container` and `restart_service` were wired the same way in v0.31, closing a real gap where they silently ran locally regardless of this field. See [§5](#5-container-runtime-dispatch) for the full dispatch table.
 
 ---
 
@@ -228,13 +228,13 @@ For container runtimes, executes `free -h` inside the container (or reads `/proc
 
 #### `read_pg_log_file`
 
-Read the PostgreSQL log file directly from inside the container, pod, or host process — without a live database connection.
+Read the PostgreSQL log file directly from inside the container, pod or host process — without a live database connection.
 
 ```
 target    string   required — server ID
 lines     int      optional — number of tail lines to return (default: 200)
 filter    string   optional — case-insensitive substring filter applied to each line
-log_dir   string   optional — override default log directory (default: /var/lib/postgresql/data/log, or the target's own configured `pg_log_dir` — see §2 — when set and this arg is omitted)
+log_dir   string   optional — override default log directory (default: /var/lib/postgresql/data/log or the target's own configured `pg_log_dir` — see §2 — when set and this arg is omitted)
 ```
 
 **How it works:**
@@ -252,7 +252,7 @@ The exec path depends on the server's runtime:
 | `kubectl` (k8s) | Two-step: `kubectl get pod -l <selector> -n <ns>` to resolve pod name, then `kubectl exec <pod> -n <ns> -- tail ...` |
 | systemd (host) | `ls -t`/`tail` run directly on the host — over SSH when the VM's `ssh_user`/`ssh_key_path` are set, locally otherwise (same SSH-or-local mechanism as `check_host`; before v0.31 this row read the log file only on the agent's own local filesystem regardless of configuration, a real gap closed live) |
 
-**Key distinction from DB agent's `read_pg_log`:** The DB agent tool uses `pg_read_file()` SQL and requires a live Postgres connection. This tool uses process exec (`docker exec` / `kubectl exec`) and works when Postgres is completely down — including after a crash, failed startup, or OOM kill.
+**Key distinction from DB agent's `read_pg_log`:** The DB agent tool uses `pg_read_file()` SQL and requires a live Postgres connection. This tool uses process exec (`docker exec` / `kubectl exec`) and works when Postgres is completely down — including after a crash, failed startup or OOM kill.
 
 Returns:
 
@@ -269,7 +269,7 @@ The agent uses this tool when `get_host_logs` shows a non-zero exit code or cras
 
 #### `get_pgbackrest_status`
 
-Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, and whether it's stale relative to the expected schedule. Distinct from the database agent's `get_backup_status`, which reads `pg_stat_archiver` — WAL-*archiving* health, not backup-*job* health. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for the full failure-mode writeup.
+Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type and whether it's stale relative to the expected schedule. Distinct from the database agent's `get_backup_status`, which reads `pg_stat_archiver` — WAL-*archiving* health, not backup-*job* health. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for the full failure-mode writeup.
 
 ```
 target         string   optional — server ID from infrastructure config; when omitted, runs pgbackrest on the agent host directly
@@ -312,9 +312,9 @@ Three fields, three different conclusions — the agent is instructed not to con
 
 `wal_continuity` (v0.32) answers a fourth question: can the latest backup actually be restored to the end of the archive? It follows the newest timeline's history and checks every WAL segment on that path is in the repo, with four extra read-only pgBackRest calls through the same dispatch (the last fetches one small archived segment to read the WAL segment size from its header). `status` is `continuous`, `broken` (with `gaps`, `recoverable_to_wal` and `consistency_reachable`), `unverified` (the check couldn't run, e.g. pgBackRest older than 2.26) or `no_backup`. `restore_from_backup` refuses unless it's `continuous`. See [BACKUP.md §3](BACKUP.md#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).
 
-The result also carries `backups` (one entry per backup in the stanza) and `output` (the raw `pgbackrest info` JSON), in that order, after `wal_continuity`. The audit trail stores the result without `output` on a successful call: the parsed fields hold the same values, and the audit record keeps only the first 8 KB of a result, so the raw text used to push `wal_continuity` out of it once a stanza had about 8 backups. A failed call keeps `output`, since it's the only record of what pgBackRest printed.
+The result also carries `backups` (one entry per backup in the stanza) and `output` (the raw `pgbackrest info` JSON), in that order, after `wal_continuity`. The audit trail stores the result without `output` on a successful call: the parsed fields hold the same values and the audit record keeps only the first 8 KB of a result, so the raw text used to push `wal_continuity` out of it once a stanza had about 8 backups. A failed call keeps `output`, since it's the only record of what pgBackRest printed.
 
-Also feeds two objective-evidence signals: `pgbackrest_wal_chain_broken` (v0.32) when `wal_continuity.status` is `broken`, and the `pgbackrest_backup_unhealthy` signal (`agents/sysadmin/objective_evidence.yaml`) — true on a non-ok stanza status, a stale backup, or no backup ever recorded — which force-gates the response for human review if the model's own conclusion doesn't account for it, the same backstop mechanism used throughout [BACKUP.md](BACKUP.md).
+Also feeds two objective-evidence signals: `pgbackrest_wal_chain_broken` (v0.32) when `wal_continuity.status` is `broken` and the `pgbackrest_backup_unhealthy` signal (`agents/sysadmin/objective_evidence.yaml`) — true on a non-ok stanza status, a stale backup or no backup ever recorded — which force-gates the response for human review if the model's own conclusion doesn't account for it, the same backstop mechanism used throughout [BACKUP.md](BACKUP.md).
 
 ---
 
@@ -339,7 +339,7 @@ not just described in prose.
 ```
 target   string   optional — server ID from infrastructure config; when omitted, runs pgbackrest on the agent host directly
 stanza   string   optional — pgBackRest stanza name; when omitted, resolved automatically the same way get_pgbackrest_status does (pgbackrest's own backup subcommand has no auto-detect-the-only-stanza behavior, unlike info)
-type     string   optional — full, diff, or incr; default full (always valid regardless of backup history, unlike diff/incr which need a prior full backup to reference)
+type     string   optional — full, diff or incr; default full (always valid regardless of backup history, unlike diff/incr which need a prior full backup to reference)
 ```
 
 Executes `pgbackrest [--stanza=<name>] --type=<type> backup` via the same dispatch as
@@ -355,9 +355,9 @@ Executes `pgbackrest [--stanza=<name>] --type=<type> backup` via the same dispat
 
 ### 4.3 Mutation tools (action class: `destructive`)
 
-Both restart tools require a policy pre-check before execution. The pre-check enforces the operating mode (`readonly` → denied, `fix` → allowed subject to rules), evaluates tag-based policy rules against the server's tags and sensitivity classes, and writes an approval request if human confirmation is required.
+Both restart tools require a policy pre-check before execution. The pre-check enforces the operating mode (`readonly` → denied, `fix` → allowed subject to rules), evaluates tag-based policy rules against the server's tags and sensitivity classes and writes an approval request if human confirmation is required.
 
-Every successful restart call is recorded in the audit log via `RecordToolCall` with timing, server ID, and runtime details.
+Every successful restart call is recorded in the audit log via `RecordToolCall` with timing, server ID and runtime details.
 
 #### `restart_container`
 
@@ -440,7 +440,7 @@ mechanism described above:
 |---|---|
 | `runtime="docker"`/`"podman"` | `docker exec <container> su postgres -c '<quoted pgbackrest command>'` |
 | VM has `ssh_user`+`ssh_key_path` set (any other runtime) | SSH via `runOnHost`: dial, authenticate (key or certificate — see §2's VM fields), run the command remotely, capture stdout/stderr/exit code — the same mechanism the table above now uses |
-| No `target` given, or VM has neither of the above | Runs `pgbackrest` directly on the agent's own host |
+| No `target` given or VM has neither of the above | Runs `pgbackrest` directly on the agent's own host |
 
 The SSH client (`agents/sysadmin/sshexec.go`) verifies the remote host key against
 `~/.ssh/known_hosts` (or `$SSH_KNOWN_HOSTS`) by default, falling back to no verification only
@@ -455,7 +455,7 @@ The SysAdmin agent introduces a three-tier remediation model for playbooks:
 | Tier | `execution_mode` | What happens |
 |---|---|---|
 | Diagnostic only | `agent` | Routed to the **database agent** for R/O investigation. SysAdmin agent is not involved. All DB-down playbooks currently use this mode. |
-| Human-approved restart | `agent_approve` | Routed to the **SysAdmin agent**. Agent investigates (R/O tools), forms a recommendation, and emits a restart proposal. The Gateway creates an approval request before executing the mutation. The operator approves or rejects via the approvals API. |
+| Human-approved restart | `agent_approve` | Routed to the **SysAdmin agent**. Agent investigates (R/O tools), forms a recommendation and emits a restart proposal. The Gateway creates an approval request before executing the mutation. The operator approves or rejects via the approvals API. |
 | Auto-restart (whitelisted) | `agent_auto` | Routed to the **SysAdmin agent**. The agent may call `restart_container` or `restart_service` without per-call human approval, but **only for tools listed in the playbook's `permitted_tools` field**. Policy rules still apply. |
 
 ### `auto_remediation_eligible` flag
@@ -547,9 +547,10 @@ The agent is also instructed to emit `ROOT_CAUSE:` and `ACTION_TAKEN:` lines for
 
 The fault catalog (`testing/catalog/failures.yaml`) includes two `host` category tests:
 
-(A third fault, `db-pgbackrest-repo-unreadable`, also runs against this agent — filed under
-`category: database` rather than `host` since it's about backup-job health, not host/container
-state. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for its own writeup.)
+(Two more faults, `db-pgbackrest-repo-unreadable` and `db-pgbackrest-wal-gap`, also run against this agent — filed under
+`category: database` rather than `host` since they're about backup health, not host/container
+state. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) and
+[§3](BACKUP.md#wal-continuity-the-restore-refuses-a-chain-it-cant-finish) for their writeups.)
 
 ### `host-container-stopped`
 
@@ -563,7 +564,7 @@ state. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for i
 
 **Expected tools:** `check_host`, `get_host_logs`
 
-**Expected keywords:** `stopped`, `exited`, `container`, `not running`, or `offline`
+**Expected keywords:** `stopped`, `exited`, `container`, `not running` or `offline`
 
 **Expected diagnosis category:** `container_stopped`
 
@@ -581,7 +582,7 @@ state. See [BACKUP.md §2](BACKUP.md#2-pgbackrest-job-level-backup-health) for i
 
 **Expected tools:** `check_host`, `get_host_logs`, `read_pg_log_file`
 
-**Expected keywords:** `crashed`, `crash`, `fatal`, `panic`, `aborted`, `signal`, `killed`, or `terminated`
+**Expected keywords:** `crashed`, `crash`, `fatal`, `panic`, `aborted`, `signal`, `killed` or `terminated`
 
 **Expected diagnosis category:** `process_crash`
 
@@ -626,9 +627,9 @@ The SysAdmin agent is actively used by the `pbs_sysadmin_host_triage` system Pla
 1. Calls `check_host` to read the container's exit code and OOM-kill flag
 2. Calls `get_host_logs` for recent container output
 3. Optionally calls `read_pg_log_file` if container logs lack PostgreSQL-level detail
-4. Explicitly states in `FINDINGS:` whether the DB agent's prior hypothesis was **confirmed**, **revised**, or **corrected**
+4. Explicitly states in `FINDINGS:` whether the DB agent's prior hypothesis was **confirmed**, **revised** or **corrected**
 
-This chain runs in one API call when `approval_mode=auto`, or returns `suggested_next` for the operator to fire manually when `approval_mode=manual` (the default).
+This chain runs in one API call when `approval_mode=auto` or returns `suggested_next` for the operator to fire manually when `approval_mode=manual` (the default).
 
 | Series | Mode | Agent | SysAdmin involvement |
 |---|---|---|---|

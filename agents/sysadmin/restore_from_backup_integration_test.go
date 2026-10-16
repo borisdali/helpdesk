@@ -21,14 +21,16 @@
 //
 // Run with:
 //
-//	go test -tags integration -timeout 120s ./agents/sysadmin/... -run RestoreFromBackup
+//	go test -tags integration -timeout 600s ./agents/sysadmin/... -run "RestoreFromBackup|WALCheck"
 package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -137,10 +139,21 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	// Bring postgres back up against the now-repaired data directory —
 	// restore_from_backup deliberately doesn't do this itself (that's
 	// restart_container's job in the real remediation playbook).
+	mark := time.Now()
 	if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
 		t.Fatalf("docker restart (post-restore): %v", err)
 	}
-	time.Sleep(8 * time.Second)
+	log := waitForRecoveryLog(t, mark, "database system is ready to accept connections")
+
+	// The WAL check said where recovery would get to before the restore ran;
+	// PostgreSQL's own log says where it actually got to. They must agree.
+	wal := before.WALContinuity
+	if got := lastRestoredSegment(log); got != wal.ArchiveEndWAL {
+		t.Errorf("PostgreSQL's last restored segment = %q, the WAL check predicted %s", got, wal.ArchiveEndWAL)
+	}
+	if want := fmt.Sprintf("selected new timeline ID: %d", wal.LatestTimeline+1); !strings.Contains(log, want) {
+		t.Errorf("recovery log has no %q: the WAL check's latest timeline (%d) isn't the one PostgreSQL recovered along", want, wal.LatestTimeline)
+	}
 
 	// Verify via a real connection, not just "the tool returned no error" —
 	// matching this project's own "verified, not just claimed" discipline.
@@ -265,5 +278,152 @@ func TestIntegration_RestoreFromBackup_RefusesOnRealWALGap(t *testing.T) {
 	}
 	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "test", "-f", "/var/lib/postgresql/data/walcheck-canary"); err != nil {
 		t.Errorf("canary file is gone from PGDATA: the refused restore touched the data directory")
+	}
+}
+
+var restoredSegmentRe = regexp.MustCompile(`restored log file "([0-9A-F]{24})" from archive`)
+
+// lastRestoredSegment returns the last WAL segment (not .history) PostgreSQL
+// says it restored from the archive.
+func lastRestoredSegment(log string) string {
+	m := restoredSegmentRe.FindAllStringSubmatch(log, -1)
+	if len(m) == 0 {
+		return ""
+	}
+	return m[len(m)-1][1]
+}
+
+// waitForRecoveryLog returns the container's log since mark once it contains
+// one of the given lines, failing the test after 60s.
+func waitForRecoveryLog(t *testing.T, mark time.Time, until ...string) string {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		out, _ := exec.Command("docker", "logs", "--since", mark.Add(-time.Second).UTC().Format(time.RFC3339), restoreIntegrationContainer).CombinedOutput()
+		log := string(out)
+		for _, u := range until {
+			if strings.Contains(log, u) {
+				return log
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in the recovery log after 60s:\n%s", until, log)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// TestIntegration_WALCheck_PredictionMatchesRealRecovery checks the WAL
+// check against PostgreSQL itself. For each scenario it hides one archived
+// segment, asks the check where recovery would stop, then runs a real
+// pgBackRest restore and reads PostgreSQL's log for the last segment it
+// actually restored. The restore is run directly, since restore_from_backup
+// refuses a broken chain.
+//
+// Each restore sets a recovery target past the end of any WAL, so recovery
+// ends with "recovery ended before configured recovery target was reached"
+// instead of promoting: no new timeline or history file reaches the shared
+// archive, and the teardown restore leaves the fixture as it found it.
+func TestIntegration_WALCheck_PredictionMatchesRealRecovery(t *testing.T) {
+	skipIfNoPgBackRestDocker(t)
+
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := infra.Load(filepath.Join(repoRoot, "testing", "testing.infra.json"))
+	if err != nil {
+		t.Fatalf("loading infra config: %v", err)
+	}
+	oldInfra := infraConfig
+	infraConfig = cfg
+	t.Cleanup(func() { infraConfig = oldInfra })
+
+	ctx := context.Background()
+	baseline, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+	if err != nil {
+		t.Fatalf("precondition: getPgBackRestStatusImpl failed: %v", err)
+	}
+	base := baseline.WALContinuity
+	if base == nil || base.Status != WALContinuous || base.ArchiveEndWAL == base.BackupStopWAL {
+		t.Fatalf("precondition: WAL continuity = %+v, want continuous with WAL after the backup", base)
+	}
+	// The scenarios below are written against the fixture's shape: the
+	// backup's own segment on timeline 1, then the newest timeline holding
+	// the last two segments.
+	end := base.ArchiveEndWAL
+	tli, logID, seg, _ := parseSegmentName(end)
+	beforeEnd := fmt.Sprintf("%08X%08X%08X", tli, logID, seg-1)
+	if seg == 0 || beforeEnd[:8] != end[:8] {
+		t.Fatalf("precondition: unexpected archive end %s", end)
+	}
+	archiveRoot := "/var/lib/pgbackrest/archive/main/" + base.ArchiveID
+
+	scenarios := []struct {
+		name       string
+		hide       string // segment to hide
+		wantStatus string
+		wantEnd    string // where the check should say recovery stops
+	}{
+		// Not needed: WAL from before the backup started.
+		{"segment before the backup", "000000010000000000000001", WALContinuous, end},
+		// The newest segment. Its timeline isn't the newest one: history
+		// shows it ran past this segment before forking, so this is lost
+		// WAL, not the archive simply ending one segment earlier.
+		{"newest segment", end, WALBroken, beforeEnd},
+		// The segment after the backup's own: recovery stops at the backup.
+		{"segment after the backup", beforeEnd, WALBroken, base.BackupStopWAL},
+	}
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			t.Cleanup(func() { restoreIntegrationTeardown(t) })
+			dir := archiveRoot + "/" + sc.hide[:16]
+			hide := `set -e; f=$(ls ` + dir + `/` + sc.hide + `-*); mv "$f" "$f.hidden-by-test"`
+			if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "sh", "-c", hide); err != nil {
+				t.Fatalf("hiding %s: %v", sc.hide, err)
+			}
+			t.Cleanup(func() {
+				unhide := `for f in ` + dir + `/*.hidden-by-test; do mv "$f" "${f%.hidden-by-test}"; done`
+				if _, err := testutil.DockerExec(context.Background(), restoreIntegrationContainer, "sh", "-c", unhide); err != nil {
+					t.Errorf("cleanup: restoring %s: %v", sc.hide, err)
+				}
+			})
+
+			status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+			if err != nil {
+				t.Fatalf("getPgBackRestStatusImpl: %v", err)
+			}
+			wal := status.WALContinuity
+			if wal == nil || wal.Status != sc.wantStatus || wal.RecoverableToWAL != sc.wantEnd {
+				t.Fatalf("WAL check = %+v, want %s with recovery reaching %s", wal, sc.wantStatus, sc.wantEnd)
+			}
+
+			// Stop PostgreSQL for good (the container's keep-alive loop keeps
+			// it up), then restore and recover for real.
+			if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "rm", "-f", "/var/lib/postgresql/data/global/pg_control"); err != nil {
+				t.Fatalf("corrupting pg_control: %v", err)
+			}
+			if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
+				t.Fatalf("docker restart (to stop postgres): %v", err)
+			}
+			time.Sleep(5 * time.Second)
+			restore := `PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2); rm -f "$PGDATA/postmaster.pid"; ` +
+				`pgbackrest --stanza=main --delta --type=lsn --target=FFFFFFFF/0 restore`
+			if out, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "su", "postgres", "-c", restore); err != nil {
+				t.Fatalf("pgbackrest restore: %v: %s", err, out)
+			}
+			mark := time.Now()
+			if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
+				t.Fatalf("docker restart (to recover): %v", err)
+			}
+			log := waitForRecoveryLog(t, mark, "recovery ended before configured recovery target was reached",
+				"database system is ready to accept connections")
+			if strings.Contains(log, "selected new timeline ID") {
+				t.Fatalf("recovery promoted instead of stopping at the unreachable target; the archive now has a new timeline:\n%s", log)
+			}
+			if got := lastRestoredSegment(log); got != sc.wantEnd {
+				t.Errorf("PostgreSQL's last restored segment = %q, the WAL check predicted %s\n%s", got, sc.wantEnd, log)
+			}
+		})
 	}
 }
