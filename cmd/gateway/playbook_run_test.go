@@ -8067,3 +8067,61 @@ func TestHandlePlaybookRunProceed_NamespaceForceOverridden(t *testing.T) {
 			got, "helpdesk-test", "default")
 	}
 }
+
+// TestCheckEvidenceProvenance_ElidedAndDottedQuotes_RealChain replays the
+// three primary quotes flagged on one live db-pgdata-corrupted chain
+// (2026-10-16), against trimmed copies of that chain's real tool outputs.
+// Every fact in them is real: two join non-adjacent log lines with " / " or
+// "...", and one names a nested JSON field by its dotted path. The negative
+// cases keep the check honest — a wrong value or an invented line still
+// fails after the split and the flattening.
+func TestCheckEvidenceProvenance_ElidedAndDottedQuotes_RealChain(t *testing.T) {
+	hostLogs := "PostgreSQL Database directory appears to contain a database; Skipping initialization\n\n" +
+		"postgres: could not find the database system\n" +
+		"Expected to find it in the directory \"/var/lib/postgresql/data\",\n" +
+		"but could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory\n" +
+		"2026-10-16 22:31:49.871 UTC [9] LOG:  database system is ready to accept connections"
+	pgbackrest := `{"stanza":"main","status_code":0,"status_message":"ok","backup_stale":false,` +
+		`"wal_continuity":{"status":"continuous","backup_label":"20261016-222939F","consistency_reachable":true},` +
+		`"backups":[{"label":"20261016-222939F","type":"full"}]}`
+	srv := serveFakeToolEvents(t, []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_host_logs", Result: hostLogs}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_pgbackrest_status", Result: pgbackrest}},
+	})
+	cases := []struct {
+		name, quote string
+		wantFlagged bool
+	}{
+		{"spaced slash joins two real lines",
+			`postgres: could not find the database system / could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory`, false},
+		{"ellipsis joins two real lines",
+			`postgres: could not find the database system...but could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory" followed by "2026-10-16 22:31:49.871 UTC [9] LOG:  database system is ready to accept connections`, false},
+		{"unicode ellipsis", `could not find the database system… No such file or directory`, false},
+		{"dotted path into nested JSON",
+			`status_code=0; backup_stale=false; wal_continuity.status=continuous; consistency_reachable=true`, false},
+		{"array element field", `backups.label: 20261016-222939F`, false},
+		{"dotted path, wrong value", `wal_continuity.status=broken`, true},
+		{"invented line after an ellipsis", `could not find the database system...database is corrupt beyond repair`, true},
+		{"path slashes do not split", `could not open file "/var/lib/postgresql/data/global/PG_VERSION"`, true},
+	}
+	for _, c := range cases {
+		report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{IsPrimary: true, Evidence: c.quote}}}
+		primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+		if got := len(primary) > 0; got != c.wantFlagged {
+			t.Errorf("%s: flagged = %v (%v), want %v", c.name, got, primary, c.wantFlagged)
+		}
+	}
+}
+
+func TestFlattenJSONEvidence(t *testing.T) {
+	got := flattenJSONEvidence(`{"b":{"c":"x","d":[1,2.5]},"a":true,"n":null}`)
+	want := "a: true\nb.c: x\nb.d: 1\nb.d: 2.5\nn: null\n"
+	if got != want {
+		t.Errorf("flattenJSONEvidence = %q, want %q", got, want)
+	}
+	for _, notJSON := range []string{"", "running (running=true)", "{not json", "42"} {
+		if got := flattenJSONEvidence(notJSON); got != "" {
+			t.Errorf("flattenJSONEvidence(%q) = %q, want \"\"", notJSON, got)
+		}
+	}
+}

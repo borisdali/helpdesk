@@ -4301,6 +4301,9 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 	for _, ev := range events {
 		if ev.Tool != nil && ev.Tool.Result != "" {
 			outputs = append(outputs, ev.Tool.Result)
+			if flat := flattenJSONEvidence(ev.Tool.Result); flat != "" {
+				outputs = append(outputs, flat)
+			}
 		}
 	}
 	flagQuote := func(qs quoteSource, flagged string) {
@@ -4388,8 +4391,17 @@ func stripEscapedQuotes(s string) string {
 // regardless of what glues them together. Returns a single-element slice
 // unchanged when no interior quote/semicolon/em-dash remains — the common
 // case of one genuine verbatim span.
+//
+// Also splits on the elision markers "...", "…" and " / " (slash with a space
+// on both sides, so a path's own slashes never split): a model joining two
+// real lines and leaving out the one between them. Found live 2026-10-16 on
+// db-pgdata-corrupted, quoting Postgres's three-line startup error
+// "could not find the database system / could not open file ..." and
+// "...system...but could not open file ..." — every line real, flagged only
+// because the joined string isn't contiguous in the log.
 func splitEvidenceQuoteParts(quote string) []string {
 	quote = stripEscapedQuotes(quote)
+	quote = evidenceElisionReplacer.Replace(quote)
 	raw := strings.FieldsFunc(quote, func(r rune) bool {
 		return r == '"' || r == ';' || r == '—'
 	})
@@ -4403,6 +4415,72 @@ func splitEvidenceQuoteParts(quote string) []string {
 		return []string{strings.TrimSpace(quote)}
 	}
 	return parts
+}
+
+// evidenceElisionReplacer turns each elision marker into ";", one of the
+// boundaries splitEvidenceQuoteParts already splits on.
+var evidenceElisionReplacer = strings.NewReplacer("...", ";", "…", ";", " / ", ";")
+
+// flattenJSONEvidence renders a JSON tool result as one "path: value" line
+// per leaf ("wal_continuity.status: continuous"), or "" when result isn't
+// JSON. checkEvidenceProvenance checks quotes against it in addition to the
+// raw result, because a model naming a nested field writes its dotted path,
+// which no substring of the raw JSON contains. Found live 2026-10-16:
+// "wal_continuity.status=continuous" from a real get_pgbackrest_status
+// result was flagged as unverified. Array indices are left out of the path
+// (a model writes "backups.label", not "backups[2].label"). Formatting only,
+// as elsewhere in this check: each line carries the real value, so a wrong
+// value still fails to match.
+func flattenJSONEvidence(result string) string {
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				p := k
+				if path != "" {
+					p = path + "." + k
+				}
+				walk(p, t[k])
+			}
+		case []any:
+			for _, e := range t {
+				walk(path, e)
+			}
+		default:
+			if path == "" {
+				return
+			}
+			val := ""
+			switch s := t.(type) {
+			case nil:
+				val = "null"
+			case string:
+				val = s
+			case float64:
+				val = strconv.FormatFloat(s, 'f', -1, 64)
+			default:
+				val = fmt.Sprintf("%v", s)
+			}
+			b.WriteString(path + ": " + val + "\n")
+		}
+	}
+	walk("", v)
+	return b.String()
 }
 
 // appendEvidenceProvenance accumulates unverified evidence quotes into extra
