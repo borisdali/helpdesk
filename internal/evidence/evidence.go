@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"reflect"
 
 	"gopkg.in/yaml.v3"
@@ -135,6 +136,10 @@ type Rule struct {
 	ConfirmationProbe     string `yaml:"confirmation_probe,omitempty"`
 	ConfirmationOperator  string `yaml:"confirmation_operator,omitempty"`
 	ConfirmationThreshold any    `yaml:"confirmation_threshold,omitempty"`
+	// ConfirmationTerms is required by, and only valid with,
+	// confirmation_probe: evidence_quote_contains_any — see that probe in
+	// confirm.go.
+	ConfirmationTerms []string `yaml:"confirmation_terms,omitempty"`
 }
 
 // LoadRules parses a YAML rules file — a flat list of Rule, each naming its
@@ -182,6 +187,18 @@ func LoadRules(path string) (map[string][]Rule, error) {
 		// later (or never, for a rarely-hit condition like this one).
 		if _, err := compare(probe.kind, zeroValue(probe.kind), r.Operator, r.Threshold); err != nil {
 			return nil, fmt.Errorf("evidence: rule %d in %q: threshold %v is not valid for probe %q (kind %s): %w", i, path, r.Threshold, r.Probe, probe.kind, err)
+		}
+		usesTerms := r.ConfirmationProbe == "evidence_quote_contains_any"
+		if usesTerms && len(r.ConfirmationTerms) == 0 {
+			return nil, fmt.Errorf("evidence: rule %d in %q: confirmation_probe %q requires confirmation_terms", i, path, r.ConfirmationProbe)
+		}
+		if !usesTerms && len(r.ConfirmationTerms) > 0 {
+			return nil, fmt.Errorf("evidence: rule %d in %q: confirmation_terms is only used by confirmation_probe evidence_quote_contains_any, not %q", i, path, r.ConfirmationProbe)
+		}
+		for _, term := range r.ConfirmationTerms {
+			if strings.TrimSpace(term) == "" {
+				return nil, fmt.Errorf("evidence: rule %d in %q: empty confirmation_terms entry", i, path)
+			}
 		}
 		if r.ConfirmationProbe != "" {
 			cprobe, ok := confirmationRegistry[r.ConfirmationProbe]
@@ -305,6 +322,7 @@ func Evaluate[T any](ctx context.Context, a auditor, schema *ToolSchema[T], item
 				ConfirmationProbe:     r.ConfirmationProbe,
 				ConfirmationOperator:  r.ConfirmationOperator,
 				ConfirmationThreshold: r.ConfirmationThreshold,
+				ConfirmationTerms:     r.ConfirmationTerms,
 			})
 			break // first matching rule per item wins
 		}

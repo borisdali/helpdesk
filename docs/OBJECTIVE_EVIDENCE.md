@@ -106,15 +106,16 @@ can probe — `internal/evidence/confirm.go`'s `HopOutcome` (the Gateway's parse
 a hop: its `DiagnosticReport`, raw response text and whether a signal line was present
 at all) plays the same role a tool's typed result plays on the probe side.
 
-Three confirmation probes ship today:
+Four confirmation probes ship today:
 
 | Probe | Kind | What it checks |
 |---|---|---|
 | `evidence_quote_contains_value` (default) | bool | Does the primary hypothesis's required verbatim `EVIDENCE` quote contain a string form of the signal's real fired value? |
+| `evidence_quote_contains_any` | bool | Does that same `EVIDENCE` quote contain any of the rule's `confirmation_terms`? For a derived probe, whose fired value (a computed `true`) never appears in the tool output a model quotes verbatim. The terms name raw data only a problem state has: `broken`, `is not in the repo`, `backup_stale:true`, a pgBackRest `[...Error]`. The fired value itself doesn't count, since a bare `true` also matches healthy fields. Whitespace, quotes and `=`/`:` are normalized, so `backup_stale:true` matches `"backup_stale": true`. `confirmation_terms` is required with this probe and rejected with any other. |
 | `resource_named_in_quote` | bool | Does the response mention the same resource (Pod name, replication slot) the evidence is about, anywhere in its text? Used for bool-kind signals where quoting a bare `"true"` is unnatural. |
 | `primary_confidence` | numeric | The primary hypothesis's own self-reported confidence — needs an explicit threshold, no universal default. |
 
-A `Rule` can declare `confirmation_probe`/`confirmation_operator`/`confirmation_threshold`
+A `Rule` can declare `confirmation_probe`/`confirmation_operator`/`confirmation_threshold`/`confirmation_terms`
 to opt into a non-default probe; these are validated at `LoadRules` time exactly like the
 signal-firing `probe`/`operator`/`threshold` fields are. The confirmation rule travels
 with the fired event itself (agent → gateway, plain JSON), so the Gateway needs no file
@@ -215,8 +216,8 @@ shares.
 
 | Tool | Signal | Confirmation |
 |---|---|---|
-| `get_pgbackrest_status` | `pgbackrest_wal_chain_broken` | `evidence_quote_contains_value` |
-| `get_pgbackrest_status` | `pgbackrest_backup_unhealthy` | `evidence_quote_contains_value` |
+| `get_pgbackrest_status` | `pgbackrest_wal_chain_broken` | `evidence_quote_contains_any` |
+| `get_pgbackrest_status` | `pgbackrest_backup_unhealthy` | `evidence_quote_contains_any` |
 
 `pgbackrest_wal_chain_broken` (v0.32) fires when the WAL-continuity check finds the latest
 backup can't be restored to the end of the archive: a missing segment, or a backup off the

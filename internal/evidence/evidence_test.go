@@ -587,3 +587,52 @@ func TestEvaluate_PopulatesValueAndConfirmationFields(t *testing.T) {
 		t.Errorf("ConfirmationProbe = %q, want empty (rule declared none)", ev.ConfirmationProbe)
 	}
 }
+
+func TestLoadRules_ConfirmationTerms(t *testing.T) {
+	cases := []struct {
+		name    string
+		extra   string
+		wantErr bool
+	}{
+		{"contains_any with terms", "  confirmation_probe: evidence_quote_contains_any\n  confirmation_terms: [\"broken\"]\n", false},
+		{"contains_any without terms", "  confirmation_probe: evidence_quote_contains_any\n", true},
+		{"contains_any with a blank term", "  confirmation_probe: evidence_quote_contains_any\n  confirmation_terms: [\"broken\", \" \"]\n", true},
+		{"terms with another probe", "  confirmation_probe: resource_named_in_quote\n  confirmation_terms: [\"broken\"]\n", true},
+		{"terms with the default probe", "  confirmation_terms: [\"broken\"]\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetRegistry(t)
+			testSchema().Register()
+			path := writeRulesFile(t, `
+- tool: test_tool
+  probe: oom_killed
+  operator: "=="
+  threshold: true
+  signal: oom_killed
+`+c.extra)
+			_, err := LoadRules(path)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("LoadRules err = %v, wantErr %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestEvaluate_CarriesConfirmationTerms(t *testing.T) {
+	resetRegistry(t)
+	schema := testSchema().Register()
+	rules := []Rule{{
+		Tool: "test_tool", Probe: "oom_killed", Operator: "==", Threshold: true,
+		Signal: "oom_killed", ConfirmationProbe: "evidence_quote_contains_any",
+		ConfirmationTerms: []string{"OOMKilled", "exit code 137"},
+	}}
+	fa := &fakeAuditor{}
+	Evaluate(context.Background(), fa, schema, []testItem{{Name: "pod-h", OOM: true}}, rules)
+	if len(fa.recorded) != 1 {
+		t.Fatalf("got %d recorded events, want 1", len(fa.recorded))
+	}
+	if got := fa.recorded[0].ConfirmationTerms; len(got) != 2 || got[0] != "OOMKilled" || got[1] != "exit code 137" {
+		t.Errorf("ConfirmationTerms = %v, want the rule's terms", got)
+	}
+}

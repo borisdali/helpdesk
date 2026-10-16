@@ -24,7 +24,18 @@
 # "unverified" (the check couldn't run). This gate makes a human look at the
 # finding; it is not what stops a restore — restore_from_backup itself
 # refuses whenever WAL continuity isn't "continuous", whatever any model or
-# gate concludes. The confirmation probe matches backup_unhealthy's.
+# gate concludes.
+#
+# confirmation_probe is evidence_quote_contains_any, not ..._value: the fired
+# value is a derived true that no verbatim quote of the tool output contains.
+# The terms are the raw wal_continuity data behind it: status "broken", or
+# a phrase only a broken detail contains (walcheck.go). Field names like
+# consistency_reachable are left out on purpose: a healthy result's quote
+# has them too ("consistency_reachable: true"), and a misread like that
+# must not confirm. Found live
+# 2026-10-16: make faulttest-gateway-pgbackrest quoted
+# "wal_continuity.status='broken'; consistency_reachable=false; ..." exactly,
+# and the signal still came back unconfirmed.
 #
 # Listed FIRST on purpose: evidence.Evaluate records only the first matching
 # rule per tool result, and a broken chain is the more severe and more
@@ -36,7 +47,8 @@
   threshold: true
   signal: pgbackrest_wal_chain_broken
   detail: "pgBackRest WAL chain from the latest backup is broken — stanza: %s"
-  confirmation_probe: evidence_quote_contains_value
+  confirmation_probe: evidence_quote_contains_any
+  confirmation_terms: ["broken", "is missing", "not in the repo", "does not descend from"]
 
 # backup_unhealthy (v0.30 Part C): true when pgBackRest's own stanza status
 # is non-ok, the most recent backup is older than the requested/default
@@ -62,10 +74,24 @@
 # for the actual fired value ("true") rather than an incidental resource
 # name — tighter, though still not a perfect semantic-engagement check; see
 # project memory for the fuller writeup if this needs revisiting again.
+#
+# Then widened to evidence_quote_contains_any (2026-10-16): "true" is only in
+# the stale sub-case's quote (backup_stale: true). A non-ok stanza is quoted
+# as its error message — the repo-unreadable run quoted
+# repo_status_message "...[13] Permission denied" exactly and came back
+# unconfirmed. The terms are values only a problem state has, including
+# "backup_stale:true" for the stale case (matched however it's formatted;
+# see normalizeQuote in internal/evidence/confirm.go). Field
+# names (status_code, status_message) are left out on purpose: a healthy
+# quote has them too ("status_code: 0", "status_message: ok"), and a model
+# that quotes only those on a stale backup has missed the staleness. Same
+# reason for "error]" rather than "error": it matches pgBackRest's own error
+# codes ("[PathOpenError]"), not the last_backup_error field name.
 - tool: get_pgbackrest_status
   probe: backup_unhealthy
   operator: "=="
   threshold: true
   signal: pgbackrest_backup_unhealthy
   detail: "pgBackRest backup unhealthy — most recent backup: %s"
-  confirmation_probe: evidence_quote_contains_value
+  confirmation_probe: evidence_quote_contains_any
+  confirmation_terms: ["backup_stale:true", "error]", "permission denied", "unable to", "no valid backup", "missing stanza", "invalid"]

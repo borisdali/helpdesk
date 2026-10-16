@@ -432,6 +432,11 @@ type ObjectiveEvidence struct {
 	ConfirmationProbe     string `json:"confirmation_probe,omitempty"`
 	ConfirmationOperator  string `json:"confirmation_operator,omitempty"`
 	ConfirmationThreshold any    `json:"confirmation_threshold,omitempty"`
+	// ConfirmationTerms are the strings evidence_quote_contains_any looks for
+	// in the EVIDENCE quote — the raw tool-output fields/values a derived
+	// probe is computed from. Carried through for the same reason as the
+	// three fields above.
+	ConfirmationTerms []string `json:"confirmation_terms,omitempty"`
 }
 
 // RollbackExecution is set on rollback_initiated, rollback_executed, and

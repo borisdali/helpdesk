@@ -179,3 +179,40 @@ func TestValueStrings(t *testing.T) {
 		t.Errorf("valueStrings(%q) = %v, want passthrough", "FailedScheduling", got)
 	}
 }
+
+func TestNormalizeQuote(t *testing.T) {
+	for _, q := range []string{`backup_stale: true`, `backup_stale=true`, `"backup_stale":true`, `\"backup_stale\": TRUE`} {
+		if got := normalizeQuote(q); got != "backup_stale:true" {
+			t.Errorf("normalizeQuote(%q) = %q, want backup_stale:true", q, got)
+		}
+	}
+}
+
+func TestEvidenceQuoteContainsAny(t *testing.T) {
+	ev := audit.ObjectiveEvidence{Value: true, ConfirmationProbe: "evidence_quote_contains_any",
+		ConfirmationTerms: []string{"broken", "not in the repo"}}
+	cases := []struct {
+		name string
+		h    HopOutcome
+		want bool
+	}{
+		{"term in quote, case-insensitive", HopOutcome{Report: reportWithPrimary(1, "wal_continuity.status='BROKEN'")}, true},
+		{"second term", HopOutcome{Report: reportWithPrimary(1, "the WAL backup X needs is not in the repo")}, true},
+		{"fired value alone does not count", HopOutcome{Report: reportWithPrimary(1, "consistency_reachable: true")}, false},
+		{"formatting normalized", HopOutcome{Report: reportWithPrimary(1, "detail=\"... is NOT in\nthe repo\"")}, true},
+		{"no term, no value", HopOutcome{Report: reportWithPrimary(1, "wal_continuity.status: continuous")}, false},
+		{"term only outside the EVIDENCE quote", HopOutcome{Report: reportWithPrimary(1, "status_code: 0"), RawText: "the chain is broken"}, false},
+		{"term only in a non-primary hypothesis", HopOutcome{Report: &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+			{IsPrimary: false, Evidence: "broken"}, {IsPrimary: true, Evidence: "status_code: 0"}}}}, false},
+		{"no report", HopOutcome{RawText: "broken"}, false},
+	}
+	for _, c := range cases {
+		got, err := Confirmed(c.h, ev)
+		if err != nil {
+			t.Fatalf("%s: Confirmed: %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: Confirmed = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
