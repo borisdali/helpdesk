@@ -63,9 +63,9 @@ func (r *Runner) Run(ctx context.Context, f Failure) testutil.AgentResponse {
 	}
 
 	prompt := ResolvePrompt(f.Prompt, r.cfg, f)
-	agentURL := r.agentURL(f.Category)
+	agentURL := AgentURLFor(r.cfg, f)
 	if agentURL == "" {
-		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL configured for category %q", f.Category)}
+		return testutil.AgentResponse{Error: fmt.Errorf("no agent URL configured for %s", AgentRouteLabel(f))}
 	}
 
 	agentConn := ResolvedAgentConnStr(r.cfg, f)
@@ -325,23 +325,51 @@ func (r *Runner) isGateway(ctx context.Context, url string) bool {
 	return result
 }
 
-// agentURL returns the configured agent URL for the given fault category.
-func (r *Runner) agentURL(category string) string {
-	switch category {
-	case "database":
-		return r.cfg.DBAgentURL
-	case "kubernetes":
-		return r.cfg.K8sAgentURL
-	case "host":
-		return r.cfg.SysadminAgentURL
-	case "compound":
-		if r.cfg.OrchestratorURL != "" {
-			return r.cfg.OrchestratorURL
+// DirectAgents lists the values Failure.DirectAgent accepts.
+var DirectAgents = map[string]bool{"database": true, "k8s": true, "sysadmin": true}
+
+// AgentURLFor returns the agent URL a direct (non-gateway) run sends f's
+// prompt to: f.DirectAgent's when set, otherwise its category's. An unknown
+// DirectAgent value returns "" rather than falling back to the category, so
+// a typo skips/fails the fault loudly instead of quietly asking an agent
+// that lacks the tools.
+func AgentURLFor(cfg *HarnessConfig, f Failure) string {
+	if f.DirectAgent != "" {
+		switch f.DirectAgent {
+		case "database":
+			return cfg.DBAgentURL
+		case "k8s":
+			return cfg.K8sAgentURL
+		case "sysadmin":
+			return cfg.SysadminAgentURL
+		default:
+			return ""
 		}
-		return r.cfg.DBAgentURL
+	}
+	switch f.Category {
+	case "database":
+		return cfg.DBAgentURL
+	case "kubernetes":
+		return cfg.K8sAgentURL
+	case "host":
+		return cfg.SysadminAgentURL
+	case "compound":
+		if cfg.OrchestratorURL != "" {
+			return cfg.OrchestratorURL
+		}
+		return cfg.DBAgentURL
 	default:
 		return ""
 	}
+}
+
+// AgentRouteLabel describes what AgentURLFor routed f by, for error and
+// skip messages.
+func AgentRouteLabel(f Failure) string {
+	if f.DirectAgent != "" {
+		return fmt.Sprintf("direct_agent %q", f.DirectAgent)
+	}
+	return fmt.Sprintf("category %q", f.Category)
 }
 
 // categoryToGatewayAgent maps a fault category to the gateway's agent name.

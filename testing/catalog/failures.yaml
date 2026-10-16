@@ -466,6 +466,11 @@ failures:
     # against a plain postgres container with no pgBackRest installed at
     # all, failing outright rather than skipping cleanly.
     agent_conn_override: pgbackrest-db
+    # Only the sysadmin agent has get_pgbackrest_status, and
+    # pbs_pgbackrest_health_triage runs on it. A direct (non-gateway) run
+    # would otherwise follow the category to the database agent, which can
+    # only guess from SQL; found 2026-10-16, see Failure.DirectAgent.
+    direct_agent: sysadmin
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml), not the plain
@@ -527,8 +532,10 @@ failures:
       wal_continuity check, the pgbackrest_wal_chain_broken signal and
       pbs_pgbackrest_health_triage's broken-chain ending, none of which the
       backup-age check (backup_stale) can see.
-    # Same dedicated pgBackRest target as db-pgbackrest-repo-unreadable.
+    # Same dedicated pgBackRest target, and the same agent, as
+    # db-pgbackrest-repo-unreadable.
     agent_conn_override: pgbackrest-db
+    direct_agent: sysadmin
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml) with an initial backup
@@ -606,6 +613,12 @@ failures:
     # across every database-category fault; this needs its own container
     # with a real backup already taken).
     agent_conn_override: pgbackrest-db
+    # pbs_db_data_loss_triage starts on the database agent, but the evidence
+    # (pg_control missing) is only in the host logs it escalates to the
+    # sysadmin agent for. A direct run has no escalation, so it asks sysadmin
+    # outright, as host-pg-crash does. Asked the database agent, it scored
+    # 70% and 20% on two runs, 2026-10-16, depending on wording alone.
+    direct_agent: sysadmin
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml) with an initial

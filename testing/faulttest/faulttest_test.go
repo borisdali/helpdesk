@@ -141,24 +141,6 @@ func findTestingDir() string {
 	return "testing"
 }
 
-// agentURL returns the appropriate agent URL for a failure category.
-func agentURL(cfg *faultlib.HarnessConfig, category string) string {
-	switch category {
-	case "database":
-		return cfg.DBAgentURL
-	case "kubernetes":
-		return cfg.K8sAgentURL
-	case "host":
-		return cfg.SysadminAgentURL
-	case "compound":
-		if cfg.OrchestratorURL != "" {
-			return cfg.OrchestratorURL
-		}
-		return cfg.DBAgentURL
-	default:
-		return ""
-	}
-}
 
 // TestMain validates prerequisites before running tests.
 func TestMain(m *testing.M) {
@@ -210,9 +192,9 @@ func TestFaultInjection(t *testing.T) {
 		ok := t.Run(f.ID, func(t *testing.T) {
 			defer func() { wasSkipped = t.Skipped() }()
 			// Check if we have the right agent for this failure.
-			url := agentURL(cfg, f.Category)
+			url := faultlib.AgentURLFor(cfg, f)
 			if url == "" && (!cfg.ViaGateway || cfg.GatewayURL == "") {
-				t.Skipf("No agent configured for category %q", f.Category)
+				t.Skipf("No agent configured for %s", faultlib.AgentRouteLabel(f))
 			}
 
 			// When routing via gateway, skip the direct-agent reachability check.

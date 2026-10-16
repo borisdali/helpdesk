@@ -1264,6 +1264,10 @@ func cmdValidate(args []string) {
 				errs = append(errs, "missing inject.type")
 			}
 
+			if f.DirectAgent != "" && !faultlib.DirectAgents[f.DirectAgent] {
+				errs = append(errs, fmt.Sprintf("direct_agent %q is not one of database, k8s, sysadmin", f.DirectAgent))
+			}
+
 			// Known inject type.
 			if f.Inject.Type != "" && !knownInjectTypes[f.Inject.Type] {
 				errs = append(errs, fmt.Sprintf("inject.type %q is not a known type", f.Inject.Type))

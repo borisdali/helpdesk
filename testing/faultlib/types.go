@@ -54,6 +54,17 @@ type Failure struct {
 	// leave this empty and are unaffected.
 	AgentConnOverride string `yaml:"agent_conn_override,omitempty"`
 
+	// DirectAgent names the agent a direct (non-gateway) run sends this
+	// fault's prompt to — "database", "k8s" or "sysadmin" — instead of the
+	// one its Category maps to. Gateway runs ignore it: there the diagnosis
+	// playbook picks the agent. Exists because the pgBackRest faults are
+	// database-category (a DB target, a connection string) but only the
+	// sysadmin agent has get_pgbackrest_status; found 2026-10-16 when `make
+	// faulttest` sent db-pgbackrest-wal-gap to the database agent, which
+	// had no way to see the WAL chain and answered "ready for restore". See
+	// AgentURLFor.
+	DirectAgent string `yaml:"direct_agent,omitempty"`
+
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
