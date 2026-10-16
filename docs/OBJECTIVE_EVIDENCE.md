@@ -126,6 +126,13 @@ agent that posted the event) is treated as **unconfirmed** — fails toward the 
 conservative, pre-existing gate behavior, never toward silently trusting a rule the
 Gateway doesn't recognize.
 
+`evidence_quote_contains_any` needs the agent, auditd **and** the Gateway on a version that
+knows `confirmation_terms`. The event reaches the Gateway through auditd, and auditd
+stores each event re-encoded from its own `Event` struct, so an older auditd silently
+drops the terms. The signal then comes back unconfirmed: the conservative direction again,
+but a correctly quoted signal will gate until auditd is upgraded too. Found live
+2026-10-16, when restarting only the agent and the Gateway wasn't enough.
+
 ## 5. Gateway wiring: gate, warn or stay silent
 
 `cmd/gateway/playbooks.go`'s `objectiveEvidenceSignals(events, outcome)` partitions every
