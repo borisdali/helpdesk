@@ -8113,6 +8113,33 @@ func TestCheckEvidenceProvenance_ElidedAndDottedQuotes_RealChain(t *testing.T) {
 	}
 }
 
+// A comma-joined compound quote leaves ", key=" fragments after the split at
+// its inner quotes. Found live 2026-10-17 on the VM's broken-chain check
+// (plr_e3a0dd6d): both fragments of a real quote were flagged.
+func TestCheckEvidenceProvenance_CommaJoinedQuote_RealVMChain(t *testing.T) {
+	result := `{"stanza":"main","status_code":0,"backup_stale":false,` +
+		`"wal_continuity":{"status":"broken","consistency_reachable":false,"detail":"the WAL backup 20261017-152429F needs (0000001B000000000000000C to 0000001B000000000000000C) is not in the repo: PostgreSQL could not start from this backup"}}`
+	srv := serveFakeToolEvents(t, []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_pgbackrest_status", Result: result}},
+	})
+	cases := []struct {
+		name, quote string
+		wantFlagged bool
+	}{
+		{"real VM quote",
+			`status=\"broken\", detail=\"the WAL backup 20261017-152429F needs (0000001B000000000000000C to 0000001B000000000000000C) is not in the repo: PostgreSQL could not start from this backup\", consistency_reachable=false`, false},
+		{"wrong value after a comma", `status=\"broken\", consistency_reachable=true`, true},
+		{"invented field after a comma", `status=\"broken\", stanza_deleted=true`, true},
+	}
+	for _, c := range cases {
+		report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{IsPrimary: true, Evidence: c.quote}}}
+		primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+		if got := len(primary) > 0; got != c.wantFlagged {
+			t.Errorf("%s: flagged = %v (%v), want %v", c.name, got, primary, c.wantFlagged)
+		}
+	}
+}
+
 func TestFlattenJSONEvidence(t *testing.T) {
 	got := flattenJSONEvidence(`{"b":{"c":"x","d":[1,2.5]},"a":true,"n":null}`)
 	want := "a: true\nb.c: x\nb.d: 1\nb.d: 2.5\nn: null\n"

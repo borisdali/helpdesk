@@ -4510,7 +4510,15 @@ func appendEvidenceProvenance(extra map[string]any, primary, secondary []string)
 // normalization only, no unit conversion (MB vs bytes) or tolerance windows,
 // since either of those would require a judgment call this check is
 // deliberately not in the business of making.
+//
+// Commas at either end of quote are dropped first: they're the leftovers of a
+// comma-joined compound quote split at its inner quotes. Found live
+// 2026-10-17 on the VM's db-pgbackrest-wal-gap check: `status=\"broken\",
+// detail=\"...\", consistency_reachable=false` split into ", detail=" and
+// ", consistency_reachable=false", both flagged though both are real. Edge
+// punctuation only, so no word or value is changed.
 func evidenceQuoteVerified(quote string, outputs []string) bool {
+	quote = strings.Trim(quote, ", \t\n")
 	nq := normalizeEvidenceText(quote)
 	if nq == "" || isEvidenceGlueOnly(quote) {
 		return true
