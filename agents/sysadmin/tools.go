@@ -1933,6 +1933,11 @@ type RestoreFromBackupArgs struct {
 // RestoreFromBackupResult is the result of restore_from_backup.
 type RestoreFromBackupResult struct {
 	Output string `json:"output"`
+	// Prediction is where recovery from the restored backup should end,
+	// from the WAL-continuity check run just before the restore. Recovery
+	// only runs once the instance is restarted; verify_restore_recovery then
+	// compares this with what PostgreSQL actually reached.
+	Prediction *RestorePrediction `json:"prediction,omitempty"`
 }
 
 // restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
@@ -1982,12 +1987,15 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 	}
 	// checkWAL runs after policy and pg_isready, immediately before the
 	// restore: the WAL-continuity check for the backup pgbackrest restore is
-	// about to use (the latest one).
+	// about to use (the latest one). Its result is also the prediction the
+	// restore is checked against afterwards.
+	var walChecked *WALContinuity
 	checkWAL := func() error {
 		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target, Stanza: stanza}, true)
 		if err != nil {
 			return fmt.Errorf("restore_from_backup: refusing to restore — could not read the backup state to check WAL continuity: %w", err)
 		}
+		walChecked = status.WALContinuity
 		return walRestoreRefusal(status)
 	}
 
@@ -2045,7 +2053,11 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 	if err != nil {
 		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
 	}
-	return RestoreFromBackupResult{Output: out}, nil
+	result := RestoreFromBackupResult{Output: out, Prediction: restorePredictionFrom(walChecked, time.Now())}
+	if result.Prediction != nil {
+		saveRestorePrediction(args.Target, *result.Prediction)
+	}
+	return result, nil
 }
 
 // walRestoreRefusal returns the error restore_from_backup refuses with when
@@ -2082,11 +2094,19 @@ func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (R
 		if err != nil {
 			errMsg = err.Error()
 		}
+		// The structured result, so the prediction is in the audit trail next
+		// to the verify_restore_recovery call that checks it.
+		output := result.Output
+		if result.Prediction != nil {
+			if b, err := json.Marshal(result); err == nil {
+				output = string(b)
+			}
+		}
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "restore_from_backup",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
 		}, audit.ToolResult{
-			Output: result.Output,
+			Output: output,
 			Error:  errMsg,
 		}, duration)
 	}
@@ -2223,6 +2243,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := restoreFromBackupImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("verify_restore_recovery", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[VerifyRestoreRecoveryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := verifyRestoreRecoveryImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

@@ -855,7 +855,7 @@ func TestGetPgBackRestStatusTool_StaleBackup_RecordsObjectiveEvidence(t *testing
 // pgbackrest_wal_chain_broken, alongside the WAL_continuity result itself.
 func TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence(t *testing.T) {
 	orig := pgbackrestEvidenceRules
-	pgbackrestEvidenceRules = loadSysadminEvidenceRules("objective_evidence.yaml")
+	pgbackrestEvidenceRules, _ = loadSysadminEvidenceRules("objective_evidence.yaml")
 	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
 	store, cleanup := withRealToolAuditor(t)
 	defer cleanup()
@@ -896,7 +896,7 @@ func TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence(t *testing.T
 // An unverified check is not evidence of a broken chain: no WAL signal.
 func TestGetPgBackRestStatusTool_UnverifiedWAL_NoWALEvidence(t *testing.T) {
 	orig := pgbackrestEvidenceRules
-	pgbackrestEvidenceRules = loadSysadminEvidenceRules("objective_evidence.yaml")
+	pgbackrestEvidenceRules, _ = loadSysadminEvidenceRules("objective_evidence.yaml")
 	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
 	store, cleanup := withRealToolAuditor(t)
 	defer cleanup()

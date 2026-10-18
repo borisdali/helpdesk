@@ -56,7 +56,7 @@ func main() {
 	// comment for the live incident (2026-09-07) this convention exists to
 	// prevent from recurring.
 	if rulesPath := os.Getenv("HELPDESK_SYSADMIN_EVIDENCE_RULES"); rulesPath != "" {
-		pgbackrestEvidenceRules = loadSysadminEvidenceRules(rulesPath)
+		pgbackrestEvidenceRules, restoreVerifyEvidenceRules = loadSysadminEvidenceRules(rulesPath)
 	} else {
 		slog.Warn("HELPDESK_SYSADMIN_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_pgbackrest_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
@@ -221,8 +221,16 @@ func createTools() ([]tool.Tool, error) {
 
 	restoreFromBackupToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "restore_from_backup",
-		Description: "Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance.",
+		Description: "Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance. On success it records where recovery should end (prediction: the last archived WAL segment and the new timeline); after restarting the instance, call verify_restore_recovery to confirm where recovery actually ended.",
 	}, restoreFromBackupTool)
+	if err != nil {
+		return nil, err
+	}
+
+	verifyRestoreRecoveryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "verify_restore_recovery",
+		Description: "After restore_from_backup and the restart, check where PostgreSQL's recovery actually ended against where restore_from_backup predicted it would (the last WAL segment restored from the archive, and the new timeline). Reads PostgreSQL's own recovery log lines. status: verified (as predicted), mismatch (stopped early, went past, or a different timeline — report it), not_found (no completed recovery in the log yet: the instance may not be restarted, or recovery failed before promotion), unverified (no prediction recorded for this target, or nothing restored from the archive). Also returns the exact LSN redo ended at. Read-only.",
+	}, verifyRestoreRecoveryTool)
 	if err != nil {
 		return nil, err
 	}
@@ -238,21 +246,23 @@ func createTools() ([]tool.Tool, error) {
 		getPgBackRestStatusToolDef,
 		runPgBackRestBackupToolDef,
 		restoreFromBackupToolDef,
+		verifyRestoreRecoveryToolDef,
 	}, nil
 }
 
 // loadSysadminEvidenceRules loads agents/sysadmin/objective_evidence.yaml-shaped
-// rules from path. Mirrors agents/database/main.go's loadDBEvidenceRules, sized
-// down to this agent's one rule set so far (get_pgbackrest_status) — extend the
-// same way (one more named return + one more rulesByTool[...] lookup) if a
-// second sysadmin tool ever needs its own objective-evidence probe.
-func loadSysadminEvidenceRules(path string) (pgbackrestRules []evidence.Rule) {
+// rules from path. Mirrors agents/database/main.go's loadDBEvidenceRules: one
+// named return per sysadmin tool with its own objective-evidence probe.
+func loadSysadminEvidenceRules(path string) (pgbackrestRules, restoreVerifyRules []evidence.Rule) {
 	rulesByTool, err := evidence.LoadRules(path)
 	if err != nil {
-		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pgbackrest_status until this is fixed", "path", path, "err", err)
-		return nil
+		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pgbackrest_status or verify_restore_recovery until this is fixed", "path", path, "err", err)
+		return nil, nil
 	}
 	pgbackrestRules = rulesByTool["get_pgbackrest_status"]
-	slog.Info("objective_evidence rules loaded", "path", path, "get_pgbackrest_status_rules", len(pgbackrestRules))
-	return pgbackrestRules
+	restoreVerifyRules = rulesByTool["verify_restore_recovery"]
+	slog.Info("objective_evidence rules loaded", "path", path,
+		"get_pgbackrest_status_rules", len(pgbackrestRules),
+		"verify_restore_recovery_rules", len(restoreVerifyRules))
+	return pgbackrestRules, restoreVerifyRules
 }

@@ -132,8 +132,14 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	// CommandRunner. Must refuse gracefully if postgres is somehow still
 	// reachable (it shouldn't be, given the crash above) and otherwise
 	// perform the actual pgbackrest restore against the real container.
-	if _, err := restoreFromBackupImpl(ctx, RestoreFromBackupArgs{Target: "pgbackrest-db", Stanza: "main"}); err != nil {
+	restored, err := restoreFromBackupImpl(ctx, RestoreFromBackupArgs{Target: "pgbackrest-db", Stanza: "main"})
+	if err != nil {
 		t.Fatalf("restoreFromBackupImpl failed against a real crashed container: %v", err)
+	}
+	if p := restored.Prediction; p == nil || p.RecoverToWAL != before.WALContinuity.ArchiveEndWAL ||
+		p.ExpectedTimeline != before.WALContinuity.LatestTimeline+1 {
+		t.Errorf("restore prediction = %+v, want recover_to_wal %s and timeline %d from the pre-restore check",
+			restored.Prediction, before.WALContinuity.ArchiveEndWAL, before.WALContinuity.LatestTimeline+1)
 	}
 
 	// Bring postgres back up against the now-repaired data directory —
@@ -153,6 +159,18 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	}
 	if want := fmt.Sprintf("selected new timeline ID: %d", wal.LatestTimeline+1); !strings.Contains(log, want) {
 		t.Errorf("recovery log has no %q: the WAL check's latest timeline (%d) isn't the one PostgreSQL recovered along", want, wal.LatestTimeline)
+	}
+
+	// verify_restore_recovery makes the same comparison from the real
+	// container's own log, the way the remediation playbook calls it.
+	verified, err := verifyRestoreRecoveryImpl(ctx, VerifyRestoreRecoveryArgs{Target: "pgbackrest-db"})
+	if err != nil {
+		t.Fatalf("verifyRestoreRecoveryImpl: %v", err)
+	}
+	if verified.Status != RestoreVerified || verified.ReachedWAL != wal.ArchiveEndWAL ||
+		verified.NewTimeline != wal.LatestTimeline+1 || verified.RedoDoneLSN == "" {
+		t.Errorf("verify_restore_recovery = %+v, want verified at %s on timeline %d with a redo-done LSN",
+			verified, wal.ArchiveEndWAL, wal.LatestTimeline+1)
 	}
 
 	// Verify via a real connection, not just "the tool returned no error" —

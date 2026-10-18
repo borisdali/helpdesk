@@ -439,8 +439,18 @@ Three things use it:
   matching rule per result is recorded and a broken chain is the more severe finding.
 - **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
   a human escalation and only transitions to the restore when the chain is `continuous`.
-  `pbs_pgbackrest_restore_remediate` (v1.4) has a matching precondition and reports how far the
-  archive reached.
+  `pbs_pgbackrest_restore_remediate` (v1.5) has a matching precondition, and reports the recovery
+  point PostgreSQL actually reached (below).
+- **Checking the restore afterwards.** The check above is a prediction. `restore_from_backup`
+  records it on success (`prediction`: the last archived segment and `latest_timeline + 1`), and
+  after the restart `verify_restore_recovery` reads PostgreSQL's own recovery lines (the last
+  segment restored before `selected new timeline ID`, `redo done at <LSN>`) and compares:
+  `verified`, `mismatch` (signal `restore_recovery_mismatch`), `not_found` (no completed recovery
+  in the log yet) or `unverified` (no prediction recorded, e.g. after an agent restart). The
+  prediction never comes from the model. It reads container logs first, then the PostgreSQL log
+  file: on a Debian/Ubuntu VM the recovery lines are only in `/var/log/postgresql/`, not the
+  journal. First live baseline (real Ubuntu VM, 2026-10-18): predicted `0000001B000000000000000C`
+  and timeline 30; PostgreSQL restored `…0C`, `redo done at 0/C000138`, selected timeline 30.
 
 **Verified, not just claimed**: the unit tests run against real output captured from the
 Docker fixture's repo, an archive that had been through 29 timeline switches from earlier restore
@@ -459,7 +469,8 @@ later forked is lost WAL, not the archive simply ending one segment earlier. (Th
 recovery target past any WAL, so PostgreSQL stops instead of promoting and the shared archive
 gains no new timeline.) The real crash-and-restore test now also checks PostgreSQL's log against
 the check: the last segment restored is `archive_end_wal` and the new timeline is
-`latest_timeline + 1`.
+`latest_timeline + 1`, and that `verify_restore_recovery` reports `verified` from the container's
+real log.
 
 Fault: [`db-pgbackrest-wal-gap`](../testing/catalog/failures.yaml) hides the latest backup's own
 start segment on a healthy instance and expects the health triage to report the broken chain

@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.4"
+version: "1.5"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -100,13 +100,32 @@ guidance: |
   startup, which would mean the restore did not actually resolve the
   corruption.
 
+  Step 4b — Verify where recovery actually ended:
+  Call verify_restore_recovery with the same connection_string (target),
+  once the instance is up. restore_from_backup recorded where recovery
+  should end (the last archived WAL segment and the new timeline); this
+  reads where PostgreSQL's recovery really ended and compares them.
+  - status=verified: report its reached_wal, redo_done_lsn and
+    new_timeline as the recovery point.
+  - status=mismatch: the restore did NOT reach the predicted point. Quote
+    its detail in FINDINGS as an anomaly — data after reached_wal may be
+    missing even though the instance is up. Do not retry the restore.
+  - status=not_found: the recovery isn't in the log yet. If Step 4 just
+    confirmed the instance is up, call it once more; if it is still
+    not_found, report that the recovery point could not be confirmed.
+  - status=unverified: report its detail; the recovery point is
+    unconfirmed, not wrong.
+
   Step 5 — Report outcome:
   Emit FINDINGS with:
   - Whether the restore and restart both succeeded
   - The backup label/timestamp that was restored from (from Step 1's
-    last_backup_label/last_backup_time), and how far the archived WAL
-    reached (Step 1's wal_continuity.archive_end_wal/archive_end_time):
-    changes made after that time were never archived and are not restored
+    last_backup_label/last_backup_time), and the recovery point from Step
+    4b: when verified, the reached_wal/redo_done_lsn/new_timeline it read
+    from PostgreSQL's own log; otherwise Step 1's predicted
+    wal_continuity.archive_end_wal, labelled as predicted, not confirmed.
+    Either way, changes made after Step 1's archive_end_time were never
+    archived and are not restored
   - Container state and log evidence after restart (quote the actual log
     line, do not paraphrase)
   - Any anomalies (restart_container failed, instance crashed again after
@@ -127,5 +146,6 @@ escalation:
   - "restore_from_backup refuses because the instance is still accepting connections — the prior diagnosis may be wrong"
   - "restart_container/restart_service fails to bring the instance back up after a successful restore — deeper corruption than a single restore can fix"
   - "logs show a new PANIC/FATAL immediately after restart — escalate rather than retry"
+  - "verify_restore_recovery reports mismatch — recovery did not reach the predicted point; a human checks what is missing"
   - "any sign of replica/primary topology — this playbook does not rebuild replicas"
 target_hints: []

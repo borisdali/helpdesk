@@ -95,3 +95,20 @@
   detail: "pgBackRest backup unhealthy — most recent backup: %s"
   confirmation_probe: evidence_quote_contains_any
   confirmation_terms: ["backup_stale:true", "error]", "permission denied", "unable to", "no valid backup", "missing stanza", "invalid"]
+
+# recovery_mismatch (v0.32 item 9): true when verify_restore_recovery finds
+# PostgreSQL's recovery after a restore ended somewhere other than
+# restore_from_backup predicted — it stopped short of (or went past) the
+# predicted last segment, or promoted to a different timeline. not_found and
+# unverified don't fire it: the comparison couldn't be made, which the
+# playbook reports as such. Same confirmation reasoning as wal_chain_broken:
+# the terms are words only a mismatch result contains ("verified" results
+# have the same field names).
+- tool: verify_restore_recovery
+  probe: recovery_mismatch
+  operator: "=="
+  threshold: true
+  signal: restore_recovery_mismatch
+  detail: "PostgreSQL recovery after the restore did not end where predicted — target: %s"
+  confirmation_probe: evidence_quote_contains_any
+  confirmation_terms: ["mismatch", "stopped early", "went past the predicted end"]

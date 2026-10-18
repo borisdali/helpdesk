@@ -2,7 +2,7 @@
 
 # Sysadmin agent tools
 
-The `sysadmin` agent (`sysadmin_agent`) publishes 10 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
+The `sysadmin` agent (`sysadmin_agent`) publishes 11 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
 
 | Tool | Action class | Capabilities |
 |---|---|---|
@@ -16,6 +16,7 @@ The `sysadmin` agent (`sysadmin_agent`) publishes 10 tools to the [Tool Registry
 | [`restart_service`](#restart_service) | destructive | `process_restart` |
 | [`restore_from_backup`](#restore_from_backup) | destructive | `data_restore` |
 | [`run_pgbackrest_backup`](#run_pgbackrest_backup) | write | `backup_run` |
+| [`verify_restore_recovery`](#verify_restore_recovery) | read | `recovery_result` |
 
 ## `check_disk`
 
@@ -158,7 +159,7 @@ Restart a systemd service hosting the database (systemctl restart). Requires the
 
 ## `restore_from_backup`
 
-Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance.
+Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance. On success it records where recovery should end (prediction: the last archived WAL segment and the new timeline); after restarting the instance, call verify_restore_recovery to confirm where recovery actually ended.
 
 - **Action class:** destructive
 - **Capabilities:** `data_restore`
@@ -191,3 +192,16 @@ Take a fresh pgBackRest backup (default type=full). Requires operator approval (
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 | `type` | string | no | Backup type: full, diff, or incr. Default full — always valid regardless of backup history, unlike diff/incr which require a prior full backup to reference. |
+
+## `verify_restore_recovery`
+
+After restore_from_backup and the restart, check where PostgreSQL's recovery actually ended against where restore_from_backup predicted it would (the last WAL segment restored from the archive, and the new timeline). Reads PostgreSQL's own recovery log lines. status: verified (as predicted), mismatch (stopped early, went past, or a different timeline — report it), not_found (no completed recovery in the log yet: the instance may not be restarted, or recovery failed before promotion), unverified (no prediction recorded for this target, or nothing restored from the archive). Also returns the exact LSN redo ended at. Read-only.
+
+- **Action class:** read
+- **Capabilities:** `recovery_result`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `target` | string | yes | Server ID from infrastructure config — the same target restore_from_backup was called with. |

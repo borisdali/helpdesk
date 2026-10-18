@@ -2241,10 +2241,10 @@ func TestPlaybooks_PgBackRestPlaybooksAreWALAware(t *testing.T) {
 	}
 
 	for _, c := range []struct {
-		series, minVersion, rootCause string
+		series, minVersion, rootCause, guidanceTool string
 	}{
-		{"pbs_pgbackrest_health_triage", "1.2", "pgbackrest-wal-chain-broken"},
-		{"pbs_pgbackrest_restore_remediate", "1.4", ""},
+		{"pbs_pgbackrest_health_triage", "1.2", "pgbackrest-wal-chain-broken", ""},
+		{"pbs_pgbackrest_restore_remediate", "1.5", "", "verify_restore_recovery"},
 	} {
 		t.Run(c.series, func(t *testing.T) {
 			id := activeID(c.series)
@@ -2256,10 +2256,14 @@ func TestPlaybooks_PgBackRestPlaybooksAreWALAware(t *testing.T) {
 				t.Fatalf("PlaybookGet(%s): %v", c.series, err)
 			}
 			if v, _ := pb["version"].(string); !atLeast(v, c.minVersion) {
-				t.Errorf("active version = %q, want %s or later (the first that reads wal_continuity)", v, c.minVersion)
+				t.Errorf("active version = %q, want %s or later (the first with the guidance checked below)", v, c.minVersion)
 			}
-			if g, _ := pb["guidance"].(string); !strings.Contains(g, "wal_continuity") {
+			g, _ := pb["guidance"].(string)
+			if !strings.Contains(g, "wal_continuity") {
 				t.Error("guidance never mentions wal_continuity")
+			}
+			if c.guidanceTool != "" && !strings.Contains(g, c.guidanceTool) {
+				t.Errorf("guidance never mentions %s", c.guidanceTool)
 			}
 			if c.rootCause != "" {
 				rcc, _ := pb["root_cause_classes"].(map[string]any)

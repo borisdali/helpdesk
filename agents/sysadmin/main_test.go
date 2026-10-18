@@ -25,6 +25,7 @@ func TestMain(m *testing.M) {
 		panic("agents/sysadmin/objective_evidence.yaml failed to load — fix the file, don't skip this: " + err.Error())
 	}
 	pgbackrestEvidenceRules = rulesByTool["get_pgbackrest_status"]
+	restoreVerifyEvidenceRules = rulesByTool["verify_restore_recovery"]
 	os.Exit(m.Run())
 }
 
@@ -32,9 +33,12 @@ func TestMain(m *testing.M) {
 // duplicate of what TestMain already enforces by panicking on load failure
 // — see agents/database/main_test.go's identical test for the rationale.
 func TestObjectiveEvidenceYAML_Valid(t *testing.T) {
-	pgbackrestRules := loadSysadminEvidenceRules("objective_evidence.yaml")
+	pgbackrestRules, restoreVerifyRules := loadSysadminEvidenceRules("objective_evidence.yaml")
 	if len(pgbackrestRules) == 0 {
 		t.Error("expected at least one get_pgbackrest_status rule from the real shipped file")
+	}
+	if len(restoreVerifyRules) == 0 {
+		t.Error("expected a verify_restore_recovery rule from the real shipped file")
 	}
 }
 
@@ -73,7 +77,8 @@ func TestObjectiveEvidenceYAML_PgBackRestConfirmation(t *testing.T) {
 		{"pgbackrest_backup_unhealthy", "status ok and an empty error field", `status_message: ok; last_backup_error: ""`, false},
 	}
 	rules := map[string]evidence.Rule{}
-	for _, r := range loadSysadminEvidenceRules("objective_evidence.yaml") {
+	pgbackrestRules, _ := loadSysadminEvidenceRules("objective_evidence.yaml")
+	for _, r := range pgbackrestRules {
 		rules[r.Signal] = r
 	}
 	for _, c := range cases {
@@ -102,7 +107,8 @@ func TestObjectiveEvidenceYAML_PgBackRestConfirmation(t *testing.T) {
 // TestObjectiveEvidenceYAML_WALChainBroken_Shipped verifies the shipped rules
 // file activates the v0.32 WAL-continuity signal.
 func TestObjectiveEvidenceYAML_WALChainBroken_Shipped(t *testing.T) {
-	for _, r := range loadSysadminEvidenceRules("objective_evidence.yaml") {
+	pgbackrestRules, _ := loadSysadminEvidenceRules("objective_evidence.yaml")
+	for _, r := range pgbackrestRules {
 		if r.Signal == "pgbackrest_wal_chain_broken" {
 			if r.Probe != "wal_chain_broken" || r.Tool != "get_pgbackrest_status" {
 				t.Errorf("rule = %+v, want probe wal_chain_broken on get_pgbackrest_status", r)
