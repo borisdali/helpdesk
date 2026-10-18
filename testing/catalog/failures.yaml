@@ -659,8 +659,17 @@ failures:
       # pgbackrest restore outright ("[038]: unable to restore while
       # PostgreSQL is running") until removed — --force does NOT bypass
       # this, it means something else to pgBackRest.
+      #
+      # Skipped when postgres is already up: after a successful remediation
+      # the rm below would delete the LIVE postmaster.pid, defeating that
+      # same [038] guard, and restore over a running server (found 2026-10-17
+      # on the VM variant). pg_isready needs no -h here: client and server
+      # are the same build in the same image, so the socket dir matches.
       script_inline: |
         set -e
+        if docker exec helpdesk-test-pg-pgbackrest pg_isready -q; then
+          echo "postgres is up: nothing to repair"; exit 0
+        fi
         docker exec -u postgres helpdesk-test-pg-pgbackrest sh -c '
           PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
           rm -f "$PGDATA/postmaster.pid"
@@ -787,6 +796,17 @@ failures:
         # `systemctl restart`/`show`, not run-as=postgres, so wrapping in
         # `sudo -u postgres` would be rejected outright ("not allowed to
         # execute ... as postgres"), not merely prompt for a password.
+        #
+        # Skipped when the unit is already active: after a successful
+        # remediation the rm below would delete the LIVE postmaster.pid and
+        # restore over a running server (found 2026-10-17). Checks the unit,
+        # not pg_isready, because the socket directory differs by distro
+        # (/var/run/postgresql on Debian/Ubuntu, /run/postgresql + /tmp on RHEL
+        # PGDG, /tmp from source) while PG_UNIT is already this script's one
+        # per-distro setting. is-active needs no sudo.
+        if systemctl is-active --quiet "$PG_UNIT"; then
+          echo "$PG_UNIT is active: nothing to repair"; exit 0
+        fi
         PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
         rm -f "$PGDATA/postmaster.pid"
         pgbackrest --stanza="$STANZA" --delta restore
