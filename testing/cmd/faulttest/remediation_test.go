@@ -690,6 +690,66 @@ func TestWaitForChildRunComplete_GatePending_ForceApproves(t *testing.T) {
 	}
 }
 
+// TestWaitForChildRunComplete_UnknownWhileRunning_WaitsForGate is a
+// regression test for a race found live (2026-10-17, db-pgdata-corrupted-vm,
+// plr_c1901d11): a run reads "unknown" from its start until the gateway's
+// async completion write lands. Reading that as terminal skipped the hop's
+// gate_pending, so the restore never ran. Only "unknown" WITH completed_at
+// set is final.
+func TestWaitForChildRunComplete_UnknownWhileRunning_WaitsForGate(t *testing.T) {
+	var proceedCalls []string
+	outcomeCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/fleet/playbook-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("prior_run_id") == "plr_parent" {
+			json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{{"run_id": "plr_child"}}}) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"runs": []map[string]any{}}) //nolint:errcheck
+	})
+	mux.HandleFunc("GET /v1/fleet/playbook-runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		outcomeCalls++
+		run := map[string]any{"outcome": "unknown", "completed_at": "0001-01-01T00:00:00Z"}
+		switch {
+		case outcomeCalls == 2:
+			run = map[string]any{"outcome": "gate_pending", "completed_at": "2026-10-18T03:17:12Z"}
+		case outcomeCalls > 2:
+			run = map[string]any{"outcome": "resolved", "completed_at": "2026-10-18T03:18:00Z"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(run) //nolint:errcheck
+	})
+	mux.HandleFunc("POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation", func(w http.ResponseWriter, r *http.Request) {
+		proceedCalls = append(proceedCalls, r.PathValue("runID"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(faultlib.ApproveRunResponse{Status: "approved"}) //nolint:errcheck
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	r := &Remediator{
+		inner: faultlib.NewRemediator(&faultlib.HarnessConfig{GatewayURL: srv.URL}),
+		cfg:   &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL, ApprovalMode: "force"}},
+	}
+	r.waitForChildRunComplete(context.Background(), "plr_parent", 15*time.Second)
+	if len(proceedCalls) != 1 || proceedCalls[0] != "plr_child" {
+		t.Errorf("proceed-escalation calls = %v, want one for plr_child — the in-flight \"unknown\" was read as terminal", proceedCalls)
+	}
+}
+
+func TestFetchRunOutcome_UnknownCompletedIsFinal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"outcome": "unknown", "completed_at": "2026-10-18T03:17:12Z"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+	r := &Remediator{cfg: &HarnessConfig{HarnessConfig: faultlib.HarnessConfig{AuditURL: srv.URL}}}
+	if got := r.fetchRunOutcome(context.Background(), "plr_x"); got != "unknown" {
+		t.Errorf("outcome = %q, want unknown (a finished run with no parsed outcome)", got)
+	}
+}
+
 // TestWaitForChildRunComplete_GatePending_NotForceMode_DoesNotApprove proves
 // the fix above is scoped to force mode only — any other approval mode means
 // a human genuinely needs to see and resolve the second gate themselves,

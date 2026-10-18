@@ -309,9 +309,20 @@ func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
 	}
 	defer resp.Body.Close()
 	var result struct {
-		Outcome string `json:"outcome"`
+		Outcome     string    `json:"outcome"`
+		CompletedAt time.Time `json:"completed_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	// A run is recorded as "unknown" when it starts, and the gateway writes
+	// the real outcome from a goroutine after the hop's response has already
+	// returned. Without completed_at, that placeholder reads as terminal.
+	// Found live 2026-10-17 (db-pgdata-corrupted-vm, plr_c1901d11): the
+	// health-triage hop was read as "complete, outcome=unknown" 0.1s before
+	// its gate_pending landed, so its gate was never approved and the restore
+	// never ran. "unknown" with completed_at set is still a real, final outcome.
+	if result.Outcome == audit.OutcomeUnknown && result.CompletedAt.IsZero() {
 		return ""
 	}
 	return result.Outcome
