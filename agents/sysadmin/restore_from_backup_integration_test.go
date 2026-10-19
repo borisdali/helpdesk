@@ -181,6 +181,134 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	}
 }
 
+// fixturePSQL runs sql in the fixture's testdb as postgres and returns its
+// unaligned output.
+func fixturePSQL(t *testing.T, sql string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "exec", "-u", "postgres", restoreIntegrationContainer,
+		"psql", "-d", "testdb", "-Atc", sql).CombinedOutput()
+	if err != nil {
+		t.Fatalf("psql %q: %v: %s", sql, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL is the item 13 canary
+// test (run by hand 2026-10-19, before the fix: both rows lost, pg_wal
+// emptied by --delta restore) made permanent. With archiving broken, row A
+// is committed into a segment that completes and waits as .ready, row B into
+// the open segment; neither reaches the archive. After the crash and
+// restore_from_backup, both rows must be back, verify_restore_recovery must
+// confirm recovery replayed the tail as predicted, and the archive must be
+// continuous onto the new timeline: the second hazard the canary run found.
+func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
+	skipIfNoPgBackRestDocker(t)
+
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := infra.Load(filepath.Join(repoRoot, "testing", "testing.infra.json"))
+	if err != nil {
+		t.Fatalf("loading infra config: %v", err)
+	}
+	oldInfra := infraConfig
+	infraConfig = cfg
+	t.Cleanup(func() { infraConfig = oldInfra })
+	t.Cleanup(func() { restoreIntegrationTeardown(t) })
+	t.Cleanup(func() {
+		// Runs first: put archiving back and remove the test's leftovers if
+		// the server is up (if it isn't, the teardown restore brings back
+		// the backup's postgresql.auto.conf). SET, not RESET: the fixture's
+		// archive_command lives in postgresql.auto.conf itself, so RESET
+		// would turn archiving off (found running this test).
+		exec.Command("docker", "exec", "-u", "postgres", restoreIntegrationContainer, "psql", "-d", "testdb", "-c",
+			"ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'", "-c", "SELECT pg_reload_conf()",
+			"-c", "DROP TABLE IF EXISTS canary_wal_tail").Run() //nolint:errcheck
+		exec.Command("docker", "exec", "-u", "postgres", restoreIntegrationContainer, "sh", "-c",
+			"rm -rf /var/lib/postgresql/pg_wal.saved-*").Run() //nolint:errcheck
+	})
+	ctx := context.Background()
+
+	// A fresh backup, so the archive end and the restored
+	// postgresql.auto.conf (archiving on) are this test's own.
+	if out, err := exec.Command("docker", "exec", "-u", "postgres", restoreIntegrationContainer,
+		"pgbackrest", "--stanza=main", "--type=full", "backup").CombinedOutput(); err != nil {
+		t.Fatalf("fresh backup: %v: %s", err, out)
+	}
+	fixturePSQL(t, "ALTER SYSTEM SET archive_command = '/bin/false'")
+	fixturePSQL(t, "SELECT pg_reload_conf()")
+	fixturePSQL(t, "DROP TABLE IF EXISTS canary_wal_tail")
+	fixturePSQL(t, "CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)")
+	fixturePSQL(t, "INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')")
+	fixturePSQL(t, "SELECT pg_switch_wal()")
+	fixturePSQL(t, "INSERT INTO canary_wal_tail VALUES (2, 'B: open segment')")
+
+	before, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+	if err != nil || before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
+		t.Fatalf("precondition: WAL check before the crash = %+v, %v", before.WALContinuity, err)
+	}
+
+	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer,
+		"rm", "-f", "/var/lib/postgresql/data/global/pg_control"); err != nil {
+		t.Fatalf("corrupting pg_control: %v", err)
+	}
+	if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
+		t.Fatalf("docker restart (to trigger the crash): %v", err)
+	}
+	time.Sleep(5 * time.Second)
+
+	restored, err := restoreFromBackupImpl(ctx, RestoreFromBackupArgs{Target: "pgbackrest-db", Stanza: "main"})
+	if err != nil {
+		t.Fatalf("restoreFromBackupImpl: %v", err)
+	}
+	tail := restored.PgWalTail
+	if tail == nil || tail.SavedTo == "" || tail.ReplayThroughWAL == "" || len(tail.PushedToArchive) == 0 {
+		t.Fatalf("pg_wal_tail = %+v, want a saved dir, WAL to replay past the archive end %s, and row A's segment pushed to the archive",
+			tail, before.WALContinuity.ArchiveEndWAL)
+	}
+	if p := restored.Prediction; p == nil || p.ReplayThroughWAL != tail.ReplayThroughWAL {
+		t.Errorf("prediction = %+v, want replay_through_wal %s", restored.Prediction, tail.ReplayThroughWAL)
+	}
+
+	mark := time.Now()
+	if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
+		t.Fatalf("docker restart (post-restore): %v", err)
+	}
+	waitForRecoveryLog(t, mark, "database system is ready to accept connections")
+
+	if got := fixturePSQL(t, "SELECT count(*) FROM canary_wal_tail"); got != "2" {
+		t.Errorf("canary rows after the restore = %s, want 2: commits that were only in pg_wal were lost", got)
+	}
+	verified, err := verifyRestoreRecoveryImpl(ctx, VerifyRestoreRecoveryArgs{Target: "pgbackrest-db"})
+	if err != nil {
+		t.Fatalf("verifyRestoreRecoveryImpl: %v", err)
+	}
+	if verified.Status != RestoreVerified || verified.ReplayedThroughWAL != tail.ReplayThroughWAL {
+		t.Errorf("verify_restore_recovery = %+v, want verified, replayed through %s", verified, tail.ReplayThroughWAL)
+	}
+
+	// restore_from_backup pushed row A's segment before startup, and
+	// PostgreSQL archives the open one as .partial when it promotes. Without
+	// both, the new timeline would depend on WAL only this host had.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		after, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
+		if err == nil && after.WALContinuity != nil && after.WALContinuity.Status == WALContinuous &&
+			after.WALContinuity.LatestTimeline == before.WALContinuity.LatestTimeline+1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			var wal *WALContinuity
+			if err == nil {
+				wal = after.WALContinuity
+			}
+			t.Fatalf("archive not continuous onto the new timeline 60s after startup: %+v, %v (pushed: %v)", wal, err, tail.PushedToArchive)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
 // TestIntegration_RestoreFromBackup_RefusesWhenServerIsUp proves the safety
 // refusal against the real pg_isready binary, not a mocked one — the
 // unit-level equivalent (TestRestoreFromBackupTool_RefusesWhenServerIsUp)

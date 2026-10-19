@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.5"
+version: "1.6"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -75,6 +75,12 @@ guidance: |
   directory. It independently refuses if the instance is still accepting
   connections — if it refuses, stop and escalate; do not retry or attempt
   to work around the refusal.
+  It also keeps the WAL that was in pg_wal (commits that may never have
+  reached the archive): its pg_wal_tail says where the original copies are
+  saved (saved_to), how far recovery should replay past the archive end
+  (replay_through_wal), and which segments it pushed to the archive. If its
+  detail says a push FAILED, quote that detail in FINDINGS: the new timeline
+  then depends on the saved copies until a human archives them.
 
   Step 3 — Bring the instance back up:
   Call check_host with the connection_string (target) first and read its
@@ -106,7 +112,9 @@ guidance: |
   should end (the last archived WAL segment and the new timeline); this
   reads where PostgreSQL's recovery really ended and compares them.
   - status=verified: report its reached_wal, redo_done_lsn and
-    new_timeline as the recovery point.
+    new_timeline as the recovery point. When replayed_through_wal is set,
+    recovery also replayed WAL from pg_wal past the archive: report that
+    segment too — those commits were recovered although never archived.
   - status=mismatch: the restore did NOT reach the predicted point. Quote
     its detail in FINDINGS as an anomaly — data after reached_wal may be
     missing even though the instance is up. Do not retry the restore.
@@ -124,8 +132,11 @@ guidance: |
     4b: when verified, the reached_wal/redo_done_lsn/new_timeline it read
     from PostgreSQL's own log; otherwise Step 1's predicted
     wal_continuity.archive_end_wal, labelled as predicted, not confirmed.
-    Either way, changes made after Step 1's archive_end_time were never
-    archived and are not restored
+    Unless Step 4b verified a replayed_through_wal, changes made after
+    Step 1's archive_end_time were never archived and are not restored;
+    when it did, only changes that were never written to pg_wal are lost
+  - Step 2's pg_wal_tail.saved_to: the original WAL is kept there and can
+    be removed by a human once the recovery point is verified
   - Container state and log evidence after restart (quote the actual log
     line, do not paraphrase)
   - Any anomalies (restart_container failed, instance crashed again after

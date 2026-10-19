@@ -369,12 +369,11 @@ close and nothing here should be read as claiming it does.
   nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
   without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
   check.
-- WAL that never reached the archive can't be seen by anything here. The WAL-continuity check
-  proves the chain is complete up to the newest *archived* segment; whatever the dead instance
-  wrote after that (still in its own `pg_wal` or never archived because archiving was broken) is
-  lost by a restore-to-latest. `wal_continuity.archive_end_time` says exactly how far a restore
-  reaches and the remediation playbook reports it, but nothing decides for a human whether that
-  loss is acceptable.
+- WAL that never reached the archive is only recovered if it is still in the dead instance's own
+  `pg_wal` (since v0.32, see [The unarchived pg_wal tail](#the-unarchived-pg_wal-tail-commits-on-disk-but-not-in-the-archive)).
+  When `pg_wal` is gone with the volume, a restore-to-latest still ends at
+  `wal_continuity.archive_end_time`, and nothing decides for a human whether that loss is
+  acceptable.
 
 #### WAL continuity: the restore refuses a chain it can't finish
 
@@ -442,7 +441,7 @@ Three things make use of it:
 
 - **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
   a human escalation and only transitions to the restore when the chain is `continuous`.
-  `pbs_pgbackrest_restore_remediate` (v1.5) has a matching precondition and reports the recovery
+  `pbs_pgbackrest_restore_remediate` (v1.6) has a matching precondition and reports the recovery
   point PostgreSQL actually reached (below).  
 
 - **Checking the restore afterwards.**   
@@ -488,6 +487,55 @@ real log.
 Fault: [`db-pgbackrest-wal-gap`](../testing/catalog/failures.yaml) hides the latest backup's own
 start segment on a healthy instance and expects the health triage to report the broken chain
 (signal `pgbackrest_wal_chain_broken`) and hand the decision to a human.
+
+#### The unarchived pg_wal tail: commits on disk but not in the archive
+
+*Added in v0.32.* PostgreSQL's analog of Oracle's online redo logs is the tail of `pg_wal`: the
+segment being written and any completed ones still marked `.ready` because archiving lags or is
+broken. Those commits are on disk but not in the archive. `pgbackrest --delta restore` removes
+everything the backup's manifest doesn't list, `pg_wal`'s contents included.
+
+👉 Found by a canary test on the Docker fixture (2026-10-19), before the fix:
+  - archiving broken (`archive_command=/bin/false`), row A committed into a segment then left
+    `.ready`, row B into the open segment, then the `db-pgdata-corrupted` crash (`pg_control`
+    deleted) and `restore_from_backup`'s own script;
+  - `pg_wal` went from 5 segments to empty, recovery ended at the archive end
+    (`redo done at 0/8000138`), and the table holding both rows didn't exist.
+
+`restore_from_backup` now does what the PostgreSQL documentation describes for archive recovery:
+
+- **Before the restore**, it moves the segment files in `pg_wal` to a directory beside PGDATA
+  (outside it, since `--delta` cleans PGDATA). If that fails, the restore doesn't run.
+- **After the restore**, it copies them back before startup. Recovery restores from the archive
+  first and falls back to `pg_wal`, so it replays the tail and stops at its first invalid record,
+  CRC-checked like any other WAL. Segments PostgreSQL pre-created by renaming old ones don't count:
+  only a segment whose first page header matches its own name is part of the tail.
+- **It pushes the tail to the archive** with `pgbackrest archive-push`, before startup, every
+  segment past the archive end except the newest, which PostgreSQL archives itself as `.partial`
+  when it promotes. Otherwise the new timeline would depend on WAL the repo doesn't have and the
+  next restore would stop at the old archive end, found during the canary test. Not a `.ready`
+  marker: found by the integration test, PostgreSQL deletes the marker during archive recovery
+  and then the segment itself, as if archived.
+- **It reports all of it** in `pg_wal_tail`: `saved_to` (the original copies, kept until a human
+  removes them), `replay_through_wal`, `pushed_to_archive`. A failed push doesn't fail the restore;
+  the detail says so and where the copies are.
+
+The prediction now includes the tail (`replay_through_wal`). PostgreSQL logs nothing for segments
+it reads from `pg_wal`, so `verify_restore_recovery` also checks which segment `redo done at`
+falls in: `verified` then reports `replayed_through_wal`, and a recovery that stopped short of the
+tail is a `mismatch`.
+
+👉 After the fix, same fixture, same crash: both rows came back. Recovery replayed the archive
+to `…0A`, then `…0B`/`…0C` from `pg_wal`, and ended at `invalid record length at 0/C000118`, the
+normal end of WAL, with `redo done at 0/C0000E0`.
+
+`TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL` makes the canary test permanent: both rows
+survive, `verify_restore_recovery` reports `verified` through the tail, and the archive is
+`continuous` onto the new timeline. With the old restore script it fails.
+
+The tail is only as good as `pg_wal` itself: when the volume is gone, or the server had promoted
+to a timeline whose history file never reached the archive, recovery still ends at the archive
+end.
 
 #### Underneath the layers: what's honest about the remediation, not oversold
 

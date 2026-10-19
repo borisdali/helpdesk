@@ -45,22 +45,41 @@ type RestorePrediction struct {
 	// ExpectedTimeline is the timeline PostgreSQL should promote to:
 	// latest_timeline+1.
 	ExpectedTimeline uint32 `json:"expected_timeline"`
+	// ReplayThroughWAL is set when restore_from_backup put WAL newer than the
+	// archive back into pg_wal (waltail.go): recovery should go on past
+	// RecoverToWAL and replay through this segment. PostgreSQL logs nothing
+	// for segments it reads from pg_wal, so this is checked against the
+	// segment "redo done at" falls in.
+	ReplayThroughWAL string `json:"replay_through_wal,omitempty"`
+	// SegmentSizeBytes maps the redo-done LSN to a segment.
+	SegmentSizeBytes uint64 `json:"segment_size_bytes,omitempty"`
 	PredictedAt      string `json:"predicted_at"`
 }
 
 // restorePredictionFrom returns the prediction a restore of wal's backup
-// makes, or nil when the check gives no end point to compare against.
-func restorePredictionFrom(wal *WALContinuity, now time.Time) *RestorePrediction {
+// makes, given what was put back into pg_wal (tail, nil if nothing), or nil
+// when the check gives no end point to compare against.
+func restorePredictionFrom(wal *WALContinuity, tail *PgWalTail, now time.Time) *RestorePrediction {
 	if wal == nil || wal.Status != WALContinuous || wal.ArchiveEndWAL == "" || wal.LatestTimeline == 0 {
 		return nil
 	}
-	return &RestorePrediction{
+	p := &RestorePrediction{
 		BackupLabel:      wal.BackupLabel,
 		RecoverToWAL:     wal.ArchiveEndWAL,
 		ArchiveEndTime:   wal.ArchiveEndTime,
 		ExpectedTimeline: wal.LatestTimeline + 1,
+		SegmentSizeBytes: wal.SegmentSizeBytes,
 		PredictedAt:      now.UTC().Format(time.RFC3339),
 	}
+	if tail != nil {
+		p.ReplayThroughWAL = tail.ReplayThroughWAL
+		// Pushed before startup, so recovery restores them from the archive
+		// (it tries the archive first): the archive now ends at the last one.
+		if n := len(tail.PushedToArchive); n > 0 {
+			p.RecoverToWAL = tail.PushedToArchive[n-1]
+		}
+	}
+	return p
 }
 
 // restorePredictions holds the last successful restore's prediction per
@@ -175,6 +194,9 @@ type VerifyRestoreRecoveryResult struct {
 	NewTimeline   uint32 `json:"new_timeline,omitempty"`
 	RedoDoneLSN   string `json:"redo_done_lsn,omitempty"`
 	ConsistentLSN string `json:"consistent_lsn,omitempty"`
+	// ReplayedThroughWAL is set when verified with a pg_wal tail: the newest
+	// segment replayed from pg_wal, past ReachedWAL (the archive's last).
+	ReplayedThroughWAL string `json:"replayed_through_wal,omitempty"`
 	// LogSource says which log the recovery lines came from.
 	LogSource string `json:"log_source,omitempty"`
 }
@@ -199,7 +221,48 @@ func compareRecovery(pred *RestorePrediction, rec recoveryLog) (status, detail s
 	case rec.LastRestoredWAL > pred.RecoverToWAL:
 		return RestoreMismatch, fmt.Sprintf("recovery went past the predicted end: the last segment restored was %s, expected %s", rec.LastRestoredWAL, pred.RecoverToWAL)
 	}
+	// Where redo actually ended, by segment number: the only evidence of
+	// replay from pg_wal, which PostgreSQL doesn't log per segment.
+	want := pred.RecoverToWAL
+	if pred.ReplayThroughWAL != "" {
+		want = pred.ReplayThroughWAL
+	}
+	if redoNo, wantNo, ok := redoSegmentNumbers(rec.RedoDoneLSN, want, pred.SegmentSizeBytes); ok {
+		switch {
+		case redoNo < wantNo && pred.ReplayThroughWAL != "":
+			return RestoreMismatch, fmt.Sprintf("recovery stopped early in the pg_wal tail: redo done at %s, but the WAL put back into pg_wal reaches %s — "+
+				"commits in the unreplayed part of the tail are not in the database (the saved copy is still on the host)", rec.RedoDoneLSN, want)
+		case redoNo < wantNo:
+			return RestoreMismatch, fmt.Sprintf("recovery stopped early: redo done at %s, before %s", rec.RedoDoneLSN, want)
+		case redoNo > wantNo:
+			return RestoreMismatch, fmt.Sprintf("recovery went past the predicted end: redo done at %s, after %s", rec.RedoDoneLSN, want)
+		}
+	}
+	if pred.ReplayThroughWAL != "" {
+		return RestoreVerified, fmt.Sprintf("recovery replayed the archive through %s, then the WAL put back into pg_wal through %s (redo done at %s), and selected timeline %d, as predicted",
+			rec.LastRestoredWAL, pred.ReplayThroughWAL, orNone(rec.RedoDoneLSN), rec.NewTimeline)
+	}
 	return RestoreVerified, fmt.Sprintf("recovery replayed through %s (redo done at %s) and selected timeline %d, as predicted", rec.LastRestoredWAL, orNone(rec.RedoDoneLSN), rec.NewTimeline)
+}
+
+// redoSegmentNumbers returns the segment numbers of the redo-done LSN and of
+// segment name, or ok=false when either can't be worked out (no LSN in the
+// log, or a prediction from before the segment size was recorded). Numbers,
+// not names: the archive end can be on an older timeline than the one the
+// server ran on (the VM, 2026-10-18: archive end on timeline 27, server on 29).
+func redoSegmentNumbers(redoLSN, name string, size uint64) (redoNo, nameNo uint64, ok bool) {
+	if redoLSN == "" || !validSegmentSize(size) {
+		return 0, 0, false
+	}
+	lsn, err := parseLSN(redoLSN)
+	if err != nil {
+		return 0, 0, false
+	}
+	_, logID, seg, err := parseSegmentName(name)
+	if err != nil {
+		return 0, 0, false
+	}
+	return lsn / size, logID*segsPerLogID(size) + seg, true
 }
 
 func orNone(s string) string {
@@ -253,6 +316,9 @@ func verifyRestoreRecoveryImpl(ctx context.Context, args VerifyRestoreRecoveryAr
 	res.RedoDoneLSN = rec.RedoDoneLSN
 	res.ConsistentLSN = rec.ConsistentLSN
 	res.Status, res.Detail = compareRecovery(res.Expected, rec)
+	if res.Status == RestoreVerified && res.Expected != nil {
+		res.ReplayedThroughWAL = res.Expected.ReplayThroughWAL
+	}
 	if !rec.Found {
 		res.Detail += " (read: " + strings.Join(tried, ", ") + ")"
 	}

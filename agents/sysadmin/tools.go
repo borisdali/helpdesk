@@ -1938,6 +1938,10 @@ type RestoreFromBackupResult struct {
 	// only runs once the instance is restarted; verify_restore_recovery then
 	// compares this with what PostgreSQL actually reached.
 	Prediction *RestorePrediction `json:"prediction,omitempty"`
+	// PgWalTail is what happened to the WAL that was in pg_wal: saved before
+	// the restore, copied back for recovery to replay, and queued for
+	// archiving (waltail.go). Nil when there was no pg_wal to save.
+	PgWalTail *PgWalTail `json:"pg_wal_tail,omitempty"`
 }
 
 // restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
@@ -1976,6 +1980,11 @@ type RestoreFromBackupResult struct {
 //     isn't actually running. $PGDATA is read from pgBackRest's own
 //     pg1-path config rather than hardcoded, so this stays correct for any
 //     real deployment's actual data directory.
+//
+// The restore itself keeps the WAL that was in pg_wal (waltail.go): moved
+// aside first, since --delta restore deletes it, copied back for recovery to
+// replay past the archive end, and pushed to the archive so the new timeline
+// doesn't depend on it.
 func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
 	stanza := args.Stanza
 	if stanza == "" {
@@ -2000,14 +2009,14 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 	}
 
 	readyScript := "pg_isready"
-	restoreScript := "PGDATA=$(grep '^pg1-path=' /etc/pgbackrest.conf | cut -d= -f2); rm -f \"$PGDATA/postmaster.pid\"; pgbackrest --stanza=" + shellQuote(stanza) + " --delta restore"
+	restoreScript := restoreScriptWithWALTail(stanza)
 
-	var out string
-	var err error
+	// run executes a script on the target the same way for the restore and
+	// for queueing the pg_wal tail for archiving afterwards.
+	var run func(script string) (string, error)
 	switch {
 	case args.Target != "" && infraConfig != nil:
-		var host resolvedHost
-		host, err = resolveHost(args.Target)
+		host, err := resolveHost(args.Target)
 		if err != nil {
 			return RestoreFromBackupResult{}, err
 		}
@@ -2024,18 +2033,16 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
 				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
 			}
-			if err := checkWAL(); err != nil {
-				return RestoreFromBackupResult{}, err
+			run = func(script string) (string, error) {
+				return execInProcess(ctx, host, []string{"su", "postgres", "-c", script})
 			}
-			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", restoreScript})
 		default:
 			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
 				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
 			}
-			if err := checkWAL(); err != nil {
-				return RestoreFromBackupResult{}, err
+			run = func(script string) (string, error) {
+				return runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
 			}
-			out, err = runOnHost(ctx, host, "sh", []string{"-c", restoreScript}, nil)
 		}
 	case infraConfig != nil:
 		return RestoreFromBackupResult{}, fmt.Errorf(
@@ -2045,15 +2052,32 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
 			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
 		}
-		if err := checkWAL(); err != nil {
-			return RestoreFromBackupResult{}, err
+		run = func(script string) (string, error) {
+			return cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
 		}
-		out, err = cmdRunner.Run(ctx, "sh", []string{"-c", restoreScript}, nil)
 	}
+	if err := checkWAL(); err != nil {
+		return RestoreFromBackupResult{}, err
+	}
+
+	raw, err := run(restoreScript)
+	savedTo, segs, out := parseWALTailOutput(raw)
 	if err != nil {
+		if savedTo != "" {
+			out += "\nThe WAL that was in pg_wal is saved in " + savedTo + " — keep it: it may hold commits that were never archived."
+		}
 		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
 	}
-	result := RestoreFromBackupResult{Output: out, Prediction: restorePredictionFrom(walChecked, time.Now())}
+	result := RestoreFromBackupResult{Output: out, PgWalTail: planWALTail(savedTo, segs, walChecked)}
+	if t := result.PgWalTail; t != nil && len(t.PushedToArchive) > 0 {
+		if pOut, pErr := run(pushToArchiveScript(stanza, t.PushedToArchive)); pErr != nil {
+			t.Detail += fmt.Sprintf(". Pushing %v to the archive FAILED (%v: %s): recovery will still replay them, but PostgreSQL deletes them "+
+				"from pg_wal afterwards, so until they are archived the new timeline depends on the copies in %s — push them with "+
+				"pgbackrest archive-push from there before removing it", t.PushedToArchive, pErr, strings.TrimSpace(pOut), t.SavedTo)
+			t.PushedToArchive = nil
+		}
+	}
+	result.Prediction = restorePredictionFrom(walChecked, result.PgWalTail, time.Now())
 	if result.Prediction != nil {
 		saveRestorePrediction(args.Target, *result.Prediction)
 	}
@@ -2094,8 +2118,9 @@ func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (R
 		if err != nil {
 			errMsg = err.Error()
 		}
-		// The structured result, so the prediction is in the audit trail next
-		// to the verify_restore_recovery call that checks it.
+		// The structured result, so the prediction and what happened to the
+		// pg_wal tail are in the audit trail next to the
+		// verify_restore_recovery call that checks them.
 		output := result.Output
 		if result.Prediction != nil {
 			if b, err := json.Marshal(result); err == nil {

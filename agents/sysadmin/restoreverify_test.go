@@ -104,7 +104,7 @@ func TestRestorePredictionFrom(t *testing.T) {
 	now := time.Date(2026, 10, 18, 20, 23, 35, 0, time.UTC)
 	wal := &WALContinuity{Status: WALContinuous, BackupLabel: "20261017-152429F",
 		ArchiveEndWAL: "0000001B000000000000000C", ArchiveEndTime: "2026-10-17T19:24:32Z", LatestTimeline: 29}
-	p := restorePredictionFrom(wal, now)
+	p := restorePredictionFrom(wal, nil, now)
 	if p == nil || p.RecoverToWAL != "0000001B000000000000000C" || p.ExpectedTimeline != 30 ||
 		p.BackupLabel != "20261017-152429F" || p.PredictedAt != "2026-10-18T20:23:35Z" {
 		t.Errorf("restorePredictionFrom = %+v", p)
@@ -114,7 +114,7 @@ func TestRestorePredictionFrom(t *testing.T) {
 		"broken":       {Status: WALBroken, ArchiveEndWAL: "x", LatestTimeline: 1},
 		"no end point": {Status: WALContinuous, LatestTimeline: 1},
 	} {
-		if p := restorePredictionFrom(w, now); p != nil {
+		if p := restorePredictionFrom(w, nil, now); p != nil {
 			t.Errorf("%s: restorePredictionFrom = %+v, want nil", name, p)
 		}
 	}
