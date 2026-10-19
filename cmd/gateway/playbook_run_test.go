@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -7465,6 +7466,78 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *t
 	}
 	if completePatch["gate_reason"] != "objective_evidence:pod_restarted" {
 		t.Errorf("persisted gate_reason = %v, want objective_evidence:pod_restarted", completePatch["gate_reason"])
+	}
+}
+
+// TestHandlePlaybookRun_GatePending_PersistedBeforeResponse is a regression
+// test for a race found live (VM db-pgdata-corrupted-vm, plr_1101585e): the
+// gate_pending outcome was PATCHed to auditd in a goroutine started after the
+// response was written, so a caller that approved the gate immediately (faulttest
+// force-approving within a millisecond) got 409 "not in gate_pending state
+// (outcome=unknown)" from proceed-escalation. auditd here delays every PATCH to
+// make the old ordering fail deterministically: the gate_pending PATCH must
+// already be stored when the handler returns.
+func TestHandlePlaybookRun_GatePending_PersistedBeforeResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage_sync01",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Analysis complete.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.32 (4.2GB); autovacuum=stuck\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	var mu sync.Mutex
+	var storedOutcomes []string
+	pbData, _ := json.Marshal(pb)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_sync01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			time.Sleep(200 * time.Millisecond)
+			var m map[string]any
+			json.NewDecoder(r.Body).Decode(&m) //nolint:errcheck
+			if o, ok := m["outcome"].(string); ok {
+				mu.Lock()
+				storedOutcomes = append(storedOutcomes, o)
+				mu.Unlock()
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert","gate_escalation":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+
+	// No polling: an immediate proceed-escalation reads the run right now.
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(storedOutcomes, audit.OutcomeGatePending) {
+		t.Errorf("stored outcomes when the response was returned = %v, want %q already stored — "+
+			"an immediate proceed-escalation would get 409 (outcome=unknown)", storedOutcomes, audit.OutcomeGatePending)
 	}
 }
 

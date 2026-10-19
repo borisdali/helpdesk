@@ -1191,9 +1191,24 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 	extra["chain"] = chain
 
+	// A gate_pending outcome is persisted BEFORE the response is written:
+	// the caller's next move is proceed-escalation on this run, which
+	// requires outcome=gate_pending. Written from the goroutine below, an
+	// immediate approval raced the PATCH and got 409 "not in gate_pending
+	// state (outcome=unknown)" — found live, faulttest force-approving
+	// within a millisecond of the response (plr_1101585e). Costs one auditd
+	// PATCH: gate_pending skips the incident-close and attribution steps.
+	// Other outcomes stay fire-and-forget; nothing acts on them on receipt.
+	gatePending := runID != "" && finalOutcome == audit.OutcomeGatePending
+	if gatePending {
+		gateReason, _ := extra["gate_reason"].(string)
+		g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, primary.diagReport, primary.sawSignalLine, gateReason)
+	}
+
 	injectFields(w, primary.capture, extra)
 
-	if runID != "" {
+	if runID != "" && !gatePending {
 		gateReason, _ := extra["gate_reason"].(string)
 		// Persist primary.diagReport (this run's own, hop-scoped report), not
 		// finalReport (the cross-hop merge). finalReport exists for the
