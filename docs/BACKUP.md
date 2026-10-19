@@ -441,7 +441,7 @@ Three things make use of it:
 
 - **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
   a human escalation and only transitions to the restore when the chain is `continuous`.
-  `pbs_pgbackrest_restore_remediate` (v1.6) has a matching precondition and reports the recovery
+  `pbs_pgbackrest_restore_remediate` (v1.7) has a matching precondition and reports the recovery
   point Postgres actually reached (below).  
 
 - **Checking the restore afterwards.**   

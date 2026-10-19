@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.6"
+version: "1.7"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -132,9 +132,15 @@ guidance: |
     4b: when verified, the reached_wal/redo_done_lsn/new_timeline it read
     from PostgreSQL's own log; otherwise Step 1's predicted
     wal_continuity.archive_end_wal, labelled as predicted, not confirmed.
-    Unless Step 4b verified a replayed_through_wal, changes made after
-    Step 1's archive_end_time were never archived and are not restored;
-    when it did, only changes that were never written to pg_wal are lost
+  - What was lost, as exactly ONE of these two sentences, filled in (from
+    Step 1's wal_continuity and Step 4b's result) and not combined or
+    reworded:
+    - Step 4b verified with replayed_through_wal set: "Commits after the
+      archive end (<archive_end_wal>) were recovered from pg_wal through
+      <replayed_through_wal>; only changes never written to pg_wal are
+      lost."
+    - otherwise: "Changes made after <archive_end_time> were never
+      archived and are not restored."
   - Step 2's pg_wal_tail.saved_to: the original WAL is kept there and can
     be removed by a human once the recovery point is verified
   - Container state and log evidence after restart (quote the actual log

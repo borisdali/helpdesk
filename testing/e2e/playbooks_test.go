@@ -2245,7 +2245,7 @@ func TestPlaybooks_PgBackRestPlaybooksAreWALAware(t *testing.T) {
 		guidanceTerms                 []string
 	}{
 		{"pbs_pgbackrest_health_triage", "1.2", "pgbackrest-wal-chain-broken", nil},
-		{"pbs_pgbackrest_restore_remediate", "1.6", "", []string{"verify_restore_recovery", "pg_wal_tail", "replayed_through_wal"}},
+		{"pbs_pgbackrest_restore_remediate", "1.7", "", []string{"verify_restore_recovery", "pg_wal_tail", "replayed_through_wal", "only changes never written to pg_wal are"}},
 	} {
 		t.Run(c.series, func(t *testing.T) {
 			id := activeID(c.series)
