@@ -677,6 +677,11 @@ failures:
         '
         docker restart helpdesk-test-pg-pgbackrest
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    remediation:
+      # Checked after the gateway's auto-chained restore: without it a PASS
+      # graded the diagnosis only, whether or not postgres came back.
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       Monitoring flagged that this database is unreachable. The
       connection_string is "{{connection_string}}" — use it verbatim for
