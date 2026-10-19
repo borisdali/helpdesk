@@ -359,9 +359,11 @@ func TestFaultInjection(t *testing.T) {
 					if err := remediator.RunGateLoop(faultCtx, gate); err != nil {
 						t.Logf("Gate loop: %v", err)
 					}
+					verifyGatewayRemediation(t, faultCtx, remediator, f, "gate_loop")
 				case resp.ChainedRunID != "":
-					// Gateway already auto-chained remediation inline; nothing to do.
+					// Gateway already auto-chained remediation inline.
 					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
+					verifyGatewayRemediation(t, faultCtx, remediator, f, "auto_chain")
 				case f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "":
 					t.Log("Running remediation...")
 					remResult := remediator.Remediate(faultCtx, f, resp.RunID)
@@ -385,6 +387,24 @@ func TestFaultInjection(t *testing.T) {
 	}
 	t.Logf("=== SUMMARY: %d/%d passed, %d failed, %d skipped ===",
 		passed, len(failures), failed, skipped)
+}
+
+// verifyGatewayRemediation checks the outcome of remediation the gateway ran
+// (an auto-chained hop, or the chain a gate approval started) with the
+// fault's verify_sql. Only faults that declare one are checked: for the rest,
+// "SELECT 1" would add little and could fail faults whose chain legitimately
+// stops at a human.
+func verifyGatewayRemediation(t *testing.T, ctx context.Context, remediator *faultlib.Remediator, f faultlib.Failure, method string) {
+	t.Helper()
+	if f.Remediation.VerifySQL == "" {
+		return
+	}
+	res := remediator.VerifyRecovery(ctx, f, method)
+	if res.Err != nil {
+		t.Errorf("Remediation (%s) did not verify: %v", method, res.Err)
+		return
+	}
+	t.Logf("Remediation verified: method=%s, recovered_in=%.1fs, score=%.2f", method, res.RecoveryTimeSecs, res.Score)
 }
 
 // TestDatabaseFailures runs only database category failures.

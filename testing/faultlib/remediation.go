@@ -141,7 +141,21 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 	if triggerErr != nil {
 		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr), Method: method}
 	}
+	return r.VerifyRecovery(ctx, f, method)
+}
 
+// VerifyRecovery polls f's verify_sql (default "SELECT 1") until it succeeds
+// or verify_timeout passes, and scores how fast it did. Remediate calls it
+// after triggering remediation itself; the faulttest suite calls it directly
+// after remediation the gateway ran (an auto-chained hop, or the chain a gate
+// approval started), which otherwise nothing checked: a restore fault scored
+// on its diagnosis alone, whether or not the data came back.
+//
+// The query runs against the fault's own target when it has an
+// agent_conn_override (resolved from infrastructure.json, which for the
+// pgBackRest fixture is a localhost DSN the harness can reach), else ConnStr.
+func (r *Remediator) VerifyRecovery(ctx context.Context, f Failure, method string) RemediationResult {
+	spec := f.Remediation
 	verifySQL := spec.VerifySQL
 	if verifySQL == "" {
 		verifySQL = "SELECT 1"
@@ -154,7 +168,11 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		}
 	}
 
-	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	connStr := r.cfg.ConnStr
+	if f.AgentConnOverride != "" {
+		connStr = ResolvedAgentConnStr(r.cfg, f)
+	}
+	recoverySecs, err := PollRecovery(ctx, connStr, verifySQL, timeout)
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
@@ -782,12 +800,6 @@ func (r *Remediator) WaitForStepApprovalViaHub(ctx context.Context, approvalID s
 			return d.Status, nil
 		}
 	}
-}
-
-// pollRecovery runs verifySQL against r.cfg.ConnStr every 5 seconds until it
-// succeeds or timeout elapses. Returns the elapsed seconds on first success.
-func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
-	return PollRecovery(ctx, r.cfg.ConnStr, verifySQL, timeout)
 }
 
 // PollRecovery runs verifySQL against connStr every 5 seconds until it succeeds

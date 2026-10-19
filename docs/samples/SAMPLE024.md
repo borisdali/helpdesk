@@ -2,9 +2,13 @@
 
 This sample is different from most other aiHelpDesk samples that, for the most part, offer detailed transcript of commands, their output and our deliberations around them (in many cases to support our blog posts, see [here](https://aihelpdesk.biz)). The idea is to allow our customers and the community in general to reproduce our steps and see our logic and how we reach our conclusions.
 
-This sample is different because there are no tokens used and no AI in it at all. It's pure Postgres (or at least our understanding of it) when it comes to not so happy path of restore and recovery from a backup. In particular, it shows our basic test of the theory that the Postgres doesn't appear to offer a native (at least in naming) separation of the "online" and "archived" WAL segments, similar to Oracle's oneline redo logs (typically multiplexed) and the archive redo logs (often also across multiple destinations). That, combined with the fact that pgBackRest likes to keep the `pg_wal` directory consistent with its view of the world as of the last backup, prompted a question if the latest, unarchived WAL segements that pgBackRest didn't get a chance to archive... may get lost.
+This sample is different because there are no tokens used and no AI in it at all. It's pure Postgres (or at least our understanding of it) when it comes to not so happy path of restore and recovery from a backup. In particular, it shows our simple-minded test of the theory that is based on following two assumptions:
+  - postgres doesn't appear to offer a native (at least in naming) separation of the "online" and "archived" WAL segments, unlike Oracle's oneline redo logs (typically multiplexed) and the archive redo logs (often also across multiple destinations)  
+  - pgBackRest appears to like keeping the `pg_wal` directory consistent with its view of the world as of the last backup  
 
-So naturally, we built a test and discovered a few other interesting (and surprising!) things along the way too. Here's the skinny:
+These two assumptions prompted a theory/question as to whether or not the latest, unarchived WAL segements that pgBackRest didn't get a chance to archive... may get lost?
+
+Well, naturally, we built a test, tried to answer that question and discovered a few other interesting (and surprising!) things along the way too. Here's the skinny:
 
 - **Yes, they may get lost.** 🤯   
   With archiving broken, two committed rows that lived only in `pg_wal` were gone after `restore_from_backup`. `pgbackrest --delta restore` emptied `pg_wal` completely and recovery stopped at the end of the archive.

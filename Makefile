@@ -379,8 +379,10 @@ faulttest-gateway-nocache:
 #   1. health triage, diagnosis only: db-pgbackrest-repo-unreadable,
 #      db-pgbackrest-wal-gap — the broken-chain case must stop at a human,
 #      so nothing is approved past it;
-#   2. data loss with remediation in force mode: db-pgdata-corrupted — the
-#      gateway auto-chains triage → restore_from_backup.
+#   2. data loss with remediation in force mode: db-pgdata-corrupted and
+#      db-pgdata-corrupted-unarchived-tail — the gateway auto-chains triage →
+#      restore_from_backup, and the tail fault's verify_sql checks the commits
+#      that were only in pg_wal came back.
 #
 # Starts only the pgBackRest container and never tears anything down, so the
 # auditd database of a locally running stack (:15434) is left alone.
@@ -411,10 +413,10 @@ faulttest-gateway-pgbackrest:
 	FAULTTEST_IDS=db-pgbackrest-repo-unreadable,db-pgbackrest-wal-gap \
 	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
 	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
-	@echo "Running db-pgdata-corrupted via gateway (restore remediation, force mode)..."
+	@echo "Running db-pgdata-corrupted faults via gateway (restore remediation, force mode)..."
 	-FAULTTEST_VIA_GATEWAY=true \
 	FAULTTEST_REMEDIATE=true \
-	FAULTTEST_IDS=db-pgdata-corrupted \
+	FAULTTEST_IDS=db-pgdata-corrupted,db-pgdata-corrupted-unarchived-tail \
 	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
 	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee -a $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)

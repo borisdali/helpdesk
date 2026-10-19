@@ -706,6 +706,107 @@ failures:
     # the client timeout was too short to let it finish.
     timeout: 300s
 
+  - id: db-pgdata-corrupted-unarchived-tail
+    name: "Data directory corrupted with commits not yet archived — restore keeps the pg_wal tail"
+    category: database
+    severity: critical
+    description: >
+      db-pgdata-corrupted, with archiving broken before the crash so the last
+      commits exist only in pg_wal: row A in a completed segment waiting as
+      .ready, row B in the open segment. Before v0.32 item 13, pgbackrest
+      --delta restore emptied pg_wal and both rows were lost (the canary run,
+      docs/samples/SAMPLE024.md). restore_from_backup now saves the tail,
+      copies it back and archive-pushes it; this fault proves the whole agent
+      chain does that, through playbook 1.6, and checks the rows themselves
+      with verify_sql rather than trusting the chain's own report.
+    agent_conn_override: pgbackrest-db
+    direct_agent: sysadmin
+    prerequisites: |
+      Same as db-pgdata-corrupted: the dedicated pgBackRest target with
+      archiving configured (testing/docker/setup-pgbackrest-backup.sh).
+      Docker-only. The inject takes its own full backup first, so the backup
+      is fresh (never refused as stale) and the archive end is this run's.
+
+      verify_sql is checked only when remediation runs (FAULTTEST_REMEDIATE=
+      true via the gateway, as faulttest-gateway-pgbackrest runs it). The
+      harness checks it after the gateway's own chain too, not only after a
+      remediation the harness triggers itself.
+    inject:
+      type: shell_exec
+      # The archive_command reload is asynchronous, so the sleep before the
+      # WAL switch; the .ready check makes injection fail loudly if row A's
+      # segment was archived anyway, rather than test nothing.
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        docker exec -u postgres "$C" pgbackrest --stanza=main --type=full backup
+        docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+          -c "ALTER SYSTEM SET archive_command = '/bin/false'" -c "SELECT pg_reload_conf()"
+        sleep 2
+        docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+          -c "DROP TABLE IF EXISTS canary_wal_tail" \
+          -c "CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)" \
+          -c "INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')" \
+          -c "SELECT pg_switch_wal()" \
+          -c "INSERT INTO canary_wal_tail VALUES (2, 'B: open segment')"
+        sleep 2
+        docker exec "$C" sh -c 'ls /var/lib/postgresql/data/pg_wal/archive_status | grep -q "\.ready$"'
+        docker exec "$C" rm -f /var/lib/postgresql/data/global/pg_control
+        docker restart "$C"
+    inject_timeout: 120s
+    teardown:
+      type: shell_exec
+      # Up (remediation worked): archiving is already back (the restore
+      # brought back the backup's postgresql.auto.conf); drop the table and
+      # switch WAL so the drop is archived. Down: db-pgdata-corrupted's own
+      # repair, which also loses the canary rows; the table was never
+      # archived, so it's gone afterwards. The saved pg_wal dirs are this
+      # fault's own test data: always removed.
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        docker exec -u postgres "$C" sh -c 'rm -rf /var/lib/postgresql/pg_wal.saved-*'
+        if docker exec "$C" pg_isready -q; then
+          docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'" \
+            -c "SELECT pg_reload_conf()" -c "DROP TABLE IF EXISTS canary_wal_tail" -c "SELECT pg_switch_wal()"
+          exit 0
+        fi
+        docker exec -u postgres "$C" sh -c '
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza=main --delta restore
+        '
+        docker restart "$C"
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    remediation:
+      # Both rows back (commits that were only in pg_wal survived the
+      # restore) and archiving on again.
+      verify_sql: >
+        SELECT (SELECT count(*) FROM canary_wal_tail) = 2
+           AND current_setting('archive_command') <> '/bin/false'
+      verify_timeout: "120s"
+    prompt: >
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
+    evaluation:
+      expected_tools:
+        - get_host_logs
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "Same diagnosis and chain as db-pgdata-corrupted (data_loss_triage -> sysadmin host triage -> pgbackrest_health_triage -> pgbackrest_restore_remediate). What differs is the restore: restore_from_backup's result has a pg_wal_tail with replay_through_wal past the archive end and row A's segment in pushed_to_archive, verify_restore_recovery returns verified with replayed_through_wal, and the remediation's findings say the commits in the pg_wal tail were recovered rather than lost."
+    timeout: 300s
+
   - id: db-pgdata-corrupted-vm
     name: "Data directory corrupted — restore from latest backup (real host/VM)"
     category: database
