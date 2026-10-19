@@ -263,8 +263,9 @@ narrowest real slice: restore to the latest available pgBackRest backup, a singl
 instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
 promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
 
-**Three layers stand between a diagnosis and `restore_from_backup`**, on top of the general
-[AI Governance](AIGOVERNANCE.md) every playbook run already gets (the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
+### **Three layers stand between a diagnosis and `restore_from_backup`**   
+These additional three layers of safegards come on top of the general
+[AI Governance](AIGOVERNANCE.md) that every playbook runs already (which includes the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
 [Evidence-Provenance](OBJECTIVE_EVIDENCE.md) checks, the [`trust_not_earned`](CONSISTENCY.md) certification gate):
 
 1. [**Each hop decides only what it can see**](#layer-1-each-hop-decides-only-what-it-can-see):  
@@ -289,7 +290,7 @@ system`. This is distinct from every scenario in §1/§2: the database isn't slo
 misconfigured, it's *gone* and the only way back is restoring from a backup rather than fixing a
 setting.
 
-#### Layer 1: each hop decides only what it can see
+#### 👉 Layer 1: each hop decides only what it can see
 
 The chain above exists because no single agent holds every tool the decision needs.   
 
@@ -304,7 +305,7 @@ and can act on the combined picture directly.
 `pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
 safety benefit once it was clear none of the static conditions needed fresh evidence to answer (which was caught in review before it shipped, not after a slow live run).
 
-#### Layer 2: the backup-health gate is deterministic code, not model prose
+#### 👉 Layer 2: the backup-health gate is deterministic code, not model prose
 
 The only layer that doesn't depend on the model getting it right and the one that actually matters most for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
 `pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
@@ -320,7 +321,7 @@ to override the caller's force-mode auto-chain intent when evidence contradicts 
 conclusion. The single most important precondition for this op — is there actually a healthy
 backup to restore from — is backed by a deterministic Go code path, not left to the model's prose.
 
-#### Layer 3: fails closed by design, not by accident
+#### 👉 Layer 3: fails closed by design, not by accident
 
 We found this during live debugging of something else entirely, confirmed while weeding out three separate live bugs during this chain's own testing:  
 - a stdio-buffering race that delayed when a crash message reached the log stream  
@@ -428,29 +429,41 @@ The result:
 | `unverified` | The check couldn't run, e.g. pgBackRest older than 2.26 (no `repo-ls`). |
 | `no_backup` | There is no backup to check. |
 
-Three things use it:
+Three things make use of it:
 
 - **`restore_from_backup` refuses unless the status is `continuous`**, `unverified` included.
   This is a Go-level check next to the `pg_isready` refusal, independent of any model or gate. It
-  runs after the policy check and `pg_isready`, immediately before the restore.
+  runs after the policy check and `pg_isready`, immediately before the restore.  
+
 - **A new objective-evidence signal, `pgbackrest_wal_chain_broken`,** force-gates a response
   when the chain is definitely `broken` (not on `unverified`, so an older pgBackRest doesn't gate
   every routine triage). It's listed ahead of `pgbackrest_backup_unhealthy`, since only the first
-  matching rule per result is recorded and a broken chain is the more severe finding.
+  matching rule per result is recorded and a broken chain is the more severe finding.  
+
 - **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
   a human escalation and only transitions to the restore when the chain is `continuous`.
-  `pbs_pgbackrest_restore_remediate` (v1.5) has a matching precondition, and reports the recovery
-  point PostgreSQL actually reached (below).
-- **Checking the restore afterwards.** The check above is a prediction. `restore_from_backup`
-  records it on success (`prediction`: the last archived segment and `latest_timeline + 1`), and
-  after the restart `verify_restore_recovery` reads PostgreSQL's own recovery lines (the last
-  segment restored before `selected new timeline ID`, `redo done at <LSN>`) and compares:
-  `verified`, `mismatch` (signal `restore_recovery_mismatch`), `not_found` (no completed recovery
-  in the log yet) or `unverified` (no prediction recorded, e.g. after an agent restart). The
-  prediction never comes from the model. It reads container logs first, then the PostgreSQL log
-  file: on a Debian/Ubuntu VM the recovery lines are only in `/var/log/postgresql/`, not the
-  journal. First live baseline (real Ubuntu VM, 2026-10-18): predicted `0000001B000000000000000C`
-  and timeline 30; PostgreSQL restored `…0C`, `redo done at 0/C000138`, selected timeline 30.
+  `pbs_pgbackrest_restore_remediate` (v1.5) has a matching precondition and reports the recovery
+  point PostgreSQL actually reached (below).  
+
+- **Checking the restore afterwards.**   
+  The check above is a prediction.   
+  `restore_from_backup` records it on success (`prediction`: the last archived segment and `latest_timeline + 1`) and
+  after the restart `verify_restore_recovery` reads PostgreSQL's own recovery lines (the last segment restored before `selected new timeline ID`, `redo done at <LSN>`) and compares:  
+    - `verified`,   
+    - `mismatch` (signal `restore_recovery_mismatch`),   
+    - `not_found` (no completed recovery in the log yet) or   
+    - `unverified` (no prediction recorded, e.g. after an agent restart).   
+
+  👉 The prediction never comes from the model.   
+  It reads container logs first, then the PostgreSQL log file. The location of the log file is OS specific, e.g. on a Debian/Ubuntu VM the recovery lines are only in `/var/log/postgresql/`, not the
+  journal.   
+
+  Here's an example of the live baseline (real Ubuntu VM, 2026-10-18, compared by hand before the automation tool existed): predicted `0000001B000000000000000C` and timeline 30; PostgreSQL restored `…0C`, `redo done at 0/C000138`, selected timeline 30.   
+
+  Now, the first run through the agent (same VM, 2026-10-19, full `db-pgdata-corrupted-vm` chain with three approved gates): `restore_from_backup` predicted `0000001F000000000000000E` and timeline 34 and `verify_restore_recovery` returned
+  `verified`: "recovery replayed through `0000001F000000000000000E` (redo done at 0/E000138) and selected timeline 34, as predicted".  
+
+  The key here is that the final FINDINGS reported *that* LSN, not the prediction. It always does.
 
 **Verified, not just claimed**: the unit tests run against real output captured from the
 Docker fixture's repo, an archive that had been through 29 timeline switches from earlier restore
@@ -469,7 +482,7 @@ later forked is lost WAL, not the archive simply ending one segment earlier. (Th
 recovery target past any WAL, so PostgreSQL stops instead of promoting and the shared archive
 gains no new timeline.) The real crash-and-restore test now also checks PostgreSQL's log against
 the check: the last segment restored is `archive_end_wal` and the new timeline is
-`latest_timeline + 1`, and that `verify_restore_recovery` reports `verified` from the container's
+`latest_timeline + 1` and that `verify_restore_recovery` reports `verified` from the container's
 real log.
 
 Fault: [`db-pgbackrest-wal-gap`](../testing/catalog/failures.yaml) hides the latest backup's own
