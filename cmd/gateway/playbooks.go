@@ -2329,20 +2329,42 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 
+	// A remediation playbook's whole job is the write its Expert Guidance
+	// names; the read-only constraints below apply to every other type.
+	// Until v0.32 every playbook got the read-only block, remediation too —
+	// remediations still mostly ran because the model let the specific
+	// guidance override the generic constraint, until it didn't: found live
+	// (VM db-pgdata-corrupted-vm, plr_eb3a260a), pbs_pgbackrest_restore_remediate
+	// quoted "Do NOT execute remediation" back as an instruction conflict
+	// and stopped without restoring, after a human had approved all 3 gates.
+	// Write tools stay enforced where they always were: policy on the hop's
+	// own purpose (derivedPurpose) and the gates in front of the hop.
+	isRemediation := pb.PlaybookType == "remediation"
+
 	if req.PriorFindings != "" {
 		if req.IsTransition {
+			next := "then proceed directly to describing the remediation."
+			if isRemediation {
+				next = "then carry out the remediation steps it gives."
+			}
 			fmt.Fprintf(&b, "## Prior Investigation Findings\nThe triage phase (same agent, same domain) already diagnosed this incident:\n%s\n\nTreat this diagnosis as settled — do NOT re-run the full investigation from scratch. "+
-				"Confirm the current state only where the Expert Guidance below explicitly calls for a pre-remediation check, then proceed directly to describing the remediation.\n\n", req.PriorFindings)
+				"Confirm the current state only where the Expert Guidance below explicitly calls for a pre-remediation check, %s\n\n", req.PriorFindings, next)
 		} else {
 			fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation (different agent/domain) reached the following conclusion:\n%s\n\nUse this as a starting point, but verify it with your own domain-specific tools — the prior agent could not see into your domain.\n\n", req.PriorFindings)
 		}
 	}
 
 	b.WriteString("## Constraints\n")
-	b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
-	b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
-	b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
-	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n")
+	if isRemediation {
+		b.WriteString("- This is a remediation playbook, approved to run: carry out the write/destructive actions its Expert Guidance names, in the order it gives, once its own precondition checks pass.\n")
+		b.WriteString("- Do not take any write action the Expert Guidance does not name, and do not substitute a different fix for one it names.\n")
+		b.WriteString("- If a precondition fails or an action errors, stop and report it as the guidance says — do not retry or improvise.\n")
+	} else {
+		b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
+		b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
+		b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
+		b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n")
+	}
 	if req.ConnectionString != "" {
 		fmt.Fprintf(&b, "- Use ONLY `connection_string` = `%s`. Do not query any other server, even if your context lists others.\n", req.ConnectionString)
 	}

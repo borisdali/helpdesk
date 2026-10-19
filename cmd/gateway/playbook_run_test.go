@@ -465,6 +465,47 @@ func TestAssembleTriagePrompt_PriorFindings_Transition(t *testing.T) {
 	}
 }
 
+// TestAssembleTriagePrompt_RemediationConstraints is a regression test for a
+// bug found live (VM db-pgdata-corrupted-vm, plr_eb3a260a): every playbook,
+// remediation included, got the read-only Constraints block, and
+// pbs_pgbackrest_restore_remediate stopped without restoring, quoting "Do NOT
+// execute remediation" back as an instruction conflict. A remediation hop must
+// be told to carry out its guidance; every other type stays read-only.
+func TestAssembleTriagePrompt_RemediationConstraints(t *testing.T) {
+	readOnly := []string{"Use only read-only diagnostic tools", "Do NOT execute remediation", "describing the remediation"}
+	req := PlaybookRunRequest{
+		ConnectionString: "host=pgbackrest-vm.test",
+		PriorFindings:    "backup 20261018-184331F healthy, WAL continuous; restore required",
+		IsTransition:     true,
+	}
+
+	rem := assembleTriagePrompt(&audit.Playbook{Name: "pgBackRest — Restore From Latest Backup",
+		SeriesID: "pbs_pgbackrest_restore_remediate", PlaybookType: "remediation", AgentName: agentNameSysadmin}, req, "")
+	for _, s := range readOnly {
+		if strings.Contains(rem, s) {
+			t.Errorf("remediation prompt contains read-only instruction %q — contradicts its own Expert Guidance", s)
+		}
+	}
+	for _, s := range []string{"carry out the write/destructive actions its Expert Guidance names", "carry out the remediation steps it gives",
+		"Do not take any write action the Expert Guidance does not name", "Use ONLY `connection_string`"} {
+		if !strings.Contains(rem, s) {
+			t.Errorf("remediation prompt missing %q", s)
+		}
+	}
+
+	for _, pbType := range []string{"triage", ""} {
+		p := assembleTriagePrompt(&audit.Playbook{Name: "pgBackRest — Health Triage", PlaybookType: pbType}, req, "")
+		for _, s := range readOnly {
+			if !strings.Contains(p, s) {
+				t.Errorf("playbook_type %q: prompt missing read-only instruction %q", pbType, s)
+			}
+		}
+		if strings.Contains(p, "carry out the write/destructive actions") {
+			t.Errorf("playbook_type %q: non-remediation prompt told to carry out write actions", pbType)
+		}
+	}
+}
+
 // TestAssembleTriagePrompt_PriorFindings_Escalation verifies that a
 // cross-domain ESCALATE_TO continuation (a different agent picking up the
 // investigation) is still told to verify with its own tools, since the prior
