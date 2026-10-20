@@ -1,0 +1,46 @@
+# Helm values for running the whole helpdesk stack in-cluster against the
+# self-managed pgBackRest pod (testing/k8s/pgbackrest-demo.yaml), v0.32.
+#
+#   kubectl create namespace db   # if it doesn't exist
+#   kubectl apply -n db -f testing/k8s/pgbackrest-demo.yaml
+#   helm upgrade helpdesk deploy/helm/helpdesk -n helpdesk-system \
+#     -f testing/k8s/helm-values-pgbackrest.yaml
+#
+# A full values file, not --reuse-values: --reuse-values doesn't merge chart
+# defaults added after the release was first installed (docs/samples/SAMPLE022.md).
+# The first four keys are the release's existing user-supplied values.
+
+image:
+  repository: helpdesk
+  tag: latest
+  pullPolicy: IfNotPresent
+
+gateway:
+  autoIncidentBundle: true
+
+governance:
+  auditd:
+    # auditd's own Postgres: never the same server as a target database.
+    dsnSecret: helpdesk-auditd-dsn
+    dsnSecretKey: dsn
+
+infrastructure:
+  db_servers:
+    pgbackrest-k8s:
+      name: pgBackRest K8s Demo
+      # The Service in front of the StatefulSet's one pod.
+      connection_string: host=pgbackrest-demo.db.svc.cluster.local port=5432 dbname=testdb user=postgres password=testpass
+      k8s_cluster: local
+      k8s_namespace: db
+      # The sysadmin agent resolves the pod from this and reaches it with
+      # kubectl exec: get_pgbackrest_status, restore_from_backup,
+      # verify_restore_recovery.
+      k8s_pod_selector: app=pgbackrest-demo
+      tags: [development, chaos]
+  k8s_clusters:
+    local:
+      name: minikube (in-cluster)
+      # Empty: the agents run in this cluster and use their own service
+      # accounts. A context name ("minikube") only exists in a kubeconfig.
+      context: ""
+      tags: [development]
