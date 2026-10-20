@@ -47,6 +47,18 @@ spec:
       labels:
         app: pgbackrest-demo
     spec:
+      initContainers:
+        # A Docker named volume inherits the image directory's ownership; a
+        # K8s volume is root-owned, and init-pgbackrest.sh's stanza-create
+        # runs as postgres (uid/gid 999 in the postgres image). PGDATA needs
+        # nothing: the postgres entrypoint fixes its ownership itself.
+        - name: repo-owner
+          image: docker-postgres-pgbackrest:latest
+          imagePullPolicy: Never
+          command: ["sh", "-c", "chown 999:999 /var/lib/pgbackrest && chmod 750 /var/lib/pgbackrest"]
+          volumeMounts:
+            - name: pgbackrest-repo
+              mountPath: /var/lib/pgbackrest
       containers:
         - name: postgres
           image: docker-postgres-pgbackrest:latest
