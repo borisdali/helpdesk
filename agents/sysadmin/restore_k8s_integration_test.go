@@ -11,11 +11,9 @@
 //
 // Opt-in, since it crashes and restores the pod: set
 // HELPDESK_K8S_PGBACKREST_CONTEXT to the kubeconfig context (e.g. minikube),
-// with the pod applied (kubectl apply -n db -f testing/k8s/pgbackrest-demo.yaml)
-// and a full backup taken. HELPDESK_K8S_PGBACKREST_NAMESPACE overrides db.
-//
-//	HELPDESK_K8S_PGBACKREST_CONTEXT=minikube go test -tags integration -timeout 600s \
-//	  ./agents/sysadmin/ -run K8s_ -v
+// in its own namespace, which must end in -destruct (default db-destruct;
+// HELPDESK_K8S_PGBACKREST_NAMESPACE overrides). `make integration-k8s` creates
+// the namespace and the pod, takes a fresh backup and runs these tests.
 package main
 
 import (
@@ -47,7 +45,12 @@ func k8sPgBackRest(t *testing.T) *k8sPgBackRestFixture {
 	}
 	ns := os.Getenv("HELPDESK_K8S_PGBACKREST_NAMESPACE")
 	if ns == "" {
-		ns = "db"
+		ns = "db-destruct"
+	}
+	// Same guard as make integration-k8s: these tests crash and restore the
+	// namespace's database, so never one a real or test database lives in.
+	if !strings.HasSuffix(ns, "-destruct") {
+		t.Fatalf("HELPDESK_K8S_PGBACKREST_NAMESPACE=%q must end in -destruct: these tests crash and restore its database", ns)
 	}
 	f := &k8sPgBackRestFixture{t: t, ctxName: ctxName, ns: ns, kubeArgs: []string{"--context", ctxName, "-n", ns}}
 	f.pod = strings.TrimSpace(f.kubectl("get", "pod", "-l", k8sPgBackRestPodSelector, "-o", "jsonpath={.items[0].metadata.name}"))

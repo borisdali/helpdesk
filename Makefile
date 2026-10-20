@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -166,6 +166,36 @@ integration-nocache:
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
+
+# ---------------------------------------------------------------------------
+# K8s integration tests (requires a cluster; destructive to one namespace)
+# ---------------------------------------------------------------------------
+# Real pod, real kubectl exec: the K8s_ tests crash the pgBackRest demo pod
+# (pg_control removed) and restore over it. They run against their own
+# pgBackRest pod in a dedicated namespace that must end in "-destruct", never
+# a namespace a real or test database lives in (db holds the in-cluster
+# agents' own target). The target creates the namespace and the pod if
+# needed and takes a fresh full backup, so every run starts from a known
+# state. Not part of `make integration`, which only brings up Docker; there
+# the K8s_ tests skip.
+#
+#   make integration-k8s                       # context minikube, ns db-destruct
+#   make integration-k8s K8S_CONTEXT=other K8S_DESTRUCT_NS=pg-destruct
+# ---------------------------------------------------------------------------
+K8S_CONTEXT     ?= minikube
+K8S_DESTRUCT_NS ?= db-destruct
+INTEGRATION_K8S_LOG = /tmp/helpdesk-integration-k8s.log
+
+integration-k8s:
+	@case "$(K8S_DESTRUCT_NS)" in *-destruct) ;; *) echo "Error: K8S_DESTRUCT_NS=$(K8S_DESTRUCT_NS) must end in -destruct (these tests crash and restore its database)"; exit 1;; esac
+	kubectl --context $(K8S_CONTEXT) get namespace $(K8S_DESTRUCT_NS) >/dev/null 2>&1 || kubectl --context $(K8S_CONTEXT) create namespace $(K8S_DESTRUCT_NS)
+	kubectl --context $(K8S_CONTEXT) apply -n $(K8S_DESTRUCT_NS) -f testing/k8s/pgbackrest-demo.yaml
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
+	-HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
+		go test --count=1 -tags integration -timeout 900s -v -run 'K8s_' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG)
+	@$(SUMMARY_CMD) $(INTEGRATION_K8S_LOG)
 
 # ---------------------------------------------------------------------------
 # Fault injection tests (requires Docker + agents + LLM API key)
