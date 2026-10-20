@@ -1420,6 +1420,8 @@ A run that ends with `FINDINGS` and hands nothing on gets one of three outcomes,
 | `diagnosed` | A triage playbook that concluded and handed nothing on: a human decides what's next |
 | `no_action` | A remediation playbook that changed nothing, for example because its own precondition failed |
 
+A triage playbook with a "healthy, nothing to do" ending must say so in its FINDINGS with `recommended=no_changes_needed` (or `recommended=monitor`); without it, a clean check reads `diagnosed` and its incident `needs_human`. Found on the first in-cluster run (2026-10-20): `pbs_pgbackrest_health_triage`'s healthy Ending D lacked it (fixed in v1.3, as was `pbs_db_backup_health_triage`'s Ending C in v1.1). The marker also skips the gate and any auto-chain, so it never belongs on an ending that hands off.
+
 `diagnosed` and `no_action` set the incident's status to `needs_human`. When the gateway can't read the trace (no auditd configured, or auditd unreachable), a remediation keeps `resolved` and the gateway logs a warning, rather than report it as having done nothing. Found live 2026-10-11: a restore remediation whose stale-backup precondition failed took no action and said a human must decide, yet recorded `resolved` with the database still down.
 
 

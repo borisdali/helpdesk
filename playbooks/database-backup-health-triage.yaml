@@ -1,6 +1,6 @@
 series_id: pbs_db_backup_health_triage
 name: Database Backup / WAL Archiving Health Triage
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -69,7 +69,7 @@ guidance: |
   Ending C — archive_mode is on and archiving_stale is false (healthy):
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
   ROOT_CAUSE: HYPOTHESIS_1
-  FINDINGS: archive_mode=on; archiving_stale=false; last_archived_wal=<wal file>; last_archived_time=<timestamp>; no action needed
+  FINDINGS: archive_mode=on; archiving_stale=false; last_archived_wal=<wal file>; last_archived_time=<timestamp>; recommended=no_changes_needed
   ESCALATE_TO: none
 escalation:
   - "archive_mode is on and archiving_stale is true — WAL archiving is currently failing"

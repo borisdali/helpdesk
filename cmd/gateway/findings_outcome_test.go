@@ -61,6 +61,11 @@ func TestFindingsOnlyOutcome(t *testing.T) {
 		{"no auditd configured: keep resolved", remediation, "restored", nil, 0, true, audit.OutcomeResolved},
 		{"triage concluded, nothing handed on", triage, "single_instance=true; needs a DBA", nil, 0, false, audit.OutcomeDiagnosed},
 		{"triage found nothing to fix", triage, "recommended=monitor", nil, 0, false, audit.OutcomeResolved},
+		// A healthy health check (K8s, 2026-10-20: pgbackrest-health-triage
+		// Ending D recorded diagnosed / needs_human before its FINDINGS
+		// carried the marker).
+		{"healthy health check", triage, "status_code=0; backup_stale=false; wal_continuity=continuous; recommended=no_changes_needed", nil, 0, false, audit.OutcomeResolved},
+		{"healthy health check without the marker", triage, "status_code=0; backup_stale=false; wal_continuity=continuous", nil, 0, false, audit.OutcomeDiagnosed},
 	}
 	for _, c := range cases {
 		g := &Gateway{}

@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_health_triage
 name: pgBackRest Backup-Job Health Triage
-version: "1.2"
+version: "1.3"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -126,7 +126,10 @@ guidance: |
   unverified, a restore can't be confirmed safe — restore_from_backup
   itself will refuse. Report that in FINDINGS for a human instead:
     ESCALATE_TO: none
-  Otherwise, this is a routine health check with nothing to do:
+  Otherwise, this is a routine health check with nothing to do: end the
+  FINDINGS line above with "; recommended=no_changes_needed" (it records the
+  run as resolved rather than waiting on a human; never add it on the two
+  data-loss lines above), then:
     ESCALATE_TO: none
 escalation:
   - "status_code != 0 — pgBackRest cannot determine its own backup state"
