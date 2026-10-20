@@ -407,16 +407,36 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 		// specifically what approves and triggers the remediation phase.
 		Purpose: "remediation",
 	}
-	resp, err := r.ProceedEscalation(ctx, gate.RunID, proceedReq)
-	if err != nil {
-		return fmt.Errorf("proceed-escalation: %w", err)
+	// A chain can stop at more than one gate: approving the first can start
+	// a hop that gates again (e.g. data-loss or restart triage → host triage
+	// → the remediation), and the response then names that hop's run, still
+	// gate_pending. Approve each in turn, as the faulttest CLI does; without
+	// this the remediation never ran and verify_sql failed (found running
+	// faulttest-gateway on db-connection-refused, 2026-10-20).
+	runID := gate.RunID
+	for hop := 1; ; hop++ {
+		resp, err := r.ProceedEscalation(ctx, runID, proceedReq)
+		if err != nil {
+			return fmt.Errorf("proceed-escalation (gate %d, run %s): %w", hop, runID, err)
+		}
+		if resp.Status == "pending_approval" {
+			return r.runApprovalLoop(ctx, resp)
+		}
+		if resp.Status == "pending_gate" && resp.RunID != "" && resp.RunID != runID {
+			if hop >= maxChainGates {
+				return fmt.Errorf("chain still at a gate (run %s) after approving %d gates", resp.RunID, hop)
+			}
+			slog.Info("gate approved: chain stopped at another gate, approving it", "gate", hop+1, "run_id", resp.RunID, "gate_reason", resp.GateReason)
+			runID = resp.RunID
+			continue
+		}
+		slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary, "gates", hop)
+		return nil
 	}
-	if resp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, resp)
-	}
-	slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary)
-	return nil
 }
+
+// maxChainGates bounds how many gates RunGateLoop approves along one chain.
+const maxChainGates = 5
 
 // WaitForGateResolution polls GET /api/v1/fleet/playbook-runs/{runID} until the
 // run's outcome is no longer "gate_pending". It respects ctx cancellation and

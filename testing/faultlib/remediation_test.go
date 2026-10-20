@@ -3,6 +3,7 @@ package faultlib
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -948,5 +949,49 @@ func TestRemediationSpeedScore(t *testing.T) {
 	}
 	if got := RemediationSpeedScore(Failure{}, 61); got != 0.75 { // no timeout: TimeoutDuration's 120s default
 		t.Errorf("default timeout, 61s: score %.2f, want 0.75", got)
+	}
+}
+
+// A chain that gates again after the first approval: the response names the
+// next hop's run, still gate_pending, and RunGateLoop approves it too, so the
+// remediation runs (db-connection-refused via faulttest-gateway, 2026-10-20:
+// restart triage → host triage gated a second time and the restart never ran).
+func TestRunGateLoop_ApprovesEachGateAlongTheChain(t *testing.T) {
+	var approved []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		approved = append(approved, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/fleet/playbook-runs/"), "/proceed-escalation"))
+		w.Header().Set("Content-Type", "application/json")
+		if len(approved) == 1 {
+			json.NewEncoder(w).Encode(ApproveRunResponse{RunID: "plr_hop2", Status: "pending_gate", GateReason: "trust_not_earned"}) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(ApproveRunResponse{RunID: "plr_hop3", Status: "complete", Summary: "restarted"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	if err := r.RunGateLoop(context.Background(), &ApproveRunResponse{RunID: "plr_hop1", Status: "pending_gate"}); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	if strings.Join(approved, ",") != "plr_hop1,plr_hop2" {
+		t.Errorf("approved %v, want plr_hop1 then the second gate plr_hop2", approved)
+	}
+}
+
+// A chain that keeps gating stops after maxChainGates approvals with an error
+// rather than looping forever.
+func TestRunGateLoop_BoundedGateApprovals(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{RunID: fmt.Sprintf("plr_hop%d", n+1), Status: "pending_gate"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	err := r.RunGateLoop(context.Background(), &ApproveRunResponse{RunID: "plr_hop1", Status: "pending_gate"})
+	if err == nil || n != maxChainGates {
+		t.Fatalf("RunGateLoop = %v after %d approvals, want an error after %d", err, n, maxChainGates)
 	}
 }
