@@ -595,6 +595,89 @@ failures:
         narrative: "The agent should read wal_continuity from get_pgbackrest_status and report that the chain is broken: the segment the latest backup itself needs (wal_continuity.gaps, consistency_reachable=false) is missing from the repo, so PostgreSQL could not start from that backup and a restore must not be attempted. It should not take the healthy stanza status (status_code=0) as proof the backup is usable, and should hand the decision to a human (take a new full backup, or recover the segment) rather than call run_pgbackrest_backup or restore_from_backup itself."
     timeout: 90s
 
+  - id: db-pgbackrest-wal-gap-k8s
+    name: "pgBackRest WAL chain broken (Kubernetes pod)"
+    category: database
+    severity: high
+    description: >
+      db-pgbackrest-wal-gap against the self-managed pgBackRest pod
+      (testing/k8s/pgbackrest-demo.yaml) with the whole helpdesk stack
+      in-cluster: the latest backup's start segment is moved aside in the
+      pod's repo, so the WAL check (get_pgbackrest_status over kubectl exec)
+      must report the chain broken and pbs_pgbackrest_health_triage must stop
+      at a human on the pgbackrest_wal_chain_broken signal. Added v0.32 to
+      check item 1's broken-chain detection on Kubernetes, not only its
+      healthy path.
+    # The gateway resolves the alias from its own infrastructure config
+    # (testing/k8s/helm-values-pgbackrest.yaml); the harness needs none.
+    agent_conn_override: pgbackrest-k8s
+    direct_agent: sysadmin
+    prerequisites: |
+      The helpdesk stack deployed in-cluster with
+      testing/k8s/helm-values-pgbackrest.yaml, the pgBackRest pod applied in
+      namespace db (kubectl apply -n db -f testing/k8s/pgbackrest-demo.yaml)
+      with a first full backup taken, and the harness's kubectl able to reach
+      the cluster (--context, or FAULTTEST_KUBE_CONTEXT). Run via the gateway
+      (--via-gateway, through a port-forward) with --conn pgbackrest-k8s.
+
+      Same inject/teardown as db-pgbackrest-wal-gap, run in the pod with
+      kubectl exec instead of docker exec. Neither touches PGDATA or the
+      running instance. Namespace db and selector app=pgbackrest-demo are
+      fixed here, as in the other K8s faults' scripts.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db
+        POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- sh -c '
+          set -e
+          seg=$(su postgres -c "pgbackrest --stanza=main info --output=json" 2>/dev/null | grep -o "\"start\":\"[0-9A-F]\{24\}\"" | tail -1 | cut -d\" -f4)
+          test -n "$seg"
+          f=$(ls /var/lib/pgbackrest/archive/main/*/"$(echo "$seg" | cut -c1-16)"/"$seg"-*)
+          mv "$f" "$f.hidden-by-fault"
+          echo "hid $f"
+        '
+    teardown:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db
+        POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- sh -c '
+          for f in $(find /var/lib/pgbackrest/archive -name "*.hidden-by-fault"); do
+            mv "$f" "${f%.hidden-by-fault}"
+          done
+        '
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      A routine backup audit wants confirmation that this database's latest
+      pgBackRest backup can actually be restored. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      check backup health and say whether a restore from the latest backup
+      would work.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "wal_continuity"
+          - "WAL chain"
+          - "missing"
+          - "consistent state"
+          - "broken"
+      expected_diagnosis:
+        category: "pgbackrest_wal_chain_broken"
+        objective_evidence_signal: pgbackrest_wal_chain_broken
+        narrative: "Same as db-pgbackrest-wal-gap: the agent should read wal_continuity from get_pgbackrest_status and report the chain broken (the segment the latest backup itself needs is missing, consistency_reachable=false), so a restore must not be attempted, and hand the decision to a human rather than call run_pgbackrest_backup or restore_from_backup."
+    timeout: 90s
+
   - id: db-pgdata-corrupted
     name: "Data directory corrupted — restore from latest backup"
     category: database
