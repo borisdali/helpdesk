@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -25,8 +26,9 @@ func recycledSeg(name, oldName string) tailSegment {
 
 // The canary run on the Docker fixture (2026-10-19), second half: archive end
 // …0A on timeline 7; pg_wal held …09 and …0A (archived), …0B (.ready, row A),
-// …0C (open, row B). Recovery replayed through …0C; only …0B needed pushing to the archive —
-// PostgreSQL archived …0C itself as .partial at promotion.
+// …0C (open, row B). Recovery replayed through …0C. Both are pushed: leaving
+// the newest to PostgreSQL's .partial loses it when the end of WAL is on a
+// segment boundary (the VM, 2026-10-19: a clean shutdown had switched WAL).
 func TestPlanWALTail_CanaryRun(t *testing.T) {
 	wal := &WALContinuity{Status: WALContinuous, ArchiveEndWAL: "00000007000000000000000A", LatestTimeline: 7, SegmentSizeBytes: mib16}
 	segs := []tailSegment{
@@ -38,8 +40,8 @@ func TestPlanWALTail_CanaryRun(t *testing.T) {
 	if tail.ReplayThroughWAL != "00000007000000000000000C" {
 		t.Errorf("ReplayThroughWAL = %q, want …0C", tail.ReplayThroughWAL)
 	}
-	if !slices.Equal(tail.PushedToArchive, []string{"00000007000000000000000B"}) {
-		t.Errorf("PushedToArchive = %v, want only …0B (…0C is archived as .partial by PostgreSQL, the recycled …0D never)", tail.PushedToArchive)
+	if !slices.Equal(tail.PushedToArchive, []string{"00000007000000000000000B", "00000007000000000000000C"}) {
+		t.Errorf("PushedToArchive = %v, want …0B and …0C, the newest included (never the recycled …0D)", tail.PushedToArchive)
 	}
 	if len(tail.CopiedBack) != 5 || tail.SavedTo == "" {
 		t.Errorf("CopiedBack/SavedTo = %v/%q, want all 5 segments and the saved dir", tail.CopiedBack, tail.SavedTo)
@@ -59,19 +61,19 @@ func TestPlanWALTail_WhatCounts(t *testing.T) {
 			[]tailSegment{tailSeg("000000070000000000000009"), tailSeg("00000007000000000000000A")}, "", nil},
 		{"a recycled segment ends the tail", wal,
 			[]tailSegment{tailSeg("00000007000000000000000B"), recycledSeg("00000007000000000000000C", "000000070000000000000004"),
-				tailSeg("00000007000000000000000D")}, "00000007000000000000000B", nil},
+				tailSeg("00000007000000000000000D")}, "00000007000000000000000B", []string{"00000007000000000000000B"}},
 		{"a gap right after the archive end: recovery can't reach the rest", wal,
 			[]tailSegment{tailSeg("00000007000000000000000C"), tailSeg("00000007000000000000000D")}, "", nil},
 		{"older timeline segments are not the server's", wal,
 			[]tailSegment{tailSeg("00000006000000000000000B"), tailSeg("00000006000000000000000C")}, "", nil},
-		{"three past the end: all but the newest pushed", wal,
+		{"three past the end: all pushed, the newest too", wal,
 			[]tailSegment{tailSeg("00000007000000000000000B"), tailSeg("00000007000000000000000C"), tailSeg("00000007000000000000000D")},
-			"00000007000000000000000D", []string{"00000007000000000000000B", "00000007000000000000000C"}},
+			"00000007000000000000000D", []string{"00000007000000000000000B", "00000007000000000000000C", "00000007000000000000000D"}},
 		// The VM, 2026-10-18: archive end on timeline 27, the server on 29. The
 		// server's own copy of segment …0C holds WAL the archived one doesn't.
 		{"server's copy of the archive end's segment on a newer timeline",
 			&WALContinuity{Status: WALContinuous, ArchiveEndWAL: "0000001B000000000000000C", LatestTimeline: 29, SegmentSizeBytes: mib16},
-			[]tailSegment{tailSeg("0000001D000000000000000C")}, "0000001D000000000000000C", nil},
+			[]tailSegment{tailSeg("0000001D000000000000000C")}, "0000001D000000000000000C", []string{"0000001D000000000000000C"}},
 		{"wrong segment size in the header", &WALContinuity{Status: WALContinuous, ArchiveEndWAL: "00000007000000000000000A", LatestTimeline: 7, SegmentSizeBytes: 64 << 20},
 			[]tailSegment{tailSeg("00000007000000000000000B")}, "", nil},
 	}
@@ -130,8 +132,17 @@ func TestRestoreScriptWithWALTail_Order(t *testing.T) {
 		t.Error("saved dir must be beside PGDATA, not inside it (--delta restore cleans PGDATA)")
 	}
 	if q := pushToArchiveScript("main", []string{"00000007000000000000000B", "00000007000000000000000C"}); !strings.Contains(q,
-		`cd "$PGDATA"`) || !strings.HasSuffix(q, `for n in 00000007000000000000000B 00000007000000000000000C; do pgbackrest --stanza='main' archive-push "pg_wal/$n"; done`) {
+		`cd "$PGDATA"`) || !strings.HasSuffix(q, `for n in 00000007000000000000000B 00000007000000000000000C; do pgbackrest --stanza='main' archive-push "pg_wal/$n"; echo "`+walTailPushedMarker+`$n"; done`) {
 		t.Errorf("push script = %q", q)
+	}
+}
+
+func TestParsePushOutput(t *testing.T) {
+	out := "P00   INFO: archive-push command begin\n" + walTailPushedMarker + "00000007000000000000000B\n" +
+		"P00  ERROR: [042]: unable to write\n"
+	pushed, rest := parsePushOutput(out)
+	if !slices.Equal(pushed, []string{"00000007000000000000000B"}) || strings.Contains(rest, walTailPushedMarker) || !strings.Contains(rest, "unable to write") {
+		t.Errorf("parsePushOutput = %v, %q", pushed, rest)
 	}
 }
 
@@ -146,6 +157,10 @@ func TestCompareRecovery_PgWalTail(t *testing.T) {
 		rec                          recoveryLog
 	}{
 		{"canary run: replayed the tail", RestoreVerified, "then the WAL put back into pg_wal through 00000007000000000000000C", pred, canary},
+		// Every tail segment pushed: recovery restores all of it from the archive.
+		{"whole tail pushed", RestoreVerified, "including the WAL from pg_wal that restore_from_backup pushed",
+			&RestorePrediction{RecoverToWAL: "00000007000000000000000C", ReplayThroughWAL: "00000007000000000000000C", ExpectedTimeline: 8, SegmentSizeBytes: mib16},
+			recoveryLog{Found: true, LastRestoredWAL: "00000007000000000000000C", NewTimeline: 8, RedoDoneLSN: "0/C0000E0"}},
 		{"stopped at the archive end anyway", RestoreMismatch, "stopped early in the pg_wal tail",
 			pred, recoveryLog{Found: true, LastRestoredWAL: "00000007000000000000000A", NewTimeline: 8, RedoDoneLSN: "0/A000138"}},
 		{"no tail, but redo went further", RestoreMismatch, "went past the predicted end: redo done at 0/C0000E0",
@@ -162,6 +177,8 @@ func TestCompareRecovery_PgWalTail(t *testing.T) {
 		}
 	}
 }
+
+var failedPushRe = regexp.MustCompile(`Pushing \[([^\]]*)\] to the archive FAILED`)
 
 // restoreFromBackupImpl end to end against fake commands: the restore
 // script's markers become PgWalTail, the segments to push are archive-pushed
@@ -184,44 +201,64 @@ func TestRestoreFromBackup_PgWalTail(t *testing.T) {
 			hex.EncodeToString(syntheticSegmentHeader(binary.LittleEndian, name, wal.SegmentSizeBytes)[:walLongHeaderLen]) + "\n"
 	}
 
-	for _, pushErr := range []error{nil, fmt.Errorf("exit status 1")} {
+	pushed := func(n string) string { return walTailPushedMarker + n + "\n" }
+	cases := []struct {
+		name       string
+		pushOut    string
+		pushErr    error
+		wantPushed []string
+		wantFailed string // segment the detail must name as not pushed
+	}{
+		{"push succeeds", pushed(next(1)) + pushed(next(2)), nil, []string{next(1), next(2)}, ""},
+		{"push fails outright", "ERROR: [042]\n", fmt.Errorf("exit status 1"), nil, next(1)},
+		{"push fails partway", pushed(next(1)) + "ERROR: [042]\n", fmt.Errorf("exit status 1"), []string{next(1)}, next(2)},
+	}
+	for _, c := range cases {
 		r := &pgbackrestRouter{
 			info:       realPgBackRestInfoJSON,
 			readyErr:   fmt.Errorf("exit status 2"),
 			restoreOut: walTailSavedMarker + "/var/lib/pgsql/pg_wal.saved-x\nrestore command end: completed successfully\n" + marker(next(1)) + marker(next(2)),
-			pushErr:    pushErr,
+			pushOut:    c.pushOut,
+			pushErr:    c.pushErr,
 		}
 		cmdRunner = r
 		res, err := restoreFromBackupImpl(context.Background(), RestoreFromBackupArgs{Stanza: "main"})
 		if err != nil {
-			t.Fatalf("pushErr=%v: %v", pushErr, err)
+			t.Fatalf("%s: %v", c.name, err)
 		}
 		tail := res.PgWalTail
 		if tail == nil || tail.SavedTo != "/var/lib/pgsql/pg_wal.saved-x" || tail.ReplayThroughWAL != next(2) {
-			t.Fatalf("pushErr=%v: PgWalTail = %+v, want saved dir and replay through %s", pushErr, tail, next(2))
+			t.Fatalf("%s: PgWalTail = %+v, want saved dir and replay through %s", c.name, tail, next(2))
 		}
-		// Once pushed, recovery restores next(1) from the archive; if the push
-		// failed, the archive still ends where the WAL check said.
-		wantArchiveEnd := next(1)
-		if pushErr != nil {
-			wantArchiveEnd = wal.ArchiveEndWAL
+		// Recovery restores what was pushed from the archive (it tries the
+		// archive first), so the archive end moves to the last pushed segment;
+		// with nothing pushed it stays where the WAL check said.
+		wantArchiveEnd := wal.ArchiveEndWAL
+		if n := len(c.wantPushed); n > 0 {
+			wantArchiveEnd = c.wantPushed[n-1]
 		}
 		if res.Prediction == nil || res.Prediction.ReplayThroughWAL != next(2) || res.Prediction.RecoverToWAL != wantArchiveEnd {
-			t.Errorf("pushErr=%v: Prediction = %+v, want recover_to_wal %s, replay_through_wal %s", pushErr, res.Prediction, wantArchiveEnd, next(2))
+			t.Errorf("%s: Prediction = %+v, want recover_to_wal %s, replay_through_wal %s", c.name, res.Prediction, wantArchiveEnd, next(2))
 		}
 		if strings.Contains(res.Output, "helpdesk-wal-tail") {
-			t.Errorf("Output still has marker lines: %q", res.Output)
+			t.Errorf("%s: Output still has marker lines: %q", c.name, res.Output)
 		}
+		// Every tail segment is pushed, the newest included.
 		calls := r.callsContaining("archive-push")
-		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "for n in "+next(1)+";") || strings.Contains(strings.Join(calls[0], " "), next(2)) {
-			t.Errorf("pushErr=%v: push calls = %v, want one pushing only %s", pushErr, calls, next(1))
+		if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "for n in "+next(1)+" "+next(2)+";") {
+			t.Errorf("%s: push calls = %v, want one pushing %s and %s", c.name, calls, next(1), next(2))
 		}
-		if pushErr == nil && !slices.Equal(tail.PushedToArchive, []string{next(1)}) {
-			t.Errorf("PushedToArchive = %v", tail.PushedToArchive)
+		if !slices.Equal(tail.PushedToArchive, c.wantPushed) {
+			t.Errorf("%s: PushedToArchive = %v, want %v", c.name, tail.PushedToArchive, c.wantPushed)
 		}
-		// A failed push doesn't fail the restore, but it must say so.
-		if pushErr != nil && (tail.PushedToArchive != nil || !strings.Contains(tail.Detail, "FAILED") || !strings.Contains(tail.Detail, "archive-push")) {
-			t.Errorf("failed push: %+v", tail)
+		// A failed push doesn't fail the restore, but it must say so, and
+		// which segments still need pushing.
+		if c.pushErr != nil {
+			m := failedPushRe.FindStringSubmatch(tail.Detail)
+			if m == nil || !strings.Contains(tail.Detail, "archive-push") || !strings.Contains(m[1], c.wantFailed) ||
+				(len(c.wantPushed) > 0 && strings.Contains(m[1], c.wantPushed[0])) {
+				t.Errorf("%s: detail = %q, want FAILED naming only the unpushed %s", c.name, tail.Detail, c.wantFailed)
+			}
 		}
 	}
 }

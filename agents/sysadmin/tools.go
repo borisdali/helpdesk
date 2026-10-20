@@ -2070,11 +2070,13 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 	}
 	result := RestoreFromBackupResult{Output: out, PgWalTail: planWALTail(savedTo, segs, walChecked)}
 	if t := result.PgWalTail; t != nil && len(t.PushedToArchive) > 0 {
-		if pOut, pErr := run(pushToArchiveScript(stanza, t.PushedToArchive)); pErr != nil {
+		pOut, pErr := run(pushToArchiveScript(stanza, t.PushedToArchive))
+		if pushed, rest := parsePushOutput(pOut); pErr != nil {
+			failed := t.PushedToArchive[len(pushed):]
 			t.Detail += fmt.Sprintf(". Pushing %v to the archive FAILED (%v: %s): recovery will still replay them, but PostgreSQL deletes them "+
 				"from pg_wal afterwards, so until they are archived the new timeline depends on the copies in %s — push them with "+
-				"pgbackrest archive-push from there before removing it", t.PushedToArchive, pErr, strings.TrimSpace(pOut), t.SavedTo)
-			t.PushedToArchive = nil
+				"pgbackrest archive-push from there before removing it", failed, pErr, rest, t.SavedTo)
+			t.PushedToArchive = pushed
 		}
 	}
 	result.Prediction = restorePredictionFrom(walChecked, result.PgWalTail, time.Now())

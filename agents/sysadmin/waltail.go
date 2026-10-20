@@ -22,11 +22,23 @@ package main
 // copied-back segments, and the new timeline then depends on WAL the repo
 // doesn't have — the next restore would stop at the old archive end. So
 // every copied-back segment recovery will replay past the archive end is
-// pushed with pgbackrest archive-push before startup, except the newest,
-// which PostgreSQL itself archives as .partial when it promotes. Not a .ready
-// marker: the integration test found (2026-10-19) that PostgreSQL deletes the
-// marker during archive recovery, and after promotion deletes the segment
-// itself as if archived — it would be gone from both pg_wal and the repo.
+// pushed with pgbackrest archive-push before startup. Not a .ready marker:
+// the integration test found (2026-10-19) that PostgreSQL deletes the marker
+// during archive recovery, and after promotion deletes the segment itself as
+// if archived — it would be gone from both pg_wal and the repo.
+//
+// The newest is pushed too. It used to be left to PostgreSQL, which archives
+// the old timeline's last segment as .partial when it promotes, but only when
+// the end of WAL is mid-segment. After a clean shutdown (archiving on, so the
+// shutdown switches WAL) the newest segment is complete, the new timeline
+// starts at the next one and there is no .partial: the newest segment was in
+// neither the archive nor pg_wal. Found on the real VM (2026-10-19), whose
+// inject shuts PostgreSQL down with systemctl, then reproduced on Docker with
+// pg_ctl stop -m fast. Pushing an incomplete newest segment under its own name
+// is safe here: the old timeline is dead after the restore, so nothing writes
+// that segment again, and recovery reading it from the archive stops at the
+// same invalid record it would in pg_wal. Restored from the archive, it counts
+// as archived, so PostgreSQL makes no .partial of it.
 //
 // Only segments whose first page header matches their own name count:
 // PostgreSQL pre-creates future segments by renaming old ones, and those
@@ -60,10 +72,11 @@ type PgWalTail struct {
 	Detail          string   `json:"detail"`
 }
 
-// Marker lines the restore script prints for restoreFromBackupImpl.
+// Marker lines the restore and push scripts print for restoreFromBackupImpl.
 const (
 	walTailSavedMarker   = "helpdesk-wal-tail-saved="
 	walTailSegmentMarker = "helpdesk-wal-tail-segment="
+	walTailPushedMarker  = "helpdesk-wal-tail-pushed="
 )
 
 // restoreScriptWithWALTail is restore_from_backup's restore command. Before
@@ -103,7 +116,9 @@ fi`
 // pushToArchiveScript archive-pushes names from pg_wal, as PostgreSQL's own
 // archive_command would (relative path, from PGDATA). names are 24-hex
 // segment names checked by planWALTail, so they need no quoting. pgBackRest
-// accepts a segment it already holds with the same checksum.
+// accepts a segment it already holds with the same checksum. Each success is
+// printed, so a push that fails partway still says which segments made it:
+// recovery restores those from the archive.
 func pushToArchiveScript(stanza string, names []string) string {
 	var b strings.Builder
 	b.WriteString(`set -e
@@ -113,8 +128,22 @@ for n in`)
 	for _, n := range names {
 		b.WriteString(" " + n)
 	}
-	b.WriteString(`; do pgbackrest --stanza=` + shellQuote(stanza) + ` archive-push "pg_wal/$n"; done`)
+	b.WriteString(`; do pgbackrest --stanza=` + shellQuote(stanza) + ` archive-push "pg_wal/$n"; echo "` + walTailPushedMarker + `$n"; done`)
 	return b.String()
+}
+
+// parsePushOutput splits the push script's success markers from pgBackRest's
+// own output.
+func parsePushOutput(out string) (pushed []string, rest string) {
+	var kept []string
+	for _, line := range strings.Split(out, "\n") {
+		if n, ok := strings.CutPrefix(line, walTailPushedMarker); ok {
+			pushed = append(pushed, strings.TrimSpace(n))
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return pushed, strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // tailSegment is one copied-back segment and its first page header.
@@ -197,6 +226,7 @@ func planWALTail(savedTo string, segs []tailSegment, wal *WALContinuity) *PgWalT
 	// timeline than the archived one it holds WAL the archive doesn't.
 	if name, ok := byNo[endNo]; ok && name != wal.ArchiveEndWAL {
 		tail.ReplayThroughWAL = name
+		tail.PushedToArchive = append(tail.PushedToArchive, name)
 	}
 	for {
 		name, ok := byNo[reach+1]
@@ -205,11 +235,7 @@ func planWALTail(savedTo string, segs []tailSegment, wal *WALContinuity) *PgWalT
 		}
 		reach++
 		tail.ReplayThroughWAL = name
-		if _, ok := byNo[reach+1]; ok {
-			// Not the newest: PostgreSQL archives the newest as .partial
-			// at promotion, the rest nobody would.
-			tail.PushedToArchive = append(tail.PushedToArchive, name)
-		}
+		tail.PushedToArchive = append(tail.PushedToArchive, name)
 	}
 	sort.Strings(tail.PushedToArchive)
 	if tail.ReplayThroughWAL == "" {

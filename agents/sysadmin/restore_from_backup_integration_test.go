@@ -59,10 +59,16 @@ func skipIfNoPgBackRestDocker(t *testing.T) {
 // failed restore attempt here must not leave the shared container broken
 // for whatever test runs next (e.g. TestIntegration_GetPgBackRestStatus_OverRealSSH,
 // which expects a healthy container). Same verified sequence as
-// db-pgdata-corrupted's own fault teardown in testing/catalog/failures.yaml.
+// db-pgdata-corrupted's own fault teardown in testing/catalog/failures.yaml,
+// including its guard: when postgres is up (the test's restore worked), the
+// rm below would delete the LIVE postmaster.pid and pgbackrest would restore
+// over a running server.
 func restoreIntegrationTeardown(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
+	if _, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "pg_isready", "-q"); err == nil {
+		return
+	}
 	script := `
 PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
 rm -f "$PGDATA/postmaster.pid"
@@ -136,10 +142,17 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restoreFromBackupImpl failed against a real crashed container: %v", err)
 	}
-	if p := restored.Prediction; p == nil || p.RecoverToWAL != before.WALContinuity.ArchiveEndWAL ||
+	// Where recovery should end: the archive end the WAL check found, or,
+	// when pg_wal held WAL past it (at least the open segment, archiving
+	// being healthy here), the last tail segment restore_from_backup pushed.
+	wantEnd := before.WALContinuity.ArchiveEndWAL
+	if tail := restored.PgWalTail; tail != nil && len(tail.PushedToArchive) > 0 {
+		wantEnd = tail.PushedToArchive[len(tail.PushedToArchive)-1]
+	}
+	if p := restored.Prediction; p == nil || p.RecoverToWAL != wantEnd ||
 		p.ExpectedTimeline != before.WALContinuity.LatestTimeline+1 {
-		t.Errorf("restore prediction = %+v, want recover_to_wal %s and timeline %d from the pre-restore check",
-			restored.Prediction, before.WALContinuity.ArchiveEndWAL, before.WALContinuity.LatestTimeline+1)
+		t.Errorf("restore prediction = %+v, want recover_to_wal %s and timeline %d from the pre-restore check and the pg_wal tail",
+			restored.Prediction, wantEnd, before.WALContinuity.LatestTimeline+1)
 	}
 
 	// Bring postgres back up against the now-repaired data directory —
@@ -154,8 +167,8 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	// The WAL check said where recovery would get to before the restore ran;
 	// PostgreSQL's own log says where it actually got to. They must agree.
 	wal := before.WALContinuity
-	if got := lastRestoredSegment(log); got != wal.ArchiveEndWAL {
-		t.Errorf("PostgreSQL's last restored segment = %q, the WAL check predicted %s", got, wal.ArchiveEndWAL)
+	if got := lastRestoredSegment(log); got != wantEnd {
+		t.Errorf("PostgreSQL's last restored segment = %q, predicted %s", got, wantEnd)
 	}
 	if want := fmt.Sprintf("selected new timeline ID: %d", wal.LatestTimeline+1); !strings.Contains(log, want) {
 		t.Errorf("recovery log has no %q: the WAL check's latest timeline (%d) isn't the one PostgreSQL recovered along", want, wal.LatestTimeline)
@@ -167,10 +180,10 @@ func TestIntegration_RestoreFromBackup_RealCrashAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifyRestoreRecoveryImpl: %v", err)
 	}
-	if verified.Status != RestoreVerified || verified.ReachedWAL != wal.ArchiveEndWAL ||
+	if verified.Status != RestoreVerified || verified.ReachedWAL != wantEnd ||
 		verified.NewTimeline != wal.LatestTimeline+1 || verified.RedoDoneLSN == "" {
 		t.Errorf("verify_restore_recovery = %+v, want verified at %s on timeline %d with a redo-done LSN",
-			verified, wal.ArchiveEndWAL, wal.LatestTimeline+1)
+			verified, wantEnd, wal.LatestTimeline+1)
 	}
 
 	// Verify via a real connection, not just "the tool returned no error" —
@@ -218,9 +231,27 @@ func walTailTestCleanup(t *testing.T) {
 // is committed into a segment that completes and waits as .ready, row B into
 // the open segment; neither reaches the archive. After the crash and
 // restore_from_backup, both rows must be back, verify_restore_recovery must
-// confirm recovery replayed the tail as predicted, and the archive must be
-// continuous onto the new timeline: the second hazard the canary run found.
+// confirm recovery replayed the tail as predicted, and the archive must hold
+// the whole tail: the second hazard the canary run found.
 func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
+	runWALTailCanary(t, false)
+}
+
+// TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL_CleanShutdown is the
+// same canary with PostgreSQL shut down cleanly after pg_control is gone, as
+// the VM fault's systemctl restart does. With archiving on, the shutdown
+// switches WAL, so row B's segment is complete and recovery ends on a segment
+// boundary, where PostgreSQL makes no .partial. Found on the real VM
+// (2026-10-19): restore_from_backup left the newest segment to that .partial,
+// and row B's segment ended up in neither the archive nor pg_wal. Docker's
+// own docker restart doesn't shut PostgreSQL down cleanly, which is why
+// KeepsUnarchivedWAL never hit it.
+func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL_CleanShutdown(t *testing.T) {
+	runWALTailCanary(t, true)
+}
+
+func runWALTailCanary(t *testing.T, cleanShutdown bool) {
+	t.Helper()
 	skipIfNoPgBackRestDocker(t)
 
 	repoRoot, err := filepath.Abs("../..")
@@ -246,6 +277,9 @@ func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
 	}
 	fixturePSQL(t, "ALTER SYSTEM SET archive_command = '/bin/false'")
 	fixturePSQL(t, "SELECT pg_reload_conf()")
+	// The reload is asynchronous: without the wait, row A's segment can
+	// still be archived with the old command.
+	time.Sleep(2 * time.Second)
 	fixturePSQL(t, "DROP TABLE IF EXISTS canary_wal_tail")
 	fixturePSQL(t, "CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)")
 	fixturePSQL(t, "INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')")
@@ -261,6 +295,12 @@ func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
 		"rm", "-f", "/var/lib/postgresql/data/global/pg_control"); err != nil {
 		t.Fatalf("corrupting pg_control: %v", err)
 	}
+	if cleanShutdown {
+		if out, err := exec.Command("docker", "exec", "-u", "postgres", restoreIntegrationContainer,
+			"pg_ctl", "-D", "/var/lib/postgresql/data", "stop", "-m", "fast", "-w", "-t", "30").CombinedOutput(); err != nil {
+			t.Fatalf("clean shutdown: %v: %s", err, out)
+		}
+	}
 	if err := exec.CommandContext(ctx, "docker", "restart", restoreIntegrationContainer).Run(); err != nil {
 		t.Fatalf("docker restart (to trigger the crash): %v", err)
 	}
@@ -272,7 +312,7 @@ func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
 	}
 	tail := restored.PgWalTail
 	if tail == nil || tail.SavedTo == "" || tail.ReplayThroughWAL == "" || len(tail.PushedToArchive) == 0 {
-		t.Fatalf("pg_wal_tail = %+v, want a saved dir, WAL to replay past the archive end %s, and row A's segment pushed to the archive",
+		t.Fatalf("pg_wal_tail = %+v, want a saved dir, WAL to replay past the archive end %s, and the tail pushed to the archive",
 			tail, before.WALContinuity.ArchiveEndWAL)
 	}
 	if p := restored.Prediction; p == nil || p.ReplayThroughWAL != tail.ReplayThroughWAL {
@@ -295,23 +335,45 @@ func TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL(t *testing.T) {
 	if verified.Status != RestoreVerified || verified.ReplayedThroughWAL != tail.ReplayThroughWAL {
 		t.Errorf("verify_restore_recovery = %+v, want verified, replayed through %s", verified, tail.ReplayThroughWAL)
 	}
+	requireTailArchived(t, ctx, before.WALContinuity, tail)
+}
 
-	// restore_from_backup pushed row A's segment before startup, and
-	// PostgreSQL archives the open one as .partial when it promotes. Without
-	// both, the new timeline would depend on WAL only this host had.
+// requireTailArchived checks the new timeline doesn't depend on WAL only
+// this host had: every tail segment, through replay_through_wal, is in the
+// repo, and once the new timeline archives a segment of its own the WAL check
+// is continuous across it. The check on the history file alone (all this
+// test asked before) passed with row B's segment missing from the archive.
+func requireTailArchived(t *testing.T, ctx context.Context, before *WALContinuity, tail *PgWalTail) {
+	t.Helper()
+	if n := len(tail.PushedToArchive); n == 0 || tail.PushedToArchive[n-1] != tail.ReplayThroughWAL {
+		t.Errorf("pushed_to_archive = %v, want the whole tail through %s", tail.PushedToArchive, tail.ReplayThroughWAL)
+	}
+	repo, err := testutil.DockerExec(ctx, restoreIntegrationContainer, "ls", "-R", "/var/lib/pgbackrest/archive/main/"+before.ArchiveID)
+	if err != nil {
+		t.Fatalf("listing the archive: %v", err)
+	}
+	for _, n := range tail.PushedToArchive {
+		if !regexp.MustCompile(`(?m)^` + n + `-`).MatchString(repo) {
+			t.Errorf("tail segment %s is not in the archive", n)
+		}
+	}
+
+	fixturePSQL(t, "CHECKPOINT")
+	fixturePSQL(t, "SELECT pg_switch_wal()")
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		after, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
-		if err == nil && after.WALContinuity != nil && after.WALContinuity.Status == WALContinuous &&
-			after.WALContinuity.LatestTimeline == before.WALContinuity.LatestTimeline+1 {
-			break
+		var wal *WALContinuity
+		if err == nil {
+			wal = after.WALContinuity
+		}
+		if wal != nil && wal.Status == WALContinuous && wal.LatestTimeline == before.LatestTimeline+1 {
+			if tli, _, _, err := parseSegmentName(wal.ArchiveEndWAL); err == nil && tli == wal.LatestTimeline {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
-			var wal *WALContinuity
-			if err == nil {
-				wal = after.WALContinuity
-			}
-			t.Fatalf("archive not continuous onto the new timeline 60s after startup: %+v, %v (pushed: %v)", wal, err, tail.PushedToArchive)
+			t.Fatalf("archive not continuous onto a segment of the new timeline 60s after a WAL switch: %+v, %v (pushed: %v)", wal, err, tail.PushedToArchive)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -350,6 +412,7 @@ func TestIntegration_RestoreFromBackup_TailPushFails(t *testing.T) {
 	}
 	fixturePSQL(t, "ALTER SYSTEM SET archive_command = '/bin/false'")
 	fixturePSQL(t, "SELECT pg_reload_conf()")
+	time.Sleep(2 * time.Second) // the reload is asynchronous
 	fixturePSQL(t, "DROP TABLE IF EXISTS canary_wal_tail")
 	fixturePSQL(t, "CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)")
 	fixturePSQL(t, "INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')")
@@ -431,22 +494,9 @@ func TestIntegration_RestoreFromBackup_TailPushFails(t *testing.T) {
 			t.Fatalf("archive-push %s from the saved dir, as the detail instructs: %v: %s", n, err, out)
 		}
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		after, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-db"})
-		if err == nil && after.WALContinuity != nil && after.WALContinuity.Status == WALContinuous &&
-			after.WALContinuity.LatestTimeline == before.WALContinuity.LatestTimeline+1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			var wal *WALContinuity
-			if err == nil {
-				wal = after.WALContinuity
-			}
-			t.Fatalf("archive not continuous onto the new timeline 60s after pushing %v from %s: %+v, %v", notPushed, tail.SavedTo, wal, err)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	byHand := *tail
+	byHand.PushedToArchive = notPushed
+	requireTailArchived(t, ctx, before.WALContinuity, &byHand)
 }
 
 // TestIntegration_RestoreFromBackup_RefusesWhenTailCannotBeSaved: if pg_wal

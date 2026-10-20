@@ -511,14 +511,21 @@ everything the backup's manifest doesn't list, `pg_wal`'s contents included.
   CRC-checked like any other WAL. Segments Postgres pre-created by renaming old ones don't count:
   only a segment whose first page header matches its own name is part of the tail.
 - **It pushes the tail to the archive** with `pgbackrest archive-push`, before startup, every
-  segment past the archive end except the newest, which Postgres archives itself as `.partial`
-  when it promotes. Otherwise the new timeline would depend on WAL the repo doesn't have and the
-  next restore would stop at the old archive end, found during the canary test. Not a `.ready`
-  marker: found by the integration test, Postgres deletes the marker during archive recovery
-  and then the segment itself, as if archived.
+  segment past the archive end, the newest included. Otherwise the new timeline would depend on
+  WAL the repo doesn't have and the next restore would stop at the old archive end, found during
+  the canary test. Not a `.ready` marker: found by the integration test, Postgres deletes the
+  marker during archive recovery and then the segment itself, as if archived.
+- **The newest too**, not left to Postgres. Postgres archives the old timeline's last segment as
+  `.partial` when it promotes, but only when the end of WAL is mid-segment. After a clean
+  shutdown (with archiving on, the shutdown switches WAL) the newest segment is complete, the new
+  timeline starts at the next one, and there is no `.partial`. The first version relied on the
+  `.partial`, and the VM run below lost row B's segment from both the archive and `pg_wal` that
+  way. Pushing an incomplete newest segment under its own name is safe: the old timeline is dead
+  after the restore, recovery reading it from the archive stops at the same invalid record it
+  would in `pg_wal`, and Postgres, having restored it from the archive, makes no `.partial`.
 - **It reports all of it** in `pg_wal_tail`: `saved_to` (the original copies, kept until a human
   removes them), `replay_through_wal`, `pushed_to_archive`. A failed push doesn't fail the restore;
-  the detail says so and where the copies are.
+  the detail says so, which segments still need pushing and where the copies are.
 
 The prediction now includes the tail (`replay_through_wal`). Postgres logs nothing for segments
 it reads from `pg_wal`, so `verify_restore_recovery` also checks which segment `redo done at`
@@ -530,8 +537,44 @@ to `…0A`, then `…0B`/`…0C` from `pg_wal` and ended at `invalid record leng
 normal end of WAL, with `redo done at 0/C0000E0`.
 
 `TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL` makes the canary test permanent: both rows
-survive, `verify_restore_recovery` reports `verified` through the tail and the archive is
-`continuous` onto the new timeline. With the old restore script it fails.
+survive, `verify_restore_recovery` reports `verified` through the tail, every tail segment is in
+the repo, and once the new timeline archives a segment of its own the WAL check is `continuous`
+across it. With the old restore script it fails. `…_CleanShutdown` is the same canary with
+Postgres shut down cleanly after `pg_control` is gone, as the VM fault's `systemctl restart` does;
+Docker's `docker restart` doesn't shut down cleanly, which is why the first version passed every
+Docker test. With the newest segment left to the `.partial` it fails on the WAL check itself:
+"WAL segment …27 on timeline 11 is missing". An earlier version of the test only waited for the
+WAL check to be `continuous` onto the new timeline, which the history file alone satisfies.
+Two more cover the
+failure paths: with the repo read-only the push fails but the restore succeeds, both rows come
+back, and pushing from `saved_to` by hand, as the detail says, makes the archive continuous; with
+PGDATA's parent read-only nothing can be saved and the restore refuses before touching PGDATA.
+`db-pgdata-corrupted-unarchived-tail` runs the same canary through the full agent chain in
+`make faulttest-gateway-pgbackrest`, its `verify_sql` checking the rows themselves.
+
+👉 The same canary on the real Ubuntu VM (systemd, SSH dispatch), through the full agent chain
+with `pbs_pgbackrest_restore_remediate` v1.7, 2026-10-19 (incident `plr_c18ee2b4`, restore hop
+`plr_cc73029d`):
+  - fresh backup `20261019-185433F`, archive end `…11`; row A committed into `…12` (left `.ready`),
+    row B into the open `…13`;
+  - `restore_from_backup` saved `pg_wal` to `/var/lib/postgresql/16/pg_wal.saved-20261019T225649Z`
+    and pushed `…12` to the archive;
+  - `verify_restore_recovery`: `verified`, the archive restored through `…12`, `pg_wal` replayed
+    through `…13`, `redo done at 0/130000D8`, new timeline 36;
+  - both rows back, `archive_command` back on, the repo's `wal archive max` now `…12`. The run's
+    findings: "Commits after the archive end (000000230000000000000011) were recovered from pg_wal
+    through 000000230000000000000013; only changes never written to pg_wal are lost."
+  - but `…13` (row B) was then in neither the archive nor `pg_wal`, and no `.partial` either: the
+    inject's `systemctl restart` had shut Postgres down cleanly, the shutdown's WAL switch made
+    `…13` complete (`redo done at 0/130000D8` is that switch record), and timeline 36 started at
+    `…14`. The next restore along timeline 36 would have stopped after `…12`. Reproduced on Docker
+    the same day, then fixed by pushing the newest segment too (above). The VM's own archive is
+    repaired by pushing `…13` from `saved_to`, which is what that directory is kept for.
+
+The run before it, a plain VM restore with archiving healthy, also showed the tail on a real
+host: the archive ended on timeline 31 while the server was on 34, and of the two segments in
+`pg_wal` the header check kept the open one and left out the one Postgres had pre-created
+(Postgres's own log: `unexpected pageaddr 0/E000000 in WAL segment …10`).
 
 The tail is only as good as `pg_wal` itself: when the volume is gone or the server had promoted
 to a timeline whose history file never reached the archive, recovery still ends at the archive

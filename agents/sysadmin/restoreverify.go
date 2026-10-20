@@ -238,6 +238,10 @@ func compareRecovery(pred *RestorePrediction, rec recoveryLog) (status, detail s
 			return RestoreMismatch, fmt.Sprintf("recovery went past the predicted end: redo done at %s, after %s", rec.RedoDoneLSN, want)
 		}
 	}
+	if pred.ReplayThroughWAL != "" && rec.LastRestoredWAL == pred.ReplayThroughWAL {
+		return RestoreVerified, fmt.Sprintf("recovery replayed the archive through %s, including the WAL from pg_wal that restore_from_backup pushed there before startup (redo done at %s), and selected timeline %d, as predicted",
+			rec.LastRestoredWAL, orNone(rec.RedoDoneLSN), rec.NewTimeline)
+	}
 	if pred.ReplayThroughWAL != "" {
 		return RestoreVerified, fmt.Sprintf("recovery replayed the archive through %s, then the WAL put back into pg_wal through %s (redo done at %s), and selected timeline %d, as predicted",
 			rec.LastRestoredWAL, pred.ReplayThroughWAL, orNone(rec.RedoDoneLSN), rec.NewTimeline)
