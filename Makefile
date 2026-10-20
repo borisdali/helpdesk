@@ -176,8 +176,11 @@ integration-nocache:
 # a namespace a real or test database lives in (db holds the in-cluster
 # agents' own target). The target creates the namespace and the pod if
 # needed and takes a fresh full backup, so every run starts from a known
-# state. Not part of `make integration`, which only brings up Docker; there
-# the K8s_ tests skip.
+# state, then archives WAL past the backup (CHECKPOINT so the switch isn't a
+# no-op, then pgbackrest check, which switches and waits for the archive), as
+# on any running server: a fresh pod otherwise has only the backup's own
+# segment (the empty-gap case, covered by a unit test). Not part of
+# `make integration`, which only brings up Docker; there the K8s_ tests skip.
 #
 #   make integration-k8s                       # context minikube, ns db-destruct
 #   make integration-k8s K8S_CONTEXT=other K8S_DESTRUCT_NS=pg-destruct
@@ -193,10 +196,6 @@ integration-k8s:
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
-	# WAL archived after the backup too, as on any running server: a fresh pod
-	# otherwise has only the backup's own segment (the empty-gap case, now a
-	# unit test). CHECKPOINT writes WAL so the switch isn't a no-op; check
-	# switches and waits for that segment to reach the archive.
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
 	-HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
 		go test --count=1 -tags integration -timeout 900s -v -run 'K8s_' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG)

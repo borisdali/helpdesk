@@ -710,3 +710,56 @@ func TestEvaluateWAL_OnlyBackupSegmentMissing_GapRecorded(t *testing.T) {
 		t.Errorf("Detail = %q, want it to name the missing segment and say PostgreSQL could not start", got.Detail)
 	}
 }
+
+// k8sServiceEnvWarnings is pgBackRest's console output on Kubernetes ahead of
+// every command, as captured from the pgbackrest-demo pod (2026-10-20): each
+// Service in the namespace injects PGBACKREST_DEMO_* variables it warns
+// about. The HINT line is pgBackRest's own continuation-line form.
+const k8sServiceEnvWarnings = `P00   WARN: environment contains invalid option 'demo-service-port'
+P00   WARN: environment contains invalid option 'demo-port-5432-tcp-proto'
+P00   WARN: environment contains invalid option 'demo-service-host'
+                                    HINT: this is valid in some recovery scenarios but may also indicate a problem.
+`
+
+// The same reads as TestCheckWALContinuity_CommandsAndResult, each with the
+// Kubernetes warnings in front: the verdict must not change. Before the fix
+// the history file failed to parse ("invalid history line … parsing \"P00\"")
+// and the check came back unverified, so on db-pgbackrest-wal-gap-k8s the
+// broken-chain signal never fired.
+func TestCheckWALContinuity_PgBackRestWarningsInOutput(t *testing.T) {
+	res, err := parsePgBackRestInfo(k8sServiceEnvWarnings+readFixture(t, "multi_timeline_info.json"), "", 25*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(args []string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, ".history"):
+			return k8sServiceEnvWarnings + readFixture(t, "multi_timeline_0000001E.history"), nil
+		case strings.Contains(joined, "repo-get"):
+			return k8sServiceEnvWarnings + readFixture(t, "multi_timeline_000000010000000000000002.gz"), nil
+		case strings.Contains(joined, "--recurse"):
+			return k8sServiceEnvWarnings + readFixture(t, "multi_timeline_listing.json"), nil
+		case strings.Contains(joined, "repo-ls"):
+			return k8sServiceEnvWarnings + readFixture(t, "multi_timeline_top.txt"), nil
+		}
+		return "", fmt.Errorf("unexpected command %q", joined)
+	}
+	got := checkWALContinuity(res, run)
+	if got.Status != WALContinuous || got.LatestTimeline != 30 {
+		t.Fatalf("Status = %s, latest timeline %d (%s), want continuous on timeline 30 as without the warnings", got.Status, got.LatestTimeline, got.Detail)
+	}
+	if got.SegmentSizeBytes != 16<<20 || got.SegmentSizeSource != SegmentSizeFromWALHeader {
+		t.Errorf("segment size = %d from %q, want 16 MiB from the WAL header", got.SegmentSizeBytes, got.SegmentSizeSource)
+	}
+}
+
+func TestWithoutPgBackRestLog(t *testing.T) {
+	in := k8sServiceEnvWarnings + "1\t0/3000000\tno recovery target specified\n2\t0/5000000\tno recovery target specified\n"
+	if got, want := withoutPgBackRestLog(in), "1\t0/3000000\tno recovery target specified\n2\t0/5000000\tno recovery target specified\n"; got != want {
+		t.Errorf("withoutPgBackRestLog = %q, want %q", got, want)
+	}
+	if got := withoutPgBackRestLog("0000000100000000\n00000002.history\n"); got != "0000000100000000\n00000002.history\n" {
+		t.Errorf("clean listing changed: %q", got)
+	}
+}

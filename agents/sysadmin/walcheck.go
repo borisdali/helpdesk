@@ -385,6 +385,35 @@ func parseWALListing(listingJSON string, segSize uint64) (map[uint32]map[uint64]
 	return files, nil
 }
 
+// pgbackrestLogLineRe matches a line of pgBackRest's own console log
+// ("P00   WARN: …"), which it writes to stdout ahead of a command's output.
+var pgbackrestLogLineRe = regexp.MustCompile(`^P\d{2}\s+[A-Z]+:`)
+
+// withoutPgBackRestLog drops pgBackRest's console log lines, and the indented
+// continuation lines that follow one (HINT:, DETAIL:), from a text output:
+// the text reads (repo-ls --output=text, a .history file) have no JSON
+// delimiter to skip to the way jsonObjectPrefix does. Found on Kubernetes
+// (2026-10-20): every Service in the pod's namespace injects env vars pgBackRest
+// warns about ("environment contains invalid option"), and a .history file
+// read with them failed to parse, leaving the WAL check unverified on a
+// broken chain. Real history and listing lines never start with whitespace or
+// with "P<digits>".
+func withoutPgBackRestLog(output string) string {
+	var kept []string
+	inLog := false
+	for _, line := range strings.Split(output, "\n") {
+		switch {
+		case pgbackrestLogLineRe.MatchString(line):
+			inLog = true
+		case inLog && line != "" && (line[0] == ' ' || line[0] == '\t'):
+		default:
+			inLog = false
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
 // jsonObjectPrefix strips any WARN/INFO preamble before the first `{`, for
 // the same reason jsonArrayPrefix exists.
 func jsonObjectPrefix(output string) string {
@@ -672,6 +701,7 @@ func checkWALContinuity(result GetPgBackRestStatusResult, run pgbackrestRunner) 
 		return WALContinuity{Status: WALUnverified, BackupLabel: in.BackupLabel, ArchiveID: in.ArchiveID,
 			Detail: fmt.Sprintf("listing %s failed (repo-ls needs pgBackRest 2.26 or later): %v", base, err)}
 	}
+	top = withoutPgBackRestLog(top)
 	// The newest timeline's history file names every ancestor and fork LSN.
 	// It's only needed when that timeline isn't the backup's own.
 	var historyText string
@@ -682,6 +712,7 @@ func checkWALContinuity(result GetPgBackRestStatusResult, run pgbackrestRunner) 
 				return WALContinuity{Status: WALUnverified, BackupLabel: in.BackupLabel, ArchiveID: in.ArchiveID,
 					Detail: fmt.Sprintf("reading the history file for timeline %d failed: %v", latest, err)}
 			}
+			historyText = withoutPgBackRestLog(historyText)
 		}
 	}
 	path, _, err := planWALPath(in, top, historyText)
