@@ -4798,14 +4798,32 @@ func gateRetargetRefusal(cfg *infra.Config, req ProceedEscalationRequest, leaf, 
 		runNS = primary.Namespace
 	}
 	if req.ConnectionString != "" && runConn != "" && !sameTarget(cfg, req.ConnectionString, runConn) {
+		asked, diagnosed := redactConnString(req.ConnectionString), redactConnString(runConn)
 		return fmt.Sprintf("connection_string %q is not the target this run diagnosed (%q): a gate approval can't retarget the remediation. "+
-			"Omit connection_string to use the run's own, or start a new triage against %q", req.ConnectionString, runConn, req.ConnectionString)
+			"Omit connection_string to use the run's own, or start a new triage against %q", asked, diagnosed, asked)
 	}
 	if req.Namespace != "" && runNS != "" && req.Namespace != runNS {
 		return fmt.Sprintf("namespace %q is not the namespace this run diagnosed (%q): a gate approval can't retarget the remediation. "+
 			"Omit namespace to use the run's own, or start a new triage in %q", req.Namespace, runNS, req.Namespace)
 	}
 	return ""
+}
+
+// redactConnString masks the password in a connection string for an error
+// message or log line: password=<value> in key=value form, or the URL form's
+// via audit.RedactDSN. The run's stored connection string carries the real
+// password, and a refusal must not hand it to whoever sent the approval.
+func redactConnString(s string) string {
+	if strings.Contains(s, "://") {
+		return audit.RedactDSN(s)
+	}
+	fields := strings.Fields(s)
+	for i, f := range fields {
+		if strings.HasPrefix(f, "password=") {
+			fields[i] = "password=***"
+		}
+	}
+	return strings.Join(fields, " ")
 }
 
 // sameTarget reports whether two connection strings name the same database:

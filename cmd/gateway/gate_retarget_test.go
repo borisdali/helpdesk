@@ -156,3 +156,27 @@ func TestHandleProceedEscalation_RefusesRetarget(t *testing.T) {
 		t.Errorf("remediation run start = %s, want it against the approved (same) target", runStartBody)
 	}
 }
+
+// The refusal is returned to whoever sent the approval: it must name both
+// targets without either password (found in the live check, 2026-10-19: the
+// 409 echoed the run's stored password=testpass).
+func TestGateRetargetRefusal_NoPasswords(t *testing.T) {
+	got := gateRetargetRefusal(retargetInfra(), ProceedEscalationRequest{ConnectionString: dockerConn},
+		&audit.PlaybookRun{ConnectionString: vmConn}, &audit.PlaybookRun{})
+	if got == "" || strings.Contains(got, "testpass") || !strings.Contains(got, "host=localhost") || !strings.Contains(got, "host=pgbackrest-vm.test") {
+		t.Errorf("refusal = %q, want both targets named and no password", got)
+	}
+}
+
+func TestRedactConnString(t *testing.T) {
+	for in, want := range map[string]string{
+		"host=db port=5432 password=s3cret user=x": "host=db port=5432 password=*** user=x",
+		"host=db port=5432":                        "host=db port=5432",
+		"postgres://u:s3cret@db:5432/app":          "postgres://u:xxxxx@db:5432/app",
+		"pgbackrest-ubuntu-vm":                     "pgbackrest-ubuntu-vm",
+	} {
+		if got := redactConnString(in); got != want {
+			t.Errorf("redactConnString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
