@@ -759,6 +759,8 @@ failures:
           pgbackrest --stanza=main --delta restore
         '
         docker restart helpdesk-test-pg-pgbackrest
+        # Don't hand the next fault a server still in recovery.
+        for i in $(seq 1 60); do docker exec helpdesk-test-pg-pgbackrest pg_isready -q && break; sleep 2; done
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
     remediation:
       # Checked after the gateway's auto-chained restore: without it a PASS
@@ -827,6 +829,12 @@ failures:
       script_inline: |
         set -e
         C=helpdesk-test-pg-pgbackrest
+        # Wait for postgres to accept connections: a fault before this one (e.g.
+        # db-pgdata-corrupted's teardown restore + restart) can hand over a
+        # server still in recovery, and the backup below then fails with "the
+        # database system is starting up" (found in the full faulttest sweep).
+        for i in $(seq 1 60); do docker exec "$C" pg_isready -q && break; sleep 2; done
+        docker exec "$C" pg_isready -q
         docker exec -u postgres "$C" pgbackrest --stanza=main --type=full backup
         docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
           -c "ALTER SYSTEM SET archive_command = '/bin/false'" -c "SELECT pg_reload_conf()"
@@ -866,6 +874,8 @@ failures:
           pgbackrest --stanza=main --delta restore
         '
         docker restart "$C"
+        # Don't hand the next fault a server still in recovery.
+        for i in $(seq 1 60); do docker exec helpdesk-test-pg-pgbackrest pg_isready -q && break; sleep 2; done
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
     remediation:
       # Both rows back (commits that were only in pg_wal survived the
