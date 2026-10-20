@@ -1930,6 +1930,21 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// The approval may restate the target, but not change it: the gate was
+	// raised on a diagnosis of the run's own target, and remediating another
+	// one on the strength of it is the one thing the approval can't mean.
+	// Found live 2026-10-17 (VM test 2.1): a proceed-escalation naming the
+	// Docker fixture while the triage had diagnosed the VM sent the
+	// remediation hop to Docker, with only a fabrication-risk WARN to show
+	// for it. Checked here, before any state changes, like the playbook
+	// lookup above. Empty fields still fall back to the run's own below.
+	if msg := gateRetargetRefusal(g.infra, req, leafRun, run); msg != "" {
+		slog.Warn("playbook: gate approval refused — it names a different target than the run diagnosed",
+			"run_id", runID, "leaf_run_id", leafRun.RunID, "resolved_by", resolvedBy, "detail", msg)
+		writeError(w, http.StatusConflict, msg)
+		return
+	}
+
 	// primaryOutcome reflects the PRIMARY run's (runID's) own first-hop
 	// signal — distinct from nextSeriesID/isTransition above. chainEscalation
 	// deliberately never updates run.EscalatedTo/TransitionedTo past the
@@ -4768,6 +4783,62 @@ func allNumbersPresent(quoteNums, outNums []float64) bool {
 		}
 	}
 	return true
+}
+
+// gateRetargetRefusal returns why a gate approval can't proceed because it
+// names a different target (connection_string or namespace) than the run it
+// approves, or "" when it doesn't. The run's target is the leaf hop's, the
+// one being continued from, falling back to the primary run's.
+func gateRetargetRefusal(cfg *infra.Config, req ProceedEscalationRequest, leaf, primary *audit.PlaybookRun) string {
+	runConn, runNS := leaf.ConnectionString, leaf.Namespace
+	if runConn == "" {
+		runConn = primary.ConnectionString
+	}
+	if runNS == "" {
+		runNS = primary.Namespace
+	}
+	if req.ConnectionString != "" && runConn != "" && !sameTarget(cfg, req.ConnectionString, runConn) {
+		return fmt.Sprintf("connection_string %q is not the target this run diagnosed (%q): a gate approval can't retarget the remediation. "+
+			"Omit connection_string to use the run's own, or start a new triage against %q", req.ConnectionString, runConn, req.ConnectionString)
+	}
+	if req.Namespace != "" && runNS != "" && req.Namespace != runNS {
+		return fmt.Sprintf("namespace %q is not the namespace this run diagnosed (%q): a gate approval can't retarget the remediation. "+
+			"Omit namespace to use the run's own, or start a new triage in %q", req.Namespace, runNS, req.Namespace)
+	}
+	return ""
+}
+
+// sameTarget reports whether two connection strings name the same database:
+// identical, or the same host, port and dbname once each is resolved through
+// the infrastructure config (config key, display name, container name,
+// connection string or endpoint). Other fields (user, password, sslmode, the
+// order they're written in) don't change which database it is.
+func sameTarget(cfg *infra.Config, a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, fb := parseConnFields(canonicalTarget(cfg, a)), parseConnFields(canonicalTarget(cfg, b))
+	if fa["host"] == "" || fb["host"] == "" {
+		return false
+	}
+	return fa["host"] == fb["host"] && fa["port"] == fb["port"] && fa["dbname"] == fb["dbname"]
+}
+
+// canonicalTarget returns the configured connection string of the
+// infrastructure entry s names, or s itself when it names none.
+func canonicalTarget(cfg *infra.Config, s string) string {
+	if cfg == nil {
+		return s
+	}
+	if db, _, ok := cfg.FindDBByConnStr(s); ok {
+		return db.ConnectionString
+	}
+	for _, db := range cfg.DBServers {
+		if db.ContainerName != "" && db.ContainerName == s {
+			return db.ConnectionString
+		}
+	}
+	return s
 }
 
 // targetMatches returns true when:

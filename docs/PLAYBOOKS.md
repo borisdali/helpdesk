@@ -589,6 +589,8 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/pr
 # → {"status": "denied", "run_id": "plr_a3f7c1b2"}
 ```
 
+`connection_string` and `namespace` are optional; when omitted, the remediation runs against the triage run's own. When given, they must name the **same target** the run diagnosed: the infra config key, display name, container name or a DSN for the same host, port and dbname are all accepted (user, password and field order don't matter). A different target is refused with `409 Conflict` before anything is recorded, and the gate stays pending. An approval can't retarget a remediation: the gate was raised on a diagnosis of one server, so to remediate another, start a new triage against it. *Added in v0.32*, after a live test approved a VM's gate with the Docker fixture's connection string and the restore ran on Docker.
+
 `resolved_by` is optional; it defaults to the `X-User` request header if omitted. `reason` is optional; when provided it is stored in the `gate_acknowledged` audit event and surfaced as `resolved_reason` in the Decision Hub:
 
 ```bash

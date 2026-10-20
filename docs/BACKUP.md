@@ -568,8 +568,14 @@ with `pbs_pgbackrest_restore_remediate` v1.7, 2026-10-19 (incident `plr_c18ee2b4
     inject's `systemctl restart` had shut Postgres down cleanly, the shutdown's WAL switch made
     `…13` complete (`redo done at 0/130000D8` is that switch record), and timeline 36 started at
     `…14`. The next restore along timeline 36 would have stopped after `…12`. Reproduced on Docker
-    the same day, then fixed by pushing the newest segment too (above). The VM's own archive is
+    the same day, then fixed by pushing the newest segment too (above). The VM's own archive was
     repaired by pushing `…13` from `saved_to`, which is what that directory is kept for.
+
+👉 The same VM canary after the fix, 2026-10-19 (incident `plr_38972d91`, restore hop
+`plr_cd2d34d4`): row A in `00000024…16` (`.ready`), row B in `…17`, and again a clean shutdown,
+so `…17` was complete (`redo done at 0/170000D8`). `verify_restore_recovery`: `verified`, the
+archive restored through `…17`, new timeline 37; both rows back, and the repo's `wal archive max`
+is now `…17`: row B's segment is in the archive this time.
 
 The run before it, a plain VM restore with archiving healthy, also showed the tail on a real
 host: the archive ended on timeline 31 while the server was on 34, and of the two segments in
