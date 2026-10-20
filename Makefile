@@ -170,23 +170,28 @@ integration-nocache:
 # ---------------------------------------------------------------------------
 # K8s integration tests (requires a cluster; destructive to one namespace)
 # ---------------------------------------------------------------------------
-# Real pod, real kubectl exec: the K8s_ tests crash the pgBackRest demo pod
-# (pg_control removed) and restore over it. They run against their own
-# pgBackRest pod in a dedicated namespace that must end in "-destruct", never
-# a namespace a real or test database lives in (db holds the in-cluster
-# agents' own target). The target creates the namespace and the pod if
-# needed and takes a fresh full backup, so every run starts from a known
-# state, then archives WAL past the backup (CHECKPOINT so the switch isn't a
-# no-op, then pgbackrest check, which switches and waits for the archive), as
-# on any running server: a fresh pod otherwise has only the backup's own
-# segment (the empty-gap case, covered by a unit test). Not part of
-# `make integration`, which only brings up Docker; there the K8s_ tests skip.
+# In-cluster: the restore lifecycle tools run in the helpdesk stack's own
+# sysadmin agent (its service account, RBAC, in-cluster kubectl), called
+# through its POST /tool/{name} endpoint via a port-forward, against a real
+# crash: the demo pod runs the stock postgres entrypoint, so a missing
+# pg_control means CrashLoopBackOff. The tests crash and restore the
+# database in a dedicated namespace that must end in "-destruct", never one a
+# real or test database lives in (db holds the agents' own target). The
+# target creates the namespace and the pod if needed, takes a fresh full
+# backup and archives WAL past it (CHECKPOINT so the switch isn't a no-op,
+# then pgbackrest check), as on any running server. Requires the stack
+# deployed with testing/k8s/helm-values-pgbackrest.yaml (its
+# pgbackrest-k8s-destruct entry). Not part of `make integration`, which only
+# brings up Docker; there these tests skip.
 #
 #   make integration-k8s                       # context minikube, ns db-destruct
-#   make integration-k8s K8S_CONTEXT=other K8S_DESTRUCT_NS=pg-destruct
+#   make integration-k8s K8S_CONTEXT=other K8S_DESTRUCT_NS=pg-destruct K8S_DESTRUCT_TARGET=...
 # ---------------------------------------------------------------------------
-K8S_CONTEXT     ?= minikube
-K8S_DESTRUCT_NS ?= db-destruct
+K8S_CONTEXT         ?= minikube
+K8S_DESTRUCT_NS     ?= db-destruct
+K8S_DESTRUCT_TARGET ?= pgbackrest-k8s-destruct
+K8S_HELPDESK_NS     ?= helpdesk-system
+K8S_SYSADMIN_PORT   ?= 11103
 INTEGRATION_K8S_LOG = /tmp/helpdesk-integration-k8s.log
 
 integration-k8s:
@@ -197,8 +202,11 @@ integration-k8s:
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
-	-HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
-		go test --count=1 -tags integration -timeout 900s -v -run 'K8s_' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG)
+	@kubectl --context $(K8S_CONTEXT) -n $(K8S_HELPDESK_NS) port-forward svc/helpdesk-sysadmin-agent $(K8S_SYSADMIN_PORT):1103 >/tmp/helpdesk-k8s-sysadmin-pf.log 2>&1 & PF=$$!; \
+		trap "kill $$PF 2>/dev/null" EXIT; sleep 3; \
+		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) \
+		HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
+		go test --count=1 -tags integration -timeout 1800s -v -run 'K8s' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG); true
 	@$(SUMMARY_CMD) $(INTEGRATION_K8S_LOG)
 
 # ---------------------------------------------------------------------------

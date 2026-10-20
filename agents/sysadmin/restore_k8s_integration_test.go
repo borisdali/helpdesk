@@ -1,184 +1,300 @@
 //go:build integration
 
-// TestIntegration_K8s_RestoreRefusesOnRealWALGap is
-// TestIntegration_RestoreFromBackup_RefusesOnRealWALGap against the
-// self-managed pgBackRest pod on a real Kubernetes cluster, through the
-// sysadmin tools' kubectl exec dispatch: the latest backup's start segment is
-// moved aside in the pod's repo, get_pgbackrest_status must report the chain
-// broken, and after a real crash restore_from_backup must refuse without
-// touching PGDATA. There's no agent restore chain on Kubernetes yet (v0.33),
-// so this is the tool-level check of item 1's refusal on K8s.
+// In-cluster restore tests: the tools under test run in the sysadmin agent
+// deployed in the cluster, called through its POST /tool/{name} endpoint, so
+// they use its own service account, RBAC and in-cluster kubectl — the
+// deployment as it really runs, against a real crash: the demo pod runs the
+// stock postgres entrypoint, so a missing pg_control leaves it in
+// CrashLoopBackOff and nothing can exec into it.
 //
-// Opt-in, since it crashes and restores the pod: set
-// HELPDESK_K8S_PGBACKREST_CONTEXT to the kubeconfig context (e.g. minikube),
-// in its own namespace, which must end in -destruct (default db-destruct;
-// HELPDESK_K8S_PGBACKREST_NAMESPACE overrides). `make integration-k8s` creates
-// the namespace and the pod, takes a fresh backup and runs these tests.
+// The harness side (hiding a WAL segment, the crash, the canary, checking
+// the data volume) uses kubectl from where the test runs: exec while the pod
+// is up, a one-off pod on the same volumes while it's crash-looping.
+//
+// Opt-in and destructive: make integration-k8s deploys the pod in its own
+// namespace (default db-destruct), takes a fresh backup, port-forwards the
+// sysadmin agent and runs these. The agent's target for that namespace is
+// HELPDESK_K8S_SYSADMIN_TARGET (default pgbackrest-k8s-destruct, from
+// testing/k8s/helm-values-pgbackrest.yaml); its name and the namespace must
+// both say "destruct".
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/infra"
 )
 
 const k8sPgBackRestPodSelector = "app=pgbackrest-demo"
 
-type k8sPgBackRestFixture struct {
+type k8sCluster struct {
 	t        *testing.T
 	ctxName  string
 	ns       string
 	pod      string
-	kubeArgs []string
+	agentURL string
+	target   string
+	host     resolvedHost // the harness's own view, for kubectl from here
 }
 
-func k8sPgBackRest(t *testing.T) *k8sPgBackRestFixture {
+func k8sInCluster(t *testing.T) *k8sCluster {
 	t.Helper()
+	agentURL := os.Getenv("HELPDESK_K8S_SYSADMIN_URL")
 	ctxName := os.Getenv("HELPDESK_K8S_PGBACKREST_CONTEXT")
-	if ctxName == "" {
-		t.Skip("HELPDESK_K8S_PGBACKREST_CONTEXT not set — opt-in: this test crashes and restores the K8s pgBackRest pod")
+	if agentURL == "" || ctxName == "" {
+		t.Skip("HELPDESK_K8S_SYSADMIN_URL / HELPDESK_K8S_PGBACKREST_CONTEXT not set — opt-in, run via make integration-k8s: these tests crash and restore a K8s pod")
 	}
 	ns := os.Getenv("HELPDESK_K8S_PGBACKREST_NAMESPACE")
 	if ns == "" {
 		ns = "db-destruct"
 	}
-	// Same guard as make integration-k8s: these tests crash and restore the
-	// namespace's database, so never one a real or test database lives in.
-	if !strings.HasSuffix(ns, "-destruct") {
-		t.Fatalf("HELPDESK_K8S_PGBACKREST_NAMESPACE=%q must end in -destruct: these tests crash and restore its database", ns)
+	target := os.Getenv("HELPDESK_K8S_SYSADMIN_TARGET")
+	if target == "" {
+		target = "pgbackrest-k8s-destruct"
 	}
-	f := &k8sPgBackRestFixture{t: t, ctxName: ctxName, ns: ns, kubeArgs: []string{"--context", ctxName, "-n", ns}}
-	f.pod = strings.TrimSpace(f.kubectl("get", "pod", "-l", k8sPgBackRestPodSelector, "-o", "jsonpath={.items[0].metadata.name}"))
-	if f.pod == "" {
-		t.Fatalf("no %s pod in namespace %s", k8sPgBackRestPodSelector, ns)
+	if !strings.HasSuffix(ns, "-destruct") || !strings.Contains(target, "destruct") {
+		t.Fatalf("namespace %q must end in -destruct and target %q must contain destruct: these tests crash and restore its database", ns, target)
 	}
+	c := &k8sCluster{t: t, ctxName: ctxName, ns: ns, agentURL: strings.TrimSuffix(agentURL, "/"), target: target,
+		host: resolvedHost{K8sContext: ctxName, K8sNamespace: ns, K8sPodSelector: k8sPgBackRestPodSelector}}
+	// The harness reuses the lifecycle's own kubectl helpers locally; the
+	// tools under test run in the cluster.
 	old := infraConfig
-	infraConfig = &infra.Config{
-		DBServers: map[string]infra.DBServer{
-			"pgbackrest-k8s": {
-				Name:             "pgBackRest K8s Demo",
-				ConnectionString: "host=pgbackrest-demo." + ns + ".svc.cluster.local port=5432 dbname=testdb user=postgres password=testpass",
-				K8sCluster:       "local",
-				K8sNamespace:     ns,
-				K8sPodSelector:   k8sPgBackRestPodSelector,
-			},
-		},
-		K8sClusters: map[string]infra.K8sCluster{"local": {Name: "local", Context: ctxName}},
-	}
+	infraConfig = &infra.Config{}
 	t.Cleanup(func() { infraConfig = old })
-	return f
+	c.pod = "pgbackrest-demo-0"
+	c.waitReady(3 * time.Minute)
+	return c
 }
 
-// kubectl runs kubectl in the fixture's context and namespace and fails the
-// test on error.
-func (f *k8sPgBackRestFixture) kubectl(args ...string) string {
-	f.t.Helper()
-	out, err := exec.Command("kubectl", append(append([]string{}, f.kubeArgs...), args...)...).CombinedOutput()
+// tool calls the in-cluster sysadmin agent's tool and returns its JSON
+// output, or its error text.
+func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
+	c.t.Helper()
+	body, _ := json.Marshal(agentutil.DirectToolRequest{Args: args, Purpose: "remediation"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.agentURL+"/tool/"+name, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		f.t.Fatalf("kubectl %s: %v: %s", strings.Join(args, " "), err, out)
+		c.t.Fatalf("POST /tool/%s: %v", name, err)
 	}
-	return string(out)
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var out agentutil.DirectToolResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		c.t.Fatalf("/tool/%s: HTTP %d, unparseable body %q", name, resp.StatusCode, raw)
+	}
+	return out.Output, out.Error
 }
 
-// exec runs a shell script in the pod (as root; su postgres inside where
-// needed), returning output and error without failing the test.
-func (f *k8sPgBackRestFixture) exec(script string) (string, error) {
-	out, err := exec.Command("kubectl", append(append([]string{}, f.kubeArgs...), "exec", f.pod, "--", "sh", "-c", script)...).CombinedOutput()
-	return string(out), err
+func (c *k8sCluster) kubectl(args ...string) string {
+	c.t.Helper()
+	out, err := kubectl(context.Background(), c.host, args...)
+	if err != nil {
+		c.t.Fatalf("%v", err)
+	}
+	return out
 }
 
-// restartPod deletes the pod; the StatefulSet recreates it on the same
-// volumes and the image's entrypoint keeps the container up even when
-// postgres can't start. Waits for the container to have started.
-func (f *k8sPgBackRestFixture) restartPod() {
-	f.t.Helper()
-	f.kubectl("delete", "pod", f.pod, "--wait=true")
-	deadline := time.Now().Add(3 * time.Minute)
-	for time.Now().Before(deadline) {
-		out, _ := exec.Command("kubectl", append(append([]string{}, f.kubeArgs...), "get", "pod", f.pod,
-			"-o", "jsonpath={.status.containerStatuses[0].started}")...).Output()
-		if strings.TrimSpace(string(out)) == "true" {
-			time.Sleep(5 * time.Second) // postgres's own startup (or crash)
+// exec runs script as root in the instance pod (it must be up).
+func (c *k8sCluster) exec(script string) (string, error) {
+	return kubectl(context.Background(), c.host, "exec", c.pod, "--", "sh", "-c", script)
+}
+
+// onVolumes runs script as postgres in a one-off pod on the instance's
+// volumes: the only way in while it's crash-looping.
+func (c *k8sCluster) onVolumes(script string) (string, error) {
+	return k8sMaintenance(context.Background(), c.host, script)
+}
+
+func (c *k8sCluster) psql(sql string) string {
+	c.t.Helper()
+	out, err := c.exec("su postgres -c " + shellQuote("psql -d testdb -Atc "+shellQuote(sql)))
+	if err != nil {
+		c.t.Fatalf("psql %q: %v", sql, err)
+	}
+	return strings.TrimSpace(out)
+}
+
+func (c *k8sCluster) waitReady(timeout time.Duration) {
+	c.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		pod, ready, err := k8sInstancePod(context.Background(), c.host)
+		if err == nil && pod != "" && ready {
+			c.pod = pod
 			return
 		}
-		time.Sleep(2 * time.Second)
+		if time.Now().After(deadline) {
+			c.t.Fatalf("instance pod not ready after %s (pod %q, %v)", timeout, pod, err)
+		}
+		time.Sleep(3 * time.Second)
 	}
-	f.t.Fatalf("pod %s did not start within 3m after delete", f.pod)
 }
 
-// repair restores the pod's PGDATA from the latest backup if postgres is
-// down, then restarts the pod and waits for it to be Ready. Same guard as
-// restoreIntegrationTeardown: never restore over a running server.
-func (f *k8sPgBackRestFixture) repair() {
-	f.t.Helper()
-	if _, err := f.exec("pg_isready -q"); err == nil {
+// crash removes pg_control and restarts the pod: postgres can't start, the
+// container exits, CrashLoopBackOff. Waits until the pod is there but not
+// ready and exec into it fails, the state a real crash leaves.
+func (c *k8sCluster) crash(alsoInPGDATA string) {
+	c.t.Helper()
+	if out, err := c.exec("rm -f /var/lib/postgresql/data/global/pg_control" + alsoInPGDATA); err != nil {
+		c.t.Fatalf("corrupting pg_control: %v: %s", err, out)
+	}
+	c.kubectl("delete", "pod", c.pod, "--wait=true")
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		pod, ready, _ := k8sInstancePod(context.Background(), c.host)
+		if pod != "" && !ready {
+			if _, err := c.exec("true"); err != nil {
+				time.Sleep(5 * time.Second) // let it crash at least once more
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	c.t.Fatal("pod did not reach a crashed, un-exec-able state within 2m")
+}
+
+// repair brings the instance back whatever state a test left it in: the
+// segments a test hid moved back, then, if postgres isn't serving, a restore
+// through the agent (the lifecycle under test) and a resume.
+func (c *k8sCluster) repair() {
+	c.t.Helper()
+	unhide := `for g in $(find /var/lib/pgbackrest/archive -name '*.hidden-by-test'); do mv "$g" "${g%.hidden-by-test}"; done; rm -rf /var/lib/pgbackrest/pg_wal.saved-*`
+	if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
+		_, _ = c.exec("su postgres -c " + shellQuote(unhide))
 		return
 	}
-	if out, err := f.exec(`su postgres -c 'PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2); rm -f "$PGDATA/postmaster.pid"; pgbackrest --stanza=main --delta restore'`); err != nil {
-		f.t.Errorf("repair restore: %v: %s", err, out)
+	if out, err := c.onVolumes(unhide); err != nil {
+		c.t.Logf("repair: unhide: %v: %s", err, out)
 	}
-	f.restartPod()
-	if out, err := exec.Command("kubectl", append(append([]string{}, f.kubeArgs...), "wait", "--for=condition=Ready", "pod/"+f.pod, "--timeout=180s")...).CombinedOutput(); err != nil {
-		f.t.Errorf("pod not Ready after repair: %v: %s", err, out)
+	if _, errStr := c.tool("restore_from_backup", map[string]any{"target": c.target, "stanza": "main"}); errStr != "" {
+		c.t.Logf("repair: restore_from_backup: %s", errStr)
+	}
+	if _, errStr := c.tool("restart_container", map[string]any{"target": c.target, "reason": "test repair"}); errStr != "" {
+		c.t.Logf("repair: restart_container: %s", errStr)
+	}
+	c.waitReady(5 * time.Minute)
+}
+
+func (c *k8sCluster) replicas() string {
+	return strings.TrimSpace(c.kubectl("get", "statefulset", "pgbackrest-demo", "-o", "jsonpath={.spec.replicas}"))
+}
+
+// Item 1's refusal, in-cluster, on a real crash: the latest backup's start
+// segment hidden, get_pgbackrest_status (run by the agent in a maintenance
+// pod, the instance pod being un-exec-able) reports the chain broken, and
+// restore_from_backup refuses before scaling anything down or touching PGDATA.
+func TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap(t *testing.T) {
+	c := k8sInCluster(t)
+	t.Cleanup(c.repair)
+
+	out, errStr := c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
+	var before GetPgBackRestStatusResult
+	if errStr != "" || json.Unmarshal([]byte(out), &before) != nil || before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
+		t.Fatalf("precondition: get_pgbackrest_status = %s %s, want continuous", out, errStr)
+	}
+	seg := before.WALContinuity.BackupStartWAL
+	dir := "/var/lib/pgbackrest/archive/main/" + before.WALContinuity.ArchiveID + "/" + seg[:16]
+	if o, err := c.exec("su postgres -c " + shellQuote(`set -e; g=$(ls `+dir+`/`+seg+`-*); mv "$g" "$g.hidden-by-test"`)); err != nil {
+		t.Fatalf("hiding %s: %v: %s", seg, err, o)
+	}
+	c.crash(" && touch /var/lib/postgresql/data/walcheck-canary")
+
+	out, errStr = c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
+	var after GetPgBackRestStatusResult
+	if errStr != "" || json.Unmarshal([]byte(out), &after) != nil {
+		t.Fatalf("get_pgbackrest_status on the crashed instance: %s %s", out, errStr)
+	}
+	if w := after.WALContinuity; w == nil || w.Status != WALBroken || w.ConsistencyReachable || len(w.Gaps) == 0 || w.Gaps[0].FirstMissing != seg {
+		t.Fatalf("WAL continuity = %+v, want broken at %s, consistency unreachable", after.WALContinuity, seg)
+	}
+
+	_, errStr = c.tool("restore_from_backup", map[string]any{"target": c.target, "stanza": "main"})
+	if !strings.Contains(errStr, "WAL continuity is broken") {
+		t.Fatalf("restore_from_backup error = %q, want a WAL-continuity refusal", errStr)
+	}
+	if r := c.replicas(); r != "1" {
+		t.Errorf("StatefulSet replicas = %s after a refused restore, want 1 (nothing quiesced)", r)
+	}
+	if o, err := c.onVolumes("test -f /var/lib/postgresql/data/walcheck-canary && echo present"); err != nil || !strings.Contains(o, "present") {
+		t.Errorf("canary file in PGDATA: %v %q — the refused restore touched the data directory", err, o)
 	}
 }
 
-func TestIntegration_K8s_RestoreRefusesOnRealWALGap(t *testing.T) {
-	f := k8sPgBackRest(t)
-	ctx := context.Background()
-	t.Cleanup(f.repair) // registered first, runs last: after the segment is back
-
-	before, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-k8s"})
-	if err != nil {
-		t.Fatalf("precondition: get_pgbackrest_status over kubectl exec: %v", err)
-	}
-	if before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
-		t.Fatalf("precondition: WAL continuity = %+v, want continuous on the healthy pod", before.WALContinuity)
-	}
-	seg := before.WALContinuity.BackupStartWAL
-	archiveDir := "/var/lib/pgbackrest/archive/main/" + before.WALContinuity.ArchiveID + "/" + seg[:16]
-
-	if out, err := f.exec(`set -e; g=$(ls ` + archiveDir + `/` + seg + `-*); mv "$g" "$g.hidden-by-test"`); err != nil {
-		t.Fatalf("hiding WAL segment %s: %v: %s", seg, err, out)
-	}
+// Items 13 and 9, in-cluster, on a real crash: with archiving broken, row A
+// is committed into a segment left .ready and row B into the open one; after
+// the crash restore_from_backup (scale to 0, restore in a maintenance pod
+// with the pg_wal copy on the repo volume, tail pushed) and restart_container
+// (scale back) bring both rows back, verify_restore_recovery reads the
+// recovery from the pod's logs and reports it verified through the tail, and
+// every tail segment is in the archive.
+func TestIntegration_K8sCluster_RestoreKeepsUnarchivedWAL(t *testing.T) {
+	c := k8sInCluster(t)
+	t.Cleanup(c.repair)
 	t.Cleanup(func() {
-		if out, err := f.exec(`for g in ` + archiveDir + `/*.hidden-by-test; do [ -e "$g" ] && mv "$g" "${g%.hidden-by-test}"; done; true`); err != nil {
-			t.Errorf("cleanup: restoring WAL segment %s: %v: %s", seg, err, out)
+		if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
+			_, _ = c.exec("su postgres -c " + shellQuote(`psql -d testdb -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'" -c "SELECT pg_reload_conf()" -c "DROP TABLE IF EXISTS canary_wal_tail" -c "SELECT pg_switch_wal()"`))
 		}
 	})
 
-	after, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: "pgbackrest-k8s"})
+	c.psql("ALTER SYSTEM SET archive_command = '/bin/false'")
+	c.psql("SELECT pg_reload_conf()")
+	time.Sleep(2 * time.Second) // the reload is asynchronous
+	c.psql("DROP TABLE IF EXISTS canary_wal_tail")
+	c.psql("CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)")
+	c.psql("INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')")
+	c.psql("SELECT pg_switch_wal()")
+	c.psql("INSERT INTO canary_wal_tail VALUES (2, 'B: open segment')")
+	c.crash("")
+
+	out, errStr := c.tool("restore_from_backup", map[string]any{"target": c.target, "stanza": "main"})
+	var restored RestoreFromBackupResult
+	if errStr != "" || json.Unmarshal([]byte(out), &restored) != nil {
+		t.Fatalf("restore_from_backup: %s %s", out, errStr)
+	}
+	tail := restored.PgWalTail
+	if tail == nil || !strings.HasPrefix(tail.SavedTo, "/var/lib/pgbackrest/pg_wal.saved-") || tail.ReplayThroughWAL == "" || len(tail.PushedToArchive) == 0 {
+		t.Fatalf("pg_wal_tail = %+v, want the copy saved on the repo volume, a tail to replay and pushed", tail)
+	}
+	if r := c.replicas(); r != "0" || !strings.Contains(restored.Quiesced, "restart_container") {
+		t.Fatalf("replicas = %s, quiesced = %q: want the StatefulSet left at 0 for restart_container", r, restored.Quiesced)
+	}
+
+	if _, errStr := c.tool("restart_container", map[string]any{"target": c.target, "reason": "resume after restore"}); errStr != "" {
+		t.Fatalf("restart_container: %s", errStr)
+	}
+	c.waitReady(5 * time.Minute)
+	if got := c.psql("SELECT count(*) FROM canary_wal_tail"); got != "2" {
+		t.Errorf("canary rows after the restore = %s, want 2: commits that were only in pg_wal were lost", got)
+	}
+
+	out, errStr = c.tool("verify_restore_recovery", map[string]any{"target": c.target})
+	var verified VerifyRestoreRecoveryResult
+	if errStr != "" || json.Unmarshal([]byte(out), &verified) != nil {
+		t.Fatalf("verify_restore_recovery: %s %s", out, errStr)
+	}
+	if verified.Status != RestoreVerified || verified.ReplayedThroughWAL != tail.ReplayThroughWAL || verified.LogSource != "kubectl logs" {
+		t.Errorf("verify_restore_recovery = %+v, want verified through %s from kubectl logs", verified, tail.ReplayThroughWAL)
+	}
+	repo, err := c.exec("ls -R /var/lib/pgbackrest/archive/main")
 	if err != nil {
-		t.Fatalf("get_pgbackrest_status with the segment hidden: %v", err)
+		t.Fatalf("listing the archive: %v", err)
 	}
-	if wal := after.WALContinuity; wal == nil || wal.Status != WALBroken || wal.ConsistencyReachable ||
-		len(wal.Gaps) == 0 || wal.Gaps[0].FirstMissing != seg {
-		t.Fatalf("WAL continuity = %+v, want broken at %s with consistency unreachable", after.WALContinuity, seg)
-	}
-
-	// A real crash: pg_control gone, then the pod restarted so postgres
-	// attempts startup and fails (a running backend doesn't read it again).
-	if out, err := f.exec("rm -f /var/lib/postgresql/data/global/pg_control && touch /var/lib/postgresql/data/walcheck-canary"); err != nil {
-		t.Fatalf("corrupting pg_control: %v: %s", err, out)
-	}
-	f.restartPod()
-	if _, err := f.exec("pg_isready -q"); err == nil {
-		t.Fatal("postgres is still up after pg_control was removed and the pod restarted")
-	}
-
-	_, err = restoreFromBackupImpl(ctx, RestoreFromBackupArgs{Target: "pgbackrest-k8s", Stanza: "main"})
-	if err == nil {
-		t.Fatal("restore_from_backup succeeded with the backup's own WAL missing, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "WAL continuity is broken") {
-		t.Errorf("error = %v, want a WAL-continuity refusal", err)
-	}
-	if _, err := f.exec("test -f /var/lib/postgresql/data/walcheck-canary"); err != nil {
-		t.Errorf("canary file is gone from PGDATA: the refused restore touched the data directory")
+	for _, n := range tail.PushedToArchive {
+		if !strings.Contains(repo, n+"-") {
+			t.Errorf("tail segment %s is not in the archive", n)
+		}
 	}
 }

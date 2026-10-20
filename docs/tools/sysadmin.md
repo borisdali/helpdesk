@@ -68,7 +68,7 @@ Show memory utilization on the host (free -h). Use to detect OOM conditions that
 
 ## `get_host_logs`
 
-Retrieve recent log lines from the database process. For Docker/Podman uses 'docker/podman logs'. For systemd uses journalctl. Use when the DB is down and read_pg_log is unavailable.
+Retrieve recent log lines from the database process. For Docker/Podman uses 'docker/podman logs'. For systemd uses journalctl. For a Kubernetes pod uses 'kubectl logs', with the previous container run's output first when it has restarted (a crash-looping postgres's fatal startup error is there). Use when the DB is down and read_pg_log is unavailable.
 
 - **Action class:** read
 - **Capabilities:** `logs`
@@ -124,7 +124,7 @@ Read the PostgreSQL log file directly from inside the container or pod (via exec
 
 ## `restart_container`
 
-Restart a Docker or Podman container hosting the database. Requires the server to have a container_runtime and container_name configured in infrastructure.json. Use restart_service for systemd-managed databases.
+Restart a Docker or Podman container hosting the database. Requires the server to have a container_runtime and container_name configured in infrastructure.json. Use restart_service for systemd-managed databases. On Kubernetes (a self-managed Postgres StatefulSet): resumes an instance restore_from_backup left scaled to 0, back to its recorded replicas; otherwise deletes the pod, which the StatefulSet recreates on the same volumes.
 
 - **Action class:** destructive
 - **Capabilities:** `process_restart`
@@ -159,7 +159,7 @@ Restart a systemd service hosting the database (systemctl restart). Requires the
 
 ## `restore_from_backup`
 
-Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance. It keeps the WAL that was in pg_wal: moved aside before the restore, put back for recovery to replay past the end of the archive, and the segments past it pushed to the archive (pg_wal_tail: saved_to, replay_through_wal, pushed_to_archive); commits that were on disk but never archived are recovered rather than lost. On success it records where recovery should end (prediction: the archive end, any pg_wal tail, and the new timeline); after restarting the instance, call verify_restore_recovery to confirm where recovery actually ended.
+Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance. It keeps the WAL that was in pg_wal: moved aside before the restore, put back for recovery to replay past the end of the archive, and the segments past it pushed to the archive (pg_wal_tail: saved_to, replay_through_wal, pushed_to_archive); commits that were on disk but never archived are recovered rather than lost. On success it records where recovery should end (prediction: the archive end, any pg_wal tail, and the new timeline); after restarting the instance, call verify_restore_recovery to confirm where recovery actually ended. On Kubernetes (a self-managed Postgres StatefulSet, which a crash leaves crash-looping) it scales the StatefulSet to 0, restores in a one-off pod with its volumes, and leaves it scaled down: the result's quiesced field says so, and restart_container resumes it.
 
 - **Action class:** destructive
 - **Capabilities:** `data_restore`

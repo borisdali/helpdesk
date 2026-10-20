@@ -128,8 +128,12 @@ func TestRestoreScriptWithWALTail_Order(t *testing.T) {
 		idx("mv \"$f\" \"$SAVED/\"") < idx("--stanza='main' --delta restore") && idx("--delta restore") < idx("cp -p \"$f\" \"$WAL/$n\"")) {
 		t.Errorf("wrong order: save, restore, copy back:\n%s", s)
 	}
-	if !strings.Contains(s, `$(dirname "$(cd "$PGDATA" && pwd -P)")/pg_wal.saved-`) {
+	if !strings.Contains(s, `PARENT=$(dirname "$(cd "$PGDATA" && pwd -P)")`) || !strings.Contains(s, `SAVED="$PARENT/pg_wal.saved-`) {
 		t.Error("saved dir must be beside PGDATA, not inside it (--delta restore cleans PGDATA)")
+	}
+	if !strings.Contains(s, `if [ -n "${HELPDESK_WAL_SAVE_IN_REPO:-}" ]; then
+    PARENT=$(grep '^repo1-path=' /etc/pgbackrest.conf | cut -d= -f2)`) {
+		t.Error("with HELPDESK_WAL_SAVE_IN_REPO the saved dir must go on the repo volume (Kubernetes)")
 	}
 	if q := pushToArchiveScript("main", []string{"00000007000000000000000B", "00000007000000000000000C"}); !strings.Contains(q,
 		`cd "$PGDATA"`) || !strings.HasSuffix(q, `for n in 00000007000000000000000B 00000007000000000000000C; do pgbackrest --stanza='main' archive-push "pg_wal/$n"; echo "`+walTailPushedMarker+`$n"; done`) {

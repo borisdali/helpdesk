@@ -32,9 +32,19 @@ infrastructure:
       connection_string: host=pgbackrest-demo.db.svc.cluster.local port=5432 dbname=testdb user=postgres password=testpass
       k8s_cluster: local
       k8s_namespace: db
-      # The sysadmin agent resolves the pod from this and reaches it with
-      # kubectl exec: get_pgbackrest_status, restore_from_backup,
-      # verify_restore_recovery.
+      # The sysadmin agent resolves the pod (and its StatefulSet) from this:
+      # kubectl exec into the pod while it's ready, a one-off maintenance pod
+      # with its volumes when it isn't, and scale-to-0/back around a restore
+      # (agents/sysadmin/lifecycle.go).
+      k8s_pod_selector: app=pgbackrest-demo
+      tags: [development, chaos]
+    # The same pod in its own namespace, for make integration-k8s's
+    # destructive tests (crash, restore, resume): never the agents' target above.
+    pgbackrest-k8s-destruct:
+      name: pgBackRest K8s Demo (destructive tests)
+      connection_string: host=pgbackrest-demo.db-destruct.svc.cluster.local port=5432 dbname=testdb user=postgres password=testpass
+      k8s_cluster: local
+      k8s_namespace: db-destruct
       k8s_pod_selector: app=pgbackrest-demo
       tags: [development, chaos]
   k8s_clusters:

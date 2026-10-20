@@ -709,6 +709,18 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 		lines = 100
 	}
 
+	// Kubernetes: the pod's own output, the previous container run's first
+	// when it has restarted (a crash-looping postgres's fatal startup error
+	// is there). Needed for diagnosis and for verify_restore_recovery's
+	// recovery lines alike.
+	if host.K8sPodSelector != "" {
+		out, err := k8sLogs(ctx, host, lines)
+		if err != nil {
+			return HostLogsResult{}, fmt.Errorf("get_host_logs %s: %w", args.Target, err)
+		}
+		return HostLogsResult{ServerID: args.Target, Runtime: "kubectl", Lines: lines, Logs: out}, nil
+	}
+
 	runtime, err := containerRuntimeBin(host)
 	if err != nil {
 		return HostLogsResult{}, err
@@ -1143,6 +1155,9 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	if err != nil {
 		return RestartResult{}, err
 	}
+	if host.K8sPodSelector != "" {
+		return restartK8sInstance(ctx, args, host)
+	}
 	if host.Runtime == "" {
 		return RestartResult{}, fmt.Errorf(
 			"server %q is managed via systemd, not a container runtime; use restart_service instead", args.Target)
@@ -1196,6 +1211,67 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 		Target:   host.ContainerName,
 		Success:  runErr == nil,
 		Output:   output,
+	}, runErr
+}
+
+// restartK8sInstance is restart_container on Kubernetes: resume the
+// instance's StatefulSet to the replica count restore_from_backup's quiesce
+// recorded (lifecycle.go). On a StatefulSet that wasn't scaled down, with no
+// record, it deletes the pod instead, which the StatefulSet recreates on the
+// same volumes: the Kubernetes form of a container restart.
+func restartK8sInstance(ctx context.Context, args RestartContainerArgs, host resolvedHost) (RestartResult, error) {
+	if policyEnforcer != nil {
+		policyCtx := agentutil.WithToolName(ctx, "restart_container")
+		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+			policy.ActionDestructive, host.Tags, "restart container: "+args.Reason, host.Sensitivity); err != nil {
+			slog.Warn("policy denied container restart", "target", args.Target, "err", err)
+			return RestartResult{}, err
+		}
+	}
+	start := time.Now()
+	var out, raw string
+	sts, runErr := k8sStatefulSet(ctx, host)
+	if runErr == nil {
+		replicas := 1
+		if sts.Spec.Replicas != nil {
+			replicas = *sts.Spec.Replicas
+		}
+		_, recorded := sts.Metadata.Annotations[k8sResumeReplicasAnnotation]
+		if replicas == 0 || recorded {
+			raw = "kubectl scale statefulset " + sts.Metadata.Name
+			out, runErr = k8sResume(ctx, host)
+		} else {
+			var pod string
+			if pod, _, runErr = k8sInstancePod(ctx, host); runErr == nil && pod != "" {
+				raw = "kubectl delete pod " + pod
+				_, runErr = kubectl(ctx, host, "delete", "pod", pod, "--wait=false")
+				out = "pod " + pod + " deleted; StatefulSet " + sts.Metadata.Name + " recreates it"
+			} else if runErr == nil {
+				runErr = fmt.Errorf("StatefulSet %s has %d replicas but no pod matches %q", sts.Metadata.Name, replicas, host.K8sPodSelector)
+			}
+		}
+	}
+	duration := time.Since(start)
+	var errMsg string
+	if runErr != nil {
+		errMsg = runErr.Error()
+		slog.Warn("restart_container failed", "target", args.Target, "err", runErr)
+	} else {
+		slog.Info("restart_container succeeded", "target", args.Target, "detail", out, "reason", args.Reason)
+	}
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "restart_container",
+			Parameters: map[string]any{"target": args.Target, "reason": args.Reason},
+			RawCommand: raw,
+		}, audit.ToolResult{Output: out, Error: errMsg}, duration)
+	}
+	return RestartResult{
+		ServerID: args.Target,
+		Runtime:  "kubectl",
+		Target:   sts.Metadata.Name,
+		Success:  runErr == nil,
+		Output:   out,
 	}, runErr
 }
 
@@ -1659,7 +1735,14 @@ func runPgBackRestOnTarget(ctx context.Context, toolName, target string, cmdArgs
 			return "", err
 		}
 		switch {
-		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+		case host.K8sPodSelector != "":
+			// Kubernetes: exec into the instance's pod while it's ready, a
+			// one-off maintenance pod with its volumes when it isn't (scaled
+			// to 0, or crash-looping, when kubectl exec into it fails): the
+			// backup state is most needed exactly when postgres is down
+			// (lifecycle.go).
+			out, err = pgInstance{host: host, target: target}.maintenance(ctx, shellCommand("pgbackrest", cmdArgs, nil), false)
+		case host.Runtime == "docker" || host.Runtime == "podman":
 			// pgBackRest checks PGDATA ownership; run as the postgres OS
 			// user inside the container/pod rather than docker-exec's or
 			// kubectl-exec's own default (root), matching how pgBackRest
@@ -1942,6 +2025,10 @@ type RestoreFromBackupResult struct {
 	// the restore, copied back for recovery to replay, and queued for
 	// archiving (waltail.go). Nil when there was no pg_wal to save.
 	PgWalTail *PgWalTail `json:"pg_wal_tail,omitempty"`
+	// Quiesced says the instance was stopped for the restore and left that
+	// way (Kubernetes: StatefulSet scaled to 0), to be resumed with
+	// restart_container. Empty where the instance was already down.
+	Quiesced string `json:"quiesced,omitempty"`
 }
 
 // restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
@@ -2008,56 +2095,40 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 		return walRestoreRefusal(status)
 	}
 
-	readyScript := "pg_isready"
 	restoreScript := restoreScriptWithWALTail(stanza)
 
-	// run executes a script on the target the same way for the restore and
-	// for queueing the pg_wal tail for archiving afterwards.
-	var run func(script string) (string, error)
-	switch {
-	case args.Target != "" && infraConfig != nil:
-		host, err := resolveHost(args.Target)
-		if err != nil {
+	// The same steps on every platform (lifecycle.go): refuse if serving,
+	// check the WAL, quiesce, then the restore and the tail push as
+	// maintenance runs. On Kubernetes quiesce scales the StatefulSet to 0 and
+	// both runs happen in a one-off pod with its volumes, the saved pg_wal
+	// copy on the repo volume; elsewhere nothing changes from before.
+	inst, err := instanceFor(args.Target)
+	if err != nil {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: %w", err)
+	}
+	if !inst.local && policyEnforcer != nil {
+		policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
+		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+			policy.ActionDestructive, inst.host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", inst.host.Sensitivity); err != nil {
+			slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
 			return RestoreFromBackupResult{}, err
 		}
-		if policyEnforcer != nil {
-			policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
-			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
-				policy.ActionDestructive, host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
-				slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
-				return RestoreFromBackupResult{}, err
-			}
-		}
-		switch {
-		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
-			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
-				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-			}
-			run = func(script string) (string, error) {
-				return execInProcess(ctx, host, []string{"su", "postgres", "-c", script})
-			}
-		default:
-			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
-				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-			}
-			run = func(script string) (string, error) {
-				return runOnHost(ctx, host, "sh", []string{"-c", script}, nil)
-			}
-		}
-	case infraConfig != nil:
-		return RestoreFromBackupResult{}, fmt.Errorf(
-			"restore_from_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
-				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
-	default:
-		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
-			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-		}
-		run = func(script string) (string, error) {
-			return cmdRunner.Run(ctx, "sh", []string{"-c", script}, nil)
-		}
+	}
+	if up, readyOut := inst.serving(ctx); up {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", readyOut)
 	}
 	if err := checkWAL(); err != nil {
 		return RestoreFromBackupResult{}, err
+	}
+	quiesceOut, err := inst.quiesce(ctx)
+	if err != nil {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: stopping the instance before the restore: %w", err)
+	}
+	if inst.k8s() {
+		restoreScript = "HELPDESK_WAL_SAVE_IN_REPO=1; export HELPDESK_WAL_SAVE_IN_REPO\n" + restoreScript
+	}
+	run := func(script string) (string, error) {
+		return inst.maintenance(ctx, script, true)
 	}
 
 	raw, err := run(restoreScript)
@@ -2078,6 +2149,9 @@ func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (Res
 				"pgbackrest archive-push from there before removing it", failed, pErr, rest, t.SavedTo)
 			t.PushedToArchive = pushed
 		}
+	}
+	if inst.quiesced() {
+		result.Quiesced = quiesceOut + " — call restart_container to resume it; recovery runs on startup"
 	}
 	result.Prediction = restorePredictionFrom(walChecked, result.PgWalTail, time.Now())
 	if result.Prediction != nil {

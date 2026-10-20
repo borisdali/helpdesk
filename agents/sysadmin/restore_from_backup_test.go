@@ -184,42 +184,6 @@ func TestRestoreFromBackupTool_SSHDispatch(t *testing.T) {
 	}
 }
 
-// TestRestoreFromBackupTool_K8sDispatch mirrors
-// TestGetPgBackRestStatusTool_K8sDispatch. Every execInProcess call resolves
-// the pod name via `kubectl get pod` first, so each of the 6 steps
-// (pg_isready, info, 3 WAL reads, restore) is a get-pod/exec pair.
-func TestRestoreFromBackupTool_K8sDispatch(t *testing.T) {
-	withK8sInfra(t)
-	capture := &pgbackrestRouter{
-		info:       realPgBackRestInfoJSON,
-		readyOut:   "no response\n",
-		readyErr:   fmt.Errorf("exit status 2"),
-		restoreOut: "restore command end: completed successfully (200ms)\n",
-	}
-	old := cmdRunner
-	cmdRunner = capture
-	defer func() { cmdRunner = old }()
-
-	ctx := mockToolContext{context.Background()}
-	result, err := restoreFromBackupTool(ctx, RestoreFromBackupArgs{Target: "prod_db", Stanza: "main"})
-	if err != nil {
-		t.Fatalf("restoreFromBackupTool() error = %v", err)
-	}
-	if !strings.Contains(result.Output, "completed successfully") {
-		t.Errorf("Output = %q, want it to contain completed successfully", result.Output)
-	}
-	if len(capture.calls) != 12 {
-		t.Fatalf("expected 12 kubectl calls (get pod + exec for 6 steps), got %d: %v", len(capture.calls), capture.calls)
-	}
-	if !containsSeq(capture.calls[1], "exec", "pg-prod-db-0") || !strings.Contains(strings.Join(capture.calls[1], " "), "pg_isready") {
-		t.Errorf("call[1] = %v, want a pg_isready exec against pg-prod-db-0", capture.calls[1])
-	}
-	restoreExec := strings.Join(capture.calls[11], " ")
-	if !strings.Contains(restoreExec, "su postgres -c") || !strings.Contains(restoreExec, "--delta") {
-		t.Errorf("call[9] = %q, want a su postgres -c ... --delta restore invocation", restoreExec)
-	}
-}
-
 // TestRestoreFromBackupTool_PolicyDenied verifies restore_from_backup is
 // gated as ActionDestructive, not ActionWrite like run_pgbackrest_backup —
 // a destructive-only deny rule must block it.

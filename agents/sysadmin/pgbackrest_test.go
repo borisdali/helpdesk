@@ -1140,57 +1140,6 @@ func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *test
 	}
 }
 
-// TestGetPgBackRestStatusTool_K8sDispatch verifies the kubectl-exec dispatch
-// path for a self-managed (non-operator) Postgres pod with pgBackRest
-// installed in its image. A real bug (fixed 2026-10-01, found auditing
-// v0.30's cross-platform coverage) used to make a K8s-configured target
-// silently fall into the SSH-or-local `default` branch and run `pgbackrest`
-// as a bare local command on the agent's own host — this now routes through
-// execInProcess's existing kubectl-exec branch (shared with check_host/
-// restart_container), the same `su postgres -c '...'` wrapping the
-// docker/podman path already uses. Operator-managed targets (CloudNativePG
-// and similar, which don't run pgBackRest inside their pods at all) aren't
-// specially rejected anymore — they'd now fail with a real, honest
-// "pgbackrest: command not found" from inside that pod instead, which is
-// more informative than a hardcoded refusal naming one specific operator.
-func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
-	withK8sInfra(t)
-	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON}
-	old := cmdRunner
-	cmdRunner = capture
-	defer func() { cmdRunner = old }()
-
-	ctx := mockToolContext{context.Background()}
-	result, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "prod_db"})
-	if err != nil {
-		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
-	}
-	if result.Stanza != "main" {
-		t.Errorf("Stanza = %q, want main", result.Stanza)
-	}
-	// Each exec resolves the pod first: (get pod, exec) for info and for each
-	// of the 3 WAL-continuity reads.
-	if len(capture.calls) != 8 {
-		t.Fatalf("expected 8 kubectl calls (get pod + exec, x4), got %d: %v", len(capture.calls), capture.calls)
-	}
-	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
-		t.Errorf("WALContinuity = %+v, want continuous", result.WALContinuity)
-	}
-	// Both calls carry the configured --context prefix (gke_project_region_prod-cluster),
-	// so "get"/"exec" aren't necessarily at index 0 — search for them instead.
-	if !containsSeq(capture.calls[0], "get", "pod") {
-		t.Errorf("call[0] = %v, want a `kubectl get pod` pod-name resolution", capture.calls[0])
-	}
-	execCall := capture.calls[1]
-	if !containsSeq(execCall, "exec", "pg-prod-db-0") {
-		t.Fatalf("call[1] = %v, want `kubectl exec pg-prod-db-0 ...`", execCall)
-	}
-	joined := strings.Join(execCall, " ")
-	if !strings.Contains(joined, "su postgres -c") {
-		t.Errorf("exec call = %q, want it to run as the postgres OS user (su postgres -c ...)", joined)
-	}
-}
-
 // containsSeq reports whether want appears as a contiguous subsequence
 // within got, starting at any index.
 func containsSeq(got []string, want ...string) bool {

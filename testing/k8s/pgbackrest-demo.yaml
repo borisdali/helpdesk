@@ -75,6 +75,14 @@ spec:
               value: testpass
             - name: POSTGRES_DB
               value: testdb
+          # The stock postgres entrypoint, not the image's start-with-sshd.sh:
+          # that one keeps the container up after postgres dies (for the Docker
+          # fixture's exec-based restore), which on Kubernetes would hide what a
+          # real crash does: CrashLoopBackOff, no kubectl exec. The restore
+          # lifecycle (agents/sysadmin/lifecycle.go) is built for the real thing:
+          # it scales the StatefulSet to 0 and runs pgBackRest in a one-off pod
+          # with these volumes.
+          command: ["docker-entrypoint.sh"]
           args:
             - postgres
             - -c

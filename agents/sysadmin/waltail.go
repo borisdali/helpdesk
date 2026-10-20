@@ -85,13 +85,22 @@ const (
 // it copies them back and prints each one's first page header for
 // planWALTail. set -e: if the tail can't be saved, the restore doesn't run,
 // rather than silently losing it again.
+//
+// With HELPDESK_WAL_SAVE_IN_REPO set (Kubernetes), the saved copy goes on the
+// pgBackRest repo volume instead (repo1-path): the restore runs in a one-off
+// maintenance pod whose own filesystem goes with it, and the data volume is
+// PGDATA itself, which --delta cleans. Beside PGDATA everywhere else.
 func restoreScriptWithWALTail(stanza string) string {
 	return `set -e
 PGDATA=$(grep '^pg1-path=' /etc/pgbackrest.conf | cut -d= -f2)
 rm -f "$PGDATA/postmaster.pid"
 SAVED=
 if WAL=$(cd "$PGDATA/pg_wal" 2>/dev/null && pwd -P); then
-  SAVED="$(dirname "$(cd "$PGDATA" && pwd -P)")/pg_wal.saved-$(date -u +%Y%m%dT%H%M%SZ)"
+  PARENT=$(dirname "$(cd "$PGDATA" && pwd -P)")
+  if [ -n "${HELPDESK_WAL_SAVE_IN_REPO:-}" ]; then
+    PARENT=$(grep '^repo1-path=' /etc/pgbackrest.conf | cut -d= -f2)
+  fi
+  SAVED="$PARENT/pg_wal.saved-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir "$SAVED"
   echo "` + walTailSavedMarker + `$SAVED"
   for f in "$WAL"/*; do
