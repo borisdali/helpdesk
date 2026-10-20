@@ -124,8 +124,9 @@ func TestRestoreScriptWithWALTail_Order(t *testing.T) {
 	if !strings.HasPrefix(s, "set -e") {
 		t.Error("script must stop before the restore if the tail can't be saved")
 	}
-	if !(idx("rm -f \"$PGDATA/postmaster.pid\"") < idx("mkdir \"$SAVED\"") && idx("mkdir \"$SAVED\"") < idx("mv \"$f\" \"$SAVED/\"") &&
-		idx("mv \"$f\" \"$SAVED/\"") < idx("--stanza='main' --delta restore") && idx("--delta restore") < idx("cp -p \"$f\" \"$WAL/$n\"")) {
+	pid, mkdir, save := idx("rm -f \"$PGDATA/postmaster.pid\""), idx("mkdir \"$SAVED\""), idx("mv \"$f\" \"$SAVED/\"")
+	restore, copyBack := idx("--stanza='main' --delta restore"), idx("cp -p \"$f\" \"$WAL/$n\"")
+	if pid >= mkdir || mkdir >= save || save >= restore || restore >= copyBack {
 		t.Errorf("wrong order: save, restore, copy back:\n%s", s)
 	}
 	if !strings.Contains(s, `PARENT=$(dirname "$(cd "$PGDATA" && pwd -P)")`) || !strings.Contains(s, `SAVED="$PARENT/pg_wal.saved-`) {

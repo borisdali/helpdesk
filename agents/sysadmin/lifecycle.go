@@ -125,20 +125,11 @@ func (in pgInstance) quiesced() bool { return in.k8s() }
 // containerMaintenanceArgs is the Docker/Podman form of a maintenance run
 // that doesn't need the instance's container to be running: a throwaway
 // container from the same image with the same volumes (--volumes-from),
-// running script as postgres. Built in v0.32 but not yet the default:
-// maintenance still execs into the container, which the test fixture keeps
-// alive after postgres dies; a real container exits with postgres, and
-// switching to this (and the fixture to a stock entrypoint) is v0.33.
+// running script as postgres, the image read from the container itself
+// (`<runtime> inspect -f {{.Config.Image}}`). Only the arguments exist in
+// v0.32: maintenance still execs into the container, which the test fixture
+// keeps alive after postgres dies; a real container exits with postgres, and
+// wiring this in (and the fixture to a stock entrypoint) is v0.33.
 func containerMaintenanceArgs(container, image, script string) []string {
 	return []string{"run", "--rm", "--volumes-from", container, "--entrypoint", "su", image, "postgres", "-c", script}
-}
-
-// containerMaintenance runs script per containerMaintenanceArgs, reading the
-// image from the container itself.
-func containerMaintenance(ctx context.Context, host resolvedHost, script string) (string, error) {
-	image, err := runOnHost(ctx, host, host.Runtime, []string{"inspect", "-f", "{{.Config.Image}}", host.ContainerName}, nil)
-	if err != nil {
-		return image, fmt.Errorf("%s inspect %s: %w", host.Runtime, host.ContainerName, err)
-	}
-	return runOnHost(ctx, host, host.Runtime, containerMaintenanceArgs(host.ContainerName, strings.TrimSpace(image), script), nil)
 }
