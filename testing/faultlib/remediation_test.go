@@ -3,6 +3,7 @@ package faultlib
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -920,5 +921,77 @@ func TestRunGateLoop_HeadlessAutoApprove_WhenEmitAndWaitFalse(t *testing.T) {
 	}
 	if !proceedCalled {
 		t.Error("expected proceed-escalation to be called in headless auto-approve mode")
+	}
+}
+
+// Recovery time runs from the fault's injection, not from the verify_sql
+// poll, which starts only after the remediation chain has finished: the live
+// VM runs (2026-10-19) reported "RECOVERED in 0.1s" after a 140s chain.
+func TestRecoveryTime(t *testing.T) {
+	now := time.Now()
+	if got := RecoveryTime(now.Add(-152*time.Second), 0.1, now); got < 151.9 || got > 152.1 {
+		t.Errorf("from the fault's start: %.1fs, want 152s", got)
+	}
+	if got := RecoveryTime(time.Time{}, 0.1, now); got != 0.1 {
+		t.Errorf("no fault start: %.1fs, want the poll's own 0.1s", got)
+	}
+}
+
+// Judged against the fault's own timeout (its whole-run budget), not
+// verify_timeout's 120s: half of a restore fault's 300s is 150s. (The VM run
+// of 2026-10-19 took 156.2s from injection, so it still scores 0.75.)
+func TestRemediationSpeedScore(t *testing.T) {
+	restore := Failure{Timeout: "300s", Remediation: RemediationSpec{VerifyTimeout: "120s"}}
+	for secs, want := range map[float64]float64{90: 1.0, 150: 1.0, 156.2: 0.75, 290: 0.75} {
+		if got := RemediationSpeedScore(restore, secs); got != want {
+			t.Errorf("300s fault, recovered in %.1fs: score %.2f, want %.2f", secs, got, want)
+		}
+	}
+	if got := RemediationSpeedScore(Failure{}, 61); got != 0.75 { // no timeout: TimeoutDuration's 120s default
+		t.Errorf("default timeout, 61s: score %.2f, want 0.75", got)
+	}
+}
+
+// A chain that gates again after the first approval: the response names the
+// next hop's run, still gate_pending, and RunGateLoop approves it too, so the
+// remediation runs (db-connection-refused via faulttest-gateway, 2026-10-20:
+// restart triage → host triage gated a second time and the restart never ran).
+func TestRunGateLoop_ApprovesEachGateAlongTheChain(t *testing.T) {
+	var approved []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		approved = append(approved, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/fleet/playbook-runs/"), "/proceed-escalation"))
+		w.Header().Set("Content-Type", "application/json")
+		if len(approved) == 1 {
+			json.NewEncoder(w).Encode(ApproveRunResponse{RunID: "plr_hop2", Status: "pending_gate", GateReason: "trust_not_earned"}) //nolint:errcheck
+			return
+		}
+		json.NewEncoder(w).Encode(ApproveRunResponse{RunID: "plr_hop3", Status: "complete", Summary: "restarted"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	if err := r.RunGateLoop(context.Background(), &ApproveRunResponse{RunID: "plr_hop1", Status: "pending_gate"}); err != nil {
+		t.Fatalf("RunGateLoop: %v", err)
+	}
+	if strings.Join(approved, ",") != "plr_hop1,plr_hop2" {
+		t.Errorf("approved %v, want plr_hop1 then the second gate plr_hop2", approved)
+	}
+}
+
+// A chain that keeps gating stops after maxChainGates approvals with an error
+// rather than looping forever.
+func TestRunGateLoop_BoundedGateApprovals(t *testing.T) {
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{RunID: fmt.Sprintf("plr_hop%d", n+1), Status: "pending_gate"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	r := newTestRemediator(t, srv.URL)
+	err := r.RunGateLoop(context.Background(), &ApproveRunResponse{RunID: "plr_hop1", Status: "pending_gate"})
+	if err == nil || n != maxChainGates {
+		t.Fatalf("RunGateLoop = %v after %d approvals, want an error after %d", err, n, maxChainGates)
 	}
 }

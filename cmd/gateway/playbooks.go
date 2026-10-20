@@ -645,7 +645,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 							authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings, false)
 					}
 				} else if esc.Findings != "" {
-					res.outcome = "resolved"
+					res.outcome = g.findingsOnlyOutcome(pb, esc.Findings, traceID, runStart)
 				}
 				// Rewrite captured body with signal lines stripped.
 				respBody["text"] = esc.CleanText
@@ -1059,7 +1059,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			ToolCalls:        chained.toolCalls,
 		})
 		finalReport = mergeDiagnosticReports(finalReport, chained.diagReport)
-		finalOutcome = "escalated+resolved"
+		// The primary run's outcome is what the incident's status is set from
+		// last, so a chain whose last hop changed nothing must not read as
+		// resolved (see findingsOnlyOutcome).
+		switch chained.outcome {
+		case audit.OutcomeDiagnosed, audit.OutcomeNoAction:
+			finalOutcome = chained.outcome
+		default:
+			finalOutcome = audit.OutcomeEscalatedResolved
+		}
 		if chained.findings != "" {
 			finalFindings = chained.findings
 		}
@@ -1191,9 +1199,24 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 	}
 	extra["chain"] = chain
 
+	// A gate_pending outcome is persisted BEFORE the response is written:
+	// the caller's next move is proceed-escalation on this run, which
+	// requires outcome=gate_pending. Written from the goroutine below, an
+	// immediate approval raced the PATCH and got 409 "not in gate_pending
+	// state (outcome=unknown)" — found live, faulttest force-approving
+	// within a millisecond of the response (plr_1101585e). Costs one auditd
+	// PATCH: gate_pending skips the incident-close and attribution steps.
+	// Other outcomes stay fire-and-forget; nothing acts on them on receipt.
+	gatePending := runID != "" && finalOutcome == audit.OutcomeGatePending
+	if gatePending {
+		gateReason, _ := extra["gate_reason"].(string)
+		g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()),
+			runID, finalOutcome, finalEscalatedTo, finalTransitionedTo, finalFindings, primary.rawText, primary.traceID, primary.diagReport, primary.sawSignalLine, gateReason)
+	}
+
 	injectFields(w, primary.capture, extra)
 
-	if runID != "" {
+	if runID != "" && !gatePending {
 		gateReason, _ := extra["gate_reason"].(string)
 		// Persist primary.diagReport (this run's own, hop-scoped report), not
 		// finalReport (the cross-hop merge). finalReport exists for the
@@ -1915,6 +1938,21 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// The approval may restate the target, but not change it: the gate was
+	// raised on a diagnosis of the run's own target, and remediating another
+	// one on the strength of it is the one thing the approval can't mean.
+	// Found live 2026-10-17 (VM test 2.1): a proceed-escalation naming the
+	// Docker fixture while the triage had diagnosed the VM sent the
+	// remediation hop to Docker, with only a fabrication-risk WARN to show
+	// for it. Checked here, before any state changes, like the playbook
+	// lookup above. Empty fields still fall back to the run's own below.
+	if msg := gateRetargetRefusal(g.infra, req, leafRun, run); msg != "" {
+		slog.Warn("playbook: gate approval refused — it names a different target than the run diagnosed",
+			"run_id", runID, "leaf_run_id", leafRun.RunID, "resolved_by", resolvedBy, "detail", msg)
+		writeError(w, http.StatusConflict, msg)
+		return
+	}
+
 	// primaryOutcome reflects the PRIMARY run's (runID's) own first-hop
 	// signal — distinct from nextSeriesID/isTransition above. chainEscalation
 	// deliberately never updates run.EscalatedTo/TransitionedTo past the
@@ -2314,20 +2352,42 @@ func assembleTriagePrompt(pb *audit.Playbook, req PlaybookRunRequest, serverType
 			strings.Join(pb.EscalatesTo, ", "))
 	}
 
+	// A remediation playbook's whole job is the write its Expert Guidance
+	// names; the read-only constraints below apply to every other type.
+	// Until v0.32 every playbook got the read-only block, remediation too —
+	// remediations still mostly ran because the model let the specific
+	// guidance override the generic constraint, until it didn't: found live
+	// (VM db-pgdata-corrupted-vm, plr_eb3a260a), pbs_pgbackrest_restore_remediate
+	// quoted "Do NOT execute remediation" back as an instruction conflict
+	// and stopped without restoring, after a human had approved all 3 gates.
+	// Write tools stay enforced where they always were: policy on the hop's
+	// own purpose (derivedPurpose) and the gates in front of the hop.
+	isRemediation := pb.PlaybookType == "remediation"
+
 	if req.PriorFindings != "" {
 		if req.IsTransition {
+			next := "then proceed directly to describing the remediation."
+			if isRemediation {
+				next = "then carry out the remediation steps it gives."
+			}
 			fmt.Fprintf(&b, "## Prior Investigation Findings\nThe triage phase (same agent, same domain) already diagnosed this incident:\n%s\n\nTreat this diagnosis as settled — do NOT re-run the full investigation from scratch. "+
-				"Confirm the current state only where the Expert Guidance below explicitly calls for a pre-remediation check, then proceed directly to describing the remediation.\n\n", req.PriorFindings)
+				"Confirm the current state only where the Expert Guidance below explicitly calls for a pre-remediation check, %s\n\n", req.PriorFindings, next)
 		} else {
 			fmt.Fprintf(&b, "## Prior Investigation Findings\nA previous investigation (different agent/domain) reached the following conclusion:\n%s\n\nUse this as a starting point, but verify it with your own domain-specific tools — the prior agent could not see into your domain.\n\n", req.PriorFindings)
 		}
 	}
 
 	b.WriteString("## Constraints\n")
-	b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
-	b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
-	b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
-	b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n")
+	if isRemediation {
+		b.WriteString("- This is a remediation playbook, approved to run: carry out the write/destructive actions its Expert Guidance names, in the order it gives, once its own precondition checks pass.\n")
+		b.WriteString("- Do not take any write action the Expert Guidance does not name, and do not substitute a different fix for one it names.\n")
+		b.WriteString("- If a precondition fails or an action errors, stop and report it as the guidance says — do not retry or improvise.\n")
+	} else {
+		b.WriteString("- Use only read-only diagnostic tools. Do not execute any write or destructive operations.\n")
+		b.WriteString("- Collect evidence, form a hypothesis, and if the evidence contradicts it, back out and pursue a different hypothesis.\n")
+		b.WriteString("- When you reach a clear diagnosis, present your findings and recommended remediation steps.\n")
+		b.WriteString("- Do NOT execute remediation — describe it for operator review and approval.\n")
+	}
 	if req.ConnectionString != "" {
 		fmt.Fprintf(&b, "- Use ONLY `connection_string` = `%s`. Do not query any other server, even if your context lists others.\n", req.ConnectionString)
 	}
@@ -2964,7 +3024,8 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 // real incidents, not an edge case.
 func isAttributableOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned,
+		audit.OutcomeDiagnosed, audit.OutcomeNoAction:
 		return true
 	default:
 		return false
@@ -2985,7 +3046,8 @@ func isAttributableOutcome(outcome string) bool {
 // resolved (including when that remediation itself failed/was abandoned).
 func isTerminalIncidentOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned,
+		audit.OutcomeDiagnosed, audit.OutcomeNoAction:
 		return true
 	default:
 		return false
@@ -2993,7 +3055,9 @@ func isTerminalIncidentOutcome(outcome string) bool {
 }
 
 // incidentStatusForOutcome maps a playbook run's outcome to the incidents
-// table's status vocabulary (open | resolved | escalated | abandoned).
+// table's status vocabulary (open | resolved | escalated | abandoned |
+// needs_human). diagnosed and no_action map to needs_human: the chain ended
+// without fixing anything.
 // "escalated+resolved" (a chain that escalated partway through but ultimately
 // resolved) maps to resolved — that's the incident's final state.
 //
@@ -3008,6 +3072,8 @@ func incidentStatusForOutcome(outcome string) string {
 		return audit.IncidentStatusEscalated
 	case audit.OutcomeAbandoned:
 		return audit.IncidentStatusAbandoned
+	case audit.OutcomeDiagnosed, audit.OutcomeNoAction:
+		return audit.IncidentStatusNeedsHuman
 	default: // OutcomeResolved, OutcomeEscalatedResolved
 		return audit.IncidentStatusResolved
 	}
@@ -3503,6 +3569,55 @@ func parseAgentEscalation(text string) agentEscalation {
 		result.Findings = extractConclusionFallback(result.CleanText)
 	}
 	return result
+}
+
+// findingsOnlyOutcome is the outcome of a run that ended with FINDINGS and
+// no hand-off, by what it did rather than what it said. A remediation
+// playbook resolved only if its own trace shows a write or destructive tool
+// call that succeeded (tool_execution events, written by the agent's tool
+// layer, not the model), and is no_action otherwise: found live 2026-10-11, a
+// restore remediation whose stale-backup precondition failed changed nothing,
+// said a human must decide, and recorded "resolved" with the database still
+// down. A triage playbook is diagnosed (a human decides what's next) unless
+// it found nothing to fix (recommended monitor / no changes needed), which is
+// resolved. When the trace can't be read, the remediation keeps the old
+// "resolved" rather than be reported as having done nothing.
+func (g *Gateway) findingsOnlyOutcome(pb *audit.Playbook, findings, traceID string, since time.Time) string {
+	if pb.PlaybookType != "remediation" {
+		if findingsRecommendMonitor(findings) {
+			return audit.OutcomeResolved
+		}
+		return audit.OutcomeDiagnosed
+	}
+	if g.auditURL == "" || traceID == "" {
+		slog.Warn("playbook: can't check the remediation's own tool calls (no auditd or trace); recording resolved",
+			"series_id", pb.SeriesID, "trace_id", traceID)
+		return audit.OutcomeResolved
+	}
+	events, err := audit.FetchToolExecutionEventsErr(g.auditURL, g.auditAPIKey, traceID, since)
+	if err != nil {
+		slog.Warn("playbook: can't read the remediation's tool calls; recording resolved",
+			"series_id", pb.SeriesID, "trace_id", traceID, "err", err)
+		return audit.OutcomeResolved
+	}
+	if changedSomething(events) {
+		return audit.OutcomeResolved
+	}
+	return audit.OutcomeNoAction
+}
+
+// changedSomething reports whether events include a write or destructive
+// tool call that didn't error.
+func changedSomething(events []audit.Event) bool {
+	for _, ev := range events {
+		if ev.Tool == nil || ev.Tool.Error != "" {
+			continue
+		}
+		if ev.ActionClass == audit.ActionWrite || ev.ActionClass == audit.ActionDestructive {
+			return true
+		}
+	}
+	return false
 }
 
 // findingsRecommendMonitor reports whether the FINDINGS line from a triage run
@@ -4301,6 +4416,9 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 	for _, ev := range events {
 		if ev.Tool != nil && ev.Tool.Result != "" {
 			outputs = append(outputs, ev.Tool.Result)
+			if flat := flattenJSONEvidence(ev.Tool.Result); flat != "" {
+				outputs = append(outputs, flat)
+			}
 		}
 	}
 	flagQuote := func(qs quoteSource, flagged string) {
@@ -4388,8 +4506,17 @@ func stripEscapedQuotes(s string) string {
 // regardless of what glues them together. Returns a single-element slice
 // unchanged when no interior quote/semicolon/em-dash remains — the common
 // case of one genuine verbatim span.
+//
+// Also splits on the elision markers "...", "…" and " / " (slash with a space
+// on both sides, so a path's own slashes never split): a model joining two
+// real lines and leaving out the one between them. Found live 2026-10-16 on
+// db-pgdata-corrupted, quoting Postgres's three-line startup error
+// "could not find the database system / could not open file ..." and
+// "...system...but could not open file ..." — every line real, flagged only
+// because the joined string isn't contiguous in the log.
 func splitEvidenceQuoteParts(quote string) []string {
 	quote = stripEscapedQuotes(quote)
+	quote = evidenceElisionReplacer.Replace(quote)
 	raw := strings.FieldsFunc(quote, func(r rune) bool {
 		return r == '"' || r == ';' || r == '—'
 	})
@@ -4403,6 +4530,72 @@ func splitEvidenceQuoteParts(quote string) []string {
 		return []string{strings.TrimSpace(quote)}
 	}
 	return parts
+}
+
+// evidenceElisionReplacer turns each elision marker into ";", one of the
+// boundaries splitEvidenceQuoteParts already splits on.
+var evidenceElisionReplacer = strings.NewReplacer("...", ";", "…", ";", " / ", ";")
+
+// flattenJSONEvidence renders a JSON tool result as one "path: value" line
+// per leaf ("wal_continuity.status: continuous"), or "" when result isn't
+// JSON. checkEvidenceProvenance checks quotes against it in addition to the
+// raw result, because a model naming a nested field writes its dotted path,
+// which no substring of the raw JSON contains. Found live 2026-10-16:
+// "wal_continuity.status=continuous" from a real get_pgbackrest_status
+// result was flagged as unverified. Array indices are left out of the path
+// (a model writes "backups.label", not "backups[2].label"). Formatting only,
+// as elsewhere in this check: each line carries the real value, so a wrong
+// value still fails to match.
+func flattenJSONEvidence(result string) string {
+	trimmed := strings.TrimSpace(result)
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return ""
+	}
+	var v any
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				p := k
+				if path != "" {
+					p = path + "." + k
+				}
+				walk(p, t[k])
+			}
+		case []any:
+			for _, e := range t {
+				walk(path, e)
+			}
+		default:
+			if path == "" {
+				return
+			}
+			val := ""
+			switch s := t.(type) {
+			case nil:
+				val = "null"
+			case string:
+				val = s
+			case float64:
+				val = strconv.FormatFloat(s, 'f', -1, 64)
+			default:
+				val = fmt.Sprintf("%v", s)
+			}
+			b.WriteString(path + ": " + val + "\n")
+		}
+	}
+	walk("", v)
+	return b.String()
 }
 
 // appendEvidenceProvenance accumulates unverified evidence quotes into extra
@@ -4432,7 +4625,15 @@ func appendEvidenceProvenance(extra map[string]any, primary, secondary []string)
 // normalization only, no unit conversion (MB vs bytes) or tolerance windows,
 // since either of those would require a judgment call this check is
 // deliberately not in the business of making.
+//
+// Commas at either end of quote are dropped first: they're the leftovers of a
+// comma-joined compound quote split at its inner quotes. Found live
+// 2026-10-17 on the VM's db-pgbackrest-wal-gap check: `status=\"broken\",
+// detail=\"...\", consistency_reachable=false` split into ", detail=" and
+// ", consistency_reachable=false", both flagged though both are real. Edge
+// punctuation only, so no word or value is changed.
 func evidenceQuoteVerified(quote string, outputs []string) bool {
+	quote = strings.Trim(quote, ", \t\n")
 	nq := normalizeEvidenceText(quote)
 	if nq == "" || isEvidenceGlueOnly(quote) {
 		return true
@@ -4647,6 +4848,80 @@ func allNumbersPresent(quoteNums, outNums []float64) bool {
 	return true
 }
 
+// gateRetargetRefusal returns why a gate approval can't proceed because it
+// names a different target (connection_string or namespace) than the run it
+// approves, or "" when it doesn't. The run's target is the leaf hop's, the
+// one being continued from, falling back to the primary run's.
+func gateRetargetRefusal(cfg *infra.Config, req ProceedEscalationRequest, leaf, primary *audit.PlaybookRun) string {
+	runConn, runNS := leaf.ConnectionString, leaf.Namespace
+	if runConn == "" {
+		runConn = primary.ConnectionString
+	}
+	if runNS == "" {
+		runNS = primary.Namespace
+	}
+	if req.ConnectionString != "" && runConn != "" && !sameTarget(cfg, req.ConnectionString, runConn) {
+		asked, diagnosed := redactConnString(req.ConnectionString), redactConnString(runConn)
+		return fmt.Sprintf("connection_string %q is not the target this run diagnosed (%q): a gate approval can't retarget the remediation. "+
+			"Omit connection_string to use the run's own, or start a new triage against %q", asked, diagnosed, asked)
+	}
+	if req.Namespace != "" && runNS != "" && req.Namespace != runNS {
+		return fmt.Sprintf("namespace %q is not the namespace this run diagnosed (%q): a gate approval can't retarget the remediation. "+
+			"Omit namespace to use the run's own, or start a new triage in %q", req.Namespace, runNS, req.Namespace)
+	}
+	return ""
+}
+
+// redactConnString masks the password in a connection string for an error
+// message or log line: password=<value> in key=value form, or the URL form's
+// via audit.RedactDSN. The run's stored connection string carries the real
+// password, and a refusal must not hand it to whoever sent the approval.
+func redactConnString(s string) string {
+	if strings.Contains(s, "://") {
+		return audit.RedactDSN(s)
+	}
+	fields := strings.Fields(s)
+	for i, f := range fields {
+		if strings.HasPrefix(f, "password=") {
+			fields[i] = "password=***"
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
+// sameTarget reports whether two connection strings name the same database:
+// identical, or the same host, port and dbname once each is resolved through
+// the infrastructure config (config key, display name, container name,
+// connection string or endpoint). Other fields (user, password, sslmode, the
+// order they're written in) don't change which database it is.
+func sameTarget(cfg *infra.Config, a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, fb := parseConnFields(canonicalTarget(cfg, a)), parseConnFields(canonicalTarget(cfg, b))
+	if fa["host"] == "" || fb["host"] == "" {
+		return false
+	}
+	return fa["host"] == fb["host"] && fa["port"] == fb["port"] && fa["dbname"] == fb["dbname"]
+}
+
+// canonicalTarget returns the configured connection string of the
+// infrastructure entry s names, or s itself when it names none.
+func canonicalTarget(cfg *infra.Config, s string) string {
+	if cfg == nil {
+		return s
+	}
+	if db, _, ok := cfg.FindDBByConnStr(s); ok {
+		return db.ConnectionString
+	}
+	for _, db := range cfg.DBServers {
+		if db.ContainerName != "" && db.ContainerName == s {
+			return db.ConnectionString
+		}
+	}
+	return s
+}
+
 // targetMatches returns true when:
 //   - actual == intended (exact), or
 //   - intended appears as a field value in actual (short name, e.g. intended="test-pg",
@@ -4735,8 +5010,13 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	}
 
 	if done {
-		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false, "")
+		// Unusual: playbook declares done on first proposal (no actions
+		// needed). No step ran, so a remediation changed nothing.
+		outcome := audit.OutcomeNoAction
+		if pb.PlaybookType != "remediation" {
+			outcome = g.findingsOnlyOutcome(pb, summary, "", time.Time{})
+		}
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, "", "", summary, "", "", nil, false, "")
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -4937,7 +5217,10 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false, "")
+		// The steps ran through the gateway under traceID: resolved only if
+		// one of them changed something (see findingsOnlyOutcome).
+		outcome := g.findingsOnlyOutcome(pb, summary, traceID, run.StartedAt)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, "", "", summary, "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

@@ -5258,7 +5258,13 @@ func printIncidentHopSummary(n *incidentNarrative) {
 	}
 	fmt.Printf("INCIDENT %s — %s", n.IncidentID, status)
 	if n.DurationSec > 0 {
-		fmt.Printf(" in %.0fs", n.DurationSec)
+		// "in" for an outcome reached, "after" for a chain that stopped
+		// without one: "needs_human in 153s" would read as settled.
+		prep := "in"
+		if status == audit.IncidentStatusNeedsHuman || status == "open" {
+			prep = "after"
+		}
+		fmt.Printf(" %s %.0fs", prep, n.DurationSec)
 	}
 	fmt.Println()
 	fmt.Println()
@@ -5664,6 +5670,10 @@ func escalationHopDesc(phase string, escalations []narrativeEscalationHop) strin
 		return "terminal escalation hop — handed off to remediation"
 	case "resolved":
 		return "terminal escalation hop — investigation concluded here"
+	case audit.OutcomeDiagnosed:
+		return "terminal escalation hop — diagnosis concluded here, nothing was fixed: needs a human"
+	case audit.OutcomeNoAction:
+		return "terminal hop — remediation took no action: needs a human"
 	default:
 		return fallback
 	}

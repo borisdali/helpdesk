@@ -23,6 +23,8 @@ func TestHopOutcomeVerdict(t *testing.T) {
 		{"resolved", true, false},
 		{"escalated", true, false},
 		{"transitioned", true, false},
+		{"diagnosed", true, false}, // v0.32, split out of resolved
+		{"no_action", true, false}, // v0.32, split out of resolved
 		{"unknown", false, false},
 		{"abandoned", false, false},
 		{"gate_pending", false, true},

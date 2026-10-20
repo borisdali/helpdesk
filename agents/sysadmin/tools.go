@@ -709,6 +709,18 @@ func getHostLogsImpl(ctx context.Context, args GetHostLogsArgs) (HostLogsResult,
 		lines = 100
 	}
 
+	// Kubernetes: the pod's own output, the previous container run's first
+	// when it has restarted (a crash-looping postgres's fatal startup error
+	// is there). Needed for diagnosis and for verify_restore_recovery's
+	// recovery lines alike.
+	if host.K8sPodSelector != "" {
+		out, err := k8sLogs(ctx, host, lines)
+		if err != nil {
+			return HostLogsResult{}, fmt.Errorf("get_host_logs %s: %w", args.Target, err)
+		}
+		return HostLogsResult{ServerID: args.Target, Runtime: "kubectl", Lines: lines, Logs: out}, nil
+	}
+
 	runtime, err := containerRuntimeBin(host)
 	if err != nil {
 		return HostLogsResult{}, err
@@ -1143,6 +1155,9 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 	if err != nil {
 		return RestartResult{}, err
 	}
+	if host.K8sPodSelector != "" {
+		return restartK8sInstance(ctx, args, host)
+	}
 	if host.Runtime == "" {
 		return RestartResult{}, fmt.Errorf(
 			"server %q is managed via systemd, not a container runtime; use restart_service instead", args.Target)
@@ -1196,6 +1211,67 @@ func restartContainerImpl(ctx context.Context, args RestartContainerArgs) (Resta
 		Target:   host.ContainerName,
 		Success:  runErr == nil,
 		Output:   output,
+	}, runErr
+}
+
+// restartK8sInstance is restart_container on Kubernetes: resume the
+// instance's StatefulSet to the replica count restore_from_backup's quiesce
+// recorded (lifecycle.go). On a StatefulSet that wasn't scaled down, with no
+// record, it deletes the pod instead, which the StatefulSet recreates on the
+// same volumes: the Kubernetes form of a container restart.
+func restartK8sInstance(ctx context.Context, args RestartContainerArgs, host resolvedHost) (RestartResult, error) {
+	if policyEnforcer != nil {
+		policyCtx := agentutil.WithToolName(ctx, "restart_container")
+		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+			policy.ActionDestructive, host.Tags, "restart container: "+args.Reason, host.Sensitivity); err != nil {
+			slog.Warn("policy denied container restart", "target", args.Target, "err", err)
+			return RestartResult{}, err
+		}
+	}
+	start := time.Now()
+	var out, raw string
+	sts, runErr := k8sStatefulSet(ctx, host)
+	if runErr == nil {
+		replicas := 1
+		if sts.Spec.Replicas != nil {
+			replicas = *sts.Spec.Replicas
+		}
+		_, recorded := sts.Metadata.Annotations[k8sResumeReplicasAnnotation]
+		if replicas == 0 || recorded {
+			raw = "kubectl scale statefulset " + sts.Metadata.Name
+			out, runErr = k8sResume(ctx, host)
+		} else {
+			var pod string
+			if pod, _, runErr = k8sInstancePod(ctx, host); runErr == nil && pod != "" {
+				raw = "kubectl delete pod " + pod
+				_, runErr = kubectl(ctx, host, "delete", "pod", pod, "--wait=false")
+				out = "pod " + pod + " deleted; StatefulSet " + sts.Metadata.Name + " recreates it"
+			} else if runErr == nil {
+				runErr = fmt.Errorf("StatefulSet %s has %d replicas but no pod matches %q", sts.Metadata.Name, replicas, host.K8sPodSelector)
+			}
+		}
+	}
+	duration := time.Since(start)
+	var errMsg string
+	if runErr != nil {
+		errMsg = runErr.Error()
+		slog.Warn("restart_container failed", "target", args.Target, "err", runErr)
+	} else {
+		slog.Info("restart_container succeeded", "target", args.Target, "detail", out, "reason", args.Reason)
+	}
+	if toolAuditor != nil {
+		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+			Name:       "restart_container",
+			Parameters: map[string]any{"target": args.Target, "reason": args.Reason},
+			RawCommand: raw,
+		}, audit.ToolResult{Output: out, Error: errMsg}, duration)
+	}
+	return RestartResult{
+		ServerID: args.Target,
+		Runtime:  "kubectl",
+		Target:   sts.Metadata.Name,
+		Success:  runErr == nil,
+		Output:   out,
 	}, runErr
 }
 
@@ -1312,6 +1388,15 @@ type PgBackRestBackup struct {
 	Error     bool      `json:"error"`
 	StartTime time.Time `json:"start_time"`
 	StopTime  time.Time `json:"stop_time"`
+	// WALStart/WALStop are the first and last WAL segments the backup needs
+	// to reach a consistent state; LSNStart/LSNStop the matching LSNs.
+	WALStart string `json:"wal_start,omitempty"`
+	WALStop  string `json:"wal_stop,omitempty"`
+	LSNStart string `json:"lsn_start,omitempty"`
+	LSNStop  string `json:"lsn_stop,omitempty"`
+	// archiveID is the repo archive directory (e.g. "16-1") holding this
+	// backup's WAL, matched through the backup's database id.
+	archiveID string
 }
 
 // GetPgBackRestStatusResult is the structured result for get_pgbackrest_status.
@@ -1327,8 +1412,11 @@ type PgBackRestBackup struct {
 // most likely marks a softer, file-level issue (e.g. a checksum problem),
 // not "the last attempt failed to run" — that case shows up as staleness
 // instead, since no successful completion ever updates LastBackupTime.
+// Field order is JSON order, and the audit trail keeps only the first 8 KB
+// of a tool result (internal/audit toolResultMaxLen): the verdict fields come
+// first, then wal_continuity, then the per-backup list, which grows with
+// retention, and the raw CLI output last.
 type GetPgBackRestStatusResult struct {
-	Output        string `json:"output"`
 	Stanza        string `json:"stanza,omitempty"`
 	StatusCode    int    `json:"status_code"`
 	StatusMessage string `json:"status_message,omitempty"`
@@ -1337,11 +1425,10 @@ type GetPgBackRestStatusResult struct {
 	// as a generic "other" but RepoStatusMessage holds the real detail (e.g.
 	// a PathOpenError naming the exact path and errno). Always prefer this
 	// over StatusMessage when both are present.
-	RepoStatusCode    int                `json:"repo_status_code,omitempty"`
-	RepoStatusMessage string             `json:"repo_status_message,omitempty"`
-	Backups           []PgBackRestBackup `json:"backups,omitempty"`
-	LastBackupLabel   string             `json:"last_backup_label,omitempty"`
-	LastBackupTime    string             `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
+	RepoStatusCode    int    `json:"repo_status_code,omitempty"`
+	RepoStatusMessage string `json:"repo_status_message,omitempty"`
+	LastBackupLabel   string `json:"last_backup_label,omitempty"`
+	LastBackupTime    string `json:"last_backup_time,omitempty"` // RFC3339; empty if no backup has ever succeeded
 	// LastBackupError deliberately has no `omitempty` — unlike LastBackupTime
 	// (where "absent" and "empty" are the same real state: no backup ever
 	// succeeded), false here is a meaningful, distinct answer from "not
@@ -1365,6 +1452,43 @@ type GetPgBackRestStatusResult struct {
 	// never hinge on whether the model correctly reconstructs a boolean from
 	// its absence.
 	BackupStale bool `json:"backup_stale"`
+	// WALContinuity says whether the latest backup can actually be restored
+	// to the end of the archived WAL — see walcheck.go. Nil only when the
+	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
+	// be asked anything further.
+	WALContinuity *WALContinuity     `json:"wal_continuity,omitempty"`
+	Backups       []PgBackRestBackup `json:"backups,omitempty"`
+	// Output is the raw `pgbackrest info` JSON. It is left out of the audited
+	// copy of a successful call (see getPgBackRestStatusTool).
+	Output string `json:"output,omitempty"`
+}
+
+// walCheckInput returns what the WAL-continuity check needs about the latest
+// backup, or false when there is no backup to check.
+func (r GetPgBackRestStatusResult) walCheckInput() (walCheckInput, bool) {
+	var last *PgBackRestBackup
+	for i := range r.Backups {
+		if last == nil || r.Backups[i].StopTime.After(last.StopTime) {
+			last = &r.Backups[i]
+		}
+	}
+	if last == nil {
+		return walCheckInput{}, false
+	}
+	var hints []lsnSegment
+	for _, b := range r.Backups {
+		hints = append(hints, lsnSegment{b.LSNStart, b.WALStart}, lsnSegment{b.LSNStop, b.WALStop})
+	}
+	return walCheckInput{
+		SizeHints:   hints,
+		Stanza:      r.Stanza,
+		BackupLabel: last.Label,
+		ArchiveID:   last.archiveID,
+		WALStart:    last.WALStart,
+		WALStop:     last.WALStop,
+		LSNStart:    last.LSNStart,
+		LSNStop:     last.LSNStop,
+	}, true
 }
 
 // PgBackRestSummary is the single synthesized item get_pgbackrest_status'
@@ -1377,6 +1501,7 @@ type PgBackRestSummary struct {
 	BackupStale     bool
 	NeverBackedUp   bool
 	LastBackupLabel string
+	WALStatus       string // WALContinuity.Status, empty when not checked
 }
 
 // pgbackrestEvidenceSchema declares get_pgbackrest_status' probe:
@@ -1401,6 +1526,14 @@ var pgbackrestEvidenceSchema = evidence.NewToolSchema[PgBackRestSummary]("get_pg
 }).
 	Bool("backup_unhealthy", func(s PgBackRestSummary) bool {
 		return s.StatusCode != 0 || s.BackupStale || s.NeverBackedUp
+	}).
+	// wal_chain_broken (v0.32): true only on a definite finding — a missing
+	// segment or a backup off the newest timeline's history. "unverified"
+	// deliberately doesn't fire it: restore_from_backup already refuses
+	// anything not "continuous", and gating every routine triage on a host
+	// whose pgBackRest predates repo-ls would bury the real signal.
+	Bool("wal_chain_broken", func(s PgBackRestSummary) bool {
+		return s.WALStatus == WALBroken
 	}).
 	Register()
 
@@ -1433,6 +1566,17 @@ type pgBackRestRawStanza struct {
 		} `json:"status"`
 	} `json:"repo"`
 	Backup []pgBackRestRawBackup `json:"backup"`
+	// Archive lists the stanza's WAL archive directories, one per database
+	// version (a stanza-upgrade adds one). Each backup's WAL lives in the one
+	// whose database id matches the backup's.
+	Archive []struct {
+		Database struct {
+			ID int `json:"id"`
+		} `json:"database"`
+		ID  string `json:"id"`
+		Min string `json:"min"`
+		Max string `json:"max"`
+	} `json:"archive"`
 }
 
 type pgBackRestRawBackup struct {
@@ -1443,6 +1587,17 @@ type pgBackRestRawBackup struct {
 		Start int64 `json:"start"`
 		Stop  int64 `json:"stop"`
 	} `json:"timestamp"`
+	Archive struct {
+		Start string `json:"start"`
+		Stop  string `json:"stop"`
+	} `json:"archive"`
+	LSN struct {
+		Start string `json:"start"`
+		Stop  string `json:"stop"`
+	} `json:"lsn"`
+	Database struct {
+		ID int `json:"id"`
+	} `json:"database"`
 }
 
 // jsonArrayPrefix strips any non-JSON preamble before the first `[`,
@@ -1525,6 +1680,10 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 		result.RepoStatusCode = stanza.Repo[0].Status.Code
 		result.RepoStatusMessage = stanza.Repo[0].Status.Message
 	}
+	archiveIDs := map[int]string{}
+	for _, a := range stanza.Archive {
+		archiveIDs[a.Database.ID] = a.ID
+	}
 	for _, b := range stanza.Backup {
 		result.Backups = append(result.Backups, PgBackRestBackup{
 			Label:     b.Label,
@@ -1532,6 +1691,11 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 			Error:     b.Error,
 			StartTime: time.Unix(b.Timestamp.Start, 0).UTC(),
 			StopTime:  time.Unix(b.Timestamp.Stop, 0).UTC(),
+			WALStart:  b.Archive.Start,
+			WALStop:   b.Archive.Stop,
+			LSNStart:  b.LSN.Start,
+			LSNStop:   b.LSN.Stop,
+			archiveID: archiveIDs[b.Database.ID],
 		})
 	}
 
@@ -1556,23 +1720,29 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 	return result, nil
 }
 
-func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
-	cmdArgs := []string{"info", "--output=json"}
-	if args.Stanza != "" {
-		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
-	}
-
+// runPgBackRestOnTarget runs one read-only pgbackrest command (info, repo-ls,
+// repo-get) against target, using the same dispatch get_pgbackrest_status has
+// always used: docker/podman/kubectl exec as the postgres OS user, SSH or
+// local via runOnHost, or bare local when no infrastructure config exists.
+func runPgBackRestOnTarget(ctx context.Context, toolName, target string, cmdArgs []string) (string, error) {
 	var out string
 	var err error
 	switch {
-	case args.Target != "" && infraConfig != nil:
+	case target != "" && infraConfig != nil:
 		var host resolvedHost
-		host, err = resolveHost(args.Target)
+		host, err = resolveHost(target)
 		if err != nil {
-			return GetPgBackRestStatusResult{}, err
+			return "", err
 		}
 		switch {
-		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
+		case host.K8sPodSelector != "":
+			// Kubernetes: exec into the instance's pod while it's ready, a
+			// one-off maintenance pod with its volumes when it isn't (scaled
+			// to 0, or crash-looping, when kubectl exec into it fails): the
+			// backup state is most needed exactly when postgres is down
+			// (lifecycle.go).
+			out, err = pgInstance{host: host, target: target}.maintenance(ctx, shellCommand("pgbackrest", cmdArgs, nil), false)
+		case host.Runtime == "docker" || host.Runtime == "podman":
 			// pgBackRest checks PGDATA ownership; run as the postgres OS
 			// user inside the container/pod rather than docker-exec's or
 			// kubectl-exec's own default (root), matching how pgBackRest
@@ -1613,15 +1783,32 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 		// error that read like "pgBackRest isn't installed" when the real
 		// problem was "this agent process was never told about this
 		// target." Refuse loudly instead of letting that ambiguity through.
-		return GetPgBackRestStatusResult{}, fmt.Errorf(
-			"get_pgbackrest_status: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
-				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
+		return "", fmt.Errorf(
+			"%s: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — "+
+				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target", toolName)
 	default:
 		// No infra config loaded at all — the only sensible reading is a
 		// genuinely colocated deployment, where this agent process runs on
 		// the same host as the pgBackRest repo it's checking.
 		out, err = cmdRunner.Run(ctx, "pgbackrest", cmdArgs, nil)
 	}
+	return out, err
+}
+
+func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) (GetPgBackRestStatusResult, error) {
+	return readPgBackRestStatus(ctx, args, true)
+}
+
+// readPgBackRestStatus is get_pgbackrest_status. withWAL=false skips the
+// WAL-continuity reads for callers that only need the stanza name
+// (run_pgbackrest_backup, restore_from_backup's stanza resolution).
+func readPgBackRestStatus(ctx context.Context, args GetPgBackRestStatusArgs, withWAL bool) (GetPgBackRestStatusResult, error) {
+	cmdArgs := []string{"info", "--output=json"}
+	if args.Stanza != "" {
+		cmdArgs = append(cmdArgs, "--stanza="+args.Stanza)
+	}
+
+	out, err := runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, cmdArgs)
 	if err != nil {
 		return GetPgBackRestStatusResult{Output: out}, fmt.Errorf("get_pgbackrest_status: %w: %s", err, out)
 	}
@@ -1636,6 +1823,15 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 	}
 	result.Output = out
 
+	// WAL continuity for the latest backup — only meaningful when pgBackRest
+	// reports the stanza healthy enough to answer further questions.
+	if withWAL && result.StatusCode == 0 {
+		wal := checkWALContinuity(result, func(walArgs []string) (string, error) {
+			return runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, walArgs)
+		})
+		result.WALContinuity = &wal
+	}
+
 	if toolAuditor != nil {
 		summary := []PgBackRestSummary{{
 			Stanza:          result.Stanza,
@@ -1644,6 +1840,9 @@ func getPgBackRestStatusImpl(ctx context.Context, args GetPgBackRestStatusArgs) 
 			NeverBackedUp:   result.LastBackupTime == "",
 			LastBackupLabel: result.LastBackupLabel,
 		}}
+		if result.WALContinuity != nil {
+			summary[0].WALStatus = result.WALContinuity.Status
+		}
 		evidence.Evaluate(ctx, toolAuditor, pgbackrestEvidenceSchema, summary, pgbackrestEvidenceRules)
 	}
 	return result, nil
@@ -1673,7 +1872,17 @@ func getPgBackRestStatusTool(ctx agent.ToolContext, args GetPgBackRestStatusArgs
 		// checkEvidenceProvenance (cmd/gateway/playbooks.go) — found live
 		// 2026-10-07 on a real db-pgdata-corrupted run. Same pattern already
 		// used by agents/incident/tools.go's create_incident_bundle.
-		resultJSON, _ := json.Marshal(result)
+		//
+		// On success the raw blob itself is left out: every value in it is
+		// already in the parsed fields, which are what the model quotes, and
+		// at ~650 bytes per backup it pushed wal_continuity past the audit
+		// trail's 8 KB cut by about 8 backups. On failure it stays, since it's
+		// the only record of what pgBackRest actually printed.
+		audited := result
+		if err == nil {
+			audited.Output = ""
+		}
+		resultJSON, _ := json.Marshal(audited)
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "get_pgbackrest_status",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
@@ -1723,7 +1932,7 @@ func runPgBackRestBackupImpl(ctx context.Context, args RunPgBackRestBackupArgs) 
 	// than pushing that requirement onto every caller.
 	stanza := args.Stanza
 	if stanza == "" {
-		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target}, false)
 		if err != nil {
 			return RunPgBackRestBackupResult{}, fmt.Errorf("run_pgbackrest_backup: resolving stanza name: %w", err)
 		}
@@ -1807,6 +2016,19 @@ type RestoreFromBackupArgs struct {
 // RestoreFromBackupResult is the result of restore_from_backup.
 type RestoreFromBackupResult struct {
 	Output string `json:"output"`
+	// Prediction is where recovery from the restored backup should end,
+	// from the WAL-continuity check run just before the restore. Recovery
+	// only runs once the instance is restarted; verify_restore_recovery then
+	// compares this with what PostgreSQL actually reached.
+	Prediction *RestorePrediction `json:"prediction,omitempty"`
+	// PgWalTail is what happened to the WAL that was in pg_wal: saved before
+	// the restore, copied back for recovery to replay, and queued for
+	// archiving (waltail.go). Nil when there was no pg_wal to save.
+	PgWalTail *PgWalTail `json:"pg_wal_tail,omitempty"`
+	// Quiesced says the instance was stopped for the restore and left that
+	// way (Kubernetes: StatefulSet scaled to 0), to be resumed with
+	// restart_container. Empty where the instance was already down.
+	Quiesced string `json:"quiesced,omitempty"`
 }
 
 // restoreFromBackupImpl is deliberately narrow: restore-to-latest-backup only
@@ -1820,7 +2042,7 @@ type RestoreFromBackupResult struct {
 // runPgBackRestBackupImpl's own refusal to touch a broken repo.
 //
 // This overwrites PGDATA, so it is classified ActionDestructive (not
-// ActionWrite like a fresh backup) and gated by two checks, both verified
+// ActionWrite like a fresh backup) and gated by three checks, verified
 // live against a real crashed-then-restored pgBackRest fixture before this
 // was written, not assumed from documentation:
 //
@@ -1829,7 +2051,14 @@ type RestoreFromBackupResult struct {
 //     crashed. This is the only thing standing between "restore a dead
 //     instance" and "destroy a live one" — refuse outright if the server
 //     answers.
-//  2. A stale postmaster.pid left over from the crash must be removed
+//  2. The WAL from the latest backup to the end of the archive must be
+//     present and continuous (walcheck.go). Overwriting PGDATA with a backup
+//     that can't reach consistency, or that would silently stop recovering at
+//     a gap, is worse than not restoring: the original data directory is
+//     gone either way. Anything other than "continuous" — including
+//     "unverified" — refuses. The check runs after policy and pg_isready,
+//     so a denied caller still triggers no command at all.
+//  3. A stale postmaster.pid left over from the crash must be removed
 //     before restoring. Confirmed live: `pgbackrest restore --force` does
 //     NOT bypass pgBackRest's own "[038]: unable to restore while
 //     PostgreSQL is running" refusal — `--force` means something else to
@@ -1838,62 +2067,119 @@ type RestoreFromBackupResult struct {
 //     isn't actually running. $PGDATA is read from pgBackRest's own
 //     pg1-path config rather than hardcoded, so this stays correct for any
 //     real deployment's actual data directory.
+//
+// The restore itself keeps the WAL that was in pg_wal (waltail.go): moved
+// aside first, since --delta restore deletes it, copied back for recovery to
+// replay past the archive end, and pushed to the archive so the new timeline
+// doesn't depend on it.
 func restoreFromBackupImpl(ctx context.Context, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
 	stanza := args.Stanza
 	if stanza == "" {
-		status, err := getPgBackRestStatusImpl(ctx, GetPgBackRestStatusArgs{Target: args.Target})
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target}, false)
 		if err != nil {
 			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: resolving stanza name: %w", err)
 		}
 		stanza = status.Stanza
 	}
-
-	readyScript := "pg_isready"
-	restoreScript := "PGDATA=$(grep '^pg1-path=' /etc/pgbackrest.conf | cut -d= -f2); rm -f \"$PGDATA/postmaster.pid\"; pgbackrest --stanza=" + shellQuote(stanza) + " --delta restore"
-
-	var out string
-	var err error
-	switch {
-	case args.Target != "" && infraConfig != nil:
-		var host resolvedHost
-		host, err = resolveHost(args.Target)
+	// checkWAL runs after policy and pg_isready, immediately before the
+	// restore: the WAL-continuity check for the backup pgbackrest restore is
+	// about to use (the latest one). Its result is also the prediction the
+	// restore is checked against afterwards.
+	var walChecked *WALContinuity
+	checkWAL := func() error {
+		status, err := readPgBackRestStatus(ctx, GetPgBackRestStatusArgs{Target: args.Target, Stanza: stanza}, true)
 		if err != nil {
+			return fmt.Errorf("restore_from_backup: refusing to restore — could not read the backup state to check WAL continuity: %w", err)
+		}
+		walChecked = status.WALContinuity
+		return walRestoreRefusal(status)
+	}
+
+	restoreScript := restoreScriptWithWALTail(stanza)
+
+	// The same steps on every platform (lifecycle.go): refuse if serving,
+	// check the WAL, quiesce, then the restore and the tail push as
+	// maintenance runs. On Kubernetes quiesce scales the StatefulSet to 0 and
+	// both runs happen in a one-off pod with its volumes, the saved pg_wal
+	// copy on the repo volume; elsewhere nothing changes from before.
+	inst, err := instanceFor(args.Target)
+	if err != nil {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: %w", err)
+	}
+	if !inst.local && policyEnforcer != nil {
+		policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
+		if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
+			policy.ActionDestructive, inst.host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", inst.host.Sensitivity); err != nil {
+			slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
 			return RestoreFromBackupResult{}, err
 		}
-		if policyEnforcer != nil {
-			policyCtx := agentutil.WithToolName(ctx, "restore_from_backup")
-			if err := policyEnforcer.CheckTool(policyCtx, "host", args.Target,
-				policy.ActionDestructive, host.Tags, "restore from pgbackrest backup (stanza="+stanza+")", host.Sensitivity); err != nil {
-				slog.Warn("policy denied pgbackrest restore", "target", args.Target, "err", err)
-				return RestoreFromBackupResult{}, err
-			}
-		}
-		switch {
-		case host.Runtime == "docker" || host.Runtime == "podman" || host.K8sPodSelector != "":
-			if readyOut, readyErr := execInProcess(ctx, host, []string{"su", "postgres", "-c", readyScript}); readyErr == nil {
-				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-			}
-			out, err = execInProcess(ctx, host, []string{"su", "postgres", "-c", restoreScript})
-		default:
-			if readyOut, readyErr := runOnHost(ctx, host, "pg_isready", nil, nil); readyErr == nil {
-				return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-			}
-			out, err = runOnHost(ctx, host, "sh", []string{"-c", restoreScript}, nil)
-		}
-	case infraConfig != nil:
-		return RestoreFromBackupResult{}, fmt.Errorf(
-			"restore_from_backup: target is required (infrastructure config is loaded, so an empty target is a resolution failure, not a valid colocated-deployment request) — " +
-				"if the given connection_string/server ID didn't match a known infrastructure entry, report that as its own finding and escalate rather than omitting target")
-	default:
-		if readyOut, readyErr := cmdRunner.Run(ctx, "pg_isready", nil, nil); readyErr == nil {
-			return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", strings.TrimSpace(readyOut))
-		}
-		out, err = cmdRunner.Run(ctx, "sh", []string{"-c", restoreScript}, nil)
 	}
+	if up, readyOut := inst.serving(ctx); up {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: refusing to restore — postgres is still accepting connections (pg_isready: %s)", readyOut)
+	}
+	if err := checkWAL(); err != nil {
+		return RestoreFromBackupResult{}, err
+	}
+	quiesceOut, err := inst.quiesce(ctx)
 	if err != nil {
+		return RestoreFromBackupResult{}, fmt.Errorf("restore_from_backup: stopping the instance before the restore: %w", err)
+	}
+	if inst.k8s() {
+		restoreScript = "HELPDESK_WAL_SAVE_IN_REPO=1; export HELPDESK_WAL_SAVE_IN_REPO\n" + restoreScript
+	}
+	run := func(script string) (string, error) {
+		return inst.maintenance(ctx, script, true)
+	}
+
+	raw, err := run(restoreScript)
+	savedTo, segs, out := parseWALTailOutput(raw)
+	if err != nil {
+		if savedTo != "" {
+			out += "\nThe WAL that was in pg_wal is saved in " + savedTo + " — keep it: it may hold commits that were never archived."
+		}
 		return RestoreFromBackupResult{Output: out}, fmt.Errorf("restore_from_backup: %w: %s", err, out)
 	}
-	return RestoreFromBackupResult{Output: out}, nil
+	result := RestoreFromBackupResult{Output: out, PgWalTail: planWALTail(savedTo, segs, walChecked)}
+	if t := result.PgWalTail; t != nil && len(t.PushedToArchive) > 0 {
+		pOut, pErr := run(pushToArchiveScript(stanza, t.PushedToArchive))
+		if pushed, rest := parsePushOutput(pOut); pErr != nil {
+			failed := t.PushedToArchive[len(pushed):]
+			t.Detail += fmt.Sprintf(". Pushing %v to the archive FAILED (%v: %s): recovery will still replay them, but PostgreSQL deletes them "+
+				"from pg_wal afterwards, so until they are archived the new timeline depends on the copies in %s — push them with "+
+				"pgbackrest archive-push from there before removing it", failed, pErr, rest, t.SavedTo)
+			t.PushedToArchive = pushed
+		}
+	}
+	if inst.quiesced() {
+		result.Quiesced = quiesceOut + " — call restart_container to resume it; recovery runs on startup"
+	}
+	result.Prediction = restorePredictionFrom(walChecked, result.PgWalTail, time.Now())
+	if result.Prediction != nil {
+		saveRestorePrediction(args.Target, *result.Prediction)
+	}
+	return result, nil
+}
+
+// walRestoreRefusal returns the error restore_from_backup refuses with when
+// the latest backup's WAL chain isn't confirmed continuous, or nil.
+func walRestoreRefusal(status GetPgBackRestStatusResult) error {
+	if status.StatusCode != 0 {
+		return fmt.Errorf("restore_from_backup: refusing to restore — pgBackRest reports the stanza unhealthy (status_code=%d: %s)", status.StatusCode, status.StatusMessage)
+	}
+	wal := status.WALContinuity
+	if wal == nil {
+		return fmt.Errorf("restore_from_backup: refusing to restore — the WAL continuity of the latest backup was not checked")
+	}
+	switch wal.Status {
+	case WALContinuous:
+		return nil
+	case WALNoBackup:
+		return fmt.Errorf("restore_from_backup: refusing to restore — %s", wal.Detail)
+	default:
+		return fmt.Errorf("restore_from_backup: refusing to restore — WAL continuity is %s for backup %s: %s. "+
+			"A human must decide whether a restore that can't be verified to reach the end of the archive is still worth it",
+			wal.Status, wal.BackupLabel, wal.Detail)
+	}
 }
 
 func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (RestoreFromBackupResult, error) {
@@ -1908,11 +2194,20 @@ func restoreFromBackupTool(ctx agent.ToolContext, args RestoreFromBackupArgs) (R
 		if err != nil {
 			errMsg = err.Error()
 		}
+		// The structured result, so the prediction and what happened to the
+		// pg_wal tail are in the audit trail next to the
+		// verify_restore_recovery call that checks them.
+		output := result.Output
+		if result.Prediction != nil {
+			if b, err := json.Marshal(result); err == nil {
+				output = string(b)
+			}
+		}
 		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
 			Name:       "restore_from_backup",
 			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza},
 		}, audit.ToolResult{
-			Output: result.Output,
+			Output: output,
 			Error:  errMsg,
 		}, duration)
 	}
@@ -2049,6 +2344,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := restoreFromBackupImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("verify_restore_recovery", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[VerifyRestoreRecoveryArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := verifyRestoreRecoveryImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

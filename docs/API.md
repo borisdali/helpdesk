@@ -347,75 +347,32 @@ Invoke a specific database agent tool directly by name. The body is a JSON objec
 **Important:** `{tool}` must be a registered tool name (e.g. `check_connection`, `get_server_info`). Unknown tool names are validated against the tool registry and rejected with `400 Bad Request` before the agent is contacted.
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/db/check_replication_lag \
+curl -s -X POST http://localhost:8080/api/v1/db/check_connection \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "X-Purpose: diagnostic" \
   -H "Content-Type: application/json" \
-  -d '{"host": "prod-db.example.com", "port": 5432}'
+  -d '{"connection_string": "prod-db"}'
 ```
 
-#### Database tool quick reference
+`connection_string` takes either a PostgreSQL DSN or a server ID from the infrastructure config. When the policy engine is enabled, send `X-Purpose` (e.g. `diagnostic`, `remediation`); policies that require a purpose deny calls without one. `Authorization` is needed only when gateway authentication is enabled.
 
-All tools accept `connection_string` (PostgreSQL DSN; falls back to `HELPDESK_DB_URL` env). Action class is `read` unless noted.
-
-| Tool | Key parameters | What it returns |
-|------|----------------|----------------|
-| `check_connection` | — | Connectivity and server version |
-| `get_server_info` | — | Version, uptime, PG settings summary |
-| `get_status_summary` | — | Compact health snapshot (supersedes server_info + connection_stats) |
-| `get_database_stats` | — | Cache hit ratio, buffer and tuple counts |
-| `get_connection_stats` | — | Active/idle/waiting connection counts by state |
-| `get_active_connections` | — | `pg_stat_activity` snapshot |
-| `get_session_info` | `pid` (required) | Detailed session state, lock holds, uncommitted write estimate |
-| `get_lock_info` | — | Lock grants and waits from `pg_locks` |
-| `get_replication_status` | — | Streaming replica lag and WAL position |
-| `get_table_stats` | `schema` | Dead tuple counts, autovacuum timestamps per table |
-| `get_config_parameter` | `parameter` (required) | Single GUC value and source |
-| `get_database_info` | — | Database list with sizes and owner |
-| `get_pg_settings` | `category`, `show_all` | Non-default GUC values, grouped by category |
-| `get_extensions` | — | Installed extensions with versions |
-| `get_baseline` | — | Combined report: server info + settings + extensions + disk usage |
-| `get_slow_queries` | `limit` | Top-N queries by total execution time from `pg_stat_statements` |
-| `get_vacuum_status` | `min_dead_ratio` | Tables with high dead-tuple ratio, last autovacuum timestamps |
-| `get_disk_usage` | `top_n` | Database sizes (`pg_database_size`) + largest tables (`pg_total_relation_size`) |
-| `get_wait_events` | — | Aggregated wait event types from `pg_stat_activity` |
-| `get_blocking_queries` | — | Blocking/blocked session pairs with lock type and relation |
-| `explain_query` | `query` (required), `allow_dml` | `EXPLAIN (ANALYZE, BUFFERS)` output; DML wrapped in BEGIN/ROLLBACK when `allow_dml=true` |
-| `cancel_query` | `pid` (required) | `pg_cancel_backend` — **write** |
-| `terminate_connection` | `pid` (required) | `pg_terminate_backend` — **destructive** |
-| `terminate_idle_connections` | `idle_threshold_seconds` | Terminate all idle connections older than threshold — **destructive** |
-| `read_pg_log` | `lines`, `filter` | Read the tail of the most-recently-modified PostgreSQL log file via `pg_read_file()`. Requires a live DB connection and `pg_read_server_files` privilege or superuser. Returns up to 128 KB (last ~1000 lines). Use `filter` (case-insensitive substring) to focus on errors. |
-| `read_uploaded_file` | `upload_id` (required), `filter` | Read the content of a file previously uploaded by an operator via `POST /api/v1/fleet/uploads`. Use this when `read_pg_log` is not available (e.g. DB is completely down). Requires `HELPDESK_AUDIT_URL` to be configured. |
-| `get_saved_snapshots` | `tool_name` (required), `server_name`, `limit`, `since` | Retrieve previously recorded outputs of a tool from the audit history. Use when the DB is unreachable and you need a value captured in a prior run — e.g. `config_file` path or `data_directory` from a past `get_baseline`. Also useful for diffing two snapshots ("what changed?") or finding when a setting last changed. Returns up to 3 snapshots by default (max 10), capped at 32 KB total. Requires `HELPDESK_AUDIT_URL`. |
+**Tool reference:** every database tool, with its parameters, action class and capabilities, is listed in [docs/tools/database.md](tools/database.md). The page is generated from the agent's code, so it always matches what the agent accepts.
 
 ---
 
 ### `POST /api/v1/k8s/{tool}`
 
-Invoke a specific Kubernetes agent tool directly by name.
+Invoke a specific Kubernetes agent tool directly by name. Validation and headers work as for `POST /api/v1/db/{tool}`.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/k8s/get_pod_logs \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
+  -H "X-Purpose: diagnostic" \
   -H "Content-Type: application/json" \
-  -d '{"namespace": "default", "pod": "my-pod-abc123"}'
+  -d '{"namespace": "default", "pod_name": "my-pod-abc123"}'
 ```
 
-#### Kubernetes tool quick reference
-
-All tools accept `context` (kubeconfig context name; defaults to current context).
-
-| Tool | Key parameters | What it returns |
-|------|----------------|----------------|
-| `get_pods` | `namespace` (required), `pod_name` | Pod list with status, restarts, age |
-| `get_pod_logs` | `namespace` (required), `pod_name` (required), `lines` | Container log tail |
-| `get_events` | `namespace` (required), `resource_name` | K8s events (warnings + normals) |
-| `describe_pod` | `namespace` (required), `pod_name` (required) | Full pod describe output |
-| `get_service` | `namespace` (required), `service_name` | Service spec with ClusterIP, ports, selector |
-| `get_endpoints` | `namespace` (required), `service_name` | Endpoint addresses for a service |
-| `get_pod_resources` | `namespace` (required), `pod_name` | CPU/memory requests + limits; live usage via `kubectl top` when metrics-server is available |
-| `get_node_status` | `node_name` | Node conditions (Ready, MemoryPressure, DiskPressure, PIDPressure), allocatable vs capacity resources |
-| `scale_deployment` | `namespace` (required), `deployment_name` (required), `replicas` (required) | Scale a deployment — **destructive** |
-| `restart_deployment` | `namespace` (required), `deployment_name` (required) | Rolling restart — **destructive** |
-| `delete_pod` | `namespace` (required), `pod_name` (required) | Delete a pod — **destructive** |
-| `debug_node_dmesg` | `node_name` (required), `lines` | Pull the kernel ring buffer from a worker node via a short-lived debug pod (auto-cleaned up) — **write** |
+**Tool reference:** every Kubernetes tool, with its parameters, action class and capabilities, is listed in [docs/tools/k8s.md](tools/k8s.md).
 
 ---
 
@@ -821,7 +778,7 @@ Record or correct the final outcome of a run. For agent-mode runs the outcome is
 
 | Field | Required | Description |
 |---|---|---|
-| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `outcome` | yes | `resolved` \| `diagnosed` \| `no_action` \| `escalated` \| `abandoned` \| `unknown` (see [PLAYBOOKS.md § Run outcomes](PLAYBOOKS.md#run-outcomes)) |
 | `escalated_to` | no | Series ID (`pbs_*`) of the next playbook when `outcome=escalated` |
 | `findings_summary` | no | Summary of what was found and what action was taken |
 

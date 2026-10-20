@@ -2,8 +2,35 @@
 
 The Tool Registry is a live, queryable catalog of every tool exposed by connected agents. Beyond simple name-and-description listing, each tool carries structured taxonomy metadata — fleet eligibility, capability labels, and supersedes relationships — that the fleet planner uses deterministically to select the right tools and strip redundant ones, without relying solely on LLM reasoning over free-form descriptions.
 
+**Looking up a specific tool?** Every published tool has an entry in the generated per-tool reference: what it does, its action class, capabilities and parameters.
+
+| Agent | Reference page |
+|-------|----------------|
+| Database (`postgres_database_agent`) | [docs/tools/database.md](tools/database.md) |
+| Kubernetes (`k8s_agent`) | [docs/tools/k8s.md](tools/k8s.md) |
+| Sysadmin (`sysadmin_agent`) | [docs/tools/sysadmin.md](tools/sysadmin.md) |
+| Incident (`incident_agent`) | [docs/tools/incident.md](tools/incident.md) |
+| Research (`research_agent`) | [docs/tools/research.md](tools/research.md) |
+| Capability vocabulary | [docs/tools/capabilities.md](tools/capabilities.md) |
+
+These pages are generated from the agents' code by `make docs-tools`, and a unit test fails when one falls out of date, so they always match what the agents publish.
+
+## Principles
+
+The registry is the only way aiHelpDesk's agents touch infrastructure. These are the rules it holds every tool to, and how each one is enforced (*v0.32*):
+
+1. **No direct access.** An agent has no shell, no database session and no cluster credentials of its own to use freely. Everything it does to a database, a host or a cluster is a call to one of its published tools, with the parameters the tool declares. The model chooses which tool to call and with what arguments; the tool's code decides what actually runs.
+2. **Every tool declares an action class:** `read`, `write` or `destructive`. The policy engine gates every call by it, together with the target's tags and the caller's purpose, and approvals apply to `write` and `destructive`. *Enforced:* `TestToolReference` fails for a tool with no action class.
+3. **Every tool offers at least one capability**, from a closed, formal vocabulary (`internal/toolregistry/capabilities.go`): each capability has a kind (*observe*: information the tool returns; *effect*: state it changes), a domain and a description. *Enforced:* `TestToolReference` fails for a tool with no capability or one outside the vocabulary, and `TestCapabilityVocabularyDoc` for a vocabulary entry no tool declares.
+4. **Capabilities agree with the action class.** A `write` or `destructive` tool declares at least one effect capability, and a `read` tool declares none. *Enforced:* `TestToolReference`.
+5. **A `read` tool changes nothing.** Whatever arguments it's given, it reads. Caller text reaches SQL only as the body of a quoted literal, and a tool that has to run caller SQL (`explain_query`) accepts exactly one statement and runs it in a transaction that is rolled back, read-only by default. *Enforced:* by review and each tool's own tests, as no generic check can see what a tool's code runs. Found and fixed while writing this list (v0.32): `explain_query` ran its statement unwrapped, and two read tools spliced caller text into SQL unquoted. One limit remains: `EXPLAIN ANALYZE` executes the query, so a function with side effects called inside it still runs.
+6. **Every mutating tool is written up.** A `write` or `destructive` tool links to a longer write-up of what it changes and how to undo it ([MUTATION_TOOLS.md](MUTATION_TOOLS.md), [ROLLBACK.md](ROLLBACK.md)). *Enforced:* `TestToolReference`, via `toolref.MissingWriteUps`.
+7. **The reference is generated, never hand-written.** `make docs-tools` renders [docs/tools/](tools/) from the agents' own code: description, action class, capabilities, parameters. *Enforced:* a unit test fails when a page is out of date.
+8. **Every call is on the record.** Each tool execution is written to the audit trail (`tool_execution` events) with its parameters, result and error, and its schema carries a fingerprint (§7), so a change to what a tool accepts is visible.
+
 This page covers:
 
+- [Principles](#principles)
 - [Browsing the Registry](#1-browsing-the-registry)
 - [Tool taxonomy fields](#2-tool-taxonomy-fields)
 - [Capability vocabulary](#3-capability-vocabulary)
@@ -26,7 +53,7 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 ```json
 {
   "name": "get_status_summary",
-  "agent": "postgres_database_agent",
+  "agent": "database",
   "description": "Returns a concise status snapshot: server uptime, PostgreSQL version, active connection count, idle connection count, and cache hit ratio.",
   "action_class": "read",
   "fleet_eligible": true,
@@ -41,7 +68,7 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 | Field | Description |
 |-------|-------------|
 | `name` | Tool name as used in fleet job `steps[].tool`. |
-| `agent` | Agent that owns this tool. |
+| `agent` | Agent that owns this tool, by short name (`database`, `k8s`, `sysadmin`, `incident`, `research`). |
 | `action_class` | `read`, `write`, or `destructive`. |
 | `fleet_eligible` | Whether the fleet planner may include this tool in generated job plans. |
 | `auto_remediation_eligible` | Whether this tool may execute without per-step approval in `agent_auto` playbooks. Currently declared only by sysadmin remediation tools (`restart_container`, `restart_service`). |
@@ -58,11 +85,13 @@ The response is `{"count": N, "tools": [...]}`. Each entry in `tools`:
 
 Hard gate: the fleet planner's tool catalog is built exclusively from fleet-eligible tools. Non-fleet tools are invisible to the LLM. This prevents the planner from selecting low-level diagnostic tools when a higher-level summary tool already covers the need.
 
-Currently fleet-eligible database tools: `get_status_summary`, `check_connection`, `get_replication_status`, `get_lock_info`, `get_table_stats`. No Kubernetes tools are fleet-eligible yet.
+Currently the only fleet-eligible tool is the database agent's `get_status_summary`. The per-tool reference pages show each tool's current eligibility.
 
 ### `capabilities`
 
-A closed vocabulary of what a tool can provide. Declared by the agent author at build time using typed constants from `internal/toolregistry`. The planner includes capability labels in its tool catalog so the LLM can reason about coverage, and future UI features can group or filter tools by capability.
+A closed vocabulary of what a tool does. Declared by the agent author at build time using typed constants from `internal/toolregistry`. The planner includes capability labels in its tool catalog so the LLM can reason about coverage, and future UI features can group or filter tools by capability.
+
+There are two kinds. **Observe** capabilities describe information a tool returns (`uptime`, `lock_info`, `logs`). **Effect** capabilities describe state a tool changes (`connection_terminate`, `process_restart`, `data_restore`). Every published tool declares at least one capability, and a tool's capabilities must agree with its action class: a `write` or `destructive` tool declares at least one effect capability, and a `read` tool declares none.
 
 See the [full vocabulary](#3-capability-vocabulary).
 
@@ -76,37 +105,17 @@ Example: `get_status_summary` supersedes `get_server_info` and `get_connection_s
 
 ## 3. Capability vocabulary
 
-### Database domain
+The full vocabulary, with the domain and meaning of every capability, is in the generated [capability vocabulary](tools/capabilities.md). Which tools declare which capability is listed on each agent's reference page.
 
-| Constant | Tag value | Provided by |
-|----------|-----------|-------------|
-| `CapUptime` | `uptime` | `get_status_summary`, `get_server_info` |
-| `CapVersion` | `version` | `get_status_summary`, `get_server_info` |
-| `CapConnectionCount` | `connection_count` | `get_status_summary`, `get_connection_stats` |
-| `CapCacheHitRatio` | `cache_hit_ratio` | `get_status_summary` |
-| `CapActiveQueries` | `active_queries` | `get_active_connections` |
-| `CapLockInfo` | `lock_info` | `get_lock_info` |
-| `CapReplication` | `replication` | `get_replication_status` |
-| `CapTableStats` | `table_stats` | `get_table_stats` |
-| `CapDatabaseList` | `database_list` | `get_database_info` |
-| `CapConfig` | `config` | `get_config_parameter` |
-| `CapConnectivity` | `connectivity` | `check_connection` |
-| `CapSessionInspect` | `session_inspect` | `get_session_info` |
-| `CapDiskUsage` | `disk_usage` | `get_baseline` |
-| `CapExtensions` | `extensions` | `get_baseline` |
+The vocabulary covers five domains:
 
-### Kubernetes domain
+- **database:** server state and statistics (`uptime`, `connection_count`, `lock_info`, `wal_archiving`, `query_plan`, ...) and effects such as `query_cancel`, `connection_terminate`, `config_change`
+- **kubernetes:** cluster objects and health (`pod_list`, `node_health`, `resource_usage`, `kernel_log`, ...) and effects such as `workload_restart`, `deployment_scale`, `resource_limits_change`
+- **host:** the database process on a VM or container host (`process_status`, `host_disk`, `backup_status`) and effects such as `process_restart`, `backup_run`, `data_restore`
+- **cross-domain:** `logs`, declared by every tool that returns log lines, whichever layer they come from
+- **incident and research:** `incident_history`, `bundle_create`, `web_search`
 
-| Constant | Tag value |
-|----------|-----------|
-| `CapPodList` | `pod_list` |
-| `CapNodeList` | `node_list` |
-| `CapLogs` | `logs` |
-| `CapDeploymentScale` | `deployment_scale` |
-| `CapEventList` | `event_list` |
-| `CapServiceInfo` | `service_info` |
-
-Constants are defined in `internal/toolregistry/capabilities.go`. Use them rather than raw strings when declaring capabilities in agent code.
+Constants are defined in `internal/toolregistry/capabilities.go`, together with `Vocabulary`, which gives each one its kind, domain and description. Use the constants rather than raw strings when declaring capabilities in agent code. A constant that is missing from `Vocabulary` is rejected by the taxonomy check.
 
 ---
 
@@ -251,14 +260,50 @@ The skill ID key format is `<agent-name>-<skill-id>`, matching the A2A card's sk
 
 **`SkillTags` vs `SkillCapabilities`**
 
-`SkillCapabilities` uses the typed constants from `internal/toolregistry/capabilities.go` and is the right choice for fleet-eligible tools where the planner needs to reason over capability coverage. For agents whose tools are not fleet-eligible (e.g., the sysadmin agent), `SkillTags` accepts free-form strings and is sufficient for discoverability and UI grouping without requiring a typed vocabulary entry. The sysadmin agent uses `SkillTags` with values like `"host"`, `"container"`, and `"remediation"` rather than `SkillCapabilities`.
+`SkillCapabilities` uses the typed constants from `internal/toolregistry/capabilities.go` and is required for every tool, fleet-eligible or not. `SkillTags` accepts free-form strings and is optional; use it for extra discoverability and UI grouping (`"postgresql"`, `"remediation"`). Tags never replace capabilities.
+
+Each agent keeps its card options in a `cardOptions(tools)` function in `agents/<agent>/card.go`, so the taxonomy test can check them against the agent's real tools.
 
 ### Rules for declaring taxonomy
 
-- **Fleet eligibility**: mark a tool `true` only if it is safe and appropriate for automated fleet-wide execution. Non-fleet tools remain accessible for interactive use — they simply do not appear in the planner's catalog.
-- **Capabilities**: use constants from `internal/toolregistry/capabilities.go`. Do not use raw strings. If a needed capability is missing, add a constant to the package (close the vocabulary).
+- **Capabilities**: every tool declares at least one, using constants from `internal/toolregistry/capabilities.go`. Do not use raw strings. If a needed capability is missing, add a constant and a `Vocabulary` entry (close the vocabulary). A `write` or `destructive` tool declares at least one effect capability; a `read` tool declares none.
+- **Action class**: every tool has an entry in `audit.ToolClassification` (`internal/audit/action.go`). An unclassified tool shows up as `unknown`.
+- **Fleet eligibility**: mark a tool `true` only if it is safe and appropriate for automated fleet-wide execution. Non-fleet tools remain accessible for interactive use; they simply do not appear in the planner's catalog.
 - **Supersedes**: only declare a tool as superseding another when the superseding tool's output is a strict superset of the superseded tool's output under all circumstances. When in doubt, do not declare supersedes.
 - **Capability parity**: if tool A supersedes tool B, tool A's capabilities list must include every capability listed for tool B.
+- **No stale keys**: every key in the card option maps names the agent's root skill or one of its tools.
+- **No unused capabilities**: every vocabulary entry is declared by at least one tool. A capability nothing provides is either a missing declaration or a dead entry to remove.
+- **See-also links resolve**: a tool's links to longer write-ups (below) must point at an existing document and match exactly one heading in it.
+- **Mutation tools are written up**: every `write` or `destructive` tool links to at least one longer write-up, normally its `MUTATION_TOOLS.md` section covering what it changes, its safeguards and whether it can be rolled back.
+
+All of these are enforced, not just documented. Each agent has a `TestToolReference` test (`agents/<agent>/tools_reference_test.go`) that runs the checks in `agentutil/toolref` against the agent's real `createTools()` and `cardOptions()`, and fails on any violation. The same test compares the agent's [reference page](#aihelpdesk-tool-registry) with the code.
+
+The unused-capability rule spans agents, which no single agent package can see. `TestCapabilityVocabularyDoc` (`agentutil/toolref`) reads the generated agent pages instead (each one is guaranteed current by its own agent test), fails on any vocabulary entry no tool declares, and writes the "Declared by" column of the [capability vocabulary](tools/capabilities.md).
+
+### Linking a tool to its longer write-up
+
+When a tool is covered in depth elsewhere (e.g. `MUTATION_TOOLS.md` §1.15 for `restore_from_backup`), add it to the `SeeAlso` map in the agent's `tools_reference_test.go`. The tool's reference page then lists it under **See also**:
+
+```go
+SeeAlso: map[string][]toolref.Link{
+    "restore_from_backup": {
+        {Doc: "MUTATION_TOOLS.md", Section: "1.15 `restore_from_backup`"},
+        {Doc: "BACKUP.md", Section: "3. Restore from backup after data loss"},
+    },
+},
+```
+
+`Section` is the start of the target heading's text. Include the tool name, not just a section number, because "1.1" also prefixes "1.10" to "1.16". The link anchor is computed from the heading, so renaming or removing that heading fails the test instead of leaving a dead link.
+
+### Adding a new tool
+
+1. Define the tool in the agent's `createTools()`.
+2. Add its action class to `audit.ToolClassification`.
+3. Add a `SkillCapabilities` entry in the agent's `card.go`.
+4. Add a `SeeAlso` link to any longer write-up. This is required for a `write` or `destructive` tool: write its `MUTATION_TOOLS.md` section first.
+5. Run `make docs-tools` and commit the regenerated `docs/tools/` pages.
+
+`make test` and CI fail until all five are done (step 4 only for write and destructive tools).
 
 ### Wire format (internal)
 

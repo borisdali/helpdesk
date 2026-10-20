@@ -162,17 +162,28 @@ metadata:
     {{- include "helpdesk.labels" . | nindent 4 }}
     app.kubernetes.io/component: sysadmin-agent
 rules:
-  # Read-only, pod-scoped: enough for check_host to detect and inspect a
-  # Kubernetes-managed target (phase, restart count, last termination) and
-  # for the on-disk log fallback to exec/read inside the pod. Deliberately
-  # narrower than the k8s agent's ClusterRole — this agent never manages
-  # deployments/jobs/nodes, only ever inspects a single pod it was pointed at.
+  # Pod-scoped reads: check_host's inspection of a Kubernetes-managed target
+  # (phase, restart count, last termination), get_host_logs (pods/log), and
+  # pgBackRest commands exec'd into a ready instance pod (pods/exec).
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["pods/log", "pods/exec"]
     verbs: ["get", "create"]
+  # The instance lifecycle (v0.32, agents/sysadmin/lifecycle.go) on a
+  # self-managed Postgres StatefulSet: restore_from_backup scales it to 0
+  # (recording the replica count in an annotation) and runs pgBackRest in a
+  # one-off pod with its image and volumes (the pods create/delete above);
+  # restart_container scales it back. Still narrower than the k8s agent's
+  # ClusterRole: no deployments, jobs or nodes, only the StatefulSet whose pods
+  # match a target's selector.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

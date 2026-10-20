@@ -6,7 +6,10 @@
 # both dispatch paths — kubectl exec (no port exposure) and SSH (needs a
 # reachable port) — not just a Docker container reached two different ways.
 #
-# Apply: kubectl apply -f testing/k8s/pgbackrest-demo.yaml
+# Apply: kubectl apply -n <namespace> -f testing/k8s/pgbackrest-demo.yaml
+#   No namespace in the manifest: it goes where -n points (helpdesk-test in the
+#   v0.30 demo, docs/samples/SAMPLE022.md; db for the v0.32 in-cluster tests).
+#   Keep it out of the helpdesk stack's own namespace.
 # Image: docker-postgres-pgbackrest:latest, loaded via `minikube image load`
 #   (not pulled from any registry — must be present in the cluster's own
 #   image cache first).
@@ -14,7 +17,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: pgbackrest-demo
-  namespace: helpdesk-test
   labels:
     app: pgbackrest-demo
 spec:
@@ -32,7 +34,6 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: pgbackrest-demo
-  namespace: helpdesk-test
   labels:
     app: pgbackrest-demo
 spec:
@@ -46,6 +47,18 @@ spec:
       labels:
         app: pgbackrest-demo
     spec:
+      initContainers:
+        # A Docker named volume inherits the image directory's ownership; a
+        # K8s volume is root-owned, and init-pgbackrest.sh's stanza-create
+        # runs as postgres (uid/gid 999 in the postgres image). PGDATA needs
+        # nothing: the postgres entrypoint fixes its ownership itself.
+        - name: repo-owner
+          image: docker-postgres-pgbackrest:latest
+          imagePullPolicy: Never
+          command: ["sh", "-c", "chown 999:999 /var/lib/pgbackrest && chmod 750 /var/lib/pgbackrest"]
+          volumeMounts:
+            - name: pgbackrest-repo
+              mountPath: /var/lib/pgbackrest
       containers:
         - name: postgres
           image: docker-postgres-pgbackrest:latest
@@ -62,6 +75,14 @@ spec:
               value: testpass
             - name: POSTGRES_DB
               value: testdb
+          # The stock postgres entrypoint, not the image's start-with-sshd.sh:
+          # that one keeps the container up after postgres dies (for the Docker
+          # fixture's exec-based restore), which on Kubernetes would hide what a
+          # real crash does: CrashLoopBackOff, no kubectl exec. The restore
+          # lifecycle (agents/sysadmin/lifecycle.go) is built for the real thing:
+          # it scales the StatefulSet to 0 and runs pgBackRest in a one-off pod
+          # with these volumes.
+          command: ["docker-entrypoint.sh"]
           args:
             - postgres
             - -c

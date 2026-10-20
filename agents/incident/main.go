@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 
@@ -95,22 +94,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cardOpts := agentutil.CardOptions{
-		Version:  "1.0.0",
-		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
-		SkillTags: map[string][]string{
-			"incident_agent":                        {"incident", "diagnostics", "bundle"},
-			"incident_agent-create_incident_bundle": {"incident", "bundle", "diagnostics", "tarball"},
-			"incident_agent-list_incidents":         {"incident", "listing", "history"},
-		},
-		SkillExamples: map[string][]string{
-			"incident_agent-create_incident_bundle": {
-				"Create a diagnostic bundle for the production database",
-				"Collect incident data for the database running on Kubernetes",
-			},
-			"incident_agent-list_incidents": {"Show me all previous incident bundles"},
-		},
-	}
+	cardOpts := cardOptions(tools)
 
 	if err := agentserve.ServeWithTracingAndDirectTools(ctx, incidentAgent, cfg, traceStore, auditStore, NewIncidentDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)

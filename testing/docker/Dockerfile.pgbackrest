@@ -84,3 +84,12 @@ ENTRYPOINT ["start-with-sshd.sh"]
 # baking the config here makes it correct regardless of volume state, no
 # runtime dependency at all.
 COPY pgbackrest.conf /etc/pgbackrest.conf
+
+# The stanza + archive_command setup, baked in too so every platform gets it:
+# docker-compose.pgbackrest.yaml bind-mounts the same file at the same path
+# (which takes precedence), but a K8s pod from testing/k8s/pgbackrest-demo.yaml
+# had no such mount and came up with no stanza and an empty archive_command
+# ("archive_command '' must contain pgbackrest", found 2026-10-20). Still
+# runs only on an empty PGDATA, like every docker-entrypoint-initdb.d script.
+COPY init-pgbackrest.sh /docker-entrypoint-initdb.d/init-pgbackrest.sh
+RUN chmod 755 /docker-entrypoint-initdb.d/init-pgbackrest.sh

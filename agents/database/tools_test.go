@@ -4940,3 +4940,85 @@ func TestGetSavedSnapshots_Truncation(t *testing.T) {
 		t.Errorf("truncated output should not include second snapshot")
 	}
 }
+
+// psqlQueryArg returns the -c argument of the last psql call capture saw.
+func psqlQueryArg(t *testing.T, capture *capturingRunner) string {
+	t.Helper()
+	for i, a := range capture.lastArgs {
+		if a == "-c" && i+1 < len(capture.lastArgs) {
+			return capture.lastArgs[i+1]
+		}
+	}
+	t.Fatalf("no -c argument in %v", capture.lastArgs)
+	return ""
+}
+
+func withCapturingRunner(t *testing.T) *capturingRunner {
+	t.Helper()
+	capture := &capturingRunner{}
+	old := cmdRunner
+	cmdRunner = capture
+	t.Cleanup(func() { cmdRunner = old })
+	return capture
+}
+
+// explain_query is a read tool, and EXPLAIN ANALYZE executes the statement:
+// it must always run inside a transaction that is rolled back, read-only by
+// default (v0.32: it used to run unwrapped, so a statement that writes, such
+// as a data-modifying CTE, was committed).
+func TestExplainQueryTool_ReadOnlyTransactionRolledBack(t *testing.T) {
+	capture := withCapturingRunner(t)
+	if _, err := explainQueryTool(newTestContext(), ExplainQueryArgs{ConnectionString: "host=localhost", Query: "SELECT * FROM users;"}); err != nil {
+		t.Fatal(err)
+	}
+	q := psqlQueryArg(t, capture)
+	if q != "BEGIN READ ONLY; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) SELECT * FROM users; ROLLBACK;" {
+		t.Errorf("psql -c = %q, want the SELECT (trailing ';' dropped) in a read-only transaction that is rolled back", q)
+	}
+}
+
+// allow_dml plans a DML statement in a transaction that is rolled back, not
+// read-only (the DML has to run for ANALYZE to measure it).
+func TestExplainQueryTool_AllowDMLRolledBack(t *testing.T) {
+	capture := withCapturingRunner(t)
+	if _, err := explainQueryTool(newTestContext(), ExplainQueryArgs{ConnectionString: "host=localhost", Query: "UPDATE users SET active = false WHERE id = 1", AllowDML: true}); err != nil {
+		t.Fatal(err)
+	}
+	q := psqlQueryArg(t, capture)
+	if !strings.HasPrefix(q, "BEGIN; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) UPDATE users") || !strings.HasSuffix(q, "; ROLLBACK;") {
+		t.Errorf("psql -c = %q, want the DML between BEGIN and ROLLBACK", q)
+	}
+}
+
+// More than one statement is refused before psql runs: psql -c runs every
+// statement in its string, so a second one would run outside the transaction.
+func TestExplainQueryTool_MultipleStatementsRefused(t *testing.T) {
+	for _, allowDML := range []bool{false, true} {
+		capture := withCapturingRunner(t)
+		res, err := explainQueryTool(newTestContext(), ExplainQueryArgs{ConnectionString: "host=localhost", Query: "SELECT 1; SELECT 2", AllowDML: allowDML})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capture.lastArgs != nil || !strings.Contains(res.Output, "exactly one SQL statement") {
+			t.Errorf("allow_dml=%v: psql called with %v, output %q; want a refusal without running psql", allowDML, capture.lastArgs, res.Output)
+		}
+	}
+}
+
+// Caller text goes into these read tools' SQL only as the body of a quoted
+// literal, quotes doubled, so it can't end the literal.
+func TestReadTools_QuoteTextArguments(t *testing.T) {
+	capture := withCapturingRunner(t)
+	if _, err := getConfigParameterTool(newTestContext(), GetConfigParameterArgs{ConnectionString: "host=localhost", ParameterName: "it's"}); err != nil {
+		t.Fatal(err)
+	}
+	if q := psqlQueryArg(t, capture); !strings.Contains(q, "ILIKE '%it''s%'") {
+		t.Errorf("get_config_parameter SQL = %q, want the name's quote doubled", q)
+	}
+	if _, err := getTableStatsTool(newTestContext(), GetTableStatsArgs{ConnectionString: "host=localhost", SchemaName: "o'brien", TableName: "t'1"}); err != nil {
+		t.Fatal(err)
+	}
+	if q := psqlQueryArg(t, capture); !strings.Contains(q, "schemaname = 'o''brien' AND relname = 't''1'") {
+		t.Errorf("get_table_stats SQL = %q, want schema and table quotes doubled", q)
+	}
+}

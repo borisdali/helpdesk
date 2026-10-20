@@ -141,24 +141,6 @@ func findTestingDir() string {
 	return "testing"
 }
 
-// agentURL returns the appropriate agent URL for a failure category.
-func agentURL(cfg *faultlib.HarnessConfig, category string) string {
-	switch category {
-	case "database":
-		return cfg.DBAgentURL
-	case "kubernetes":
-		return cfg.K8sAgentURL
-	case "host":
-		return cfg.SysadminAgentURL
-	case "compound":
-		if cfg.OrchestratorURL != "" {
-			return cfg.OrchestratorURL
-		}
-		return cfg.DBAgentURL
-	default:
-		return ""
-	}
-}
 
 // TestMain validates prerequisites before running tests.
 func TestMain(m *testing.M) {
@@ -210,9 +192,9 @@ func TestFaultInjection(t *testing.T) {
 		ok := t.Run(f.ID, func(t *testing.T) {
 			defer func() { wasSkipped = t.Skipped() }()
 			// Check if we have the right agent for this failure.
-			url := agentURL(cfg, f.Category)
+			url := faultlib.AgentURLFor(cfg, f)
 			if url == "" && (!cfg.ViaGateway || cfg.GatewayURL == "") {
-				t.Skipf("No agent configured for category %q", f.Category)
+				t.Skipf("No agent configured for %s", faultlib.AgentRouteLabel(f))
 			}
 
 			// When routing via gateway, skip the direct-agent reachability check.
@@ -270,6 +252,7 @@ func TestFaultInjection(t *testing.T) {
 			// defer-registered-before-Inject dance here.
 			t.Log("Injecting failure...")
 			faultTraceID := "gotest-" + runID + "-" + f.ID
+			faultStart := time.Now() // recovery time is measured from here
 			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
 				cfg.ConnStr = origConn
 			})
@@ -360,6 +343,7 @@ func TestFaultInjection(t *testing.T) {
 			// 5. Remediation phase (opt-in via FAULTTEST_REMEDIATE=true).
 			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
+				remediator.SetFaultStart(faultStart)
 				switch {
 				case resp.Status == "pending_gate":
 					// Triage ended at an escalation gate (e.g. sysadmin cross-domain hand-off).
@@ -377,9 +361,11 @@ func TestFaultInjection(t *testing.T) {
 					if err := remediator.RunGateLoop(faultCtx, gate); err != nil {
 						t.Logf("Gate loop: %v", err)
 					}
+					verifyGatewayRemediation(t, faultCtx, remediator, f, "gate_loop")
 				case resp.ChainedRunID != "":
-					// Gateway already auto-chained remediation inline; nothing to do.
+					// Gateway already auto-chained remediation inline.
 					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
+					verifyGatewayRemediation(t, faultCtx, remediator, f, "auto_chain")
 				case f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "":
 					t.Log("Running remediation...")
 					remResult := remediator.Remediate(faultCtx, f, resp.RunID)
@@ -403,6 +389,24 @@ func TestFaultInjection(t *testing.T) {
 	}
 	t.Logf("=== SUMMARY: %d/%d passed, %d failed, %d skipped ===",
 		passed, len(failures), failed, skipped)
+}
+
+// verifyGatewayRemediation checks the outcome of remediation the gateway ran
+// (an auto-chained hop, or the chain a gate approval started) with the
+// fault's verify_sql. Only faults that declare one are checked: for the rest,
+// "SELECT 1" would add little and could fail faults whose chain legitimately
+// stops at a human.
+func verifyGatewayRemediation(t *testing.T, ctx context.Context, remediator *faultlib.Remediator, f faultlib.Failure, method string) {
+	t.Helper()
+	if f.Remediation.VerifySQL == "" {
+		return
+	}
+	res := remediator.VerifyRecovery(ctx, f, method)
+	if res.Err != nil {
+		t.Errorf("Remediation (%s) did not verify: %v", method, res.Err)
+		return
+	}
+	t.Logf("Remediation verified: method=%s, recovered_in=%.1fs, score=%.2f", method, res.RecoveryTimeSecs, res.Score)
 }
 
 // TestDatabaseFailures runs only database category failures.

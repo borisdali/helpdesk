@@ -45,6 +45,11 @@ jobs:
             2>&1 | tee /tmp/unit.log
           grep -E "^(ok |FAIL)" /tmp/unit.log
 
+      - name: Tool reference (agents/incident)
+        # The unit-test step above skips agents/incident, so run its tool
+        # taxonomy and docs/tools/incident.md freshness check on its own.
+        run: go test -run TestToolReference ./agents/incident/
+
       - name: Helm tests
         run: make test-helm
 

@@ -38,6 +38,7 @@ type confirmationProbe struct {
 // rule via its Signal's ConfirmationProbe field.
 var confirmationRegistry = map[string]confirmationProbe{
 	"evidence_quote_contains_value": {kind: KindBool, fn: evidenceQuoteContainsValue},
+	"evidence_quote_contains_any":   {kind: KindBool, fn: evidenceQuoteContainsAny},
 	"resource_named_in_quote":       {kind: KindBool, fn: resourceNamedInQuote},
 	"primary_confidence": {kind: KindNumeric, fn: func(h HopOutcome, _ audit.ObjectiveEvidence) any {
 		return primaryConfidence(h.Report)
@@ -89,6 +90,55 @@ func evidenceQuoteContainsValue(h HopOutcome, ev audit.ObjectiveEvidence) any {
 		}
 	}
 	return false
+}
+
+// evidenceQuoteContainsAny is evidenceQuoteContainsValue for derived probes:
+// it also accepts any of ev.ConfirmationTerms (case-insensitive) in the same
+// primary EVIDENCE quote. A derived bool probe (wal_chain_broken,
+// backup_unhealthy) fires with Value true, but "true" is nowhere in the tool
+// output the model is required to quote verbatim — the data behind it is
+// wal_continuity.status "broken", consistency_reachable false, or a stanza
+// error message. Found live 2026-10-16: two exact, correct quotes of that
+// data left both pgBackRest signals unconfirmed. The terms name that raw
+// data; matching stays scoped to the EVIDENCE field, unlike
+// resource_named_in_quote's whole-response match.
+//
+// The fired value deliberately does NOT count: a bare "true" matches any
+// healthy field in the quote ("consistency_reachable: true"), which is how
+// a misread would confirm. A rule that needs a field's value names it as a
+// term ("backup_stale:true"); quote and terms are both normalized by
+// normalizeQuote, so that matches "backup_stale: true", "backup_stale=true"
+// and "\"backup_stale\":true" alike.
+func evidenceQuoteContainsAny(h HopOutcome, ev audit.ObjectiveEvidence) any {
+	hyp := primaryHypothesis(h.Report)
+	if hyp == nil || hyp.Evidence == "" {
+		return false
+	}
+	quote := normalizeQuote(hyp.Evidence)
+	for _, term := range ev.ConfirmationTerms {
+		if t := normalizeQuote(term); t != "" && strings.Contains(quote, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeQuote lowercases s and drops the formatting a model varies when
+// quoting tool output — whitespace, quote characters, backslash escapes — and
+// treats "=" as ":", so a term matches however the quote renders a field.
+func normalizeQuote(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case ' ', '\t', '\n', '\r', '"', '\'', '`', '\\':
+			continue
+		case '=':
+			b.WriteRune(':')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // valueStrings returns every reasonable string rendering of v worth

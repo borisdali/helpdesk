@@ -64,6 +64,7 @@ var ToolClassification = map[string]ActionClass{
 	"explain_query":              ActionRead,
 	"read_pg_log":                ActionRead,
 	"read_uploaded_file":         ActionRead,
+	"get_bgwriter_stats":         ActionRead,
 
 	// Kubernetes agent tools
 	"get_pods":                   ActionRead,
@@ -76,6 +77,7 @@ var ToolClassification = map[string]ActionClass{
 	"describe_pod":               ActionRead,
 	"get_pod_resources":          ActionRead,
 	"get_node_status":            ActionRead,
+	"read_pod_file":              ActionRead,
 	"scale_deployment":           ActionDestructive,
 	"restart_deployment":         ActionDestructive,
 	"delete_pod":                 ActionDestructive,
@@ -93,20 +95,24 @@ var ToolClassification = map[string]ActionClass{
 	"create_incident_bundle": ActionWrite,
 	"list_incidents":         ActionRead,
 
-	// Research agent tools
-	"web_search": ActionRead,
+	// Research agent tools. google_search is the tool's real name (ADK
+	// geminitool.GoogleSearch); web_search is kept for older audit records.
+	"google_search": ActionRead,
+	"web_search":    ActionRead,
 
 	// Sysadmin agent tools
 	"check_host":        ActionRead,
 	"get_host_logs":     ActionRead,
 	"check_disk":        ActionRead,
 	"check_memory":      ActionRead,
+	"read_pg_log_file":  ActionRead,
 	"restart_container": ActionDestructive,
 	"restart_service":   ActionDestructive,
 
-	"get_pgbackrest_status": ActionRead,
-	"run_pgbackrest_backup": ActionWrite,
-	"restore_from_backup":   ActionDestructive,
+	"get_pgbackrest_status":   ActionRead,
+	"run_pgbackrest_backup":   ActionWrite,
+	"restore_from_backup":     ActionDestructive,
+	"verify_restore_recovery": ActionRead,
 }
 
 // ClassifyTool returns the action class for a given tool name.

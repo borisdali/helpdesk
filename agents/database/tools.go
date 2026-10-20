@@ -1140,13 +1140,21 @@ type GetConfigParameterArgs struct {
 	ParameterName    string `json:"parameter_name,omitempty" jsonschema:"Specific parameter name to retrieve (e.g., 'max_connections'). If empty, shows common important parameters."`
 }
 
+// sqlLiteralBody returns s for use inside a single-quoted SQL string literal
+// ('...'), with quotes doubled, so a caller's text can't end the literal.
+// standard_conforming_strings is on by default since PostgreSQL 9.1, so
+// backslashes are literal.
+func sqlLiteralBody(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
 func getConfigParameterImpl(ctx context.Context, args GetConfigParameterArgs) (PsqlResult, error) {
 	var query string
 	if args.ParameterName != "" {
 		query = fmt.Sprintf(`SELECT name, setting, unit, short_desc
 			FROM pg_settings
 			WHERE name ILIKE '%%%s%%'
-			ORDER BY name;`, args.ParameterName)
+			ORDER BY name;`, sqlLiteralBody(args.ParameterName))
 	} else {
 		query = `SELECT name, setting, unit, short_desc
 			FROM pg_settings
@@ -1586,8 +1594,9 @@ type GetTableStatsArgs struct {
 func getTableStatsImpl(ctx context.Context, args GetTableStatsArgs) (PsqlResult, error) {
 	schemaFilter := "public"
 	if args.SchemaName != "" {
-		schemaFilter = args.SchemaName
+		schemaFilter = sqlLiteralBody(args.SchemaName)
 	}
+	tableName := sqlLiteralBody(args.TableName)
 
 	var query string
 	if args.TableName != "" {
@@ -1605,7 +1614,7 @@ func getTableStatsImpl(ctx context.Context, args GetTableStatsArgs) (PsqlResult,
 			seq_scan,
 			idx_scan
 		FROM pg_stat_user_tables
-		WHERE schemaname = '%s' AND relname = '%s';`, schemaFilter, args.TableName)
+		WHERE schemaname = '%s' AND relname = '%s';`, schemaFilter, tableName)
 	} else {
 		query = fmt.Sprintf(`SELECT
 			relname as table_name,
@@ -2625,7 +2634,16 @@ func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, e
 		return PsqlResult{Output: "explain_query: query is required"}, nil
 	}
 
-	trimmed := strings.TrimSpace(strings.ToUpper(args.Query))
+	// Exactly one statement: psql -c runs every statement in the string, so a
+	// second one would run outside the transaction below, unexplained and
+	// committed. A trailing semicolon is fine; any other one is refused,
+	// even inside a string literal (conservative: a plan rarely needs one).
+	query := strings.TrimRight(strings.TrimSpace(args.Query), "; \t\r\n")
+	if strings.Contains(query, ";") {
+		return PsqlResult{Output: "explain_query: exactly one SQL statement is accepted (no ';' except a trailing one)."}, nil
+	}
+
+	trimmed := strings.ToUpper(query)
 	isDML := !strings.HasPrefix(trimmed, "SELECT") &&
 		!strings.HasPrefix(trimmed, "WITH") &&
 		!strings.HasPrefix(trimmed, "EXPLAIN") &&
@@ -2635,13 +2653,16 @@ func explainQueryImpl(ctx context.Context, args ExplainQueryArgs) (PsqlResult, e
 		return PsqlResult{Output: "explain_query: only SELECT/WITH queries are allowed by default. Set allow_dml=true to EXPLAIN DML statements (they will be wrapped in BEGIN/ROLLBACK and not committed)."}, nil
 	}
 
-	var psqlQuery string
+	// EXPLAIN ANALYZE executes the statement, so it always runs in a
+	// transaction that is rolled back, read-only unless allow_dml asks for a
+	// DML plan: explain_query is a read tool, and nothing it runs may change
+	// data. (A query calling a server function with side effects still runs
+	// it: read-only blocks writes to tables, not every function.)
+	begin := "BEGIN READ ONLY"
 	if isDML && args.AllowDML {
-		// Wrap in transaction so DML is rolled back after EXPLAIN ANALYZE.
-		psqlQuery = fmt.Sprintf("BEGIN; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s; ROLLBACK;", args.Query)
-	} else {
-		psqlQuery = fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s", args.Query)
+		begin = "BEGIN"
 	}
+	psqlQuery := fmt.Sprintf("%s; EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) %s; ROLLBACK;", begin, query)
 
 	output, err := runPsqlWithToolName(ctx, args.ConnectionString, psqlQuery, "explain_query")
 	if err != nil {

@@ -1,7 +1,7 @@
 # aiHelpDesk Backup & Restore
 
 This document describes how aiHelpDesk diagnoses and, where safely possible, remediates
-PostgreSQL backup-taking failures. What's certified today and what's on the roadmap.
+Postgres backup-taking failures. What's certified today and what's on the roadmap.
 
 Backup health is table-stakes, not an advanced feature. It's kept in its own page,
 separate from [HA_DR.md](HA_DR.md) (streaming replication, failover, etc.), because it's a
@@ -263,8 +263,9 @@ narrowest real slice: restore to the latest available pgBackRest backup, a singl
 instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
 promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
 
-**Three layers stand between a diagnosis and `restore_from_backup`**, on top of the general
-[AI Governance](AIGOVERNANCE.md) every playbook run already gets (the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
+### **Three layers stand between a diagnosis and `restore_from_backup`**   
+These additional three layers of safegards come on top of the general
+[AI Governance](AIGOVERNANCE.md) that every playbook runs already (which includes the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
 [Evidence-Provenance](OBJECTIVE_EVIDENCE.md) checks, the [`trust_not_earned`](CONSISTENCY.md) certification gate):
 
 1. [**Each hop decides only what it can see**](#layer-1-each-hop-decides-only-what-it-can-see):  
@@ -277,17 +278,19 @@ promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#
 Only Layer 2 is fully independent of the model. Layers 1 and 3 are carried out through
 LLM-interpreted playbook guidance (see [the honest limit](#layer-3-fails-closed-by-design-not-by-accident)
 under Layer 3). Underneath all three, the tool itself refuses to run against a live instance
-and pgBackRest refuses to restore without a selectable backup. See
+or onto a WAL chain it can't confirm reaches the end of the archive (v0.32, see
+[WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)) and pgBackRest
+refuses to restore without a selectable backup. See
 [Underneath the layers](#underneath-the-layers-whats-honest-about-the-remediation-not-oversold) below for details.
 
 **The failure mode**:  
 A missing/corrupted `pg_control` file (disk corruption, an accidental delete, a bad volume
-restore) leaves PostgreSQL unable to start at all and the error message is `postgres: could not find the database
+restore) leaves Postgres unable to start at all and the error message is `postgres: could not find the database
 system`. This is distinct from every scenario in §1/§2: the database isn't slow or
 misconfigured, it's *gone* and the only way back is restoring from a backup rather than fixing a
 setting.
 
-#### Layer 1: each hop decides only what it can see
+#### 👉 Layer 1: each hop decides only what it can see
 
 The chain above exists because no single agent holds every tool the decision needs.   
 
@@ -302,7 +305,7 @@ and can act on the combined picture directly.
 `pbs_db_data_loss_triage` before transitioning onward, adding two full LLM round-trips for zero
 safety benefit once it was clear none of the static conditions needed fresh evidence to answer (which was caught in review before it shipped, not after a slow live run).
 
-#### Layer 2: the backup-health gate is deterministic code, not model prose
+#### 👉 Layer 2: the backup-health gate is deterministic code, not model prose
 
 The only layer that doesn't depend on the model getting it right and the one that actually matters most for a destructive op: `pbs_pgbackrest_health_triage`'s `get_pgbackrest_status` call carries the exact same
 `pgbackrest_backup_unhealthy` [objective-evidence signal](OBJECTIVE_EVIDENCE.md) as §2 and here
@@ -318,12 +321,12 @@ to override the caller's force-mode auto-chain intent when evidence contradicts 
 conclusion. The single most important precondition for this op — is there actually a healthy
 backup to restore from — is backed by a deterministic Go code path, not left to the model's prose.
 
-#### Layer 3: fails closed by design, not by accident
+#### 👉 Layer 3: fails closed by design, not by accident
 
 We found this during live debugging of something else entirely, confirmed while weeding out three separate live bugs during this chain's own testing:  
 - a stdio-buffering race that delayed when a crash message reached the log stream  
 - a log-request window too small once prior test cycles had piled up legitimate noise   
-- `get_host_logs` silently discarding stderr (where PostgreSQL's own fatal startup message actually lives)  
+- `get_host_logs` silently discarding stderr (where Postgres's own fatal startup message actually lives)  
 
 Each of these bugs independently caused the diagnosis to miss the real corruption signature. In every one of those three cases, the diagnosis was wrong or
 incomplete and in every one, nothing destructive happened anyway. That's not luck.  
@@ -356,21 +359,232 @@ close and nothing here should be read as claiming it does.
   suggest damage beyond what a plain restore fixes?) rest on the model's own quoted-evidence
   discipline, not a deterministic check — the fail-closed property above narrows the blast radius of
   that gap considerably, but, per the honest limit just stated, does not close it.
-- `restore_from_backup` itself doesn't independently re-verify `status_code`/`backup_stale` at the
-  Go level when called with an explicit stanza (the normal path from the remediation playbook's
-  own Step 1) — it relies on that playbook's LLM-mediated re-check plus the force-gate above as
-  the real backstops, not a third, redundant tool-level check. As of v0.31.x, Step 1's own
+- `restore_from_backup` itself doesn't re-verify `backup_stale` at the Go level — it relies on
+  the remediation playbook's LLM-mediated re-check plus the force-gate above. (Since v0.32 it does
+  refuse on a non-zero `status_code` and on any WAL-continuity status other than `continuous`,
+  see [WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish).) As of v0.31.x, Step 1's own
   `backup_stale=true` precondition is an explicit, named stop (cite the staleness, do not
   transition or escalate automatically, defer to a human) rather than unguided model judgment —
   found live (2026-10-11) to matter: the earlier, vaguer wording let the model either invent a
   nonexistent escalation target or decide on its own to restore from a stale backup anyway, both
   without ever surfacing the decision to a human. This is still prose discipline, not a Go-level
-  check and still doesn't know whether the WAL chain itself is intact — see the next bullet.
-- There is no verification, before or after the restore, that the WAL chain from the backup to the
-  crash point is actually contiguous — see [§4](#4-roadmap)'s "WAL-chain completeness" item. A gap
-  in the archive wouldn't be caught by anything above; Postgres replays however much WAL it can
-  find and completes recovery there, logging it the same way as legitimately reaching the true
-  end of the stream.
+  check.
+- WAL that never reached the archive is only recovered if it is still in the dead instance's own
+  `pg_wal` (since v0.32, see [The unarchived pg_wal tail](#the-unarchived-pg_wal-tail-commits-on-disk-but-not-in-the-archive)).
+  When `pg_wal` is gone with the volume, a restore-to-latest still ends at
+  `wal_continuity.archive_end_time` and nothing decides for a human whether that loss is
+  acceptable.
+
+#### WAL continuity: the restore refuses a chain it can't finish
+
+*Added in v0.32.* A restore is only as good as the WAL behind it. `pgbackrest --delta restore`
+lays down the latest backup and Postgres then replays archived WAL from that backup's start to
+the end of the archive, following timeline history to the newest timeline. If a segment on that
+path is missing, recovery either can't reach a consistent state at all (Postgres won't start) or
+silently stops at the gap and comes up with older data and in both cases PGDATA has already been
+overwritten. Backup age (`backup_stale`) says nothing about this: a fresh backup can sit on a
+broken chain.
+
+`get_pgbackrest_status` now returns a `wal_continuity` block, computed from the repo alone, with no
+live instance needed:
+
+1. The backup's own WAL start/stop segments and LSNs, from `pgbackrest info`.
+2. The newest timeline, from the archive's `.history` files and that file's contents: every
+   ancestor timeline and the LSN where each one forked (`pgbackrest repo-get`).
+3. The segment files on the timelines along that path (one `pgbackrest repo-ls`, filtered to
+   those timelines).
+4. The WAL segment size, from the page header of the smallest of those segments
+   (`pgbackrest repo-get`).
+
+It then walks the segments in the order Postgres would read them: up to each fork from the
+parent timeline, from the fork's segment onward from the child. `.partial` segments don't count,
+since `restore_command` never fetches them.
+
+The walk depends on the WAL segment size: it's 16 MiB by default, but `initdb --wal-segsize` can
+set any power of two from 1 MiB to 1 GiB and the size decides which segment name follows which
+(at 64 MiB, `…0000003F` is followed by the next logical id's `…00000000`). pgBackRest doesn't
+record it in `pgbackrest info`, `archive.info`, `backup.info` or the backup manifest and the usual
+sources (`SHOW wal_segment_size`, `pg_controldata`) need the data directory a restore is about to
+replace. So it comes from two places that must agree:
+
+- **The segment's own page header.** Every WAL segment starts with a header recording the
+  cluster's segment size (`xlp_seg_size`), in a layout unchanged since Postgres 8.3. The check
+  fetches the smallest gz, bz2 or uncompressed segment on the path (usually a few KB compressed)
+  and decodes it; `repo-get` decrypts but doesn't decompress. lz4 and zst segments aren't read.
+- **The backups' LSNs.** Each backup's start/stop LSN and segment name fit only one size, unless
+  every backup starts in the first 1 MiB of a 4 GiB logical WAL id.
+
+If the header contradicts the LSNs, the status is `unverified`. If no header could be read, the
+LSNs decide and if they're ambiguous too, Postgres's 16 MiB default is assumed. That fallback
+fails safe: a wrong size only makes real segments look missing, never a broken chain look
+complete. `segment_size_source` (`wal_header`, `backup_lsns` or `default`) says which applied.
+
+The result:
+
+| `status` | Meaning |
+|---|---|
+| `continuous` | Every segment from the backup to the archive end is present. |
+| `broken` | A segment is missing (`gaps` lists them; `consistency_reachable=false` when it's one the backup itself needs, `recoverable_to_wal` is where recovery would stop) or the backup isn't on the newest timeline's history. |
+| `unverified` | The check couldn't run, e.g. pgBackRest older than 2.26 (no `repo-ls`). |
+| `no_backup` | There is no backup to check. |
+
+Three things make use of it:
+
+- **`restore_from_backup` refuses unless the status is `continuous`**, `unverified` included.
+  This is a Go-level check next to the `pg_isready` refusal, independent of any model or gate. It
+  runs after the policy check and `pg_isready`, immediately before the restore.  
+
+- **A new objective-evidence signal, `pgbackrest_wal_chain_broken`,** force-gates a response
+  when the chain is definitely `broken` (not on `unverified`, so an older pgBackRest doesn't gate
+  every routine triage). It's listed ahead of `pgbackrest_backup_unhealthy`, since only the first
+  matching rule per result is recorded and a broken chain is the more severe finding.  
+
+- **The playbooks.** `pbs_pgbackrest_health_triage` (v1.2) has a new Ending E for a broken chain,
+  a human escalation and only transitions to the restore when the chain is `continuous`.
+  `pbs_pgbackrest_restore_remediate` (v1.7) has a matching precondition and reports the recovery
+  point Postgres actually reached (below).  
+
+- **Checking the restore afterwards.**   
+  The check above is a prediction.   
+  `restore_from_backup` records it on success (`prediction`: the last archived segment and `latest_timeline + 1`) and
+  after the restart `verify_restore_recovery` reads Postgres's own recovery lines (the last segment restored before `selected new timeline ID`, `redo done at <LSN>`) and compares:  
+    - `verified`,   
+    - `mismatch` (signal `restore_recovery_mismatch`),   
+    - `not_found` (no completed recovery in the log yet) or   
+    - `unverified` (no prediction recorded, e.g. after an agent restart).   
+
+  👉 The prediction never comes from the model.   
+  It reads container logs first, then the Postgres log file. The location of the log file is OS specific, e.g. on a Debian/Ubuntu VM the recovery lines are only in `/var/log/postgresql/`, not the
+  journal.   
+
+  Here's an example of the live baseline (real Ubuntu VM, 2026-10-18, compared by hand before the automation tool existed): predicted `0000001B000000000000000C` and timeline 30; Postgres restored `…0C`, `redo done at 0/C000138`, selected timeline 30.   
+
+  Now, the first run through the agent (same VM, 2026-10-19, full `db-pgdata-corrupted-vm` chain with three approved gates): `restore_from_backup` predicted `0000001F000000000000000E` and timeline 34 and `verify_restore_recovery` returned
+  `verified`: "recovery replayed through `0000001F000000000000000E` (redo done at 0/E000138) and selected timeline 34, as predicted".  
+
+  The key here is that the final FINDINGS reported *that* LSN, not the prediction. It always does.
+
+**Verified, not just claimed**: the unit tests run against real output captured from the
+Docker fixture's repo, an archive that had been through 29 timeline switches from earlier restore
+tests, with `.partial` segments at several of them. Removing segments from that real listing
+gives each `broken` case. An integration test
+(`TestIntegration_RestoreFromBackup_RefusesOnRealWALGap`) moves the backup's own WAL segment out
+of the real repo, crashes the instance and checks that `restore_from_backup` refuses and a canary
+file in PGDATA survives.
+
+The check is also tested against Postgres itself. `TestIntegration_WALCheck_PredictionMatchesRealRecovery`
+hides one segment at a time (one from before the backup, the segment right after it, the newest
+one), asks the check where recovery would stop, then runs a real `pgbackrest restore` and reads
+Postgres's log for the last segment it actually restored. All three agree, including the case
+the check gets right and a backup-age view never could: the newest segment of a timeline that
+later forked is lost WAL, not the archive simply ending one segment earlier. (Those restores set a
+recovery target past any WAL, so Postgres stops instead of promoting and the shared archive
+gains no new timeline.) The real crash-and-restore test now also checks Postgres's log against
+the check: the last segment restored is `archive_end_wal` and the new timeline is
+`latest_timeline + 1` and that `verify_restore_recovery` reports `verified` from the container's
+real log.
+
+Fault: [`db-pgbackrest-wal-gap`](../testing/catalog/failures.yaml) hides the latest backup's own
+start segment on a healthy instance and expects the health triage to report the broken chain
+(signal `pgbackrest_wal_chain_broken`) and hand the decision to a human.
+
+#### The unarchived pg_wal tail: commits on disk but not in the archive
+
+*Added in v0.32.* Postgres's analog of Oracle's online redo logs is the tail of `pg_wal`: the
+segment being written and any completed ones still marked `.ready` because archiving lags or is
+broken. Those commits are on disk but not in the archive. `pgbackrest --delta restore` removes
+everything the backup's manifest doesn't list, `pg_wal`'s contents included.
+
+👉 Found by a canary test on the Docker fixture (2026-10-19), before the fix:
+  - archiving broken (`archive_command=/bin/false`), row A committed into a segment then left
+    `.ready`, row B into the open segment, then the `db-pgdata-corrupted` crash (`pg_control`
+    deleted) and `restore_from_backup`'s own script;
+  - `pg_wal` went from 5 segments to empty, recovery ended at the archive end
+    (`redo done at 0/8000138`) and the table holding both rows didn't exist.
+
+`restore_from_backup` now does what the Postgres documentation describes for archive recovery:
+
+- **Before the restore**, it moves the segment files in `pg_wal` to a directory beside PGDATA
+  (outside it, since `--delta` cleans PGDATA). If that fails, the restore doesn't run.
+- **After the restore**, it copies them back before startup. Recovery restores from the archive
+  first and falls back to `pg_wal`, so it replays the tail and stops at its first invalid record,
+  CRC-checked like any other WAL. Segments Postgres pre-created by renaming old ones don't count:
+  only a segment whose first page header matches its own name is part of the tail.
+- **It pushes the tail to the archive** with `pgbackrest archive-push`, before startup, every
+  segment past the archive end, the newest included. Otherwise the new timeline would depend on
+  WAL the repo doesn't have and the next restore would stop at the old archive end, found during
+  the canary test. Not a `.ready` marker: found by the integration test, Postgres deletes the
+  marker during archive recovery and then the segment itself, as if archived.
+- **The newest too**, not left to Postgres. Postgres archives the old timeline's last segment as
+  `.partial` when it promotes, but only when the end of WAL is mid-segment. After a clean
+  shutdown (with archiving on, the shutdown switches WAL) the newest segment is complete, the new
+  timeline starts at the next one, and there is no `.partial`. The first version relied on the
+  `.partial`, and the VM run below lost row B's segment from both the archive and `pg_wal` that
+  way. Pushing an incomplete newest segment under its own name is safe: the old timeline is dead
+  after the restore, recovery reading it from the archive stops at the same invalid record it
+  would in `pg_wal`, and Postgres, having restored it from the archive, makes no `.partial`.
+- **It reports all of it** in `pg_wal_tail`: `saved_to` (the original copies, kept until a human
+  removes them), `replay_through_wal`, `pushed_to_archive`. A failed push doesn't fail the restore;
+  the detail says so, which segments still need pushing and where the copies are.
+
+The prediction now includes the tail (`replay_through_wal`). Postgres logs nothing for segments
+it reads from `pg_wal`, so `verify_restore_recovery` also checks which segment `redo done at`
+falls in: `verified` then reports `replayed_through_wal` and a recovery that stopped short of the
+tail is a `mismatch`.
+
+👉 After the fix, same fixture, same crash: both rows came back. Recovery replayed the archive
+to `…0A`, then `…0B`/`…0C` from `pg_wal` and ended at `invalid record length at 0/C000118`, the
+normal end of WAL, with `redo done at 0/C0000E0`.
+
+`TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL` makes the canary test permanent: both rows
+survive, `verify_restore_recovery` reports `verified` through the tail, every tail segment is in
+the repo, and once the new timeline archives a segment of its own the WAL check is `continuous`
+across it. With the old restore script it fails. `…_CleanShutdown` is the same canary with
+Postgres shut down cleanly after `pg_control` is gone, as the VM fault's `systemctl restart` does;
+Docker's `docker restart` doesn't shut down cleanly, which is why the first version passed every
+Docker test. With the newest segment left to the `.partial` it fails on the WAL check itself:
+"WAL segment …27 on timeline 11 is missing". An earlier version of the test only waited for the
+WAL check to be `continuous` onto the new timeline, which the history file alone satisfies.
+Two more cover the
+failure paths: with the repo read-only the push fails but the restore succeeds, both rows come
+back, and pushing from `saved_to` by hand, as the detail says, makes the archive continuous; with
+PGDATA's parent read-only nothing can be saved and the restore refuses before touching PGDATA.
+`db-pgdata-corrupted-unarchived-tail` runs the same canary through the full agent chain in
+`make faulttest-gateway-pgbackrest`, its `verify_sql` checking the rows themselves.
+
+👉 The same canary on the real Ubuntu VM (systemd, SSH dispatch), through the full agent chain
+with `pbs_pgbackrest_restore_remediate` v1.7, 2026-10-19 (incident `plr_c18ee2b4`, restore hop
+`plr_cc73029d`):
+  - fresh backup `20261019-185433F`, archive end `…11`; row A committed into `…12` (left `.ready`),
+    row B into the open `…13`;
+  - `restore_from_backup` saved `pg_wal` to `/var/lib/postgresql/16/pg_wal.saved-20261019T225649Z`
+    and pushed `…12` to the archive;
+  - `verify_restore_recovery`: `verified`, the archive restored through `…12`, `pg_wal` replayed
+    through `…13`, `redo done at 0/130000D8`, new timeline 36;
+  - both rows back, `archive_command` back on, the repo's `wal archive max` now `…12`. The run's
+    findings: "Commits after the archive end (000000230000000000000011) were recovered from pg_wal
+    through 000000230000000000000013; only changes never written to pg_wal are lost."
+  - but `…13` (row B) was then in neither the archive nor `pg_wal`, and no `.partial` either: the
+    inject's `systemctl restart` had shut Postgres down cleanly, the shutdown's WAL switch made
+    `…13` complete (`redo done at 0/130000D8` is that switch record), and timeline 36 started at
+    `…14`. The next restore along timeline 36 would have stopped after `…12`. Reproduced on Docker
+    the same day, then fixed by pushing the newest segment too (above). The VM's own archive was
+    repaired by pushing `…13` from `saved_to`, which is what that directory is kept for.
+
+👉 The same VM canary after the fix, 2026-10-19 (incident `plr_38972d91`, restore hop
+`plr_cd2d34d4`): row A in `00000024…16` (`.ready`), row B in `…17`, and again a clean shutdown,
+so `…17` was complete (`redo done at 0/170000D8`). `verify_restore_recovery`: `verified`, the
+archive restored through `…17`, new timeline 37; both rows back, and the repo's `wal archive max`
+is now `…17`: row B's segment is in the archive this time.
+
+The run before it, a plain VM restore with archiving healthy, also showed the tail on a real
+host: the archive ended on timeline 31 while the server was on 34, and of the two segments in
+`pg_wal` the header check kept the open one and left out the one Postgres had pre-created
+(Postgres's own log: `unexpected pageaddr 0/E000000 in WAL segment …10`).
+
+The tail is only as good as `pg_wal` itself: when the volume is gone or the server had promoted
+to a timeline whose history file never reached the archive, recovery still ends at the archive
+end.
 
 #### Underneath the layers: what's honest about the remediation, not oversold
 
@@ -408,7 +622,7 @@ today, confirmed empirically rather than assumed, with zero code of our own resp
 Everything above was built and live-verified against the dedicated Docker fixture
 (`testing/docker/docker-compose.pgbackrest.yaml`).  
 
-This same chain also works against a real, SSH-reachable Linux host/VM running PostgreSQL as a genuine systemd service. Not a disguised
+This same chain also works against a real, SSH-reachable Linux host/VM running Postgres as a genuine systemd service. Not a disguised
 container, but via [`db-pgdata-corrupted-vm`](../testing/catalog/failures.yaml) (new fault, same diagnosis/remediation playbooks).  
 
 This required making the following SysAdmin Agent's tool more robust and portable: `check_host`, `get_host_logs`, `check_disk`, `check_memory`, `read_pg_log_file`,
@@ -419,25 +633,99 @@ See [SYSADMIN_AGENT.md §5](SYSADMIN_AGENT.md#5-container-runtime-dispatch) for 
 
 `pbs_pgbackrest_restore_remediate` has a new `restart_service` path written from well-established
 Debian/RHEL packaging conventions (journalctl showing only service-lifecycle lines, not
-PostgreSQL's own output.   
+Postgres's own output.   
 
 `read_pg_log_file`'s log directory differing by distro, see the new `pg_log_dir` infra-config field), not something directly observed against a real VM the way every
 other claim in this document is.  
+
+#### Kubernetes: restoring an instance that can't start
+
+*Added in v0.32.* On Docker and the VM the restore runs where Postgres runs: `docker exec` into
+the container, or a shell over SSH on the host. On Kubernetes that breaks exactly when it's needed.
+A Postgres that can't start (`pg_control` gone) exits, the pod goes into `CrashLoopBackOff`, and
+`kubectl exec` into it fails, and with it every pgBackRest command: `get_pgbackrest_status`, the
+WAL check, the restore and the push of the `pg_wal` tail. A real Docker container behaves the same
+way; the Docker fixture only hides it, because its entrypoint (`start-with-sshd.sh`) keeps the
+container up after Postgres dies.
+
+So the restore is now a lifecycle with the same steps on every platform
+(`agents/sysadmin/lifecycle.go`), and Kubernetes gets its own implementation of each
+(`k8s_lifecycle.go`), for a self-managed Postgres StatefulSet whose image carries pgBackRest:
+
+| Step | Kubernetes | Docker/Podman, host/VM |
+|---|---|---|
+| Serving? | a ready pod answers `pg_isready` | `pg_isready` in the container / on the host |
+| Quiesce | scale the StatefulSet to 0, the replica count recorded in an annotation | nothing: the instance is already down |
+| Maintenance run | a one-off pod with the StatefulSet's image and volumes, deleted afterwards | `docker exec` / the host's shell, as before |
+| Resume (`restart_container`) | scale back to the recorded replicas | `docker restart` / `restart_service`, as before |
+| Logs (`get_host_logs`) | `kubectl logs`, the previous container run first | `docker logs` / journal, as before |
+
+- **Reads** (`get_pgbackrest_status`, the WAL check) exec into the pod while it's ready and use a
+  one-off pod while it isn't.
+- **The restore** refuses while Postgres serves, checks the WAL, scales the StatefulSet to 0 (so
+  the crash-looping pod can't start Postgres on PGDATA mid-restore), then runs the same restore
+  script as on Docker in a one-off pod. The saved `pg_wal` copy goes on the repo volume: the
+  one-off pod's own disk goes with it, and the data volume is PGDATA itself, which `--delta`
+  cleans. It leaves the StatefulSet at 0, and its `quiesced` field says to resume it with
+  `restart_container`; recovery runs when the pod starts.
+- **RBAC:** the sysadmin agent's ClusterRole gains pods create/delete, StatefulSets
+  get/list/patch and their scale subresource. Still no deployments, jobs or nodes.
+
+👉 Verified in-cluster on minikube (2026-10-20), with the whole stack deployed by Helm
+(`testing/k8s/helm-values-pgbackrest.yaml`) and the demo pod (`testing/k8s/pgbackrest-demo.yaml`)
+running the stock Postgres entrypoint, so a crash really crash-loops. `make integration-k8s` calls
+the in-cluster sysadmin agent's tools through its `/tool/{name}` endpoint, under its own service
+account, in a namespace of its own that must end in `-destruct`:
+  - **refusal:** the latest backup's start segment hidden, then a real crash. `get_pgbackrest_status`
+    ran in a one-off pod and reported the chain `broken` at that segment; `restore_from_backup`
+    refused with the StatefulSet still at 1 replica and a canary file in PGDATA untouched;
+  - **the `pg_wal` tail, resume and verify:** archiving broken, row A committed in a `.ready`
+    segment and row B in the open one, then a real crash. The restore scaled to 0, restored, saved
+    the copy on the repo volume and pushed the tail; `restart_container` scaled back; both rows
+    came back, `verify_restore_recovery` read the recovery from `kubectl logs` and reported it
+    `verified` through the tail, and every tail segment was in the archive.
+
+The broken-chain detection also ran through the in-cluster agents as a fault
+(`db-pgbackrest-wal-gap-k8s`, via faulttest and the gateway): the health triage reported the chain
+broken and the `pgbackrest_wal_chain_broken` signal fired.
+
+👉 Kubernetes found two bugs in the WAL check that Docker and the VM never showed, both fixed with
+regression tests:
+  - **an empty gap list** when the backup's only segment was missing and nothing had been archived
+    after it (a brand-new pod): the verdict was right, `broken`, but `gaps` named nothing;
+  - **an unreadable `.history` file:** every Service in the pod's namespace injects environment
+    variables pgBackRest warns about on stdout (`environment contains invalid option`), and a
+    history file read with those lines in front failed to parse, so the check came back
+    `unverified` instead of `broken` and the signal never fired. The text reads now drop
+    pgBackRest's own log lines, as the JSON reads already skipped them.
+
+And two fixture gaps: `init-pgbackrest.sh` (stanza and `archive_command`) was mounted by the
+compose file rather than built into the image, so the first pod came up without either; and a
+Kubernetes volume is root-owned where a Docker named volume inherits the image's ownership, so the
+repo volume needs an init container to hand it to `postgres`.
+
+Not yet: the agent-driven chain on Kubernetes (the data-loss triage routing to the pgBackRest
+health triage, the restore playbook's restart step calling `restart_container`, and the
+`db-pgdata-corrupted-k8s` faults run with `--remediate`); a ReadWriteOnce volume on a multi-node
+cluster (the one-off pod isn't pinned to the instance's node); a remote repo (S3/GCS/Azure), where
+the one-off pod needs the repo's credentials rather than a volume. Operator-managed Postgres
+(CloudNativePG) has no pgBackRest at all and stays out of scope.
 
 ## 4. Roadmap
 
 Not yet built — tracked, not forgotten:
 
-- **WAL-chain completeness verification (§3).**  
-  Nothing today confirms, before or after a restore, that the WAL chain from the backup to the
-  crash point is actually contiguous. This is implementable without a live source instance:
-  `pgbackrest info --output=json` already reports the stanza's `archive[].max` (the latest WAL
-  segment filename physically present in the repo — not yet parsed into
-  `GetPgBackRestStatusResult`) and Postgres's own recovery log reports exactly which segments it
-  replayed (`"restored log file \"...\" from archive"`) and the final LSN (`"redo done at ..."`).
-  Comparing the two after a restore — did recovery replay through the repo's own latest segment,
-  or stop short — would turn a silent partial-recovery into a reported, CRITICAL finding instead
-  of a result that looks identical to a clean recovery from the outside.
+- **The agent-driven restore chain on Kubernetes (§3).**  
+  The tools work in-cluster since v0.32 ([Kubernetes](#kubernetes-restoring-an-instance-that-cant-start));
+  the playbooks don't route a Kubernetes data-loss case to them yet, and multi-node ReadWriteOnce
+  volumes and remote repos aren't handled.
+
+- **Backup-check history (planned for v0.33).**  
+  Each `get_pgbackrest_status` result is kept today only as a tool-call record in the audit
+  trail, as JSON. A dedicated auditd table, one row per check (stanza, last backup, `backup_stale`,
+  WAL status, `recoverable_to_wal`, `archive_end_time`, gaps, segment size and its source, trace
+  ID), would answer questions pgBackRest's own history can't: when the WAL chain first broke, how
+  far behind the archive was at each check and exactly what a refused restore saw.
 
 - **Dedicated objective-evidence signals for `pbs_db_data_loss_triage` /
   `pbs_sysadmin_host_triage` (§3).**  

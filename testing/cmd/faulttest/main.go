@@ -493,6 +493,7 @@ func cmdRun(args []string) {
 			// injection left a noisy-neighbor pod running on the cluster for
 			// 36+ minutes before that fix).
 			callStart := time.Now()
+			remediator.SetFaultStart(callStart)
 			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
 				cfg.ConnStr = origConn
 			})
@@ -711,8 +712,8 @@ func cmdRun(args []string) {
 				evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 				runRemediationJudge(remResult)
 				if remResult.Passed {
-					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
-					printIncidentSummary(resp, remResult.RecoveryTimeSecs, cfg.GatewayURL)
+					fmt.Printf("Remediation: RECOVERED %.1fs after injection (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+					printIncidentSummary(resp, remResult.RecoveryTimeSecs, remResult.Playbook, remResult.Outcome, cfg.GatewayURL)
 					if cfg.GatewayURL != "" {
 						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved", f.DiagnosisPlaybookSeriesID); vaultErr != nil {
 							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
@@ -736,7 +737,7 @@ func cmdRun(args []string) {
 				evalResult.OverallScore = evalResult.Score*0.6 + remResult.Score*0.4
 				runRemediationJudge(remResult)
 				if remResult.Passed {
-					fmt.Printf("Remediation: RECOVERED in %.1fs (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
+					fmt.Printf("Remediation: RECOVERED %.1fs after injection (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 					if cfg.GatewayURL != "" {
 						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved", f.DiagnosisPlaybookSeriesID); vaultErr != nil {
 							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)
@@ -1262,6 +1263,10 @@ func cmdValidate(args []string) {
 			}
 			if f.Inject.Type == "" {
 				errs = append(errs, "missing inject.type")
+			}
+
+			if f.DirectAgent != "" && !faultlib.DirectAgents[f.DirectAgent] {
+				errs = append(errs, fmt.Sprintf("direct_agent %q is not one of database, k8s, sysadmin", f.DirectAgent))
 			}
 
 			// Known inject type.

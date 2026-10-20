@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -461,6 +462,47 @@ func TestAssembleTriagePrompt_PriorFindings_Transition(t *testing.T) {
 	}
 	if strings.Contains(prompt, "investigate further") {
 		t.Error("transition prompt should NOT tell the agent to investigate further — it should confirm and remediate")
+	}
+}
+
+// TestAssembleTriagePrompt_RemediationConstraints is a regression test for a
+// bug found live (VM db-pgdata-corrupted-vm, plr_eb3a260a): every playbook,
+// remediation included, got the read-only Constraints block, and
+// pbs_pgbackrest_restore_remediate stopped without restoring, quoting "Do NOT
+// execute remediation" back as an instruction conflict. A remediation hop must
+// be told to carry out its guidance; every other type stays read-only.
+func TestAssembleTriagePrompt_RemediationConstraints(t *testing.T) {
+	readOnly := []string{"Use only read-only diagnostic tools", "Do NOT execute remediation", "describing the remediation"}
+	req := PlaybookRunRequest{
+		ConnectionString: "host=pgbackrest-vm.test",
+		PriorFindings:    "backup 20261018-184331F healthy, WAL continuous; restore required",
+		IsTransition:     true,
+	}
+
+	rem := assembleTriagePrompt(&audit.Playbook{Name: "pgBackRest — Restore From Latest Backup",
+		SeriesID: "pbs_pgbackrest_restore_remediate", PlaybookType: "remediation", AgentName: agentNameSysadmin}, req, "")
+	for _, s := range readOnly {
+		if strings.Contains(rem, s) {
+			t.Errorf("remediation prompt contains read-only instruction %q — contradicts its own Expert Guidance", s)
+		}
+	}
+	for _, s := range []string{"carry out the write/destructive actions its Expert Guidance names", "carry out the remediation steps it gives",
+		"Do not take any write action the Expert Guidance does not name", "Use ONLY `connection_string`"} {
+		if !strings.Contains(rem, s) {
+			t.Errorf("remediation prompt missing %q", s)
+		}
+	}
+
+	for _, pbType := range []string{"triage", ""} {
+		p := assembleTriagePrompt(&audit.Playbook{Name: "pgBackRest — Health Triage", PlaybookType: pbType}, req, "")
+		for _, s := range readOnly {
+			if !strings.Contains(p, s) {
+				t.Errorf("playbook_type %q: prompt missing read-only instruction %q", pbType, s)
+			}
+		}
+		if strings.Contains(p, "carry out the write/destructive actions") {
+			t.Errorf("playbook_type %q: non-remediation prompt told to carry out write actions", pbType)
+		}
 	}
 }
 
@@ -7468,6 +7510,78 @@ func TestHandlePlaybookRun_ObjectiveEvidence_ForcedGate_GateReasonPersisted(t *t
 	}
 }
 
+// TestHandlePlaybookRun_GatePending_PersistedBeforeResponse is a regression
+// test for a race found live (VM db-pgdata-corrupted-vm, plr_1101585e): the
+// gate_pending outcome was PATCHed to auditd in a goroutine started after the
+// response was written, so a caller that approved the gate immediately (faulttest
+// force-approving within a millisecond) got 409 "not in gate_pending state
+// (outcome=unknown)" from proceed-escalation. auditd here delays every PATCH to
+// make the old ordering fail deterministically: the gate_pending PATCH must
+// already be stored when the handler returns.
+func TestHandlePlaybookRun_GatePending_PersistedBeforeResponse(t *testing.T) {
+	pb := &audit.Playbook{
+		PlaybookID:    "pb_vac_triage_sync01",
+		SeriesID:      "pbs_vacuum_triage",
+		Name:          "Vacuum & Bloat Triage",
+		Guidance:      "Check dead tuples and autovacuum lag.",
+		ExecutionMode: "agent",
+		AgentName:     agentNameDB,
+		IsActive:      true,
+	}
+	agentText := "Analysis complete.\n\n" +
+		"FINDINGS: worst table public.orders dead_ratio=0.32 (4.2GB); autovacuum=stuck\n" +
+		"TRANSITION_TO: pbs_vacuum_remediate\n"
+
+	var mu sync.Mutex
+	var storedOutcomes []string
+	pbData, _ := json.Marshal(pb)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
+			w.Write(pbData) //nolint:errcheck
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/runs"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"run_id": "plr_gate_sync01"}) //nolint:errcheck
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/playbook-runs/"):
+			time.Sleep(200 * time.Millisecond)
+			var m map[string]any
+			json.NewDecoder(r.Body).Decode(&m) //nolint:errcheck
+			if o, ok := m["outcome"].(string); ok {
+				mu.Lock()
+				storedOutcomes = append(storedOutcomes, o)
+				mu.Unlock()
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Write([]byte("[]")) //nolint:errcheck
+		}
+	}))
+	t.Cleanup(auditSrv.Close)
+
+	gw := makeGateGateway(t, auditSrv.URL, agentNameDB, agentText)
+	rec := postPlaybookRun(t, gw, pb.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","context":"bloat alert","gate_escalation":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response not valid JSON: %v — body: %s", err, rec.Body.String())
+	}
+	if resp["status"] != "pending_gate" {
+		t.Fatalf("status = %q, want pending_gate", resp["status"])
+	}
+
+	// No polling: an immediate proceed-escalation reads the run right now.
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Contains(storedOutcomes, audit.OutcomeGatePending) {
+		t.Errorf("stored outcomes when the response was returned = %v, want %q already stored — "+
+			"an immediate proceed-escalation would get 409 (outcome=unknown)", storedOutcomes, audit.OutcomeGatePending)
+	}
+}
+
 // TestHandlePlaybookRun_LowConfidenceAndObjectiveEvidence_CombinedGateReason is
 // a regression test for a real bug found via manual verification: the
 // low-confidence and objective-evidence force-gate checks used to each guard
@@ -8065,5 +8179,90 @@ func TestHandlePlaybookRunProceed_NamespaceForceOverridden(t *testing.T) {
 	if got, _ := gotToolArgs["namespace"].(string); got != "helpdesk-test" {
 		t.Errorf("tool call args[namespace] = %q, want the forced authoritative value %q (not the stale %q stored on the step)",
 			got, "helpdesk-test", "default")
+	}
+}
+
+// TestCheckEvidenceProvenance_ElidedAndDottedQuotes_RealChain replays the
+// three primary quotes flagged on one live db-pgdata-corrupted chain
+// (2026-10-16), against trimmed copies of that chain's real tool outputs.
+// Every fact in them is real: two join non-adjacent log lines with " / " or
+// "...", and one names a nested JSON field by its dotted path. The negative
+// cases keep the check honest — a wrong value or an invented line still
+// fails after the split and the flattening.
+func TestCheckEvidenceProvenance_ElidedAndDottedQuotes_RealChain(t *testing.T) {
+	hostLogs := "PostgreSQL Database directory appears to contain a database; Skipping initialization\n\n" +
+		"postgres: could not find the database system\n" +
+		"Expected to find it in the directory \"/var/lib/postgresql/data\",\n" +
+		"but could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory\n" +
+		"2026-10-16 22:31:49.871 UTC [9] LOG:  database system is ready to accept connections"
+	pgbackrest := `{"stanza":"main","status_code":0,"status_message":"ok","backup_stale":false,` +
+		`"wal_continuity":{"status":"continuous","backup_label":"20261016-222939F","consistency_reachable":true},` +
+		`"backups":[{"label":"20261016-222939F","type":"full"}]}`
+	srv := serveFakeToolEvents(t, []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_host_logs", Result: hostLogs}},
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_pgbackrest_status", Result: pgbackrest}},
+	})
+	cases := []struct {
+		name, quote string
+		wantFlagged bool
+	}{
+		{"spaced slash joins two real lines",
+			`postgres: could not find the database system / could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory`, false},
+		{"ellipsis joins two real lines",
+			`postgres: could not find the database system...but could not open file \"/var/lib/postgresql/data/global/pg_control\": No such file or directory" followed by "2026-10-16 22:31:49.871 UTC [9] LOG:  database system is ready to accept connections`, false},
+		{"unicode ellipsis", `could not find the database system… No such file or directory`, false},
+		{"dotted path into nested JSON",
+			`status_code=0; backup_stale=false; wal_continuity.status=continuous; consistency_reachable=true`, false},
+		{"array element field", `backups.label: 20261016-222939F`, false},
+		{"dotted path, wrong value", `wal_continuity.status=broken`, true},
+		{"invented line after an ellipsis", `could not find the database system...database is corrupt beyond repair`, true},
+		{"path slashes do not split", `could not open file "/var/lib/postgresql/data/global/PG_VERSION"`, true},
+	}
+	for _, c := range cases {
+		report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{IsPrimary: true, Evidence: c.quote}}}
+		primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+		if got := len(primary) > 0; got != c.wantFlagged {
+			t.Errorf("%s: flagged = %v (%v), want %v", c.name, got, primary, c.wantFlagged)
+		}
+	}
+}
+
+// A comma-joined compound quote leaves ", key=" fragments after the split at
+// its inner quotes. Found live 2026-10-17 on the VM's broken-chain check
+// (plr_e3a0dd6d): both fragments of a real quote were flagged.
+func TestCheckEvidenceProvenance_CommaJoinedQuote_RealVMChain(t *testing.T) {
+	result := `{"stanza":"main","status_code":0,"backup_stale":false,` +
+		`"wal_continuity":{"status":"broken","consistency_reachable":false,"detail":"the WAL backup 20261017-152429F needs (0000001B000000000000000C to 0000001B000000000000000C) is not in the repo: PostgreSQL could not start from this backup"}}`
+	srv := serveFakeToolEvents(t, []audit.Event{
+		{EventType: audit.EventTypeToolExecution, Tool: &audit.ToolExecution{Name: "get_pgbackrest_status", Result: result}},
+	})
+	cases := []struct {
+		name, quote string
+		wantFlagged bool
+	}{
+		{"real VM quote",
+			`status=\"broken\", detail=\"the WAL backup 20261017-152429F needs (0000001B000000000000000C to 0000001B000000000000000C) is not in the repo: PostgreSQL could not start from this backup\", consistency_reachable=false`, false},
+		{"wrong value after a comma", `status=\"broken\", consistency_reachable=true`, true},
+		{"invented field after a comma", `status=\"broken\", stanza_deleted=true`, true},
+	}
+	for _, c := range cases {
+		report := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{{IsPrimary: true, Evidence: c.quote}}}
+		primary, _ := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), report)
+		if got := len(primary) > 0; got != c.wantFlagged {
+			t.Errorf("%s: flagged = %v (%v), want %v", c.name, got, primary, c.wantFlagged)
+		}
+	}
+}
+
+func TestFlattenJSONEvidence(t *testing.T) {
+	got := flattenJSONEvidence(`{"b":{"c":"x","d":[1,2.5]},"a":true,"n":null}`)
+	want := "a: true\nb.c: x\nb.d: 1\nb.d: 2.5\nn: null\n"
+	if got != want {
+		t.Errorf("flattenJSONEvidence = %q, want %q", got, want)
+	}
+	for _, notJSON := range []string{"", "running (running=true)", "{not json", "42"} {
+		if got := flattenJSONEvidence(notJSON); got != "" {
+			t.Errorf("flattenJSONEvidence(%q) = %q, want \"\"", notJSON, got)
+		}
 	}
 }

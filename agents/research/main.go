@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/a2aproject/a2a-go/a2a"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/geminitool"
@@ -65,20 +64,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cardOpts := agentutil.CardOptions{
-		Version:  "1.0.0",
-		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
-		SkillTags: map[string][]string{
-			"research_agent": {"research", "search", "web", "documentation"},
-		},
-		SkillExamples: map[string][]string{
-			"research_agent": {
-				"Search for the latest PostgreSQL 17 release notes",
-				"Find best practices for Kubernetes pod autoscaling",
-				"Look up recent CVEs for Redis",
-			},
-		},
-	}
+	cardOpts := cardOptions(tools)
 
 	if err := agentserve.ServeWithTracing(ctx, researchAgent, cfg, traceStore, auditStore, cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)

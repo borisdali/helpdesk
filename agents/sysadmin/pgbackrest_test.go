@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -52,6 +55,81 @@ const realPgBackRestInfoJSON = `[
         "status": {"code": 0, "lock": {"backup": {"held": false}, "restore": {"held": false}}, "message": "ok"}
     }
 ]`
+
+// realInfoArchiveTop and realInfoWALListing are the repo reads the
+// WAL-continuity check makes, shaped like real repo-ls output and matching
+// realPgBackRestInfoJSON's backup (WAL 000000010000000000000015, timeline 1,
+// archive 16-1): its one segment is present, so the chain is continuous.
+const realInfoArchiveTop = "0000000100000000\n"
+
+var realInfoWALListing = `{".":{"type":"path"},"0000000100000000":{"type":"path"},` +
+	`"0000000100000000/000000010000000000000015-` + strings.Repeat("e", 40) + `.gz":{"type":"file","size":16456,"time":1790395767}}`
+
+// realInfoHeaderSegment is the gzip'd first page of segment
+// 000000010000000000000015 of a 16 MiB cluster.
+func realInfoHeaderSegment() string {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	zw.Write(syntheticSegmentHeader(binary.LittleEndian, "000000010000000000000015", 16<<20)) //nolint:errcheck
+	zw.Close()                                                                                //nolint:errcheck
+	return buf.String()
+}
+
+// pgbackrestRouter is a cmdRunner fake that answers each command by what it
+// is rather than by call position, since get_pgbackrest_status and
+// restore_from_backup now make several pgbackrest reads per call.
+type pgbackrestRouter struct {
+	calls      [][]string
+	info       string
+	walListing string // defaults to realInfoWALListing
+	readyOut   string
+	readyErr   error
+	restoreOut string
+	restoreErr error
+	pushOut    string // archive-pushing the pg_wal tail
+	pushErr    error
+}
+
+func (r *pgbackrestRouter) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
+	r.calls = append(r.calls, args)
+	joined := name + " " + strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "pg_isready"):
+		return r.readyOut, r.readyErr
+	case strings.Contains(joined, "--delta restore"):
+		return r.restoreOut, r.restoreErr
+	case strings.Contains(joined, "archive-push"):
+		return r.pushOut, r.pushErr
+	case strings.Contains(joined, "repo-ls") && strings.Contains(joined, "--recurse"):
+		if r.walListing != "" {
+			return r.walListing, nil
+		}
+		return realInfoWALListing, nil
+	case strings.Contains(joined, "repo-ls"):
+		return realInfoArchiveTop, nil
+	case strings.Contains(joined, "repo-get") && strings.Contains(joined, "000000010000000000000015-"):
+		// The header segment checkWALContinuity picks from realInfoWALListing.
+		return realInfoHeaderSegment(), nil
+	case strings.Contains(joined, "repo-get"):
+		return "", fmt.Errorf("unexpected repo-get: %s", joined)
+	case strings.Contains(joined, "'info'") || strings.Contains(joined, "info --output=json"):
+		return r.info, nil
+	case containsSeq(args, "get", "pod"):
+		return "pg-prod-db-0\n", nil
+	}
+	return "", fmt.Errorf("unexpected command: %s", joined)
+}
+
+// callsContaining returns the calls whose joined args contain substr.
+func (r *pgbackrestRouter) callsContaining(substr string) [][]string {
+	var out [][]string
+	for _, c := range r.calls {
+		if strings.Contains(strings.Join(c, " "), substr) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // realPgBackRestBrokenRepoJSON is the exact output captured live
 // (2026-09-27) from the same install after `chmod 000` on the repo path —
@@ -384,6 +462,91 @@ func TestParsePgBackRestInfo_NonOkStatus(t *testing.T) {
 	}
 }
 
+// A successful call is audited without the raw `pgbackrest info` blob, and
+// with wal_continuity ahead of the per-backup list, so that a stanza with a
+// month of daily backups still has its WAL verdict inside the audit trail's
+// 8 KB cut. Before, about 8 backups pushed it out.
+func TestGetPgBackRestStatusTool_AuditKeepsWALVerdictWithManyBackups(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	var info []map[string]any
+	if err := json.Unmarshal([]byte(realPgBackRestInfoJSON), &info); err != nil {
+		t.Fatal(err)
+	}
+	latest := info[0]["backup"].([]any)[0].(map[string]any)
+	var backups []any
+	for i := 29; i >= 1; i-- {
+		stop := float64(1790395767 - i*86400)
+		backups = append(backups, map[string]any{
+			"archive":   map[string]any{"start": "000000010000000000000014", "stop": "000000010000000000000014"},
+			"backrest":  latest["backrest"],
+			"database":  latest["database"],
+			"error":     false,
+			"info":      latest["info"],
+			"label":     fmt.Sprintf("20260926-040922F_202609%02d-040922I", i),
+			"lsn":       map[string]any{"start": "0/14000028", "stop": "0/14000138"},
+			"prior":     "20260926-040922F",
+			"reference": []string{"20260926-040922F"},
+			"timestamp": map[string]any{"start": stop - 5, "stop": stop},
+			"type":      "incr",
+		})
+	}
+	info[0]["backup"] = append(backups, latest)
+	infoJSON, _ := json.Marshal(info)
+
+	capture := &pgbackrestRouter{info: string(infoJSON)}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if len(result.Backups) != 30 || result.Output == "" {
+		t.Fatalf("got %d backups, output %d bytes; want 30 and the raw output still returned to the model", len(result.Backups), len(result.Output))
+	}
+	if full, _ := json.Marshal(result); len(full) <= 8192 {
+		t.Fatalf("the full result is %d bytes; the fixture must exceed the 8 KB audit cut to test anything", len(full))
+	}
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolExecution})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("Query: %d events, %v; want 1", len(events), err)
+	}
+	audited := events[0].Tool.Result
+	if strings.Contains(audited, `"output":`) {
+		t.Error("audited result still contains the raw pgbackrest info output")
+	}
+	if !strings.Contains(audited, `"wal_continuity":{"status":"continuous"`) ||
+		!strings.Contains(audited, `"segment_size_source":"wal_header"`) {
+		t.Errorf("audited result (%d bytes) lost the WAL verdict:\n%s", len(audited), audited)
+	}
+	if strings.Index(audited, `"wal_continuity"`) > strings.Index(audited, `"backups"`) {
+		t.Error("wal_continuity should come before backups in the audited JSON")
+	}
+}
+
+// A failed call keeps the raw output in the audit trail: it's the only
+// record of what pgBackRest printed.
+func TestGetPgBackRestStatusTool_FailureAuditKeepsRawOutput(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	defer withMockRunner("ERROR: [055]: unable to load info file", fmt.Errorf("exit status 55"))()
+
+	if _, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeToolExecution})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("Query: %d events, %v; want 1", len(events), err)
+	}
+	if !strings.Contains(events[0].Tool.Result, "unable to load info file") {
+		t.Errorf("audited result = %q, want the raw pgBackRest output", events[0].Tool.Result)
+	}
+}
+
 func TestGetPgBackRestStatusTool_Success(t *testing.T) {
 	defer withMockRunner(realPgBackRestInfoJSON, nil)()
 
@@ -432,7 +595,7 @@ func withPgBackRestDockerInfra(t *testing.T) {
 // manually verified live against the real container during development.
 func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
 	withPgBackRestDockerInfra(t)
-	capture := &sequencedRunner{outputs: []string{realPgBackRestInfoJSON}}
+	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON}
 	old := cmdRunner
 	cmdRunner = capture
 	defer func() { cmdRunner = old }()
@@ -445,8 +608,18 @@ func TestGetPgBackRestStatusTool_DockerDispatch(t *testing.T) {
 	if result.Stanza != "main" {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
 	}
-	if len(capture.calls) != 1 {
-		t.Fatalf("expected 1 docker exec call, got %d: %v", len(capture.calls), capture.calls)
+	// info, then the WAL-continuity reads (archive listing, segment listing),
+	// all through the same docker exec dispatch.
+	if len(capture.calls) != 4 {
+		t.Fatalf("expected 4 docker exec calls (info + 3 WAL reads), got %d: %v", len(capture.calls), capture.calls)
+	}
+	for _, c := range capture.calls {
+		if len(c) < 2 || c[0] != "exec" || c[1] != "helpdesk-test-pg-pgbackrest" || !strings.Contains(strings.Join(c, " "), "su postgres -c") {
+			t.Errorf("call = %v, want every pgbackrest read via docker exec as the postgres OS user", c)
+		}
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
+		t.Errorf("WALContinuity = %+v, want continuous", result.WALContinuity)
 	}
 	args := capture.calls[0]
 	if len(args) < 2 || args[0] != "exec" || args[1] != "helpdesk-test-pg-pgbackrest" {
@@ -575,10 +748,16 @@ func TestGetPgBackRestStatusTool_SSHDispatch(t *testing.T) {
 	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
 
 	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
-		if !strings.Contains(cmd, "pgbackrest") || !strings.Contains(cmd, "info") || !strings.Contains(cmd, "--output=json") {
-			return "unexpected command: " + cmd, 1
+		switch {
+		case !strings.Contains(cmd, "pgbackrest"):
+		case strings.Contains(cmd, "repo-ls") && strings.Contains(cmd, "--recurse"):
+			return realInfoWALListing, 0
+		case strings.Contains(cmd, "repo-ls"):
+			return realInfoArchiveTop, 0
+		case strings.Contains(cmd, "info") && strings.Contains(cmd, "--output=json"):
+			return realPgBackRestInfoJSON, 0
 		}
-		return realPgBackRestInfoJSON, 0
+		return "unexpected command: " + cmd, 1
 	})
 	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
 	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
@@ -594,6 +773,10 @@ func TestGetPgBackRestStatusTool_SSHDispatch(t *testing.T) {
 	}
 	if result.Stanza != "main" {
 		t.Errorf("Stanza = %q, want main", result.Stanza)
+	}
+	// The WAL-continuity reads go over the same SSH session path.
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALContinuous {
+		t.Errorf("WALContinuity = %+v, want continuous over SSH", result.WALContinuity)
 	}
 }
 
@@ -668,6 +851,85 @@ func TestGetPgBackRestStatusTool_StaleBackup_RecordsObjectiveEvidence(t *testing
 	}
 	if events[0].ObjectiveEvidence == nil || events[0].ObjectiveEvidence.Signal != "pgbackrest_backup_unhealthy" {
 		t.Errorf("ObjectiveEvidence = %+v, want signal=pgbackrest_backup_unhealthy", events[0].ObjectiveEvidence)
+	}
+}
+
+// TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence loads the
+// real shipped rules file and checks a broken WAL chain fires
+// pgbackrest_wal_chain_broken, alongside the WAL_continuity result itself.
+func TestGetPgBackRestStatusTool_BrokenWAL_RecordsObjectiveEvidence(t *testing.T) {
+	orig := pgbackrestEvidenceRules
+	pgbackrestEvidenceRules, _ = loadSysadminEvidenceRules("objective_evidence.yaml")
+	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	capture := &pgbackrestRouter{info: realPgBackRestInfoJSON, walListing: `{".":{"type":"path"}}`}
+	old := cmdRunner
+	cmdRunner = capture
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALBroken || result.WALContinuity.ConsistencyReachable {
+		t.Fatalf("WALContinuity = %+v, want broken with consistency unreachable", result.WALContinuity)
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var signals []string
+	for _, e := range events {
+		if e.ObjectiveEvidence != nil {
+			signals = append(signals, e.ObjectiveEvidence.Signal)
+		}
+	}
+	found := false
+	for _, s := range signals {
+		if s == "pgbackrest_wal_chain_broken" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("signals = %v, want pgbackrest_wal_chain_broken", signals)
+	}
+}
+
+// An unverified check is not evidence of a broken chain: no WAL signal.
+func TestGetPgBackRestStatusTool_UnverifiedWAL_NoWALEvidence(t *testing.T) {
+	orig := pgbackrestEvidenceRules
+	pgbackrestEvidenceRules, _ = loadSysadminEvidenceRules("objective_evidence.yaml")
+	t.Cleanup(func() { pgbackrestEvidenceRules = orig })
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	inner := &pgbackrestRouter{info: realPgBackRestInfoJSON}
+	old := cmdRunner
+	cmdRunner = runnerFunc(func(ctx context.Context, name string, args []string, env []string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "repo-ls") {
+			return "", fmt.Errorf("exit status 31")
+		}
+		return inner.Run(ctx, name, args, env)
+	})
+	defer func() { cmdRunner = old }()
+
+	result, err := getPgBackRestStatusTool(mockToolContext{context.Background()}, GetPgBackRestStatusArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
+	}
+	if result.WALContinuity == nil || result.WALContinuity.Status != WALUnverified {
+		t.Fatalf("WALContinuity = %+v, want unverified", result.WALContinuity)
+	}
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeObjectiveEvidence})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, e := range events {
+		if e.ObjectiveEvidence != nil && e.ObjectiveEvidence.Signal == "pgbackrest_wal_chain_broken" {
+			t.Errorf("pgbackrest_wal_chain_broken fired on an unverified check")
+		}
 	}
 }
 
@@ -875,52 +1137,6 @@ func TestGetPgBackRestStatusResult_BackupStaleFalse_SerializesExplicitly(t *test
 	}
 	if !strings.Contains(string(raw), `"last_backup_error":false`) {
 		t.Errorf("marshaled JSON = %s, want it to explicitly contain \"last_backup_error\":false, not omit it", raw)
-	}
-}
-
-// TestGetPgBackRestStatusTool_K8sDispatch verifies the kubectl-exec dispatch
-// path for a self-managed (non-operator) Postgres pod with pgBackRest
-// installed in its image. A real bug (fixed 2026-10-01, found auditing
-// v0.30's cross-platform coverage) used to make a K8s-configured target
-// silently fall into the SSH-or-local `default` branch and run `pgbackrest`
-// as a bare local command on the agent's own host — this now routes through
-// execInProcess's existing kubectl-exec branch (shared with check_host/
-// restart_container), the same `su postgres -c '...'` wrapping the
-// docker/podman path already uses. Operator-managed targets (CloudNativePG
-// and similar, which don't run pgBackRest inside their pods at all) aren't
-// specially rejected anymore — they'd now fail with a real, honest
-// "pgbackrest: command not found" from inside that pod instead, which is
-// more informative than a hardcoded refusal naming one specific operator.
-func TestGetPgBackRestStatusTool_K8sDispatch(t *testing.T) {
-	withK8sInfra(t)
-	capture := &sequencedRunner{outputs: []string{"pg-prod-db-0\n", realPgBackRestInfoJSON}}
-	old := cmdRunner
-	cmdRunner = capture
-	defer func() { cmdRunner = old }()
-
-	ctx := mockToolContext{context.Background()}
-	result, err := getPgBackRestStatusTool(ctx, GetPgBackRestStatusArgs{Target: "prod_db"})
-	if err != nil {
-		t.Fatalf("getPgBackRestStatusTool() error = %v", err)
-	}
-	if result.Stanza != "main" {
-		t.Errorf("Stanza = %q, want main", result.Stanza)
-	}
-	if len(capture.calls) != 2 {
-		t.Fatalf("expected 2 kubectl calls (get pod, exec), got %d: %v", len(capture.calls), capture.calls)
-	}
-	// Both calls carry the configured --context prefix (gke_project_region_prod-cluster),
-	// so "get"/"exec" aren't necessarily at index 0 — search for them instead.
-	if !containsSeq(capture.calls[0], "get", "pod") {
-		t.Errorf("call[0] = %v, want a `kubectl get pod` pod-name resolution", capture.calls[0])
-	}
-	execCall := capture.calls[1]
-	if !containsSeq(execCall, "exec", "pg-prod-db-0") {
-		t.Fatalf("call[1] = %v, want `kubectl exec pg-prod-db-0 ...`", execCall)
-	}
-	joined := strings.Join(execCall, " ")
-	if !strings.Contains(joined, "su postgres -c") {
-		t.Errorf("exec call = %q, want it to run as the postgres OS user (su postgres -c ...)", joined)
 	}
 }
 

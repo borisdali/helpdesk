@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
@@ -23,10 +22,8 @@ import (
 	"helpdesk/agentutil"
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
-	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
-	"helpdesk/internal/toolregistry"
 	"helpdesk/prompts"
 )
 
@@ -179,98 +176,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cardOpts := agentutil.CardOptions{
-		Version:  buildinfo.Version,
-		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
-		SkillTags: map[string][]string{
-			"postgres_database_agent":                            {"postgresql", "database", "diagnostics"},
-			"postgres_database_agent-check_connection":           {"postgresql", "connectivity"},
-			"postgres_database_agent-get_database_info":          {"postgresql", "metadata"},
-			"postgres_database_agent-get_active_connections":     {"postgresql", "performance", "connections"},
-			"postgres_database_agent-get_connection_stats":       {"postgresql", "performance", "connections"},
-			"postgres_database_agent-get_database_stats":         {"postgresql", "performance", "statistics"},
-		"postgres_database_agent-get_status_summary":         {"postgresql", "status", "fleet"},
-			"postgres_database_agent-get_config_parameter":       {"postgresql", "configuration"},
-			"postgres_database_agent-get_replication_status":     {"postgresql", "replication", "ha"},
-			"postgres_database_agent-get_lock_info":              {"postgresql", "locks", "contention"},
-			"postgres_database_agent-get_table_stats":            {"postgresql", "tables", "performance"},
-			"postgres_database_agent-get_session_info":            {"postgresql", "connections", "inspection"},
-			"postgres_database_agent-cancel_query":               {"postgresql", "connections", "remediation"},
-			"postgres_database_agent-terminate_connection":        {"postgresql", "connections", "remediation"},
-			"postgres_database_agent-terminate_idle_connections":  {"postgresql", "connections", "remediation"},
-			"postgres_database_agent-reset_cache_stats":           {"postgresql", "performance", "remediation"},
-		},
-		SkillExamples: map[string][]string{
-			"postgres_database_agent-check_connection":       {"Check if the production database is reachable"},
-			"postgres_database_agent-get_session_info":       {"How much uncommitted work does the session with pid 38553 have?", "Is it safe to terminate PID 12345?"},
-			"postgres_database_agent-get_active_connections": {"Show me all long-running queries"},
-			"postgres_database_agent-get_lock_info":          {"Are there any blocking locks on the database?"},
-			"postgres_database_agent-get_replication_status": {"What is the replication lag?"},
-		},
-		SkillFleetEligible: map[string]bool{
-			"postgres_database_agent-get_status_summary": true,
-		},
-		SkillCapabilities: map[string][]string{
-			"postgres_database_agent-get_baseline": {
-				toolregistry.CapUptime,
-				toolregistry.CapVersion,
-				toolregistry.CapConfig,
-				toolregistry.CapDiskUsage,
-				toolregistry.CapExtensions,
-			},
-			"postgres_database_agent-get_status_summary": {
-				toolregistry.CapUptime,
-				toolregistry.CapVersion,
-				toolregistry.CapConnectionCount,
-				toolregistry.CapCacheHitRatio,
-			},
-			"postgres_database_agent-get_server_info": {
-				toolregistry.CapUptime,
-				toolregistry.CapVersion,
-			},
-			"postgres_database_agent-get_connection_stats": {
-				toolregistry.CapConnectionCount,
-			},
-			"postgres_database_agent-check_connection": {
-				toolregistry.CapConnectivity,
-			},
-			"postgres_database_agent-get_replication_status": {
-				toolregistry.CapReplication,
-			},
-			"postgres_database_agent-get_lock_info": {
-				toolregistry.CapLockInfo,
-			},
-			"postgres_database_agent-get_table_stats": {
-				toolregistry.CapTableStats,
-			},
-			"postgres_database_agent-get_database_info": {
-				toolregistry.CapDatabaseList,
-			},
-			"postgres_database_agent-get_config_parameter": {
-				toolregistry.CapConfig,
-			},
-			"postgres_database_agent-get_active_connections": {
-				toolregistry.CapActiveQueries,
-			},
-			"postgres_database_agent-get_session_info": {
-				toolregistry.CapSessionInspect,
-			},
-		},
-		SkillSupersedes: map[string][]string{
-			"postgres_database_agent-get_baseline": {
-				"get_server_info",
-				"get_pg_settings",
-				"get_extensions",
-				"get_disk_usage",
-			},
-			"postgres_database_agent-get_status_summary": {
-				"get_server_info",
-				"get_connection_stats",
-			},
-		},
-		SkillSchemaHash: agentutil.ComputeSchemaFingerprints("postgres_database_agent", tools),
-		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
-	}
+	cardOpts := cardOptions(tools)
 
 	cardOpts.ExtraHandlers = map[string]http.Handler{
 		"POST /admin/register-db": http.HandlerFunc(handleRegisterDB),
@@ -514,7 +420,7 @@ func createTools() ([]tool.Tool, error) {
 
 	explainQueryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "explain_query",
-		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on a SQL query and return the full execution plan. By default only SELECT/WITH statements are accepted. Set allow_dml=true to explain DML statements (they are wrapped in BEGIN/ROLLBACK and never committed).",
+		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on one SQL statement and return the full execution plan. Exactly one statement is accepted (no ';' except a trailing one). It always runs in a transaction that is rolled back: read-only by default, which only SELECT/WITH statements are accepted for; set allow_dml=true to explain a DML statement, which then executes but is never committed. EXPLAIN ANALYZE executes the statement, so a query calling a function with side effects still runs it. Needs psql 15 or later (earlier versions print only the ROLLBACK).",
 	}, explainQueryTool)
 	if err != nil {
 		return nil, err

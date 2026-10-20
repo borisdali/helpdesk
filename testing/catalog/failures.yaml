@@ -466,6 +466,11 @@ failures:
     # against a plain postgres container with no pgBackRest installed at
     # all, failing outright rather than skipping cleanly.
     agent_conn_override: pgbackrest-db
+    # Only the sysadmin agent has get_pgbackrest_status, and
+    # pbs_pgbackrest_health_triage runs on it. A direct (non-gateway) run
+    # would otherwise follow the category to the database agent, which can
+    # only guess from SQL; found 2026-10-16, see Failure.DirectAgent.
+    direct_agent: sysadmin
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml), not the plain
@@ -514,6 +519,165 @@ failures:
         narrative: "The agent should identify from get_pgbackrest_status that pgBackRest cannot access its own repository (a non-ok stanza status, likely reporting the stanza as \"[invalid]\" with a permission-denied detail in the repo-level status message), correctly distinguishing this filesystem-level failure from WAL-archiving health or a simple stale-backup finding, and recommend investigating the repo path's permissions/ownership rather than assuming a transient blip."
     timeout: 60s
 
+  - id: db-pgbackrest-wal-gap
+    name: "pgBackRest WAL chain broken"
+    category: database
+    severity: high
+    description: >
+      A WAL segment the latest backup needs is missing from the pgBackRest
+      archive, while the database itself is healthy and pgBackRest reports
+      the stanza ok. Nothing is wrong today, but the backup can no longer be
+      restored: PostgreSQL could not reach a consistent state from it, and a
+      restore would overwrite PGDATA for nothing. Exercises v0.32's
+      wal_continuity check, the pgbackrest_wal_chain_broken signal and
+      pbs_pgbackrest_health_triage's broken-chain ending, none of which the
+      backup-age check (backup_stale) can see.
+    # Same dedicated pgBackRest target, and the same agent, as
+    # db-pgbackrest-repo-unreadable.
+    agent_conn_override: pgbackrest-db
+    direct_agent: sysadmin
+    prerequisites: |
+      Requires the dedicated pgBackRest target
+      (testing/docker/docker-compose.pgbackrest.yaml) with an initial backup
+      already taken (testing/docker/setup-pgbackrest-backup.sh).
+
+      inject moves the latest backup's own start segment aside inside the
+      repo (a name the WAL check ignores), so the chain is broken at the
+      backup itself (consistency_reachable=false). teardown moves it back and
+      is safe to run more than once. Neither touches PGDATA or the running
+      instance, and nothing is written to the archive.
+
+      Either health-triage ending that escalates to a human is correct here:
+      Ending E (broken chain) when the backup is fresh, or Ending C (stale
+      backup, with wal_continuity=broken in its findings) when it isn't, as
+      on a fixture whose only backup was taken days ago. Both record the
+      pgbackrest_wal_chain_broken signal, which is listed first in
+      agents/sysadmin/objective_evidence.yaml.
+
+      Docker-only, same reasoning as db-pgbackrest-repo-unreadable. No
+      external_compat variant.
+    inject:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: |
+        set -e
+        seg=$(su postgres -c 'pgbackrest --stanza=main info --output=json' | grep -o '"start":"[0-9A-F]\{24\}"' | tail -1 | cut -d'"' -f4)
+        test -n "$seg"
+        f=$(ls /var/lib/pgbackrest/archive/main/*/"$(echo "$seg" | cut -c1-16)"/"$seg"-*)
+        mv "$f" "$f.hidden-by-fault"
+    teardown:
+      type: docker_exec
+      exec_via: helpdesk-test-pg-pgbackrest
+      script_inline: |
+        for f in $(find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'); do
+          mv "$f" "${f%.hidden-by-fault}"
+        done
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      A routine backup audit wants confirmation that this database's latest
+      pgBackRest backup can actually be restored. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      check backup health and say whether a restore from the latest backup
+      would work.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "wal_continuity"
+          - "WAL chain"
+          - "missing"
+          - "consistent state"
+          - "broken"
+      expected_diagnosis:
+        category: "pgbackrest_wal_chain_broken"
+        objective_evidence_signal: pgbackrest_wal_chain_broken
+        narrative: "The agent should read wal_continuity from get_pgbackrest_status and report that the chain is broken: the segment the latest backup itself needs (wal_continuity.gaps, consistency_reachable=false) is missing from the repo, so PostgreSQL could not start from that backup and a restore must not be attempted. It should not take the healthy stanza status (status_code=0) as proof the backup is usable, and should hand the decision to a human (take a new full backup, or recover the segment) rather than call run_pgbackrest_backup or restore_from_backup itself."
+    timeout: 90s
+
+  - id: db-pgbackrest-wal-gap-k8s
+    name: "pgBackRest WAL chain broken (Kubernetes pod)"
+    category: database
+    severity: high
+    description: >
+      db-pgbackrest-wal-gap against the self-managed pgBackRest pod
+      (testing/k8s/pgbackrest-demo.yaml) with the whole helpdesk stack
+      in-cluster: the latest backup's start segment is moved aside in the
+      pod's repo, so the WAL check (get_pgbackrest_status over kubectl exec)
+      must report the chain broken and pbs_pgbackrest_health_triage must stop
+      at a human on the pgbackrest_wal_chain_broken signal. Added v0.32 to
+      check item 1's broken-chain detection on Kubernetes, not only its
+      healthy path.
+    # The gateway resolves the alias from its own infrastructure config
+    # (testing/k8s/helm-values-pgbackrest.yaml); the harness needs none.
+    agent_conn_override: pgbackrest-k8s
+    direct_agent: sysadmin
+    prerequisites: |
+      The helpdesk stack deployed in-cluster with
+      testing/k8s/helm-values-pgbackrest.yaml, the pgBackRest pod applied in
+      namespace db (kubectl apply -n db -f testing/k8s/pgbackrest-demo.yaml)
+      with a first full backup taken, and the harness's kubectl able to reach
+      the cluster (--context, or FAULTTEST_KUBE_CONTEXT). Run via the gateway
+      (--via-gateway, through a port-forward) with --conn pgbackrest-k8s.
+
+      Same inject/teardown as db-pgbackrest-wal-gap, run in the pod with
+      kubectl exec instead of docker exec. Neither touches PGDATA or the
+      running instance. Namespace db and selector app=pgbackrest-demo are
+      fixed here, as in the other K8s faults' scripts.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db
+        POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- sh -c '
+          set -e
+          seg=$(su postgres -c "pgbackrest --stanza=main info --output=json" 2>/dev/null | grep -o "\"start\":\"[0-9A-F]\{24\}\"" | tail -1 | cut -d\" -f4)
+          test -n "$seg"
+          f=$(ls /var/lib/pgbackrest/archive/main/*/"$(echo "$seg" | cut -c1-16)"/"$seg"-*)
+          mv "$f" "$f.hidden-by-fault"
+          echo "hid $f"
+        '
+    teardown:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db
+        POD=$(kubectl $CTX_ARG get pod -n "$NS" -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        kubectl $CTX_ARG exec -n "$NS" "$POD" -- sh -c '
+          for f in $(find /var/lib/pgbackrest/archive -name "*.hidden-by-fault"); do
+            mv "$f" "${f%.hidden-by-fault}"
+          done
+        '
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      A routine backup audit wants confirmation that this database's latest
+      pgBackRest backup can actually be restored. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      check backup health and say whether a restore from the latest backup
+      would work.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "wal_continuity"
+          - "WAL chain"
+          - "missing"
+          - "consistent state"
+          - "broken"
+      expected_diagnosis:
+        category: "pgbackrest_wal_chain_broken"
+        objective_evidence_signal: pgbackrest_wal_chain_broken
+        narrative: "Same as db-pgbackrest-wal-gap: the agent should read wal_continuity from get_pgbackrest_status and report the chain broken (the segment the latest backup itself needs is missing, consistency_reachable=false), so a restore must not be attempted, and hand the decision to a human rather than call run_pgbackrest_backup or restore_from_backup."
+    timeout: 90s
+
   - id: db-pgdata-corrupted
     name: "Data directory corrupted — restore from latest backup"
     category: database
@@ -532,6 +696,12 @@ failures:
     # across every database-category fault; this needs its own container
     # with a real backup already taken).
     agent_conn_override: pgbackrest-db
+    # pbs_db_data_loss_triage starts on the database agent, but the evidence
+    # (pg_control missing) is only in the host logs it escalates to the
+    # sysadmin agent for. A direct run has no escalation, so it asks sysadmin
+    # outright, as host-pg-crash does. Asked the database agent, it scored
+    # 70% and 20% on two runs, 2026-10-16, depending on wording alone.
+    direct_agent: sysadmin
     prerequisites: |
       Requires the dedicated pgBackRest target
       (testing/docker/docker-compose.pgbackrest.yaml) with an initial
@@ -572,8 +742,17 @@ failures:
       # pgbackrest restore outright ("[038]: unable to restore while
       # PostgreSQL is running") until removed — --force does NOT bypass
       # this, it means something else to pgBackRest.
+      #
+      # Skipped when postgres is already up: after a successful remediation
+      # the rm below would delete the LIVE postmaster.pid, defeating that
+      # same [038] guard, and restore over a running server (found 2026-10-17
+      # on the VM variant). pg_isready needs no -h here: client and server
+      # are the same build in the same image, so the socket dir matches.
       script_inline: |
         set -e
+        if docker exec helpdesk-test-pg-pgbackrest pg_isready -q; then
+          echo "postgres is up: nothing to repair"; exit 0
+        fi
         docker exec -u postgres helpdesk-test-pg-pgbackrest sh -c '
           PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
           rm -f "$PGDATA/postmaster.pid"
@@ -581,6 +760,11 @@ failures:
         '
         docker restart helpdesk-test-pg-pgbackrest
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    remediation:
+      # Checked after the gateway's auto-chained restore: without it a PASS
+      # graded the diagnosis only, whether or not postgres came back.
+      verify_sql: "SELECT 1"
+      verify_timeout: "120s"
     prompt: >
       Monitoring flagged that this database is unreachable. The
       connection_string is "{{connection_string}}" — use it verbatim for
@@ -608,6 +792,107 @@ failures:
     # 2026-10-07: 90s cut the connection mid-remediation, right as
     # restore_from_backup was running — the chain itself was correct, only
     # the client timeout was too short to let it finish.
+    timeout: 300s
+
+  - id: db-pgdata-corrupted-unarchived-tail
+    name: "Data directory corrupted with commits not yet archived — restore keeps the pg_wal tail"
+    category: database
+    severity: critical
+    description: >
+      db-pgdata-corrupted, with archiving broken before the crash so the last
+      commits exist only in pg_wal: row A in a completed segment waiting as
+      .ready, row B in the open segment. Before v0.32 item 13, pgbackrest
+      --delta restore emptied pg_wal and both rows were lost (the canary run,
+      docs/samples/SAMPLE024.md). restore_from_backup now saves the tail,
+      copies it back and archive-pushes it; this fault proves the whole agent
+      chain does that, through playbook 1.6, and checks the rows themselves
+      with verify_sql rather than trusting the chain's own report.
+    agent_conn_override: pgbackrest-db
+    direct_agent: sysadmin
+    prerequisites: |
+      Same as db-pgdata-corrupted: the dedicated pgBackRest target with
+      archiving configured (testing/docker/setup-pgbackrest-backup.sh).
+      Docker-only. The inject takes its own full backup first, so the backup
+      is fresh (never refused as stale) and the archive end is this run's.
+
+      verify_sql is checked only when remediation runs (FAULTTEST_REMEDIATE=
+      true via the gateway, as faulttest-gateway-pgbackrest runs it). The
+      harness checks it after the gateway's own chain too, not only after a
+      remediation the harness triggers itself.
+    inject:
+      type: shell_exec
+      # The archive_command reload is asynchronous, so the sleep before the
+      # WAL switch; the .ready check makes injection fail loudly if row A's
+      # segment was archived anyway, rather than test nothing.
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        docker exec -u postgres "$C" pgbackrest --stanza=main --type=full backup
+        docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+          -c "ALTER SYSTEM SET archive_command = '/bin/false'" -c "SELECT pg_reload_conf()"
+        sleep 2
+        docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+          -c "DROP TABLE IF EXISTS canary_wal_tail" \
+          -c "CREATE TABLE canary_wal_tail (id int PRIMARY KEY, segment text)" \
+          -c "INSERT INTO canary_wal_tail VALUES (1, 'A: completed, .ready, never archived')" \
+          -c "SELECT pg_switch_wal()" \
+          -c "INSERT INTO canary_wal_tail VALUES (2, 'B: open segment')"
+        sleep 2
+        docker exec "$C" sh -c 'ls /var/lib/postgresql/data/pg_wal/archive_status | grep -q "\.ready$"'
+        docker exec "$C" rm -f /var/lib/postgresql/data/global/pg_control
+        docker restart "$C"
+    inject_timeout: 120s
+    teardown:
+      type: shell_exec
+      # Up (remediation worked): archiving is already back (the restore
+      # brought back the backup's postgresql.auto.conf); drop the table and
+      # switch WAL so the drop is archived. Down: db-pgdata-corrupted's own
+      # repair, which also loses the canary rows; the table was never
+      # archived, so it's gone afterwards. The saved pg_wal dirs are this
+      # fault's own test data: always removed.
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        docker exec -u postgres "$C" sh -c 'rm -rf /var/lib/postgresql/pg_wal.saved-*'
+        if docker exec "$C" pg_isready -q; then
+          docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'" \
+            -c "SELECT pg_reload_conf()" -c "DROP TABLE IF EXISTS canary_wal_tail" -c "SELECT pg_switch_wal()"
+          exit 0
+        fi
+        docker exec -u postgres "$C" sh -c '
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza=main --delta restore
+        '
+        docker restart "$C"
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    remediation:
+      # Both rows back (commits that were only in pg_wal survived the
+      # restore) and archiving on again.
+      verify_sql: >
+        SELECT (SELECT count(*) FROM canary_wal_tail) = 2
+           AND current_setting('archive_command') <> '/bin/false'
+      verify_timeout: "120s"
+    prompt: >
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
+    evaluation:
+      expected_tools:
+        - get_host_logs
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "Same diagnosis and chain as db-pgdata-corrupted (data_loss_triage -> sysadmin host triage -> pgbackrest_health_triage -> pgbackrest_restore_remediate). What differs is the restore: restore_from_backup's result has a pg_wal_tail with replay_through_wal past the archive end and row A's segment in pushed_to_archive, verify_restore_recovery returns verified with replayed_through_wal, and the remediation's findings say the commits in the pg_wal tail were recovered rather than lost."
     timeout: 300s
 
   - id: db-pgdata-corrupted-vm
@@ -700,6 +985,17 @@ failures:
         # `systemctl restart`/`show`, not run-as=postgres, so wrapping in
         # `sudo -u postgres` would be rejected outright ("not allowed to
         # execute ... as postgres"), not merely prompt for a password.
+        #
+        # Skipped when the unit is already active: after a successful
+        # remediation the rm below would delete the LIVE postmaster.pid and
+        # restore over a running server (found 2026-10-17). Checks the unit,
+        # not pg_isready, because the socket directory differs by distro
+        # (/var/run/postgresql on Debian/Ubuntu, /run/postgresql + /tmp on RHEL
+        # PGDG, /tmp from source) while PG_UNIT is already this script's one
+        # per-distro setting. is-active needs no sudo.
+        if systemctl is-active --quiet "$PG_UNIT"; then
+          echo "$PG_UNIT is active: nothing to repair"; exit 0
+        fi
         PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
         rm -f "$PGDATA/postmaster.pid"
         pgbackrest --stanza="$STANZA" --delta restore

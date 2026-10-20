@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-governance faulttest faulttest-gateway recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -63,6 +63,15 @@ test:
 test-nocache:
 	-go test -v --count=1 ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
 	@$(SUMMARY_CMD) $(TEST_LOG)
+
+# Regenerate the per-tool reference pages in docs/tools/ from the agents' code.
+# The same tests run in `make test` and CI in compare mode and fail when a page
+# is stale or a tool lacks a capability or action class.
+docs-tools:
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestToolReference ./agents/...
+	@# capabilities.md is built from the agent pages, so it must come second.
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestCapabilityVocabularyDoc ./agentutil/toolref/
+	@echo "Regenerated docs/tools/. Review and commit the changes."
 
 # ---------------------------------------------------------------------------
 # Helm chart template tests (requires helm in PATH; no Kubernetes cluster needed)
@@ -138,7 +147,7 @@ integration:
 	# separate. Exercises internal/audit's Postgres backend, otherwise never
 	# run anywhere.
 	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
-		go test -tags integration -timeout 300s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+		go test -tags integration -timeout 900s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
@@ -153,10 +162,52 @@ integration-nocache:
 	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
 	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
-		go test --count=1 -tags integration -timeout 300s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
+		go test --count=1 -tags integration -timeout 900s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml down -v
+
+# ---------------------------------------------------------------------------
+# K8s integration tests (requires a cluster; destructive to one namespace)
+# ---------------------------------------------------------------------------
+# In-cluster: the restore lifecycle tools run in the helpdesk stack's own
+# sysadmin agent (its service account, RBAC, in-cluster kubectl), called
+# through its POST /tool/{name} endpoint via a port-forward, against a real
+# crash: the demo pod runs the stock postgres entrypoint, so a missing
+# pg_control means CrashLoopBackOff. The tests crash and restore the
+# database in a dedicated namespace that must end in "-destruct", never one a
+# real or test database lives in (db holds the agents' own target). The
+# target creates the namespace and the pod if needed, takes a fresh full
+# backup and archives WAL past it (CHECKPOINT so the switch isn't a no-op,
+# then pgbackrest check), as on any running server. Requires the stack
+# deployed with testing/k8s/helm-values-pgbackrest.yaml (its
+# pgbackrest-k8s-destruct entry). Not part of `make integration`, which only
+# brings up Docker; there these tests skip.
+#
+#   make integration-k8s                       # context minikube, ns db-destruct
+#   make integration-k8s K8S_CONTEXT=other K8S_DESTRUCT_NS=pg-destruct K8S_DESTRUCT_TARGET=...
+# ---------------------------------------------------------------------------
+K8S_CONTEXT         ?= minikube
+K8S_DESTRUCT_NS     ?= db-destruct
+K8S_DESTRUCT_TARGET ?= pgbackrest-k8s-destruct
+K8S_HELPDESK_NS     ?= helpdesk-system
+K8S_SYSADMIN_PORT   ?= 11103
+INTEGRATION_K8S_LOG = /tmp/helpdesk-integration-k8s.log
+
+integration-k8s:
+	@case "$(K8S_DESTRUCT_NS)" in *-destruct) ;; *) echo "Error: K8S_DESTRUCT_NS=$(K8S_DESTRUCT_NS) must end in -destruct (these tests crash and restore its database)"; exit 1;; esac
+	kubectl --context $(K8S_CONTEXT) get namespace $(K8S_DESTRUCT_NS) >/dev/null 2>&1 || kubectl --context $(K8S_CONTEXT) create namespace $(K8S_DESTRUCT_NS)
+	kubectl --context $(K8S_CONTEXT) apply -n $(K8S_DESTRUCT_NS) -f testing/k8s/pgbackrest-demo.yaml
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
+	@kubectl --context $(K8S_CONTEXT) -n $(K8S_HELPDESK_NS) port-forward svc/helpdesk-sysadmin-agent $(K8S_SYSADMIN_PORT):1103 >/tmp/helpdesk-k8s-sysadmin-pf.log 2>&1 & PF=$$!; \
+		trap "kill $$PF 2>/dev/null" EXIT; sleep 3; \
+		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) \
+		HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
+		go test --count=1 -tags integration -timeout 1800s -v -run 'K8s' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG); true
+	@$(SUMMARY_CMD) $(INTEGRATION_K8S_LOG)
 
 # ---------------------------------------------------------------------------
 # Fault injection tests (requires Docker + agents + LLM API key)
@@ -357,6 +408,59 @@ faulttest-gateway-nocache:
 	FAULTTEST_CONN_STR="host=localhost port=15432 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_AGENT_CONN_STR="faulttest-db" \
 	go test --count=1 -tags faulttest -timeout 3600s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+
+# ---------------------------------------------------------------------------
+# pgBackRest faults via gateway playbooks (requires a live gateway)
+# ---------------------------------------------------------------------------
+# The pgBackRest faults are Docker-only, so faulttest-gateway (external_compat
+# only) never runs them, and make faulttest (direct A2A) can't check what
+# defines them: the playbook endings and the objective-evidence gate
+# (expected_diagnosis.objective_evidence_signal is enforced only via the
+# gateway). This target runs them the way they are meant to run:
+#   1. health triage, diagnosis only: db-pgbackrest-repo-unreadable,
+#      db-pgbackrest-wal-gap — the broken-chain case must stop at a human,
+#      so nothing is approved past it;
+#   2. data loss with remediation in force mode: db-pgdata-corrupted and
+#      db-pgdata-corrupted-unarchived-tail — the gateway auto-chains triage →
+#      restore_from_backup, and the tail fault's verify_sql checks the commits
+#      that were only in pg_wal came back.
+#
+# Starts only the pgBackRest container and never tears anything down, so the
+# auditd database of a locally running stack (:15434) is left alone.
+#
+# Required env vars: FAULTTEST_GATEWAY_URL, FAULTTEST_API_KEY (as above).
+# The gateway's infrastructure.json must contain "pgbackrest-db"
+# (testing/testing.infra.json has it).
+# ---------------------------------------------------------------------------
+PGBACKREST_CONN_STR = host=localhost port=15435 dbname=testdb user=postgres password=testpass
+
+faulttest-gateway-pgbackrest:
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ] || [ -z "$(FAULTTEST_API_KEY)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL and FAULTTEST_API_KEY must be set"; \
+		echo "  export FAULTTEST_GATEWAY_URL=http://localhost:8080"; \
+		echo "  export FAULTTEST_API_KEY=<gateway API key>"; \
+		exit 1; \
+	fi
+	@if ! curl -sf -H "Authorization: Bearer $(FAULTTEST_API_KEY)" "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
+		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
+		exit 1; \
+	fi
+	@echo "Starting pgBackRest test database..."
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml \
+		up -d --wait postgres-pgbackrest
+	./testing/docker/setup-pgbackrest-backup.sh
+	@echo "Running pgBackRest health-triage faults via gateway (diagnosis only)..."
+	-FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_IDS=db-pgbackrest-repo-unreadable,db-pgbackrest-wal-gap \
+	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
+	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	@echo "Running db-pgdata-corrupted faults via gateway (restore remediation, force mode)..."
+	-FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_REMEDIATE=true \
+	FAULTTEST_IDS=db-pgdata-corrupted,db-pgdata-corrupted-unarchived-tail \
+	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
+	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee -a $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------

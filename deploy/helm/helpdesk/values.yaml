@@ -98,11 +98,12 @@ agents:
     auditAPIKeySecret: ""
     auditAPIKeyKey: "api-key"
     rbac:
-      # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so
-      # check_host can detect and inspect Kubernetes-managed targets
-      # (runtime=kubectl) via in-cluster kubectl. Read-only, pod-scoped —
-      # narrower than the k8s agent's ClusterRole, since this agent only
-      # ever inspects a single pod, never manages deployments/jobs/nodes.
+      # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
+      # sysadmin tools can reach Kubernetes-managed targets (runtime=kubectl)
+      # via in-cluster kubectl: pod reads, logs and exec, and for a
+      # self-managed Postgres StatefulSet the restore lifecycle (scale it to 0
+      # and back, one-off maintenance pods with its volumes). Narrower than the
+      # k8s agent's ClusterRole: no deployments, jobs or nodes.
       create: true
     # Objective-evidence framework (docs/OBJECTIVE_EVIDENCE.md): see
     # agents.database.objectiveEvidence above for the full explanation. On by

@@ -12,8 +12,20 @@ import (
 )
 
 // Playbook run outcome constants.
+//
+// A run that finishes with FINDINGS and no hand-off is one of three, by what
+// it did rather than what it said (v0.32): resolved (a remediation playbook
+// whose own trace shows a write/destructive tool call that succeeded, or a
+// triage that found nothing to fix), diagnosed (a triage playbook that
+// concluded and handed nothing on: a human decides what's next), no_action
+// (a remediation playbook that changed nothing, e.g. its precondition
+// failed). Until v0.32 all three were "resolved", so a remediation that
+// stopped at its own precondition with the database still down read the
+// same as one that fixed it.
 const (
 	OutcomeResolved          = "resolved"
+	OutcomeDiagnosed         = "diagnosed"
+	OutcomeNoAction          = "no_action"
 	OutcomeEscalated         = "escalated"
 	OutcomeTransitioned      = "transitioned" // triage handed off to a remediation playbook in the same series
 	OutcomeAbandoned         = "abandoned"

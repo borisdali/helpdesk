@@ -38,6 +38,8 @@ type RemediationResult struct {
 	// RunID is the remediation playbook run_id (plr_*). Empty when unavailable
 	// (e.g. agent_prompt remediation, or auditd not configured).
 	RunID string
+	// Playbook/Outcome are that run's series and outcome, when known.
+	Playbook, Outcome string
 }
 
 // Remediator wraps faultlib.Remediator, adding interactive approval prompts
@@ -45,6 +47,19 @@ type RemediationResult struct {
 type Remediator struct {
 	inner *faultlib.Remediator
 	cfg   *HarnessConfig
+	// faultStart is when this fault's injection began (SetFaultStart); the
+	// recovery time is measured from it.
+	faultStart time.Time
+}
+
+// SetFaultStart records when the current fault's injection began, so the
+// recovery time covers the whole incident (diagnosis, gates, remediation)
+// rather than only the final verify_sql poll. Measured from the poll alone it
+// read 0.1s after a 140s restore chain: the poll starts once the chain has
+// already finished.
+func (r *Remediator) SetFaultStart(t time.Time) {
+	r.faultStart = t
+	r.inner.SetFaultStart(t)
 }
 
 // NewRemediator creates a Remediator backed by cfg.
@@ -109,10 +124,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: "playbook"}
 	}
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := faultlib.RemediationSpeedScore(f, recoverySecs)
 	if r.cfg.EmitAndWait {
 		if resolveURL, err := r.inner.RequestFeedback(ctx, gate.RunID); err != nil {
 			slog.Warn("faulttest: failed to request feedback via hub", "run_id", gate.RunID, "err", err)
@@ -133,12 +145,15 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	} else {
 		r.submitFeedback(ctx, gate.RunID, remRunID, gate.DiagnosticReport)
 	}
+	remSeries, remOutcome := r.fetchRunSeriesOutcome(ctx, remRunID)
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
 		Score:            score,
 		Method:           "playbook",
 		RunID:            remRunID,
+		Playbook:         remSeries,
+		Outcome:          remOutcome,
 	}
 }
 
@@ -187,10 +202,7 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
 
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := faultlib.RemediationSpeedScore(f, recoverySecs)
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,
@@ -280,14 +292,20 @@ func (r *Remediator) findChildRunID(ctx context.Context, priorRunID string) stri
 // the gateway when auditd URL is absent). Returns "" if the run is still active
 // or cannot be fetched.
 func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
+	_, outcome := r.fetchRunSeriesOutcome(ctx, runID)
+	return outcome
+}
+
+// fetchRunSeriesOutcome is fetchRunOutcome plus the run's playbook series.
+func (r *Remediator) fetchRunSeriesOutcome(ctx context.Context, runID string) (seriesID, outcome string) {
 	if runID == "" {
-		return ""
+		return "", ""
 	}
 	base := r.cfg.AuditURL
 	path := "/v1/fleet/playbook-runs/" + runID
 	if base == "" {
 		if r.cfg.GatewayURL == "" {
-			return ""
+			return "", ""
 		}
 		base = r.cfg.GatewayURL
 		path = "/api/v1/fleet/playbook-runs/" + runID
@@ -295,7 +313,7 @@ func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
 	url := strings.TrimSuffix(base, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if r.cfg.GatewayAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.GatewayAPIKey)
@@ -305,16 +323,28 @@ func (r *Remediator) fetchRunOutcome(ctx context.Context, runID string) string {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 	var result struct {
-		Outcome string `json:"outcome"`
+		SeriesID    string    `json:"series_id"`
+		Outcome     string    `json:"outcome"`
+		CompletedAt time.Time `json:"completed_at"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return ""
+		return "", ""
 	}
-	return result.Outcome
+	// A run is recorded as "unknown" when it starts, and the gateway writes
+	// the real outcome from a goroutine after the hop's response has already
+	// returned. Without completed_at, that placeholder reads as terminal.
+	// Found live 2026-10-17 (db-pgdata-corrupted-vm, plr_c1901d11): the
+	// health-triage hop was read as "complete, outcome=unknown" 0.1s before
+	// its gate_pending landed, so its gate was never approved and the restore
+	// never ran. "unknown" with completed_at set is still a real, final outcome.
+	if result.Outcome == audit.OutcomeUnknown && result.CompletedAt.IsZero() {
+		return result.SeriesID, ""
+	}
+	return result.SeriesID, result.Outcome
 }
 
 // waitForChildRunComplete waits for the escalation chain triggered by parentRunID
@@ -1025,7 +1055,11 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 // pollRecovery uses the resolved connection string (infra alias expansion) and
 // delegates to faultlib.PollRecovery.
 func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
-	return faultlib.PollRecovery(ctx, r.resolvedConnStr(), verifySQL, timeout)
+	secs, err := faultlib.PollRecovery(ctx, r.resolvedConnStr(), verifySQL, timeout)
+	if err == nil {
+		secs = faultlib.RecoveryTime(r.faultStart, secs, time.Now())
+	}
+	return secs, err
 }
 
 // resolvedConnStr resolves cfg.ConnStr through the infrastructure config so
@@ -1246,21 +1280,34 @@ func primaryHypothesisText(diagReport map[string]any) string {
 	return ""
 }
 
-// printIncidentSummary prints a compact incident narrative link after a successful gate+recovery.
-func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, gatewayURL string) {
+// printIncidentSummary prints a compact incident narrative link after a
+// successful gate+recovery: recoverySecs is from injection to verify_sql
+// passing, remPlaybook/remOutcome the last hop that ran (the remediation),
+// when known. It used to print the first hop's target as "Remediation"
+// (pbs_sysadmin_host_triage on a 4-hop restore chain) and "resolved in 0.1s"
+// (the verify_sql poll alone).
+func printIncidentSummary(resp testutil.AgentResponse, recoverySecs float64, remPlaybook, remOutcome, gatewayURL string) {
 	if resp.RunID == "" {
 		return
 	}
-	fmt.Printf("Incident %s — resolved in %.1fs\n", resp.RunID, recoverySecs)
+	fmt.Printf("Incident %s — recovered %.1fs after the fault was injected\n", resp.RunID, recoverySecs)
 	if diag := primaryHypothesisText(resp.DiagnosticReport); diag != "" {
 		fmt.Printf("  Diagnosis  : %s\n", diag)
 	}
-	target := resp.TransitionTarget
-	if target == "" {
-		target = resp.EscalationTarget
+	if remPlaybook == "" {
+		remPlaybook = resp.TransitionTarget
+		if remPlaybook == "" {
+			remPlaybook = resp.EscalationTarget
+		}
+		if remPlaybook != "" {
+			remPlaybook += " (next hop; the chain's last hop is unknown)"
+		}
 	}
-	if target != "" {
-		fmt.Printf("  Remediation: %s\n", target)
+	if remPlaybook != "" {
+		if remOutcome != "" {
+			remPlaybook += " (" + remOutcome + ")"
+		}
+		fmt.Printf("  Remediation: %s\n", remPlaybook)
 	}
 	if gatewayURL != "" {
 		base := strings.TrimSuffix(gatewayURL, "/")

@@ -335,6 +335,8 @@ See [Fault Injection](FAULT_INJECTION_TESTING.md) for the internal Docker-compos
 
   Trigger: manually before release; optionally nightly on staging.
 
+  **pgBackRest faults (`make faulttest-gateway-pgbackrest`).** The pgBackRest faults are Docker-only, so the target above never runs them. Layer 4a runs them, but direct A2A can't check what defines them: the playbook endings and the `objective_evidence_signal` gate, which only a gateway run enforces. This target runs them through a live gateway against the local pgBackRest container. It runs `db-pgbackrest-repo-unreadable` and `db-pgbackrest-wal-gap` as diagnosis only, because a broken WAL chain must stop at a human. It runs `db-pgdata-corrupted` with remediation in force mode, so the gateway auto-chains triage into `restore_from_backup`. It starts only the pgBackRest container and tears nothing down. It needs `FAULTTEST_GATEWAY_URL` and `FAULTTEST_API_KEY`, and a gateway whose `infrastructure.json` has `pgbackrest-db`. Trigger: before a release that touches backup or restore.
+
   ### Layer 4c: Stability Re-certification (`make recertify`)
 
   Goal: After a playbook version update (via `vault suggest-update` + activation), re-run stability certification for affected series to confirm the new version meets the STABLE threshold (≥80% pass rate, ≤30pp confidence spread). This closes the Vault improvement loop: suggest-update → activate → recertify → STABLE cert.

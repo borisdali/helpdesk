@@ -301,13 +301,15 @@ Faults that have a `remediation` block in the catalog will trigger the Playbook 
 
 **Remediation scoring:**
 
-Each remediation attempt produces a `remediation_score` (0.0–1.0) based on recovery speed relative to the fault's `verify_timeout` (default 120s):
+Each remediation attempt produces a `remediation_score` (0.0–1.0) from its recovery time. The recovery time (`recovery_time_seconds`, the `RECOVERED … after injection` line) runs from the fault's injection to the moment `verify_sql` first passes: the whole incident, diagnosis, gates and remediation included (*v0.32*). It used to run from the start of the `verify_sql` poll, which begins only once the remediation chain has finished, so a 140s restore chain reported 0.1s.
 
 | Recovery time | Score | Meaning |
 |---------------|:-----:|---------|
-| ≤ half the timeout | **1.0** | Fast recovery — Playbook acted promptly |
-| ≤ full timeout | **0.75** | Recovered within the window, but slowly |
-| Timed out | **0.0** | Recovery not confirmed |
+| ≤ half the fault's `timeout` | **1.0** | Fast recovery |
+| Longer, but `verify_sql` passed | **0.75** | Recovered, slowly |
+| `verify_sql` never passed within `verify_timeout` | **0.0** | Recovery not confirmed |
+
+The bar is half the fault's own `timeout`, its budget for the whole run (*v0.32*; it was half of `verify_timeout`, which only bounds the `verify_sql` poll and, measured from injection, no multi-hop chain could meet). This is a stopgap: two buckets can't rank one restore against another, and diagnosis time counts against the remediation. To compare remediations, use the times themselves (`recovery_time_seconds`, and `vault versions`' average recovery time per playbook version).
 
 The `overall_score` combines diagnosis and remediation:
 
@@ -1252,7 +1254,8 @@ The JSON report contains one entry per fault:
 | `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
 | `judge_model` | Model that produced the judge score (omitted when skipped) |
 | `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |
-| `remediation_score` | 0.0–1.0: `1.0` if recovered within half the verify timeout, `0.75` within the full timeout, `0.0` if timed out. Only present when `--remediate` was set. |
+| `recovery_time_seconds` | Seconds from the fault's injection to `verify_sql` first passing (*v0.32*; before, from the start of the `verify_sql` poll). Only present when `--remediate` was set. |
+| `remediation_score` | 0.0–1.0: `1.0` if recovered within half the fault's `timeout`, `0.75` if recovered later, `0.0` if `verify_sql` never passed. Only present when `--remediate` was set. |
 | `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
 | `overall_score` | `score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
 | `remediation_judge_score` | 0.0–1.0 mapped from the judge's 0–3 score. Only present when `--remediation-judge` was set and the judge call succeeded. |

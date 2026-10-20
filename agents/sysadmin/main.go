@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/a2aproject/a2a-go/a2a"
 	"github.com/google/uuid"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/tool"
@@ -19,7 +18,6 @@ import (
 	"helpdesk/agentutil"
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
-	"helpdesk/internal/buildinfo"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
@@ -58,7 +56,7 @@ func main() {
 	// comment for the live incident (2026-09-07) this convention exists to
 	// prevent from recurring.
 	if rulesPath := os.Getenv("HELPDESK_SYSADMIN_EVIDENCE_RULES"); rulesPath != "" {
-		pgbackrestEvidenceRules = loadSysadminEvidenceRules(rulesPath)
+		pgbackrestEvidenceRules, restoreVerifyEvidenceRules = loadSysadminEvidenceRules(rulesPath)
 	} else {
 		slog.Warn("HELPDESK_SYSADMIN_EVIDENCE_RULES not set — objective-evidence force-gate disabled: no forced-gate signals will fire from get_pgbackrest_status, and faulttest will report EVIDENCE COVERAGE GAP on every run that would otherwise trip one")
 	}
@@ -140,37 +138,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	const agentName = "sysadmin_agent"
-
-	cardOpts := agentutil.CardOptions{
-		Version:  buildinfo.Version,
-		Provider: &a2a.AgentProvider{Org: "Helpdesk"},
-		SkillTags: map[string][]string{
-			agentName:                            {"host", "infrastructure", "diagnostics"},
-			agentName + "-check_host":            {"host", "container", "status"},
-			agentName + "-get_host_logs":         {"host", "container", "logs"},
-			agentName + "-check_disk":            {"host", "storage", "diagnostics"},
-			agentName + "-check_memory":          {"host", "memory", "diagnostics"},
-			agentName + "-read_pg_log_file":      {"host", "postgres", "logs", "diagnostics"},
-			agentName + "-restart_container":     {"host", "container", "remediation"},
-			agentName + "-restart_service":       {"host", "systemd", "remediation"},
-			agentName + "-get_pgbackrest_status": {"host", "backup", "diagnostics"},
-			agentName + "-run_pgbackrest_backup": {"host", "backup", "remediation"},
-			agentName + "-restore_from_backup":   {"host", "backup", "remediation"},
-		},
-		SkillExamples: map[string][]string{
-			agentName + "-check_host":            {"Is the alloydb-omni container running?"},
-			agentName + "-get_host_logs":         {"Show the last 200 log lines from the prod_db container"},
-			agentName + "-restart_container":     {"Restart the prod_db container — crash loop detected"},
-			agentName + "-get_pgbackrest_status": {"Check whether pgBackRest's last backup for prod_db is stale"},
-		},
-		SkillAutoRemediationEligible: map[string]bool{
-			agentName + "-restart_container": true,
-			agentName + "-restart_service":   true,
-		},
-		SkillSchemaHash: agentutil.ComputeSchemaFingerprints(agentName, tools),
-		ToolSchemas:     agentutil.ComputeInputSchemas(tools),
-	}
+	cardOpts := cardOptions(tools)
 
 	if err := agentserve.ServeWithTracingAndDirectTools(ctx, sysadminAgent, cfg, traceStore, auditStore, NewSysadminDirectRegistry(), cardOpts); err != nil {
 		slog.Error("server stopped", "err", err)
@@ -189,7 +157,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getHostLogsToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_host_logs",
-		Description: "Retrieve recent log lines from the database process. For Docker/Podman uses 'docker/podman logs'. For systemd uses journalctl. Use when the DB is down and read_pg_log is unavailable.",
+		Description: "Retrieve recent log lines from the database process. For Docker/Podman uses 'docker/podman logs'. For systemd uses journalctl. For a Kubernetes pod uses 'kubectl logs', with the previous container run's output first when it has restarted (a crash-looping postgres's fatal startup error is there). Use when the DB is down and read_pg_log is unavailable.",
 	}, getHostLogsTool)
 	if err != nil {
 		return nil, err
@@ -221,7 +189,7 @@ func createTools() ([]tool.Tool, error) {
 
 	restartContainerToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "restart_container",
-		Description: "Restart a Docker or Podman container hosting the database. Requires the server to have a container_runtime and container_name configured in infrastructure.json. Use restart_service for systemd-managed databases.",
+		Description: "Restart a Docker or Podman container hosting the database. Requires the server to have a container_runtime and container_name configured in infrastructure.json. Use restart_service for systemd-managed databases. On Kubernetes (a self-managed Postgres StatefulSet): resumes an instance restore_from_backup left scaled to 0, back to its recorded replicas; otherwise deletes the pod, which the StatefulSet recreates on the same volumes.",
 	}, restartContainerTool)
 	if err != nil {
 		return nil, err
@@ -237,7 +205,7 @@ func createTools() ([]tool.Tool, error) {
 
 	getPgBackRestStatusToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_pgbackrest_status",
-		Description: "Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, and whether it's stale relative to the expected schedule. This is the backup-taking precondition — distinct from the database agent's get_backup_status, which checks WAL archiving health via pg_stat_archiver.",
+		Description: "Check pgBackRest backup-job health: stanza status, the most recent backup's label/time/type, whether it's stale relative to the expected schedule, and wal_continuity — whether the archived WAL needed to restore that backup to the end of the archive is present and unbroken (status continuous, broken, unverified or no_backup; broken lists the gaps and where recovery would stop). This is the backup-taking precondition — distinct from the database agent's get_backup_status, which checks WAL archiving health via pg_stat_archiver.",
 	}, getPgBackRestStatusTool)
 	if err != nil {
 		return nil, err
@@ -253,8 +221,16 @@ func createTools() ([]tool.Tool, error) {
 
 	restoreFromBackupToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "restore_from_backup",
-		Description: "Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready). Use only when get_pgbackrest_status confirms a healthy, non-stale backup exists and the instance is confirmed down — never against a broken repo/stanza or a live instance.",
+		Description: "Restore the database from the latest pgBackRest backup, overwriting the current data directory (destructive — requires operator approval). Restore-to-latest only: no point-in-time target. Refuses outright if the server is still accepting connections (pg_isready), or if the latest backup's WAL chain is not confirmed continuous to the end of the archive (wal_continuity.status other than continuous). Use only when get_pgbackrest_status confirms a healthy, non-stale backup with wal_continuity.status=continuous exists and the instance is confirmed down — never against a broken repo/stanza, a broken or unverified WAL chain, or a live instance. It keeps the WAL that was in pg_wal: moved aside before the restore, put back for recovery to replay past the end of the archive, and the segments past it pushed to the archive (pg_wal_tail: saved_to, replay_through_wal, pushed_to_archive); commits that were on disk but never archived are recovered rather than lost. On success it records where recovery should end (prediction: the archive end, any pg_wal tail, and the new timeline); after restarting the instance, call verify_restore_recovery to confirm where recovery actually ended. On Kubernetes (a self-managed Postgres StatefulSet, which a crash leaves crash-looping) it scales the StatefulSet to 0, restores in a one-off pod with its volumes, and leaves it scaled down: the result's quiesced field says so, and restart_container resumes it.",
 	}, restoreFromBackupTool)
+	if err != nil {
+		return nil, err
+	}
+
+	verifyRestoreRecoveryToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "verify_restore_recovery",
+		Description: "After restore_from_backup and the restart, check where PostgreSQL's recovery actually ended against where restore_from_backup predicted it would (the last WAL segment restored from the archive, and the new timeline). Reads PostgreSQL's own recovery log lines. status: verified (as predicted), mismatch (stopped early, went past, or a different timeline — report it), not_found (no completed recovery in the log yet: the instance may not be restarted, or recovery failed before promotion), unverified (no prediction recorded for this target, or nothing restored from the archive). Also returns the exact LSN redo ended at, and replayed_through_wal when recovery replayed WAL that restore_from_backup put back into pg_wal past the archive. Read-only.",
+	}, verifyRestoreRecoveryTool)
 	if err != nil {
 		return nil, err
 	}
@@ -270,21 +246,23 @@ func createTools() ([]tool.Tool, error) {
 		getPgBackRestStatusToolDef,
 		runPgBackRestBackupToolDef,
 		restoreFromBackupToolDef,
+		verifyRestoreRecoveryToolDef,
 	}, nil
 }
 
 // loadSysadminEvidenceRules loads agents/sysadmin/objective_evidence.yaml-shaped
-// rules from path. Mirrors agents/database/main.go's loadDBEvidenceRules, sized
-// down to this agent's one rule set so far (get_pgbackrest_status) — extend the
-// same way (one more named return + one more rulesByTool[...] lookup) if a
-// second sysadmin tool ever needs its own objective-evidence probe.
-func loadSysadminEvidenceRules(path string) (pgbackrestRules []evidence.Rule) {
+// rules from path. Mirrors agents/database/main.go's loadDBEvidenceRules: one
+// named return per sysadmin tool with its own objective-evidence probe.
+func loadSysadminEvidenceRules(path string) (pgbackrestRules, restoreVerifyRules []evidence.Rule) {
 	rulesByTool, err := evidence.LoadRules(path)
 	if err != nil {
-		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pgbackrest_status until this is fixed", "path", path, "err", err)
-		return nil
+		slog.Error("failed to load objective_evidence rules — no forced-gate signals will fire from get_pgbackrest_status or verify_restore_recovery until this is fixed", "path", path, "err", err)
+		return nil, nil
 	}
 	pgbackrestRules = rulesByTool["get_pgbackrest_status"]
-	slog.Info("objective_evidence rules loaded", "path", path, "get_pgbackrest_status_rules", len(pgbackrestRules))
-	return pgbackrestRules
+	restoreVerifyRules = rulesByTool["verify_restore_recovery"]
+	slog.Info("objective_evidence rules loaded", "path", path,
+		"get_pgbackrest_status_rules", len(pgbackrestRules),
+		"verify_restore_recovery_rules", len(restoreVerifyRules))
+	return pgbackrestRules, restoreVerifyRules
 }

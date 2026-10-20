@@ -20,8 +20,8 @@ type RemediationResult struct {
 	Passed           bool
 	RecoveryTimeSecs float64
 	Err              error
-	// Score is 0.0-1.0: 1.0 if recovered within half the verify timeout,
-	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	// Score is 0.0-1.0: see RemediationSpeedScore; 0.0 if verify_sql timed
+	// out or remediation wasn't attempted.
 	Score float64
 	// Method records how remediation was triggered: "playbook", "agent_prompt", or "none".
 	Method string
@@ -95,14 +95,49 @@ type ApproveRunStep struct {
 
 // Remediator triggers playbook or agent remediation and polls for recovery.
 type Remediator struct {
-	cfg    *HarnessConfig
-	client *http.Client
+	cfg        *HarnessConfig
+	client     *http.Client
+	faultStart time.Time // see SetFaultStart
 }
 
 // longClient is used for calls that block while an agent chain runs (e.g.
 // proceed-escalation). It carries no fixed timeout; the caller's context
 // provides the only deadline.
 var longClient = &http.Client{}
+
+// RemediationSpeedScore is the remediation_score of a recovery that took
+// recoverySecs from the fault's injection: 1.0 within half the fault's own
+// timeout (its budget for the whole run), else 0.75. Not recovering at all
+// scores 0, decided by the caller. Until v0.32 the bar was half of
+// verify_timeout, written for a recovery time that covered only the
+// verify_sql poll; measured from injection, a multi-hop chain could never
+// meet that 60s. A stopgap, to revisit: two buckets can't
+// rank restores, and diagnosis time counts against the remediation (see
+// project memory, v0.32 item 5 / item 15's RTO work).
+func RemediationSpeedScore(f Failure, recoverySecs float64) float64 {
+	if recoverySecs <= f.TimeoutDuration().Seconds()/2 {
+		return 1.0
+	}
+	return 0.75
+}
+
+// RecoveryTime is the recovery time reported for a verify_sql poll that
+// succeeded at now after pollSecs: measured from faultStart (the fault's
+// injection) when known, else the poll's own duration.
+func RecoveryTime(faultStart time.Time, pollSecs float64, now time.Time) float64 {
+	if faultStart.IsZero() {
+		return pollSecs
+	}
+	return now.Sub(faultStart).Seconds()
+}
+
+// SetFaultStart records when the current fault's injection began:
+// VerifyRecovery then reports the recovery time from it (the whole incident)
+// rather than from the start of its own verify_sql poll, which begins only
+// after the remediation chain has finished.
+func (r *Remediator) SetFaultStart(t time.Time) {
+	r.faultStart = t
+}
 
 // NewRemediator creates a new Remediator with the given config.
 func NewRemediator(cfg *HarnessConfig) *Remediator {
@@ -141,7 +176,21 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 	if triggerErr != nil {
 		return RemediationResult{Err: fmt.Errorf("remediation trigger: %w", triggerErr), Method: method}
 	}
+	return r.VerifyRecovery(ctx, f, method)
+}
 
+// VerifyRecovery polls f's verify_sql (default "SELECT 1") until it succeeds
+// or verify_timeout passes, and scores how fast it did. Remediate calls it
+// after triggering remediation itself; the faulttest suite calls it directly
+// after remediation the gateway ran (an auto-chained hop, or the chain a gate
+// approval started), which otherwise nothing checked: a restore fault scored
+// on its diagnosis alone, whether or not the data came back.
+//
+// The query runs against the fault's own target when it has an
+// agent_conn_override (resolved from infrastructure.json, which for the
+// pgBackRest fixture is a localhost DSN the harness can reach), else ConnStr.
+func (r *Remediator) VerifyRecovery(ctx context.Context, f Failure, method string) RemediationResult {
+	spec := f.Remediation
 	verifySQL := spec.VerifySQL
 	if verifySQL == "" {
 		verifySQL = "SELECT 1"
@@ -154,15 +203,19 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		}
 	}
 
-	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	connStr := r.cfg.ConnStr
+	if f.AgentConnOverride != "" {
+		connStr = ResolvedAgentConnStr(r.cfg, f)
+	}
+	recoverySecs, err := PollRecovery(ctx, connStr, verifySQL, timeout)
+	if err == nil {
+		recoverySecs = RecoveryTime(r.faultStart, recoverySecs, time.Now())
+	}
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
 
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := RemediationSpeedScore(f, recoverySecs)
 
 	return RemediationResult{
 		Passed:           true,
@@ -354,16 +407,36 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 		// specifically what approves and triggers the remediation phase.
 		Purpose: "remediation",
 	}
-	resp, err := r.ProceedEscalation(ctx, gate.RunID, proceedReq)
-	if err != nil {
-		return fmt.Errorf("proceed-escalation: %w", err)
+	// A chain can stop at more than one gate: approving the first can start
+	// a hop that gates again (e.g. data-loss or restart triage → host triage
+	// → the remediation), and the response then names that hop's run, still
+	// gate_pending. Approve each in turn, as the faulttest CLI does; without
+	// this the remediation never ran and verify_sql failed (found running
+	// faulttest-gateway on db-connection-refused, 2026-10-20).
+	runID := gate.RunID
+	for hop := 1; ; hop++ {
+		resp, err := r.ProceedEscalation(ctx, runID, proceedReq)
+		if err != nil {
+			return fmt.Errorf("proceed-escalation (gate %d, run %s): %w", hop, runID, err)
+		}
+		if resp.Status == "pending_approval" {
+			return r.runApprovalLoop(ctx, resp)
+		}
+		if resp.Status == "pending_gate" && resp.RunID != "" && resp.RunID != runID {
+			if hop >= maxChainGates {
+				return fmt.Errorf("chain still at a gate (run %s) after approving %d gates", resp.RunID, hop)
+			}
+			slog.Info("gate approved: chain stopped at another gate, approving it", "gate", hop+1, "run_id", resp.RunID, "gate_reason", resp.GateReason)
+			runID = resp.RunID
+			continue
+		}
+		slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary, "gates", hop)
+		return nil
 	}
-	if resp.Status == "pending_approval" {
-		return r.runApprovalLoop(ctx, resp)
-	}
-	slog.Info("gate approved: remediation triggered", "status", resp.Status, "summary", resp.Summary)
-	return nil
 }
+
+// maxChainGates bounds how many gates RunGateLoop approves along one chain.
+const maxChainGates = 5
 
 // WaitForGateResolution polls GET /api/v1/fleet/playbook-runs/{runID} until the
 // run's outcome is no longer "gate_pending". It respects ctx cancellation and
@@ -782,12 +855,6 @@ func (r *Remediator) WaitForStepApprovalViaHub(ctx context.Context, approvalID s
 			return d.Status, nil
 		}
 	}
-}
-
-// pollRecovery runs verifySQL against r.cfg.ConnStr every 5 seconds until it
-// succeeds or timeout elapses. Returns the elapsed seconds on first success.
-func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
-	return PollRecovery(ctx, r.cfg.ConnStr, verifySQL, timeout)
 }
 
 // PollRecovery runs verifySQL against connStr every 5 seconds until it succeeds

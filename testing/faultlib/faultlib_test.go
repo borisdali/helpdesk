@@ -79,6 +79,93 @@ func TestObjectiveEvidenceSignal_MatchesRealAgentRules(t *testing.T) {
 	}
 }
 
+// TestDirectAgent_MatchesDiagnosisPlaybookAgent checks that a direct
+// (non-gateway) run asks the same agent the fault's diagnosis playbook runs
+// on. Without it, a database-category fault whose playbook runs on the
+// sysadmin agent silently goes to the database agent, which lacks the
+// playbook's tools: db-pgbackrest-wal-gap did exactly that on 2026-10-16 and
+// got "ready for restore" for a broken WAL chain. The text-only evaluator
+// couldn't tell, since "pgbackrest" in the prompt-echo matched its keywords.
+func TestDirectAgent_MatchesDiagnosisPlaybookAgent(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+
+	paths, err := filepath.Glob(filepath.Join("..", "..", "playbooks", "*.yaml"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no playbooks found: %v", err)
+	}
+	seriesAgent := map[string]string{}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		var pb struct {
+			SeriesID  string `yaml:"series_id"`
+			AgentName string `yaml:"agent_name"`
+		}
+		if err := yaml.Unmarshal(data, &pb); err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		agent := map[string]string{
+			"": "database", "postgres_database_agent": "database",
+			"k8s_agent": "k8s", "sysadmin_agent": "sysadmin",
+		}[pb.AgentName]
+		if agent == "" {
+			t.Fatalf("%s: unknown agent_name %q", path, pb.AgentName)
+		}
+		seriesAgent[pb.SeriesID] = agent
+	}
+
+	cfg := &HarnessConfig{DBAgentURL: "database", K8sAgentURL: "k8s", SysadminAgentURL: "sysadmin"}
+	checked := 0
+	for _, f := range cat.Failures {
+		if f.DirectAgent != "" && !DirectAgents[f.DirectAgent] {
+			t.Errorf("fault %q: direct_agent %q is not one of database, k8s, sysadmin", f.ID, f.DirectAgent)
+			continue
+		}
+		// Database-agent playbooks are skipped: they start with SQL and
+		// escalate (pbs_db_restart_triage → sysadmin), so a direct run that
+		// goes straight to the escalation target, as host-pg-crash does, is
+		// fine. The hazard is the reverse, a sysadmin/k8s playbook whose
+		// tools the category's agent doesn't have.
+		want, ok := seriesAgent[f.DiagnosisPlaybookSeriesID]
+		if !ok || want == "database" || f.Category == "compound" {
+			continue
+		}
+		checked++
+		if got := AgentURLFor(cfg, f); got != want {
+			t.Errorf("fault %q: a direct run asks the %s agent, but its diagnosis playbook %s runs on the %s agent — set direct_agent: %s",
+				f.ID, got, f.DiagnosisPlaybookSeriesID, want, want)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no fault with a known diagnosis playbook was checked")
+	}
+}
+
+func TestAgentURLFor(t *testing.T) {
+	cfg := &HarnessConfig{DBAgentURL: "db", K8sAgentURL: "k8s", SysadminAgentURL: "sys"}
+	cases := []struct {
+		name string
+		f    Failure
+		want string
+	}{
+		{"category database", Failure{Category: "database"}, "db"},
+		{"category host", Failure{Category: "host"}, "sys"},
+		{"direct_agent overrides category", Failure{Category: "database", DirectAgent: "sysadmin"}, "sys"},
+		{"direct_agent k8s", Failure{Category: "database", DirectAgent: "k8s"}, "k8s"},
+		{"unknown direct_agent does not fall back", Failure{Category: "database", DirectAgent: "sysadmn"}, ""},
+	}
+	for _, c := range cases {
+		if got := AgentURLFor(cfg, c.f); got != c.want {
+			t.Errorf("%s: AgentURLFor = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestEvidenceSignalConfirmed mirrors cmd/faulttest's own
 // TestEvidenceSignalConfirmed — see EvidenceSignalConfirmed's doc comment
 // (evaluator.go) for why this exists as a duplicated, gateway-gated check

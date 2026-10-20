@@ -37,7 +37,8 @@ type hopSignature struct {
 // table chosen for v1 (outcome-validity, not text-scoring — see project
 // memory for why this was chosen over two stricter, deferred alternatives):
 //
-//	resolved, escalated, transitioned  -> passed=true
+//	resolved, escalated, transitioned,
+//	diagnosed, no_action               -> passed=true
 //	unknown, abandoned                 -> passed=false
 //	gate_pending                       -> exclude=true (this rep doesn't count
 //	                                       toward N for this hop at all — a
@@ -49,7 +50,12 @@ type hopSignature struct {
 //	                                       silent pass or fail on unknown data
 func hopOutcomeVerdict(outcome string) (passed, exclude bool) {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeTransitioned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeTransitioned,
+		// Split out of "resolved" in v0.32, which they counted as before:
+		// stopping honestly (a human decides, or a precondition failed) is a
+		// valid outcome for this criterion; whether it was the right one is
+		// the diagnosis score's job.
+		audit.OutcomeDiagnosed, audit.OutcomeNoAction:
 		return true, false
 	case audit.OutcomeGatePending:
 		return false, true

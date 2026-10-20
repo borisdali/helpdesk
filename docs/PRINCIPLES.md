@@ -36,6 +36,17 @@ Every action the system can take is a named, code-reviewed, pre-approved tool:
 is always visible in the formal repository that we refer to as the Tool
 Registry (`GET /api/v1/tools`). Nothing outside that list can execute.
 
+The one tool that takes SQL from the model, `explain_query`, accepts exactly one
+statement and runs it in a transaction that is rolled back, read-only by default,
+so writes to tables are refused (a function with side effects called inside the
+query still runs: `EXPLAIN ANALYZE` executes it). And `set_archive_command` takes
+the `archive_command` value itself, which Postgres runs as a shell command: it is a
+`write` tool, gated by policy, and its playbook only restores a value confirmed from
+a reading taken before the failure, never a guess ([MUTATION_TOOLS.md §1.5](MUTATION_TOOLS.md#15-set_archive_command--change-wal-archive_command)). The rules every tool is held to (an action
+class, at least one capability from a formal vocabulary, a write-up for every
+mutation, a reference generated from the code) and the check that enforces each
+are listed in [Tool Registry › Principles](TOOL_REGISTRY.md#principles).
+
 This is not a limitation — it is a deliberate design choice. A system that can
 run any SQL or any shell command cannot be audited meaningfully, cannot enforce
 blast-radius limits, cannot be tested for failure modes and cannot earn the

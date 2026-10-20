@@ -2198,3 +2198,83 @@ func TestPlaybooks_JudgeVerdictRoundtrip(t *testing.T) {
 	}
 	t.Logf("judge verdict roundtrip OK: playbook_id=%s verdict=%v", pbID, got["judge_verdict"])
 }
+
+// TestPlaybooks_PgBackRestPlaybooksAreWALAware verifies that the active
+// versions of the two pgBackRest playbooks a restore goes through are the
+// v0.32 ones that read wal_continuity. Seeding only adds a playbook version it
+// hasn't seen before, so a stack running an old image, or one whose playbooks
+// weren't re-seeded, keeps the older versions active: health triage would
+// then hand a broken chain to restore_from_backup and leave the Go-level
+// refusal as the only guard. Does not require an API key.
+func TestPlaybooks_PgBackRestPlaybooksAreWALAware(t *testing.T) {
+	cfg := LoadConfig()
+	if !IsGatewayReachable(cfg.GatewayURL) {
+		t.Skipf("gateway not reachable at %s", cfg.GatewayURL)
+	}
+	client := NewGatewayClient(cfg.GatewayURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	playbooks, err := client.PlaybookList(ctx, "")
+	if err != nil {
+		t.Fatalf("PlaybookList: %v", err)
+	}
+	activeID := func(series string) string {
+		for _, pb := range playbooks {
+			sid, _ := pb["series_id"].(string)
+			active, hasActive := pb["is_active"].(bool)
+			if sid == series && (active || !hasActive) {
+				id, _ := pb["playbook_id"].(string)
+				return id
+			}
+		}
+		return ""
+	}
+	// atLeast compares "major.minor" versions numerically ("1.10" > "1.9").
+	atLeast := func(got, want string) bool {
+		var gMaj, gMin, wMaj, wMin int
+		if _, err := fmt.Sscanf(got, "%d.%d", &gMaj, &gMin); err != nil {
+			return false
+		}
+		fmt.Sscanf(want, "%d.%d", &wMaj, &wMin) //nolint:errcheck
+		return gMaj > wMaj || (gMaj == wMaj && gMin >= wMin)
+	}
+
+	for _, c := range []struct {
+		series, minVersion, rootCause string
+		guidanceTerms                 []string
+	}{
+		{"pbs_pgbackrest_health_triage", "1.3", "pgbackrest-wal-chain-broken", []string{"recommended=no_changes_needed"}},
+		{"pbs_pgbackrest_restore_remediate", "1.7", "", []string{"verify_restore_recovery", "pg_wal_tail", "replayed_through_wal", "only changes never written to pg_wal are"}},
+	} {
+		t.Run(c.series, func(t *testing.T) {
+			id := activeID(c.series)
+			if id == "" {
+				t.Skipf("series %q not found in playbook list — stack may not be seeded", c.series)
+			}
+			pb, err := client.PlaybookGet(ctx, id)
+			if err != nil {
+				t.Fatalf("PlaybookGet(%s): %v", c.series, err)
+			}
+			if v, _ := pb["version"].(string); !atLeast(v, c.minVersion) {
+				t.Errorf("active version = %q, want %s or later (the first with the guidance checked below)", v, c.minVersion)
+			}
+			g, _ := pb["guidance"].(string)
+			if !strings.Contains(g, "wal_continuity") {
+				t.Error("guidance never mentions wal_continuity")
+			}
+			for _, term := range c.guidanceTerms {
+				if !strings.Contains(g, term) {
+					t.Errorf("guidance never mentions %s", term)
+				}
+			}
+			if c.rootCause != "" {
+				rcc, _ := pb["root_cause_classes"].(map[string]any)
+				classes, _ := rcc["classes"].([]any)
+				if !strings.Contains(fmt.Sprint(classes), c.rootCause) {
+					t.Errorf("root_cause_classes.classes = %v, want %s", classes, c.rootCause)
+				}
+			}
+		})
+	}
+}

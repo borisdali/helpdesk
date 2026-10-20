@@ -90,4 +90,14 @@ func TestIntegration_GetPgBackRestStatus_OverRealSSH(t *testing.T) {
 		t.Error("expected a real prior backup on the test container, got none — " +
 			"run testing/docker/setup-pgbackrest-backup.sh first")
 	}
+	// The WAL check's segment-header read is the one binary read: a gzip'd
+	// segment has to come back over SSH byte for byte to decode.
+	wal := result.WALContinuity
+	if wal == nil || wal.Status != WALContinuous {
+		t.Fatalf("WALContinuity = %+v, want continuous", wal)
+	}
+	if wal.SegmentSizeBytes != 16<<20 || wal.SegmentSizeSource != SegmentSizeFromWALHeader {
+		t.Errorf("segment size = %d from %q, want 16 MiB read from a WAL segment header over SSH",
+			wal.SegmentSizeBytes, wal.SegmentSizeSource)
+	}
 }

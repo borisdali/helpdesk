@@ -18,6 +18,9 @@ const (
 	IncidentStatusResolved  = "resolved"
 	IncidentStatusEscalated = "escalated"
 	IncidentStatusAbandoned = "abandoned"
+	// IncidentStatusNeedsHuman: the chain ended without fixing anything,
+	// on a diagnosed or no_action run. Before v0.32 these read "resolved".
+	IncidentStatusNeedsHuman = "needs_human"
 )
 
 // Incident records one user-facing incident — one row per real-world event or
