@@ -124,10 +124,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: "playbook"}
 	}
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := faultlib.RemediationSpeedScore(f, recoverySecs)
 	if r.cfg.EmitAndWait {
 		if resolveURL, err := r.inner.RequestFeedback(ctx, gate.RunID); err != nil {
 			slog.Warn("faulttest: failed to request feedback via hub", "run_id", gate.RunID, "err", err)
@@ -205,10 +202,7 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
 
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := faultlib.RemediationSpeedScore(f, recoverySecs)
 	return RemediationResult{
 		Passed:           true,
 		RecoveryTimeSecs: recoverySecs,

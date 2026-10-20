@@ -20,8 +20,8 @@ type RemediationResult struct {
 	Passed           bool
 	RecoveryTimeSecs float64
 	Err              error
-	// Score is 0.0-1.0: 1.0 if recovered within half the verify timeout,
-	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.
+	// Score is 0.0-1.0: see RemediationSpeedScore; 0.0 if verify_sql timed
+	// out or remediation wasn't attempted.
 	Score float64
 	// Method records how remediation was triggered: "playbook", "agent_prompt", or "none".
 	Method string
@@ -104,6 +104,22 @@ type Remediator struct {
 // proceed-escalation). It carries no fixed timeout; the caller's context
 // provides the only deadline.
 var longClient = &http.Client{}
+
+// RemediationSpeedScore is the remediation_score of a recovery that took
+// recoverySecs from the fault's injection: 1.0 within half the fault's own
+// timeout (its budget for the whole run), else 0.75. Not recovering at all
+// scores 0, decided by the caller. Until v0.32 the bar was half of
+// verify_timeout, written for a recovery time that covered only the
+// verify_sql poll; measured from injection, a multi-hop chain could never
+// meet that 60s. A stopgap, to revisit: two buckets can't
+// rank restores, and diagnosis time counts against the remediation (see
+// project memory, v0.32 item 5 / item 15's RTO work).
+func RemediationSpeedScore(f Failure, recoverySecs float64) float64 {
+	if recoverySecs <= f.TimeoutDuration().Seconds()/2 {
+		return 1.0
+	}
+	return 0.75
+}
 
 // RecoveryTime is the recovery time reported for a verify_sql poll that
 // succeeded at now after pollSecs: measured from faultStart (the fault's
@@ -199,10 +215,7 @@ func (r *Remediator) VerifyRecovery(ctx context.Context, f Failure, method strin
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
 
-	score := 0.75
-	if recoverySecs <= timeout.Seconds()/2 {
-		score = 1.0
-	}
+	score := RemediationSpeedScore(f, recoverySecs)
 
 	return RemediationResult{
 		Passed:           true,

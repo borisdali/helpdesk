@@ -935,3 +935,18 @@ func TestRecoveryTime(t *testing.T) {
 		t.Errorf("no fault start: %.1fs, want the poll's own 0.1s", got)
 	}
 }
+
+// Judged against the fault's own timeout (its whole-run budget), not
+// verify_timeout's 120s: half of a restore fault's 300s is 150s. (The VM run
+// of 2026-10-19 took 156.2s from injection, so it still scores 0.75.)
+func TestRemediationSpeedScore(t *testing.T) {
+	restore := Failure{Timeout: "300s", Remediation: RemediationSpec{VerifyTimeout: "120s"}}
+	for secs, want := range map[float64]float64{90: 1.0, 150: 1.0, 156.2: 0.75, 290: 0.75} {
+		if got := RemediationSpeedScore(restore, secs); got != want {
+			t.Errorf("300s fault, recovered in %.1fs: score %.2f, want %.2f", secs, got, want)
+		}
+	}
+	if got := RemediationSpeedScore(Failure{}, 61); got != 0.75 { // no timeout: TimeoutDuration's 120s default
+		t.Errorf("default timeout, 61s: score %.2f, want 0.75", got)
+	}
+}
