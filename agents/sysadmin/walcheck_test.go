@@ -678,3 +678,35 @@ func TestEvaluateWAL_TailOfOlderTimelineMissing_Broken(t *testing.T) {
 		t.Errorf("Detail = %q", got.Detail)
 	}
 }
+
+// The backup's own WAL missing from a single-timeline archive with nothing
+// archived after it: found on Kubernetes (2026-10-20), where a fresh pod's
+// archive held only the backup's one segment, start = stop. The verdict was
+// right but the gap list came back empty, the walk having stopped at "nothing
+// archived on the newest timeline" before recording any gap. The missing
+// range is the gap the health triage and the fault's diagnosis point to.
+func TestEvaluateWAL_OnlyBackupSegmentMissing_GapRecorded(t *testing.T) {
+	in := multiTimelineInput(t) // backup on timeline 1, start = stop = 000000010000000000000003
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(readFixture(t, "multi_timeline_listing.json")), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for k := range raw {
+		// Keep timeline 1's segments from before the backup only.
+		if k != "." && k != "0000000100000000" && !strings.Contains(k, "/000000010000000000000001-") && !strings.Contains(k, "/000000010000000000000002-") {
+			delete(raw, k)
+		}
+	}
+	listing, _ := json.Marshal(raw)
+	got := evaluateWALContinuity(in, "0000000100000000\n", "", string(listing))
+
+	if got.Status != WALBroken || got.ConsistencyReachable {
+		t.Fatalf("Status = %s, ConsistencyReachable = %v (%s), want broken and unreachable", got.Status, got.ConsistencyReachable, got.Detail)
+	}
+	if len(got.Gaps) != 1 || got.Gaps[0].FirstMissing != "000000010000000000000003" || got.Gaps[0].LastMissing != "000000010000000000000003" || got.Gaps[0].Timeline != 1 {
+		t.Errorf("Gaps = %+v, want one gap: 000000010000000000000003 on timeline 1", got.Gaps)
+	}
+	if !strings.Contains(got.Detail, "000000010000000000000003") || !strings.Contains(got.Detail, "could not start") {
+		t.Errorf("Detail = %q, want it to name the missing segment and say PostgreSQL could not start", got.Detail)
+	}
+}

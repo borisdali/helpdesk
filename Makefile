@@ -193,6 +193,11 @@ integration-k8s:
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
+	# WAL archived after the backup too, as on any running server: a fresh pod
+	# otherwise has only the backup's own segment (the empty-gap case, now a
+	# unit test). CHECKPOINT writes WAL so the switch isn't a no-op; check
+	# switches and waits for that segment to reach the archive.
+	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
 	-HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
 		go test --count=1 -tags integration -timeout 900s -v -run 'K8s_' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_K8S_LOG)

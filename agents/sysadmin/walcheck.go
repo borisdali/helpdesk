@@ -475,7 +475,16 @@ func evaluateWALContinuity(in walCheckInput, topListing, historyText, listingJSO
 				}
 			}
 			if !hasAny {
-				break // nothing archived after the last fork: recovery ends there
+				// Nothing archived after the last fork: recovery ends there.
+				// Unless that's still inside the backup's own WAL: then it's
+				// missing, and the gap must say so (found on K8s, 2026-10-20:
+				// a fresh archive held only the backup's one segment, and
+				// with it hidden the gap list came back empty).
+				if start <= plan.stopSeg {
+					addGap(tli, start, plan.stopSeg)
+					broken = true
+				}
+				break
 			}
 		} else {
 			forkSeg := plan.switches[tli] / plan.segSize
