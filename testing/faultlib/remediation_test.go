@@ -922,3 +922,16 @@ func TestRunGateLoop_HeadlessAutoApprove_WhenEmitAndWaitFalse(t *testing.T) {
 		t.Error("expected proceed-escalation to be called in headless auto-approve mode")
 	}
 }
+
+// Recovery time runs from the fault's injection, not from the verify_sql
+// poll, which starts only after the remediation chain has finished: the live
+// VM runs (2026-10-19) reported "RECOVERED in 0.1s" after a 140s chain.
+func TestRecoveryTime(t *testing.T) {
+	now := time.Now()
+	if got := RecoveryTime(now.Add(-152*time.Second), 0.1, now); got < 151.9 || got > 152.1 {
+		t.Errorf("from the fault's start: %.1fs, want 152s", got)
+	}
+	if got := RecoveryTime(time.Time{}, 0.1, now); got != 0.1 {
+		t.Errorf("no fault start: %.1fs, want the poll's own 0.1s", got)
+	}
+}

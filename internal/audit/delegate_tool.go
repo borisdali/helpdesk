@@ -639,6 +639,18 @@ func FetchObjectiveEvidenceEvents(auditURL, apiKey, traceID string, since time.T
 // write propagation; when false, a single attempt is made and failures fail open
 // (returns nil, treated by callers as "no events of this type").
 func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.Time, retry bool) []Event {
+	events, _ := fetchEventsByTypeErr(auditURL, apiKey, traceID, eventType, since, retry)
+	return events
+}
+
+// FetchToolExecutionEventsErr is FetchToolExecutionEvents for a caller that
+// must tell "no tool ran" from "couldn't ask": it returns the last fetch
+// error when no attempt succeeded.
+func FetchToolExecutionEventsErr(auditURL, apiKey, traceID string, since time.Time) ([]Event, error) {
+	return fetchEventsByTypeErr(auditURL, apiKey, traceID, "tool_execution", since, true)
+}
+
+func fetchEventsByTypeErr(auditURL, apiKey, traceID, eventType string, since time.Time, retry bool) ([]Event, error) {
 	reqURL := strings.TrimRight(auditURL, "/") +
 		"/v1/events?event_type=" + eventType + "&trace_id=" + traceID +
 		"&since=" + since.UTC().Format(time.RFC3339)
@@ -647,6 +659,7 @@ func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.T
 	if retry {
 		attempts = 2
 	}
+	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
@@ -654,6 +667,7 @@ func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.T
 		req, err := http.NewRequest(http.MethodGet, reqURL, nil) //nolint:noctx
 		if err != nil {
 			slog.Debug("delegation verification: build request failed", "event_type", eventType, "attempt", attempt, "err", err)
+			lastErr = err
 			continue
 		}
 		if apiKey != "" {
@@ -662,6 +676,12 @@ func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.T
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			slog.Debug("delegation verification: fetch failed", "event_type", eventType, "attempt", attempt, "err", err)
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("auditd returned %s", resp.Status)
 			continue
 		}
 		var events []Event
@@ -669,11 +689,12 @@ func fetchEventsByType(auditURL, apiKey, traceID, eventType string, since time.T
 		resp.Body.Close()
 		if decodeErr != nil {
 			slog.Debug("delegation verification: decode failed", "event_type", eventType, "attempt", attempt, "err", decodeErr)
+			lastErr = decodeErr
 			continue
 		}
-		return events
+		return events, nil
 	}
-	return nil
+	return nil, lastErr
 }
 
 // narratedToolsNotConfirmed returns the tool names the model's own reasoning says it

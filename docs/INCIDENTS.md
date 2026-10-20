@@ -383,7 +383,7 @@ Diagnosis:     1.00 (LLM judge)   Agent confidence: 95%
 
 | Section | What it shows |
 |---------|---------------|
-| `Origin`/`Status`/`Attribution`/`Bundle`/`Draft playbook` | The v0.29 incidents-table row linked to this run, when one exists — `Origin` is `real` or `faulttest`; `Status` is `open`/`resolved`/`escalated`/`abandoned`; `Attribution` is the classified root-cause label; `Bundle`/`Draft playbook` show the paths/IDs only once a bundle or draft has actually been created for this incident. Absent entirely (not shown as empty) for any run recorded before this table existed or never tracked as an incident — fail-open, not a claim that these are unset |
+| `Origin`/`Status`/`Attribution`/`Bundle`/`Draft playbook` | The v0.29 incidents-table row linked to this run, when one exists — `Origin` is `real` or `faulttest`; `Status` is `open`/`resolved`/`escalated`/`abandoned`/`needs_human` (*v0.32*: the chain ended without fixing anything, on a `diagnosed` or `no_action` run; these read `resolved` before); `Attribution` is the classified root-cause label; `Bundle`/`Draft playbook` show the paths/IDs only once a bundle or draft has actually been created for this incident. Absent entirely (not shown as empty) for any run recorded before this table existed or never tracked as an incident — fail-open, not a claim that these are unset |
 | `TRIAGE` | The agent's primary and rejected hypotheses, confidence, evidence quoted verbatim from tool output and the triage playbook's `findings_summary` |
 | `GATE` | Who approved, when and the at-gate feedback verdicts for both triage diagnosis and remediation plan |
 | `REMEDIATION` | Which remediation playbook ran, each step's outcome and the plan summary the agent produced |

@@ -645,7 +645,7 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 							authz.PrincipalFromContext(r.Context()), pb, esc.EscalateTo, esc.Findings, false)
 					}
 				} else if esc.Findings != "" {
-					res.outcome = "resolved"
+					res.outcome = g.findingsOnlyOutcome(pb, esc.Findings, traceID, runStart)
 				}
 				// Rewrite captured body with signal lines stripped.
 				respBody["text"] = esc.CleanText
@@ -1059,7 +1059,15 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 			ToolCalls:        chained.toolCalls,
 		})
 		finalReport = mergeDiagnosticReports(finalReport, chained.diagReport)
-		finalOutcome = "escalated+resolved"
+		// The primary run's outcome is what the incident's status is set from
+		// last, so a chain whose last hop changed nothing must not read as
+		// resolved (see findingsOnlyOutcome).
+		switch chained.outcome {
+		case audit.OutcomeDiagnosed, audit.OutcomeNoAction:
+			finalOutcome = chained.outcome
+		default:
+			finalOutcome = audit.OutcomeEscalatedResolved
+		}
 		if chained.findings != "" {
 			finalFindings = chained.findings
 		}
@@ -3016,7 +3024,8 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 // real incidents, not an edge case.
 func isAttributableOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeTransitioned,
+		audit.OutcomeDiagnosed, audit.OutcomeNoAction:
 		return true
 	default:
 		return false
@@ -3037,7 +3046,8 @@ func isAttributableOutcome(outcome string) bool {
 // resolved (including when that remediation itself failed/was abandoned).
 func isTerminalIncidentOutcome(outcome string) bool {
 	switch outcome {
-	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned:
+	case audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeEscalatedResolved, audit.OutcomeAbandoned, audit.OutcomeTransitioned,
+		audit.OutcomeDiagnosed, audit.OutcomeNoAction:
 		return true
 	default:
 		return false
@@ -3045,7 +3055,9 @@ func isTerminalIncidentOutcome(outcome string) bool {
 }
 
 // incidentStatusForOutcome maps a playbook run's outcome to the incidents
-// table's status vocabulary (open | resolved | escalated | abandoned).
+// table's status vocabulary (open | resolved | escalated | abandoned |
+// needs_human). diagnosed and no_action map to needs_human: the chain ended
+// without fixing anything.
 // "escalated+resolved" (a chain that escalated partway through but ultimately
 // resolved) maps to resolved — that's the incident's final state.
 //
@@ -3060,6 +3072,8 @@ func incidentStatusForOutcome(outcome string) string {
 		return audit.IncidentStatusEscalated
 	case audit.OutcomeAbandoned:
 		return audit.IncidentStatusAbandoned
+	case audit.OutcomeDiagnosed, audit.OutcomeNoAction:
+		return audit.IncidentStatusNeedsHuman
 	default: // OutcomeResolved, OutcomeEscalatedResolved
 		return audit.IncidentStatusResolved
 	}
@@ -3555,6 +3569,55 @@ func parseAgentEscalation(text string) agentEscalation {
 		result.Findings = extractConclusionFallback(result.CleanText)
 	}
 	return result
+}
+
+// findingsOnlyOutcome is the outcome of a run that ended with FINDINGS and
+// no hand-off, by what it did rather than what it said. A remediation
+// playbook resolved only if its own trace shows a write or destructive tool
+// call that succeeded (tool_execution events, written by the agent's tool
+// layer, not the model), and is no_action otherwise: found live 2026-10-11, a
+// restore remediation whose stale-backup precondition failed changed nothing,
+// said a human must decide, and recorded "resolved" with the database still
+// down. A triage playbook is diagnosed (a human decides what's next) unless
+// it found nothing to fix (recommended monitor / no changes needed), which is
+// resolved. When the trace can't be read, the remediation keeps the old
+// "resolved" rather than be reported as having done nothing.
+func (g *Gateway) findingsOnlyOutcome(pb *audit.Playbook, findings, traceID string, since time.Time) string {
+	if pb.PlaybookType != "remediation" {
+		if findingsRecommendMonitor(findings) {
+			return audit.OutcomeResolved
+		}
+		return audit.OutcomeDiagnosed
+	}
+	if g.auditURL == "" || traceID == "" {
+		slog.Warn("playbook: can't check the remediation's own tool calls (no auditd or trace); recording resolved",
+			"series_id", pb.SeriesID, "trace_id", traceID)
+		return audit.OutcomeResolved
+	}
+	events, err := audit.FetchToolExecutionEventsErr(g.auditURL, g.auditAPIKey, traceID, since)
+	if err != nil {
+		slog.Warn("playbook: can't read the remediation's tool calls; recording resolved",
+			"series_id", pb.SeriesID, "trace_id", traceID, "err", err)
+		return audit.OutcomeResolved
+	}
+	if changedSomething(events) {
+		return audit.OutcomeResolved
+	}
+	return audit.OutcomeNoAction
+}
+
+// changedSomething reports whether events include a write or destructive
+// tool call that didn't error.
+func changedSomething(events []audit.Event) bool {
+	for _, ev := range events {
+		if ev.Tool == nil || ev.Tool.Error != "" {
+			continue
+		}
+		if ev.ActionClass == audit.ActionWrite || ev.ActionClass == audit.ActionDestructive {
+			return true
+		}
+	}
+	return false
 }
 
 // findingsRecommendMonitor reports whether the FINDINGS line from a triage run
@@ -4947,8 +5010,13 @@ func (g *Gateway) handlePlaybookRunApprove(w http.ResponseWriter, r *http.Reques
 	}
 
 	if done {
-		// Unusual: playbook declares done on first proposal (no actions needed).
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", "", nil, false, "")
+		// Unusual: playbook declares done on first proposal (no actions
+		// needed). No step ran, so a remediation changed nothing.
+		outcome := audit.OutcomeNoAction
+		if pb.PlaybookType != "remediation" {
+			outcome = g.findingsOnlyOutcome(pb, summary, "", time.Time{})
+		}
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, "", "", summary, "", "", nil, false, "")
 		resp := ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary, Warnings: warnings, EffectiveApprovalMode: req.ApprovalMode}
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -5149,7 +5217,10 @@ func (g *Gateway) handlePlaybookRunProceed(w http.ResponseWriter, r *http.Reques
 	}
 
 	if done {
-		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, "resolved", "", "", summary, "", run.TraceID, nil, false, "")
+		// The steps ran through the gateway under traceID: resolved only if
+		// one of them changed something (see findingsOnlyOutcome).
+		outcome := g.findingsOnlyOutcome(pb, summary, traceID, run.StartedAt)
+		go g.recordPlaybookRunComplete(context.WithoutCancel(r.Context()), runID, outcome, "", "", summary, "", run.TraceID, nil, false, "")
 		writeJSON(w, http.StatusOK, ApproveRunResponse{RunID: runID, Status: "complete", Summary: summary})
 		return
 	}

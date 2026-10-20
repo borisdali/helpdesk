@@ -564,6 +564,8 @@ func TestIsAttributableOutcome(t *testing.T) {
 		// verification; TRANSITION_TO is the more common of the two in this
 		// codebase's own playbook catalog.
 		audit.OutcomeTransitioned: true,
+		audit.OutcomeDiagnosed:    true,
+		audit.OutcomeNoAction:     true,
 		audit.OutcomeAbandoned:    false,
 		audit.OutcomeUnknown:      false,
 		"gate_pending":            false,
@@ -761,6 +763,8 @@ func TestIsTerminalIncidentOutcome(t *testing.T) {
 		// stayed status="open" forever, regardless of how its downstream
 		// remediation eventually resolved.
 		audit.OutcomeTransitioned: true,
+		audit.OutcomeDiagnosed:    true,
+		audit.OutcomeNoAction:     true,
 		audit.OutcomeUnknown:      false,
 		"gate_pending":            false,
 		"":                        false,
@@ -781,6 +785,9 @@ func TestIncidentStatusForOutcome(t *testing.T) {
 		// TRANSITION_TO reuses the "escalated" status bucket — see
 		// incidentStatusForOutcome's comment.
 		audit.OutcomeTransitioned: audit.IncidentStatusEscalated,
+		// v0.32: a chain that ended without fixing anything.
+		audit.OutcomeDiagnosed: audit.IncidentStatusNeedsHuman,
+		audit.OutcomeNoAction:  audit.IncidentStatusNeedsHuman,
 	}
 	for outcome, want := range cases {
 		if got := incidentStatusForOutcome(outcome); got != want {

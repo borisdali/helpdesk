@@ -95,14 +95,33 @@ type ApproveRunStep struct {
 
 // Remediator triggers playbook or agent remediation and polls for recovery.
 type Remediator struct {
-	cfg    *HarnessConfig
-	client *http.Client
+	cfg        *HarnessConfig
+	client     *http.Client
+	faultStart time.Time // see SetFaultStart
 }
 
 // longClient is used for calls that block while an agent chain runs (e.g.
 // proceed-escalation). It carries no fixed timeout; the caller's context
 // provides the only deadline.
 var longClient = &http.Client{}
+
+// RecoveryTime is the recovery time reported for a verify_sql poll that
+// succeeded at now after pollSecs: measured from faultStart (the fault's
+// injection) when known, else the poll's own duration.
+func RecoveryTime(faultStart time.Time, pollSecs float64, now time.Time) float64 {
+	if faultStart.IsZero() {
+		return pollSecs
+	}
+	return now.Sub(faultStart).Seconds()
+}
+
+// SetFaultStart records when the current fault's injection began:
+// VerifyRecovery then reports the recovery time from it (the whole incident)
+// rather than from the start of its own verify_sql poll, which begins only
+// after the remediation chain has finished.
+func (r *Remediator) SetFaultStart(t time.Time) {
+	r.faultStart = t
+}
 
 // NewRemediator creates a new Remediator with the given config.
 func NewRemediator(cfg *HarnessConfig) *Remediator {
@@ -173,6 +192,9 @@ func (r *Remediator) VerifyRecovery(ctx context.Context, f Failure, method strin
 		connStr = ResolvedAgentConnStr(r.cfg, f)
 	}
 	recoverySecs, err := PollRecovery(ctx, connStr, verifySQL, timeout)
+	if err == nil {
+		recoverySecs = RecoveryTime(r.faultStart, recoverySecs, time.Now())
+	}
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}

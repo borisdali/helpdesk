@@ -778,7 +778,7 @@ Record or correct the final outcome of a run. For agent-mode runs the outcome is
 
 | Field | Required | Description |
 |---|---|---|
-| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `outcome` | yes | `resolved` \| `diagnosed` \| `no_action` \| `escalated` \| `abandoned` \| `unknown` (see [PLAYBOOKS.md § Run outcomes](PLAYBOOKS.md#run-outcomes)) |
 | `escalated_to` | no | Series ID (`pbs_*`) of the next playbook when `outcome=escalated` |
 | `findings_summary` | no | Summary of what was found and what action was taken |
 

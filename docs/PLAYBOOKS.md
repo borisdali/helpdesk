@@ -1196,7 +1196,7 @@ Updates an existing run with its final outcome. Called by operators after review
 
 | Field | Required | Description |
 |---|---|---|
-| `outcome` | yes | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `outcome` | yes | `resolved` \| `diagnosed` \| `no_action` \| `escalated` \| `abandoned` \| `unknown` (see [Run outcomes](#run-outcomes)) |
 | `escalated_to` | no | Series ID (`pbs_*`) of the next Playbook if outcome is `escalated` |
 | `findings_summary` | no | Free-form summary of what was found and recommended |
 
@@ -1397,7 +1397,7 @@ Returns `404` if no run with that ID exists.
 | `playbook_id` | string | The specific Playbook version that was run |
 | `series_id` | string | Series the Playbook belongs to |
 | `execution_mode` | string | `fleet`, `agent` or `agent_approve` |
-| `outcome` | string | `resolved` \| `escalated` \| `abandoned` \| `unknown` |
+| `outcome` | string | `resolved` \| `diagnosed` \| `no_action` \| `escalated` \| `transitioned` \| `escalated+resolved` \| `gate_pending` \| `abandoned` \| `unknown` (see [Run outcomes](#run-outcomes) below) |
 | `escalated_to` | string | Series ID of the follow-on Playbook (when `outcome=escalated`) |
 | `transitioned_to` | string | Series ID of the remediation Playbook (when `outcome=transitioned`) |
 | `findings_summary` | string | Operator-provided summary of diagnosis and action taken |
@@ -1409,6 +1409,19 @@ Returns `404` if no run with that ID exists.
 | `agent_transcript` | string | Full text of the agent's response, including reasoning and evidence interpretation. Populated for agent-mode runs only. |
 | `prior_run_id` | string | `plr_*` run ID of the previous investigation this run continues. Set when the run was started with `prior_run_id` in the request body or automatically when a gate is approved and the remediation playbook is chained. |
 | `diagnostic_report` | object | Structured hypothesis report parsed from the agent's response. `null` when the agent did not emit `HYPOTHESIS_N:` lines. See [Structured diagnostic report](#structured-diagnostic-report). |
+
+#### Run outcomes
+
+A run that ends with `FINDINGS` and hands nothing on gets one of three outcomes, by what it did rather than what it said (*v0.32*; until then all three were `resolved`):
+
+| Outcome | When |
+|---|---|
+| `resolved` | A remediation playbook whose own trace shows a write or destructive tool call that succeeded (from the `tool_execution` audit events, written by the agent's tool layer, not the model), or a triage that found nothing to fix (`recommended=monitor` / `no_changes_needed`) |
+| `diagnosed` | A triage playbook that concluded and handed nothing on: a human decides what's next |
+| `no_action` | A remediation playbook that changed nothing, for example because its own precondition failed |
+
+`diagnosed` and `no_action` set the incident's status to `needs_human`. When the gateway can't read the trace (no auditd configured, or auditd unreachable), a remediation keeps `resolved` and the gateway logs a warning, rather than report it as having done nothing. Found live 2026-10-11: a restore remediation whose stale-backup precondition failed took no action and said a human must decide, yet recorded `resolved` with the database still down.
+
 
 ---
 

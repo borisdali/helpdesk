@@ -252,6 +252,7 @@ func TestFaultInjection(t *testing.T) {
 			// defer-registered-before-Inject dance here.
 			t.Log("Injecting failure...")
 			faultTraceID := "gotest-" + runID + "-" + f.ID
+			faultStart := time.Now() // recovery time is measured from here
 			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
 				cfg.ConnStr = origConn
 			})
@@ -342,6 +343,7 @@ func TestFaultInjection(t *testing.T) {
 			// 5. Remediation phase (opt-in via FAULTTEST_REMEDIATE=true).
 			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
+				remediator.SetFaultStart(faultStart)
 				switch {
 				case resp.Status == "pending_gate":
 					// Triage ended at an escalation gate (e.g. sysadmin cross-domain hand-off).
