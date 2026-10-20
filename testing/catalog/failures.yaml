@@ -759,8 +759,9 @@ failures:
           pgbackrest --stanza=main --delta restore
         '
         docker restart helpdesk-test-pg-pgbackrest
-        # Don't hand the next fault a server still in recovery.
-        for i in $(seq 1 60); do docker exec helpdesk-test-pg-pgbackrest pg_isready -q && break; sleep 2; done
+        # Don't hand the next fault a server still in recovery: pg_isready alone
+        # says yes to a consistent server that hasn't promoted yet.
+        for i in $(seq 1 60); do [ "$(docker exec -u postgres helpdesk-test-pg-pgbackrest psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
     remediation:
       # Checked after the gateway's auto-chained restore: without it a PASS
@@ -829,12 +830,15 @@ failures:
       script_inline: |
         set -e
         C=helpdesk-test-pg-pgbackrest
-        # Wait for postgres to accept connections: a fault before this one (e.g.
+        # Wait for postgres to be out of recovery: a fault before this one (e.g.
         # db-pgdata-corrupted's teardown restore + restart) can hand over a
-        # server still in recovery, and the backup below then fails with "the
-        # database system is starting up" (found in the full faulttest sweep).
-        for i in $(seq 1 60); do docker exec "$C" pg_isready -q && break; sleep 2; done
-        docker exec "$C" pg_isready -q
+        # server still recovering, and the backup below then fails ("the
+        # database system is starting up", "are all available clusters in
+        # recovery?"; found in the faulttest sweeps). pg_isready alone isn't
+        # enough: a consistent server accepts read-only connections while
+        # still in archive recovery (hot_standby), before it promotes.
+        for i in $(seq 1 60); do [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ]
         docker exec -u postgres "$C" pgbackrest --stanza=main --type=full backup
         docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
           -c "ALTER SYSTEM SET archive_command = '/bin/false'" -c "SELECT pg_reload_conf()"
@@ -862,6 +866,10 @@ failures:
         set -e
         C=helpdesk-test-pg-pgbackrest
         docker exec -u postgres "$C" sh -c 'rm -rf /var/lib/postgresql/pg_wal.saved-*'
+        # A server still in archive recovery answers pg_isready but is read-only
+        # ("cannot execute DROP TABLE in a read-only transaction"): wait for it to
+        # promote, or to turn out to be down.
+        for i in $(seq 1 60); do docker exec "$C" pg_isready -q || break; [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
         if docker exec "$C" pg_isready -q; then
           docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
             -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'" \
@@ -874,8 +882,9 @@ failures:
           pgbackrest --stanza=main --delta restore
         '
         docker restart "$C"
-        # Don't hand the next fault a server still in recovery.
-        for i in $(seq 1 60); do docker exec helpdesk-test-pg-pgbackrest pg_isready -q && break; sleep 2; done
+        # Don't hand the next fault a server still in recovery: pg_isready alone
+        # says yes to a consistent server that hasn't promoted yet.
+        for i in $(seq 1 60); do [ "$(docker exec -u postgres helpdesk-test-pg-pgbackrest psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
     diagnosis_playbook_series_id: pbs_db_data_loss_triage
     remediation:
       # Both rows back (commits that were only in pg_wal survived the
