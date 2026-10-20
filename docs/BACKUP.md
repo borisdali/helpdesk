@@ -638,19 +638,89 @@ Postgres's own output.
 `read_pg_log_file`'s log directory differing by distro, see the new `pg_log_dir` infra-config field), not something directly observed against a real VM the way every
 other claim in this document is.  
 
+#### Kubernetes: restoring an instance that can't start
+
+*Added in v0.32.* On Docker and the VM the restore runs where Postgres runs: `docker exec` into
+the container, or a shell over SSH on the host. On Kubernetes that breaks exactly when it's needed.
+A Postgres that can't start (`pg_control` gone) exits, the pod goes into `CrashLoopBackOff`, and
+`kubectl exec` into it fails, and with it every pgBackRest command: `get_pgbackrest_status`, the
+WAL check, the restore and the push of the `pg_wal` tail. A real Docker container behaves the same
+way; the Docker fixture only hides it, because its entrypoint (`start-with-sshd.sh`) keeps the
+container up after Postgres dies.
+
+So the restore is now a lifecycle with the same steps on every platform
+(`agents/sysadmin/lifecycle.go`), and Kubernetes gets its own implementation of each
+(`k8s_lifecycle.go`), for a self-managed Postgres StatefulSet whose image carries pgBackRest:
+
+| Step | Kubernetes | Docker/Podman, host/VM |
+|---|---|---|
+| Serving? | a ready pod answers `pg_isready` | `pg_isready` in the container / on the host |
+| Quiesce | scale the StatefulSet to 0, the replica count recorded in an annotation | nothing: the instance is already down |
+| Maintenance run | a one-off pod with the StatefulSet's image and volumes, deleted afterwards | `docker exec` / the host's shell, as before |
+| Resume (`restart_container`) | scale back to the recorded replicas | `docker restart` / `restart_service`, as before |
+| Logs (`get_host_logs`) | `kubectl logs`, the previous container run first | `docker logs` / journal, as before |
+
+- **Reads** (`get_pgbackrest_status`, the WAL check) exec into the pod while it's ready and use a
+  one-off pod while it isn't.
+- **The restore** refuses while Postgres serves, checks the WAL, scales the StatefulSet to 0 (so
+  the crash-looping pod can't start Postgres on PGDATA mid-restore), then runs the same restore
+  script as on Docker in a one-off pod. The saved `pg_wal` copy goes on the repo volume: the
+  one-off pod's own disk goes with it, and the data volume is PGDATA itself, which `--delta`
+  cleans. It leaves the StatefulSet at 0, and its `quiesced` field says to resume it with
+  `restart_container`; recovery runs when the pod starts.
+- **RBAC:** the sysadmin agent's ClusterRole gains pods create/delete, StatefulSets
+  get/list/patch and their scale subresource. Still no deployments, jobs or nodes.
+
+👉 Verified in-cluster on minikube (2026-10-20), with the whole stack deployed by Helm
+(`testing/k8s/helm-values-pgbackrest.yaml`) and the demo pod (`testing/k8s/pgbackrest-demo.yaml`)
+running the stock Postgres entrypoint, so a crash really crash-loops. `make integration-k8s` calls
+the in-cluster sysadmin agent's tools through its `/tool/{name}` endpoint, under its own service
+account, in a namespace of its own that must end in `-destruct`:
+  - **refusal:** the latest backup's start segment hidden, then a real crash. `get_pgbackrest_status`
+    ran in a one-off pod and reported the chain `broken` at that segment; `restore_from_backup`
+    refused with the StatefulSet still at 1 replica and a canary file in PGDATA untouched;
+  - **the `pg_wal` tail, resume and verify:** archiving broken, row A committed in a `.ready`
+    segment and row B in the open one, then a real crash. The restore scaled to 0, restored, saved
+    the copy on the repo volume and pushed the tail; `restart_container` scaled back; both rows
+    came back, `verify_restore_recovery` read the recovery from `kubectl logs` and reported it
+    `verified` through the tail, and every tail segment was in the archive.
+
+The broken-chain detection also ran through the in-cluster agents as a fault
+(`db-pgbackrest-wal-gap-k8s`, via faulttest and the gateway): the health triage reported the chain
+broken and the `pgbackrest_wal_chain_broken` signal fired.
+
+👉 Kubernetes found two bugs in the WAL check that Docker and the VM never showed, both fixed with
+regression tests:
+  - **an empty gap list** when the backup's only segment was missing and nothing had been archived
+    after it (a brand-new pod): the verdict was right, `broken`, but `gaps` named nothing;
+  - **an unreadable `.history` file:** every Service in the pod's namespace injects environment
+    variables pgBackRest warns about on stdout (`environment contains invalid option`), and a
+    history file read with those lines in front failed to parse, so the check came back
+    `unverified` instead of `broken` and the signal never fired. The text reads now drop
+    pgBackRest's own log lines, as the JSON reads already skipped them.
+
+And two fixture gaps: `init-pgbackrest.sh` (stanza and `archive_command`) was mounted by the
+compose file rather than built into the image, so the first pod came up without either; and a
+Kubernetes volume is root-owned where a Docker named volume inherits the image's ownership, so the
+repo volume needs an init container to hand it to `postgres`.
+
+Not yet: the agent-driven chain on Kubernetes (the data-loss triage routing to the pgBackRest
+health triage, the restore playbook's restart step calling `restart_container`, and the
+`db-pgdata-corrupted-k8s` faults run with `--remediate`); a ReadWriteOnce volume on a multi-node
+cluster (the one-off pod isn't pinned to the instance's node); a remote repo (S3/GCS/Azure), where
+the one-off pod needs the repo's credentials rather than a volume. Operator-managed Postgres
+(CloudNativePG) has no pgBackRest at all and stays out of scope.
+
 ## 4. Roadmap
 
 Not yet built — tracked, not forgotten:
 
-- **Post-restore WAL verification (§3).**  
-  Since v0.32 the WAL chain is checked *before* a restore ([WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)).
-  Still not done: confirming *afterwards* that recovery actually replayed through
-  `recoverable_to_wal`, by reading Postgres's own recovery log (`"restored log file \"...\" from archive"`,
-  `"redo done at ..."`). The pre-restore check verifies that segments are present, not their
-  contents; `pgbackrest verify` checks contents too, but it reads every file in the repo, which is
-  too slow to run on the restore path for a large repo.
+- **The agent-driven restore chain on Kubernetes (§3).**  
+  The tools work in-cluster since v0.32 ([Kubernetes](#kubernetes-restoring-an-instance-that-cant-start));
+  the playbooks don't route a Kubernetes data-loss case to them yet, and multi-node ReadWriteOnce
+  volumes and remote repos aren't handled.
 
-- **Backup-check history (planned for v0.32).**  
+- **Backup-check history (planned for v0.33).**  
   Each `get_pgbackrest_status` result is kept today only as a tool-call record in the audit
   trail, as JSON. A dedicated auditd table, one row per check (stanza, last backup, `backup_stale`,
   WAL status, `recoverable_to_wal`, `archive_end_time`, gaps, segment size and its source, trace

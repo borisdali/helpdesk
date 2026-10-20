@@ -15,8 +15,22 @@ The Tool Registry is a live, queryable catalog of every tool exposed by connecte
 
 These pages are generated from the agents' code by `make docs-tools`, and a unit test fails when one falls out of date, so they always match what the agents publish.
 
+## Principles
+
+The registry is the only way aiHelpDesk's agents touch infrastructure. These are the rules it holds every tool to, and how each one is enforced (*v0.32*):
+
+1. **No direct access.** An agent has no shell, no database session and no cluster credentials of its own to use freely. Everything it does to a database, a host or a cluster is a call to one of its published tools, with the parameters the tool declares. The model chooses which tool to call and with what arguments; the tool's code decides what actually runs.
+2. **Every tool declares an action class:** `read`, `write` or `destructive`. The policy engine gates every call by it, together with the target's tags and the caller's purpose, and approvals apply to `write` and `destructive`. *Enforced:* `TestToolReference` fails for a tool with no action class.
+3. **Every tool offers at least one capability**, from a closed, formal vocabulary (`internal/toolregistry/capabilities.go`): each capability has a kind (*observe*: information the tool returns; *effect*: state it changes), a domain and a description. *Enforced:* `TestToolReference` fails for a tool with no capability or one outside the vocabulary, and `TestCapabilityVocabularyDoc` for a vocabulary entry no tool declares.
+4. **Capabilities agree with the action class.** A `write` or `destructive` tool declares at least one effect capability, and a `read` tool declares none. *Enforced:* `TestToolReference`.
+5. **A `read` tool changes nothing.** Whatever arguments it's given, it reads. Caller text reaches SQL only as the body of a quoted literal, and a tool that has to run caller SQL (`explain_query`) accepts exactly one statement and runs it in a transaction that is rolled back, read-only by default. *Enforced:* by review and each tool's own tests, as no generic check can see what a tool's code runs. Found and fixed while writing this list (v0.32): `explain_query` ran its statement unwrapped, and two read tools spliced caller text into SQL unquoted. One limit remains: `EXPLAIN ANALYZE` executes the query, so a function with side effects called inside it still runs.
+6. **Every mutating tool is written up.** A `write` or `destructive` tool links to a longer write-up of what it changes and how to undo it ([MUTATION_TOOLS.md](MUTATION_TOOLS.md), [ROLLBACK.md](ROLLBACK.md)). *Enforced:* `TestToolReference`, via `toolref.MissingWriteUps`.
+7. **The reference is generated, never hand-written.** `make docs-tools` renders [docs/tools/](tools/) from the agents' own code: description, action class, capabilities, parameters. *Enforced:* a unit test fails when a page is out of date.
+8. **Every call is on the record.** Each tool execution is written to the audit trail (`tool_execution` events) with its parameters, result and error, and its schema carries a fingerprint (§7), so a change to what a tool accepts is visible.
+
 This page covers:
 
+- [Principles](#principles)
 - [Browsing the Registry](#1-browsing-the-registry)
 - [Tool taxonomy fields](#2-tool-taxonomy-fields)
 - [Capability vocabulary](#3-capability-vocabulary)

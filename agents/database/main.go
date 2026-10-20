@@ -420,7 +420,7 @@ func createTools() ([]tool.Tool, error) {
 
 	explainQueryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "explain_query",
-		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on a SQL query and return the full execution plan. By default only SELECT/WITH statements are accepted. Set allow_dml=true to explain DML statements (they are wrapped in BEGIN/ROLLBACK and never committed).",
+		Description: "Run EXPLAIN (ANALYZE, BUFFERS) on one SQL statement and return the full execution plan. Exactly one statement is accepted (no ';' except a trailing one). It always runs in a transaction that is rolled back: read-only by default, which only SELECT/WITH statements are accepted for; set allow_dml=true to explain a DML statement, which then executes but is never committed. EXPLAIN ANALYZE executes the statement, so a query calling a function with side effects still runs it. Needs psql 15 or later (earlier versions print only the ROLLBACK).",
 	}, explainQueryTool)
 	if err != nil {
 		return nil, err
