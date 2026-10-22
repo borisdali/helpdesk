@@ -1,6 +1,6 @@
 # aiHelpDesk: Deployment on Kubernetes
 
-If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed, and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
+If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
 
 This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
 
@@ -119,7 +119,7 @@ model:
   name: claude-haiku-4-5-20251001
 ...
 ...
-# Infrastructure inventory — database servers, K8s clusters, and VMs.
+# Infrastructure inventory — database servers, K8s clusters and VMs.
 # See helm/infrastructure.json.example for details.
 infrastructure:
   db_servers:
@@ -283,7 +283,7 @@ gateway:
       cacheTTL: "5m"        # optional, JWKS cache duration
 ```
 
-Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer, and audience, then extracts roles from the configured claim.
+Clients send `Authorization: Bearer <jwt-token>`. The Gateway validates the signature, issuer and audience, then extracts roles from the configured claim.
 See sample log of testing JWT authn on K8s [here](../../docs/IDENTITY_JWT_SAMPLE.md).
 
 #### Requiring explicit purpose for sensitive resources
@@ -309,6 +309,22 @@ helm install helpdesk ./helm/helpdesk \
     --set model.vendor=anthropic \
     --set model.name=claude-haiku-4-5-20251001
 ```
+
+### 3.7a SSH to Hosts and VMs (sysadmin agent)
+
+To let the in-cluster sysadmin agent reach a VM or host over SSH (targets whose
+`infrastructure.json` entry sets `ssh_user` and `ssh_key_path`), mount a Secret with the key and a
+`known_hosts` file:
+
+```bash
+kubectl create secret generic sysadmin-ssh -n helpdesk-system \
+    --from-file=id_ed25519=/path/to/key \
+    --from-file=known_hosts=/path/to/known_hosts
+helm upgrade helpdesk ./helm/helpdesk --reuse-values --set agents.sysadmin.ssh.secretName=sysadmin-ssh
+```
+
+The entry's `ssh_key_path` is then `/etc/helpdesk/ssh/id_ed25519` and its `address` must resolve
+and be routable from the pod. See [SYSADMIN_AGENT.md §5](../../docs/SYSADMIN_AGENT.md#ssh-dispatch-from-an-in-cluster-agent-helm).
 
 ### 3.8 Gateway Access
 
@@ -404,7 +420,7 @@ helpdesk-client \
   --purpose diagnostic
 ```
 
-See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options, and per-agent examples.
+See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, authentication options and per-agent examples.
 
 ### 4.4 Fallback: kubectl exec (in-cluster REPL)
 
@@ -494,7 +510,7 @@ To include infrastructure config, create a `my-values.yaml` as shown above and a
 
 ## 7. Using the Gateway API
 
-While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters, and status codes).
+While the interactive Orchestrator REPL is available via `kubectl exec`, the Gateway provides a REST API that is often more suitable for programmatic access and automation. See [API.md](../../docs/API.md) for the full endpoint reference (request/response shapes, query parameters and status codes).
 
 ```bash
 # Port-forward the Gateway
@@ -544,7 +560,7 @@ kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 8080:8080 &
 
 ## 9. AI Governance
 
-aiHelpDesk includes an AI Governance framework with policy-based access control, human-in-the-loop approval workflows, and comprehensive audit logging.
+aiHelpDesk includes an AI Governance framework with policy-based access control, human-in-the-loop approval workflows and comprehensive audit logging.
 
 ### 9.1 Governance Components
 
@@ -554,7 +570,7 @@ aiHelpDesk includes an AI Governance framework with policy-based access control,
 | **auditor** | Real-time audit stream monitor with alerting | Disabled |
 | **secbot** | Security responder that creates incidents for anomalies | Disabled |
 | **govbot** | Compliance reporter CronJob — posts summary to Slack on a schedule | Disabled |
-| **approvals** | Operator CLI for listing, approving, and denying approval requests (exec into auditd pod) | - |
+| **approvals** | Operator CLI for listing, approving and denying approval requests (exec into auditd pod) | - |
 | **govexplain** | Operator CLI for explaining past and hypothetical policy decisions (exec into any pod) | - |
 | **srebot** | SRE automation bot — detects DB anomalies, triggers AI diagnosis + incident bundle | - |
 | **fleet-runner** | CronJob — applies multi-step sequences across infrastructure targets with staged rollout (canary → waves → circuit breaker) | Disabled |
@@ -585,7 +601,7 @@ governance:
 ```
 
 The `persistence` block above backs `auditd`'s default SQLite storage. Postgres is a
-fully-supported alternative backend (more concurrent-write headroom, or to keep auditd's storage
+fully-supported alternative backend (more concurrent-write headroom or to keep auditd's storage
 on the same managed-database infrastructure as the rest of your stack) — set
 `governance.auditd.dsnSecret` instead, which also skips creating the SQLite PVC. See
 [docs/AUDIT.md §8.2](../../docs/AUDIT.md#82-postgres-backend) for the full setup, including a
@@ -699,7 +715,7 @@ policies:
         message: "Destructive operations on production are prohibited."
 ```
 
-See `policies.example.yaml` in the bundle for the full schema including time-based schedules, principal-based rules, row limits, and multi-approver quorum.
+See `policies.example.yaml` in the bundle for the full schema including time-based schedules, principal-based rules, row limits and multi-approver quorum.
 
 **Step 2: Create a Kubernetes ConfigMap**
 
@@ -966,7 +982,7 @@ kubectl -n helpdesk-system logs -f job/fleet-vacuum-now
 
 #### Ad-hoc jobs
 
-`scripts/run-fleet-job.sh` runs a single fleet job from a local JSON file. It auto-detects the image and service endpoints from the running Helm release, creates a temporary ConfigMap + Job, streams the logs, and cleans up on exit — no cluster-side setup required.
+`scripts/run-fleet-job.sh` runs a single fleet job from a local JSON file. It auto-detects the image and service endpoints from the running Helm release, creates a temporary ConfigMap + Job, streams the logs and cleans up on exit — no cluster-side setup required.
 
 ```bash
 # Dry run first (no execution, prints plan)
@@ -1003,17 +1019,17 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
 ./scripts/run-fleet-job.sh --dry-run jobs/health-check.json
 ```
 
-See [here](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating, and planner details. Also, the full `run-fleet-job.sh` script reference is available [here](../../scripts/README.md#run-fleet-jobsh).
+See [here](../../docs/FLEET.md) for the full job definition schema, multi-step examples, approval gating and planner details. Also, the full `run-fleet-job.sh` script reference is available [here](../../scripts/README.md#run-fleet-jobsh).
 
 ## 10. Fault Injection Testing (faulttest)
 
-`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent, and score the response. This confirms that the agents behave correctly in your specific environment before going to production.
+`faulttest` validates that your aiHelpDesk agents correctly diagnose real database and infrastructure failures. You inject a known fault against a staging database, send a diagnostic prompt to the agent and score the response. This confirms that the agents behave correctly in your specific environment before going to production.
 
-The binary is baked into the same Docker image as the agents, and runs as a Kubernetes Job. There are two ways to trigger it.
+The binary is baked into the same Docker image as the agents and runs as a Kubernetes Job. There are two ways to trigger it.
 
 ### 10.1 Via Helm (recommended)
 
-Because the Helm chart already knows your agent URLs, model API Secret, and infrastructure ConfigMap, you only need to name the fault and flip one flag:
+Because the Helm chart already knows your agent URLs, model API Secret and infrastructure ConfigMap, you only need to name the fault and flip one flag:
 
 ```bash
 # On an existing release:
@@ -1048,7 +1064,7 @@ helm upgrade helpdesk ./deploy/helm/helpdesk \
     --set faulttest.judge=true
 ```
 
-When `judge=true`, the judge uses the same vendor and model configured for the agents (`model.vendor` and `model.name`). No separate API key or model secret is needed. To use a different model for judging, pass `--judge-vendor`, `--judge-model`, and `--judge-api-key` explicitly via the Job spec (§10.2).
+When `judge=true`, the judge uses the same vendor and model configured for the agents (`model.vendor` and `model.name`). No separate API key or model secret is needed. To use a different model for judging, pass `--judge-vendor`, `--judge-model` and `--judge-api-key` explicitly via the Job spec (§10.2).
 
 Disable after testing so the Job does not re-run on the next unrelated upgrade:
 
@@ -1068,13 +1084,13 @@ Key `faulttest.*` values:
 | `targetNamespace` | `helpdesk-test` | Namespace where faults are injected |
 | `ttlSecondsAfterFinished` | `3600` | Auto-delete the Job after N seconds |
 
-See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full fault catalog, scoring details, and custom catalog authoring.
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full fault catalog, scoring details and custom catalog authoring.
 
 ---
 
 ### 10.2 Via K8s Job (the hard way)
 
-If you are not using Helm, or need full control over the Job spec (custom image registry, node selectors, resource limits, etc.), you can apply the Job directly. This requires manually wiring the ConfigMap and Secrets that the chart would otherwise resolve for you.
+If you are not using Helm or need full control over the Job spec (custom image registry, node selectors, resource limits, etc.), you can apply the Job directly. This requires manually wiring the ConfigMap and Secrets that the chart would otherwise resolve for you.
 
 #### Step 1 — Find your infrastructure ConfigMap name
 
@@ -1234,7 +1250,7 @@ spec:
         # ...
 ```
 
-The Helm path (§10.1) creates this ServiceAccount, Role, and RoleBinding as Helm hooks alongside the Job, so no manual RBAC setup is needed there.
+The Helm path (§10.1) creates this ServiceAccount, Role and RoleBinding as Helm hooks alongside the Job, so no manual RBAC setup is needed there.
 
 ### 10.3 Listing faults without a full run
 
@@ -1280,9 +1296,9 @@ env:
         key: api-key
 ```
 
-When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20`, and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
+When the judge is enabled the scoring weights shift from `keyword*0.50 + diagnosis*0.30 + tool*0.20` to `tool*0.40 + judge*0.40 + keyword*0.20` and each result includes a one-sentence reasoning string explaining the score. The judge is opt-in — omitting `--judge` falls back to the default keyword-based scoring and requires no additional API key.
 
-See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring, and remediation mode.
+See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fault catalog, scoring details, custom catalog authoring and remediation mode.
 
 ### 10.5 SSH injection mode
 
@@ -1296,7 +1312,7 @@ kubectl create secret generic faulttest-ssh-key \
   --namespace helpdesk-system
 ```
 
-Add these args, env, volume mount, and volume to the Job spec from Step 2 above:
+Add these args, env, volume mount and volume to the Job spec from Step 2 above:
 
 ```yaml
 args:
@@ -1559,7 +1575,7 @@ kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 
 ### 10.5 Database Agent Prompts for Password
 
-**Symptom:** The database agent asks for a password every time it connects to a database, or logs `fe_sendauth: no password supplied`.
+**Symptom:** The database agent asks for a password every time it connects to a database or logs `fe_sendauth: no password supplied`.
 
 **Solution:** Create a `.pgpass` secret and reference it via `agents.database.pgpassSecret` (see Section 3.4).
 

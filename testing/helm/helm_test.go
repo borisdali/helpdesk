@@ -12,6 +12,7 @@
 package helm_test
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1350,4 +1351,62 @@ func TestAuditdPostgresDSN_SetWhenConfigured(t *testing.T) {
 	if _, ok := objects["PersistentVolumeClaim/test-auditd"]; ok {
 		t.Error("PersistentVolumeClaim should not be created when dsnSecret is set")
 	}
+}
+
+// TestSysadminSSHSecret verifies the sysadmin agent mounts an SSH Secret and
+// points SSH_KNOWN_HOSTS at it only when agents.sysadmin.ssh.secretName is
+// set, and that the key is mounted read-only with a private mode.
+func TestSysadminSSHSecret(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		dep := render(t)["Deployment/test-sysadmin-agent"]
+		container := containerByName(t, dep, "sysadmin-agent")
+		if _, ok := containerEnvMap(container)["SSH_KNOWN_HOSTS"]; ok {
+			t.Error("SSH_KNOWN_HOSTS set without agents.sysadmin.ssh.secretName")
+		}
+		for _, m := range container["volumeMounts"].([]any) {
+			if m.(map[string]any)["name"] == "ssh" {
+				t.Error("ssh volumeMount present without agents.sysadmin.ssh.secretName")
+			}
+		}
+	})
+
+	t.Run("mounted when set", func(t *testing.T) {
+		dep := render(t, "agents.sysadmin.ssh.secretName=sysadmin-ssh")["Deployment/test-sysadmin-agent"]
+		container := containerByName(t, dep, "sysadmin-agent")
+		if got := containerEnvMap(container)["SSH_KNOWN_HOSTS"]; got != "/etc/helpdesk/ssh/known_hosts" {
+			t.Errorf("SSH_KNOWN_HOSTS: want /etc/helpdesk/ssh/known_hosts, got %q", got)
+		}
+		var mounted bool
+		for _, m := range container["volumeMounts"].([]any) {
+			mount := m.(map[string]any)
+			if mount["name"] == "ssh" {
+				mounted = true
+				if mount["mountPath"] != "/etc/helpdesk/ssh" || mount["readOnly"] != true {
+					t.Errorf("ssh mount: want /etc/helpdesk/ssh read-only, got %v", mount)
+				}
+			}
+		}
+		if !mounted {
+			t.Fatal("ssh volumeMount not found")
+		}
+		spec := dep["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		var found bool
+		for _, v := range spec["volumes"].([]any) {
+			vol := v.(map[string]any)
+			if vol["name"] != "ssh" {
+				continue
+			}
+			found = true
+			secret := vol["secret"].(map[string]any)
+			if secret["secretName"] != "sysadmin-ssh" {
+				t.Errorf("secretName: want sysadmin-ssh, got %v", secret["secretName"])
+			}
+			if fmt.Sprint(secret["defaultMode"]) != "256" { // 0400
+				t.Errorf("defaultMode: want 0400 (256), got %v", secret["defaultMode"])
+			}
+		}
+		if !found {
+			t.Error("ssh volume not found")
+		}
+	})
 }

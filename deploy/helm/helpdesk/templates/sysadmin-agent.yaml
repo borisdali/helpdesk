@@ -34,6 +34,10 @@ spec:
             - name: HELPDESK_INFRA_CONFIG
               value: /etc/helpdesk/infrastructure.json
             {{- end }}
+            {{- if .Values.agents.sysadmin.ssh.secretName }}
+            - name: SSH_KNOWN_HOSTS
+              value: {{ .Values.agents.sysadmin.ssh.mountPath }}/{{ .Values.agents.sysadmin.ssh.knownHostsKey }}
+            {{- end }}
             {{- include "helpdesk.modelEnv" . | nindent 12 }}
             {{- if .Values.governance.auditd.enabled }}
             - name: HELPDESK_AUDIT_ENABLED
@@ -86,6 +90,11 @@ spec:
             - name: docker-sock
               mountPath: /var/run/docker.sock
             {{- end }}
+            {{- if .Values.agents.sysadmin.ssh.secretName }}
+            - name: ssh
+              mountPath: {{ .Values.agents.sysadmin.ssh.mountPath }}
+              readOnly: true
+            {{- end }}
             {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
           ports:
             - name: a2a
@@ -124,6 +133,12 @@ spec:
           hostPath:
             path: /var/run/docker.sock
             type: Socket
+        {{- end }}
+        {{- if .Values.agents.sysadmin.ssh.secretName }}
+        - name: ssh
+          secret:
+            secretName: {{ .Values.agents.sysadmin.ssh.secretName }}
+            defaultMode: 0400
         {{- end }}
         {{- include "helpdesk.usersVolume" . | nindent 8 }}
 ---

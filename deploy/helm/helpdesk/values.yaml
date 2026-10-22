@@ -97,6 +97,21 @@ agents:
     # Secret containing the Bearer token this agent sends to auditd (HELPDESK_AUDIT_API_KEY).
     auditAPIKeySecret: ""
     auditAPIKeyKey: "api-key"
+    # SSH dispatch to hosts and VMs outside the cluster (docs/SYSADMIN_AGENT.md §5):
+    # a target whose infrastructure.json entry sets ssh_user and ssh_key_path is
+    # reached over SSH. Name a Secret holding the private key(s) and a
+    # known_hosts file and the chart mounts it read-only at mountPath and points
+    # SSH_KNOWN_HOSTS at <mountPath>/<knownHostsKey>. The entry's ssh_key_path
+    # must then be <mountPath>/<key name>. Without a known_hosts file the agent
+    # logs a warning and skips host-key verification, so include one. The pod
+    # also needs a network route to the host; use its IP if the name won't
+    # resolve in-cluster. Create with:
+    #   kubectl create secret generic sysadmin-ssh \
+    #     --from-file=id_ed25519=/path/to/key --from-file=known_hosts=/path/to/known_hosts
+    ssh:
+      secretName: ""
+      mountPath: /etc/helpdesk/ssh
+      knownHostsKey: known_hosts
     rbac:
       # Create a ServiceAccount, ClusterRole, and ClusterRoleBinding so the
       # sysadmin tools can reach Kubernetes-managed targets (runtime=kubectl)

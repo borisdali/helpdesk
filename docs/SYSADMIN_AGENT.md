@@ -428,6 +428,34 @@ the mismatch. Confirmed via a real in-process SSH server in `agents/sysadmin/ssh
 that each of the seven now reaches a remote host for real, not just that they compile against
 `runOnHost`'s signature.
 
+### SSH dispatch from an in-cluster agent (Helm)
+
+An agent running in Kubernetes reaches a VM the same way, with three things in place:
+
+1. **The key and `known_hosts`, mounted.** Create a Secret and name it in the chart; it is mounted
+   read-only (mode `0400`) and `SSH_KNOWN_HOSTS` is pointed at it:
+
+   ```bash
+   kubectl create secret generic sysadmin-ssh -n helpdesk-system \
+     --from-file=id_ed25519=$HOME/.ssh/pgbackrest_vm_key \
+     --from-file=known_hosts=$HOME/.ssh/known_hosts
+   helm upgrade helpdesk ./deploy/helm/helpdesk --reuse-values \
+     --set agents.sysadmin.ssh.secretName=sysadmin-ssh
+   ```
+
+   Without a `known_hosts` file the agent logs a warning and skips host-key verification, so
+   include one (`ssh-keyscan <host>`).
+2. **The VM's entry in `infrastructure.json`** (the chart's `infrastructure` value) naming the
+   mounted key: `"ssh_user": "postgres"`, `"ssh_key_path": "/etc/helpdesk/ssh/id_ed25519"` and
+   an `address` the pod can resolve. A name that only your laptop resolves won't work in-cluster;
+   use the IP.
+3. **A network route** from the pod to the VM's SSH port.
+
+`agents.sysadmin.ssh.mountPath` and `.knownHostsKey` change the mount location and the Secret key
+holding `known_hosts` (defaults `/etc/helpdesk/ssh` and `known_hosts`). The chart only renders the
+mount, so what was tested is the rendering (`TestSysadminSSHSecret`); a live in-cluster run
+against a VM is still to do.
+
 ### pgBackRest tool dispatch
 
 `get_pgbackrest_status` and `run_pgbackrest_backup` use their own three-way dispatch, not the
