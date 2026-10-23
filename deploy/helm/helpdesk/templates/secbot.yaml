@@ -24,7 +24,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/secbot"]
           args:
-            {{- if .Values.governance.auditd.persistence.enabled }}
+            {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
             - "-socket=/data/audit/audit.sock"
             {{- else }}
             - "-audit-service=http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
@@ -49,7 +49,7 @@ spec:
             - name: metrics
               containerPort: {{ .Values.governance.secbot.port }}
               protocol: TCP
-          {{- if .Values.governance.auditd.persistence.enabled }}
+          {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
           volumeMounts:
             - name: audit-data
               mountPath: /data/audit
@@ -67,7 +67,7 @@ spec:
               port: metrics
             initialDelaySeconds: 3
             periodSeconds: 10
-      {{- if .Values.governance.auditd.persistence.enabled }}
+      {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
       volumes:
         - name: audit-data
           persistentVolumeClaim:

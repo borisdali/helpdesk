@@ -1410,3 +1410,54 @@ func TestSysadminSSHSecret(t *testing.T) {
 		}
 	})
 }
+
+// TestAuditorSecbotWithPostgresAuditd verifies the auditor and secbot don't
+// mount the audit-data PVC when auditd uses the Postgres backend. In that mode
+// the chart creates no PVC and auditd's /data/audit is an emptyDir, so a
+// claim on helpdesk-auditd would leave them Pending forever. They must reach
+// auditd over HTTP instead of the unix socket.
+func TestAuditorSecbotWithPostgresAuditd(t *testing.T) {
+	enable := []string{"governance.auditor.enabled=true", "governance.secbot.enabled=true"}
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  string // "socket" or "http"
+	}{
+		{"sqlite uses the PVC and socket", nil, "socket"},
+		{"postgres uses HTTP, no PVC", []string{"governance.auditd.dsnSecret=helpdesk-auditd-dsn"}, "http"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := render(t, append(enable, tc.extra...)...)
+			for _, name := range []string{"Deployment/test-auditor", "Deployment/test-secbot"} {
+				dep, ok := objects[name]
+				if !ok {
+					t.Fatalf("%s not found", name)
+				}
+				spec := dep["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+				hasPVC := false
+				if vols, ok := spec["volumes"].([]any); ok {
+					for _, v := range vols {
+						if _, ok := v.(map[string]any)["persistentVolumeClaim"]; ok {
+							hasPVC = true
+						}
+					}
+				}
+				var args []string
+				for _, a := range spec["containers"].([]any)[0].(map[string]any)["args"].([]any) {
+					args = append(args, a.(string))
+				}
+				joined := strings.Join(args, " ")
+				switch tc.want {
+				case "socket":
+					if !hasPVC || !strings.Contains(joined, "-socket=") {
+						t.Errorf("%s: want PVC and -socket, got pvc=%v args=%q", name, hasPVC, joined)
+					}
+				case "http":
+					if hasPVC || strings.Contains(joined, "-socket=") || !strings.Contains(joined, "-audit-service=") {
+						t.Errorf("%s: want no PVC and -audit-service, got pvc=%v args=%q", name, hasPVC, joined)
+					}
+				}
+			}
+		})
+	}
+}

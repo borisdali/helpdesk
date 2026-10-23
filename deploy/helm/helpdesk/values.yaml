@@ -309,7 +309,8 @@ governance:
     # Secret containing a Postgres DSN (postgres://user:pass@host:port/db)
     # for auditd's own storage. When set, auditd runs with backend=postgres
     # instead of SQLite, and the audit-data PVC below is not created (only
-    # the runtime notification socket lives under emptyDir).
+    # the runtime notification socket lives under emptyDir). The auditor and
+    # secbot then reach auditd over HTTP (-audit-service) instead of the socket.
     #
     # IMPORTANT: this DSN must point at an instance dedicated to auditd's
     # own storage — never one this deployment also monitors or remediates

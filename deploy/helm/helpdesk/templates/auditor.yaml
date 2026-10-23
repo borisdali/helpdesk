@@ -24,7 +24,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/auditor"]
           args:
-            {{- if .Values.governance.auditd.persistence.enabled }}
+            {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
             - "-socket=/data/audit/audit.sock"
             {{- else }}
             - "-audit-service=http://{{ include "helpdesk.fullname" . }}-auditd:{{ .Values.governance.auditd.port }}"
@@ -56,13 +56,13 @@ spec:
                   name: {{ .Values.governance.email.smtpSecret }}
                   key: password
             {{- end }}
-          {{- if .Values.governance.auditd.persistence.enabled }}
+          {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
           volumeMounts:
             - name: audit-data
               mountPath: /data/audit
               readOnly: true
           {{- end }}
-      {{- if .Values.governance.auditd.persistence.enabled }}
+      {{- if and .Values.governance.auditd.persistence.enabled (not .Values.governance.auditd.dsnSecret) }}
       volumes:
         - name: audit-data
           persistentVolumeClaim:
