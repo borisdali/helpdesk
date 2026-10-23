@@ -1370,6 +1370,15 @@ func TestSysadminSSHSecret(t *testing.T) {
 		}
 	})
 
+	// An upgrade with --reuse-values doesn't merge in defaults for keys the
+	// release never had, so the whole ssh block can be absent, or hold only
+	// the secretName the operator just set.
+	t.Run("block absent from the release's values", func(t *testing.T) {
+		dep := render(t, "agents.sysadmin.ssh=null")["Deployment/test-sysadmin-agent"]
+		if _, ok := containerEnvMap(containerByName(t, dep, "sysadmin-agent"))["SSH_KNOWN_HOSTS"]; ok {
+			t.Error("SSH_KNOWN_HOSTS set with no ssh block")
+		}
+	})
 	t.Run("mounted when set", func(t *testing.T) {
 		dep := render(t, "agents.sysadmin.ssh.secretName=sysadmin-ssh")["Deployment/test-sysadmin-agent"]
 		container := containerByName(t, dep, "sysadmin-agent")
