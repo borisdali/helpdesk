@@ -18,8 +18,10 @@
 #
 # Usage:
 #   kubectl create namespace helpdesk-auditd-storage
-#   kubectl apply -f postgres-auditd.yaml
-#   kubectl -n helpdesk-auditd-storage create secret generic helpdesk-auditd-dsn \
+#   kubectl apply -n helpdesk-auditd-storage -f postgres-auditd.yaml
+#   # The Secret goes in the namespace auditd runs in (e.g. helpdesk-system),
+#   # not the storage namespace: a pod can only read Secrets from its own.
+#   kubectl -n helpdesk-system create secret generic helpdesk-auditd-dsn \
 #     --from-literal=dsn='postgres://postgres:<password>@postgres-auditd.helpdesk-auditd-storage.svc.cluster.local:5432/auditd?sslmode=disable'
 #   # then, in your helpdesk Helm values:
 #   #   governance:
@@ -27,7 +29,10 @@
 #   #       dsnSecret: helpdesk-auditd-dsn
 #
 # Change POSTGRES_PASSWORD below before applying — this file ships a
-# placeholder, not a real credential.
+# placeholder, not a real credential. The image reads it only when it first
+# initializes an empty data directory: if the PVC (pgdata-postgres-auditd-0)
+# already exists, the old password stays and this value is ignored. Delete the
+# PVC to start over.
 apiVersion: v1
 kind: Service
 metadata:
