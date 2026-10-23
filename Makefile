@@ -689,6 +689,7 @@ bundle:
 	\
 	echo "==> helm chart"; \
 	cp -r deploy/helm/helpdesk $$bundledir/helm/; \
+	cp -r deploy/helm/examples $$bundledir/helm/; \
 	cp deploy/docker-compose/infrastructure.json.example $$bundledir/helm/; \
 	cp policies.example.yaml $$bundledir/helm/; \
 	cp users.example.yaml $$bundledir/helm/; \
