@@ -870,3 +870,36 @@ func TestPrintGatePreviewAndReport_MultilineDescriptionIndentedThroughout(t *tes
 		}
 	}
 }
+
+// verify_exec: the harness polls the fault's script instead of connecting with
+// psql, for a target (a Kubernetes pod behind a ClusterIP Service) it has no
+// route to. newTestRemediator's ConnStr is a localhost DSN nothing listens on,
+// so a pass here can only have come from the script.
+func TestPollRecovery_VerifyExecBypassesSQL(t *testing.T) {
+	r := newTestRemediator(t, "")
+	secs, err := r.pollRecovery(context.Background(), "SELECT 1", "exit 0", 10*time.Second)
+	if err != nil {
+		t.Fatalf("pollRecovery with a passing verify_exec: %v", err)
+	}
+	if secs < 0 || secs > 5 {
+		t.Errorf("recovery poll took %.1fs, want an immediate pass", secs)
+	}
+}
+
+func TestPollRecovery_VerifyExecFailureIsNotRecovery(t *testing.T) {
+	r := newTestRemediator(t, "")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := r.pollRecovery(ctx, "SELECT 1", "exit 1", time.Minute); err == nil {
+		t.Error("a verify_exec that never passes must not report recovery")
+	}
+}
+
+// The --context given to faulttest reaches verify_exec, as it does the
+// inject and teardown scripts.
+func TestPollRecovery_VerifyExecSeesTheKubeContext(t *testing.T) {
+	r := NewRemediator(&HarnessConfig{HarnessConfig: faultlib.HarnessConfig{KubeContext: "minikube"}})
+	if _, err := r.pollRecovery(context.Background(), "", `[ "$FAULTTEST_K8S_CONTEXT" = minikube ]`, 10*time.Second); err != nil {
+		t.Errorf("verify_exec did not see FAULTTEST_K8S_CONTEXT: %v", err)
+	}
+}
