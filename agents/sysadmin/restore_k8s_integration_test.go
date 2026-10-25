@@ -79,6 +79,22 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 	return c
 }
 
+// step logs one timestamped line of what the harness is doing, so a passing
+// run under -v reads as a record of the commands, their output and the checks.
+func (c *k8sCluster) step(format string, a ...any) {
+	c.t.Helper()
+	c.t.Logf("[%s] %s", time.Now().UTC().Format("15:04:05.000"), fmt.Sprintf(format, a...))
+}
+
+// clipLog trims s to n bytes for a log line.
+func clipLog(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + fmt.Sprintf("… (%d more bytes)", len(s)-n)
+	}
+	return s
+}
+
 // tool calls the in-cluster sysadmin agent's tool and returns its JSON
 // output, or its error text.
 func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
@@ -91,6 +107,9 @@ func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
 		Args:    args,
 		Purpose: "remediation",
 	})
+	argsJSON, _ := json.Marshal(args)
+	c.step("POST %s/tool/%s args=%s", c.agentURL, name, argsJSON)
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.agentURL+"/tool/"+name, bytes.NewReader(body))
@@ -108,27 +127,44 @@ func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		c.t.Fatalf("/tool/%s: HTTP %d, unparseable body %q", name, resp.StatusCode, raw)
 	}
+	c.step("  -> HTTP %d in %s, error=%q, output=%s", resp.StatusCode, time.Since(start).Round(time.Millisecond), out.Error, clipLog(out.Output, 700))
 	return out.Output, out.Error
 }
 
 func (c *k8sCluster) kubectl(args ...string) string {
 	c.t.Helper()
+	c.step("kubectl %s", strings.Join(args, " "))
 	out, err := kubectl(context.Background(), c.host, args...)
+	c.step("  -> err=%v out=%s", err, clipLog(out, 300))
 	if err != nil {
 		c.t.Fatalf("%v", err)
 	}
 	return out
 }
 
+// execRaw runs script as root in the instance pod without logging it: for
+// polling loops.
+func (c *k8sCluster) execRaw(script string) (string, error) {
+	return kubectl(context.Background(), c.host, "exec", c.pod, "--", "sh", "-c", script)
+}
+
 // exec runs script as root in the instance pod (it must be up).
 func (c *k8sCluster) exec(script string) (string, error) {
-	return kubectl(context.Background(), c.host, "exec", c.pod, "--", "sh", "-c", script)
+	c.t.Helper()
+	c.step("exec in %s: %s", c.pod, clipLog(script, 400))
+	out, err := c.execRaw(script)
+	c.step("  -> err=%v out=%s", err, clipLog(out, 300))
+	return out, err
 }
 
 // onVolumes runs script as postgres in a one-off pod on the instance's
 // volumes: the only way in while it's crash-looping.
 func (c *k8sCluster) onVolumes(script string) (string, error) {
-	return k8sMaintenance(context.Background(), c.host, script)
+	c.t.Helper()
+	c.step("one-off pod on the instance's volumes: %s", clipLog(script, 400))
+	out, err := k8sMaintenance(context.Background(), c.host, script)
+	c.step("  -> err=%v out=%s", err, clipLog(out, 300))
+	return out, err
 }
 
 func (c *k8sCluster) psql(sql string) string {
@@ -147,6 +183,7 @@ func (c *k8sCluster) waitReady(timeout time.Duration) {
 		pod, ready, err := k8sInstancePod(context.Background(), c.host)
 		if err == nil && pod != "" && ready {
 			c.pod = pod
+			c.step("instance pod %s is ready", pod)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -161,6 +198,7 @@ func (c *k8sCluster) waitReady(timeout time.Duration) {
 // ready and exec into it fails, the state a real crash leaves.
 func (c *k8sCluster) crash(alsoInPGDATA string) {
 	c.t.Helper()
+	c.step("crash: removing pg_control, then deleting the pod so postgres cannot start")
 	if out, err := c.exec("rm -f /var/lib/postgresql/data/global/pg_control" + alsoInPGDATA); err != nil {
 		c.t.Fatalf("corrupting pg_control: %v: %s", err, out)
 	}
@@ -169,8 +207,9 @@ func (c *k8sCluster) crash(alsoInPGDATA string) {
 	for time.Now().Before(deadline) {
 		pod, ready, _ := k8sInstancePod(context.Background(), c.host)
 		if pod != "" && !ready {
-			if _, err := c.exec("true"); err != nil {
+			if _, err := c.execRaw("true"); err != nil {
 				time.Sleep(5 * time.Second) // let it crash at least once more
+				c.step("crash: pod %s is not ready and cannot be exec'd into (CrashLoopBackOff)", pod)
 				return
 			}
 		}
@@ -184,6 +223,7 @@ func (c *k8sCluster) crash(alsoInPGDATA string) {
 // through the agent (the lifecycle under test) and a resume.
 func (c *k8sCluster) repair() {
 	c.t.Helper()
+	c.step("repair: unhide any hidden segments and bring the instance back")
 	unhide := `for g in $(find /var/lib/pgbackrest/archive -name '*.hidden-by-test'); do mv "$g" "${g%.hidden-by-test}"; done; rm -rf /var/lib/pgbackrest/pg_wal.saved-*`
 	if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
 		_, _ = c.exec("su postgres -c " + shellQuote(unhide))
@@ -213,18 +253,23 @@ func TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap(t *testing.T) {
 	c := k8sInCluster(t)
 	t.Cleanup(c.repair)
 
+	c.step("1. precondition: the WAL chain must be continuous before anything is hidden")
 	out, errStr := c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
 	var before GetPgBackRestStatusResult
 	if errStr != "" || json.Unmarshal([]byte(out), &before) != nil || before.WALContinuity == nil || before.WALContinuity.Status != WALContinuous {
 		t.Fatalf("precondition: get_pgbackrest_status = %s %s, want continuous", out, errStr)
 	}
 	seg := before.WALContinuity.BackupStartWAL
+	c.step("   ok: continuous, backup %s starts at segment %s", before.LastBackupLabel, seg)
+	c.step("2. hide the backup's start segment %s in the repo", seg)
 	dir := "/var/lib/pgbackrest/archive/main/" + before.WALContinuity.ArchiveID + "/" + seg[:16]
 	if o, err := c.exec("su postgres -c " + shellQuote(`set -e; g=$(ls `+dir+`/`+seg+`-*); mv "$g" "$g.hidden-by-test"`)); err != nil {
 		t.Fatalf("hiding %s: %v: %s", seg, err, o)
 	}
+	c.step("3. crash the instance, leaving a canary file in PGDATA")
 	c.crash(" && touch /var/lib/postgresql/data/walcheck-canary")
 
+	c.step("4. the WAL check on the crashed instance (the agent runs it in a one-off pod) must say broken at %s", seg)
 	out, errStr = c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
 	var after GetPgBackRestStatusResult
 	if errStr != "" || json.Unmarshal([]byte(out), &after) != nil {
@@ -233,16 +278,24 @@ func TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap(t *testing.T) {
 	if w := after.WALContinuity; w == nil || w.Status != WALBroken || w.ConsistencyReachable || len(w.Gaps) == 0 || w.Gaps[0].FirstMissing != seg {
 		t.Fatalf("WAL continuity = %+v, want broken at %s, consistency unreachable", after.WALContinuity, seg)
 	}
+	c.step("   ok: status=%s consistency_reachable=%v gaps=%+v", after.WALContinuity.Status, after.WALContinuity.ConsistencyReachable, after.WALContinuity.Gaps)
 
+	c.step("5. restore_from_backup must refuse on the broken chain")
 	_, errStr = c.tool("restore_from_backup", map[string]any{"target": c.target, "stanza": "main"})
 	if !strings.Contains(errStr, "WAL continuity is broken") {
 		t.Fatalf("restore_from_backup error = %q, want a WAL-continuity refusal", errStr)
 	}
+	c.step("   ok: refused: %s", clipLog(errStr, 400))
+	c.step("6. nothing may have been touched: the StatefulSet stays at 1 replica and the canary file survives")
 	if r := c.replicas(); r != "1" {
 		t.Errorf("StatefulSet replicas = %s after a refused restore, want 1 (nothing quiesced)", r)
+	} else {
+		c.step("   ok: replicas=%s", r)
 	}
 	if o, err := c.onVolumes("test -f /var/lib/postgresql/data/walcheck-canary && echo present"); err != nil || !strings.Contains(o, "present") {
 		t.Errorf("canary file in PGDATA: %v %q — the refused restore touched the data directory", err, o)
+	} else {
+		c.step("   ok: canary file present")
 	}
 }
 

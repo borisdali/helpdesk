@@ -49,6 +49,134 @@ This test is strictly opt-in, since it crashes the Pod and it skips unless the c
 It runs from the laptop through the <context> and uses the same `kubectl exec` code path the in-cluster agent uses, with the kubeconfig context instead of the service account.
 
 
+
+
+```
+[boris@ ~/helpdesk]$ HELPDESK_K8S_SYSADMIN_API_KEY=$HELPDESK_CLIENT_API_KEY \
+  HELPDESK_K8S_SYSADMIN_URL=http://localhost:11103 \
+  HELPDESK_K8S_SYSADMIN_TARGET=pgbackrest-k8s-destruct \
+  HELPDESK_K8S_PGBACKREST_CONTEXT=<context> \
+  HELPDESK_K8S_PGBACKREST_NAMESPACE=db-destruct \
+  go test --count=1 -tags integration -timeout 900s -v -run 'K8sCluster_RestoreRefusesOnRealWALGap' ./agents/sysadmin/...  
+
+=== RUN   TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap
+--- PASS: TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap (93.79s)
+PASS
+ok      helpdesk/agents/sysadmin        94.255s
+
+Nice! The test passed and `db-destruct` Pod ended up as healthy. This is the WAL-continuity refusal on K8s in action. What it proved, in a real cluster against a real crash:
+  - The precondition showed the chain continuous  
+  - The backup's start segment was hidden, `pg_control` was deleted and the Pod went into CrashLoopBackOff  
+  - `get_pgbackrest_status` ran in a one-off Pod, since the instance Pod can't be `kubectl exec`'d into. It reported `broken`, with the missing segment named and `consistency_reachable=false`.
+  - `restore_from_backup` refused with a WAL-continuity error.
+  - Nothing was touched: the StatefulSet stayed at 1 replica and the canary file in PGDATA survived.
+
+All of this went through the Postgres-backed auditd and the identity-enforcing agent, with policy checks on, as a real install would have it. Ain't that cool :-)
+
+In a nutshell, this is what the PASS of that test means, but if you are like me and would like to dig deeper, here's one way (aka the forensics): querying the audit events for the test's trace IDs is not a bad place to start:
+
+```
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-auditd-storage exec postgres-auditd-0 -- psql -U postgres -d auditd -c "select substr(timestamp,12,12) ts, event_type, tool_name, action_class, outcome_status, outcome_duration_ms ms, left(coalesce(outcome_error,''),120) err from audit_events where trace_id like 'tr_k8sit_%' and created_at > now() - interval '3 hours' order by id desc limit 40"
+      ts      |     event_type     |      tool_name      | action_class | outcome_status | ms  | err
+--------------+--------------------+---------------------+--------------+----------------+-----+-----
+ 02:43:40.136 | tool_execution     | restart_container   | destructive  | success        | 103 |
+ 02:43:40.031 | policy_decision    |                     | destructive  | allow          |   0 |
+ 02:43:39.644 | tool_invoked       | restart_container   | destructive  |                |   0 |
+ 02:43:28.435 | objective_evidence |                     |              |                |   0 |
+ 02:43:09.220 | policy_decision    |                     | destructive  | allow          |   0 |
+ 02:43:08.624 | tool_invoked       | restore_from_backup | destructive  |                |   0 |
+ 02:43:01.048 | objective_evidence |                     |              |                |   0 |
+ 02:42:43.765 | policy_decision    |                     | destructive  | allow          |   0 |
+ 02:42:43.162 | tool_invoked       | restore_from_backup | destructive  |                |   0 |
+ 02:42:42.234 | objective_evidence |                     |              |                |   0 |
+ 02:42:17.072 | objective_evidence |                     |              |                |   0 |
+(11 rows)
+```
+
+Follow on with reviewing the SysAdmin Agent's log:
+
+```
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-system logs deploy/helpdesk-sysadmin-agent --since=8h | grep -E 'restore_from_backup|direct tool'
+time=2026-10-25T02:40:43.169Z level=DEBUG msg="direct tool: ok" tool=get_pgbackrest_status target=pgbackrest-k8s-destruct ms=17933
+time=2026-10-25T02:41:24.643Z level=DEBUG msg="direct tool: ok" tool=restore_from_backup target=pgbackrest-k8s-destruct ms=24980
+time=2026-10-25T02:41:27.028Z level=DEBUG msg="direct tool: ok" tool=restart_container target=pgbackrest-k8s-destruct ms=1874
+time=2026-10-25T02:42:17.232Z level=DEBUG msg="direct tool: ok" tool=get_pgbackrest_status target=pgbackrest-k8s-destruct ms=764
+time=2026-10-25T02:42:42.750Z level=DEBUG msg="direct tool: ok" tool=get_pgbackrest_status target=pgbackrest-k8s-destruct ms=17623
+
+time=2026-10-25T02:43:01.448Z level=WARN msg="direct tool call failed" tool=restore_from_backup target=pgbackrest-k8s-destruct err="restore_from_backup: refusing to restore — WAL continuity is broken for backup 20261020-184816F: WAL segment  000000020000000000000008, needed for backup 20261020-184816F to reach a consistent state, is missing from the repo: PostgreSQL could not start from this backup. A human must decide whether a restore that can't be verified to reach the end of the archive is still worth it" ms=18286
+
+time=2026-10-25T02:43:39.106Z level=DEBUG msg="direct tool: ok" tool=restore_from_backup target=pgbackrest-k8s-destruct ms=30482
+time=2026-10-25T02:43:40.342Z level=DEBUG msg="direct tool: ok" tool=restart_container target=pgbackrest-k8s-destruct ms=697
+```
+
+Aha, note "refusing to restore — WAL continuity is broken... WAL segment ... needed for backup... to reach a consistent state, is missing from the repo". Bingo!
+
+Forensics are indeed cool, but hold on, there's a better way :-). The test is equipped with the optional play-by-play logging, so... you just have to ask:
+
+
+
+```
+[boris@ ~/helpdesk]$ date; HELPDESK_K8S_SYSADMIN_API_KEY=$HELPDESK_CLIENT_API_KEY HELPDESK_K8S_SYSADMIN_URL=http://localhost:11103 \
+>           HELPDESK_K8S_SYSADMIN_TARGET=pgbackrest-k8s-destruct HELPDESK_K8S_PGBACKREST_CONTEXT=<context> \
+>           HELPDESK_K8S_PGBACKREST_NAMESPACE=db-destruct \
+>                   time go test --count=1 -tags integration -timeout 900s -v -run 'K8sCluster_RestoreRefusesOnRealWALGap' \
+>                     ./agents/sysadmin/... 2>&1 | tee /tmp/k8s-refusal.log
+Sun Oct 25 00:40:40 EDT 2026
+=== RUN   TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap
+    restore_k8s_integration_test.go:253: [04:40:43.034] instance pod pgbackrest-demo-0 is ready
+    restore_k8s_integration_test.go:256: [04:40:43.035] 1. precondition: the WAL chain must be continuous before anything is hidden
+    restore_k8s_integration_test.go:257: [04:40:43.035] POST http://localhost:11103/tool/get_pgbackrest_status args={"target":"pgbackrest-k8s-destruct"}
+    restore_k8s_integration_test.go:257: [04:40:44.466]   -> HTTP 200 in 1.431s, error="", output={"stanza":"main","status_code":0,"status_message":"ok","repo_status_message":"ok","last_backup_label":"20261020-184816F","last_backup_time":"2026-10-20T18:48:18Z","last_backup_error":false,"backup_stale":true,"wal_continuity":{"status":"continuous","backup_label":"20261020-184816F","archive_id":"16-1","backup_start_wal":"000000020000000000000008","backup_stop_wal":"000000020000000000000008","consistency_reachable":true,"latest_timeline":6,"timeline_path":[2,3,4,5,6],"recoverable_to_wal":"00000005000000000000000F","archive_end_wal":"00000005000000000000000F","archive_end_time":"2026-10-25T02:43:35Z","segment_size_bytes":16777216,"segment_size_source":"wal_header"},"backups":[{"label":"2026102… (2910 more bytes)
+    restore_k8s_integration_test.go:263: [04:40:44.467]    ok: continuous, backup 20261020-184816F starts at segment 000000020000000000000008
+    restore_k8s_integration_test.go:264: [04:40:44.467] 2. hide the backup's start segment 000000020000000000000008 in the repo
+    restore_k8s_integration_test.go:266: [04:40:44.467] exec in pgbackrest-demo-0: su postgres -c 'set -e; g=$(ls /var/lib/pgbackrest/archive/main/16-1/0000000200000000/000000020000000000000008-*); mv "$g" "$g.hidden-by-test"'
+    restore_k8s_integration_test.go:266: [04:40:44.553]   -> err=<nil> out=
+    restore_k8s_integration_test.go:269: [04:40:44.553] 3. crash the instance, leaving a canary file in PGDATA
+    restore_k8s_integration_test.go:270: [04:40:44.554] crash: removing pg_control, then deleting the pod so postgres cannot start
+    restore_k8s_integration_test.go:270: [04:40:44.554] exec in pgbackrest-demo-0: rm -f /var/lib/postgresql/data/global/pg_control && touch /var/lib/postgresql/data/walcheck-canary
+    restore_k8s_integration_test.go:270: [04:40:44.626]   -> err=<nil> out=
+    restore_k8s_integration_test.go:270: [04:40:44.626] kubectl delete pod pgbackrest-demo-0 --wait=true
+    restore_k8s_integration_test.go:270: [04:40:46.527]   -> err=<nil> out=pod "pgbackrest-demo-0" deleted
+    restore_k8s_integration_test.go:270: [04:40:51.611] crash: pod pgbackrest-demo-0 is not ready and cannot be exec'd into (CrashLoopBackOff)
+    restore_k8s_integration_test.go:272: [04:40:51.611] 4. the WAL check on the crashed instance (the agent runs it in a one-off pod) must say broken at 000000020000000000000008
+    restore_k8s_integration_test.go:273: [04:40:51.611] POST http://localhost:11103/tool/get_pgbackrest_status args={"target":"pgbackrest-k8s-destruct"}
+    restore_k8s_integration_test.go:273: [04:41:09.486]   -> HTTP 200 in 17.875s, error="", output={"stanza":"main","status_code":0,"status_message":"ok","repo_status_message":"ok","last_backup_label":"20261020-184816F","last_backup_time":"2026-10-20T18:48:18Z","last_backup_error":false,"backup_stale":true,"wal_continuity":{"status":"broken","detail":"WAL segment 000000020000000000000008, needed for backup 20261020-184816F to reach a consistent state, is missing from the repo: PostgreSQL could not start from this backup","backup_label":"20261020-184816F","archive_id":"16-1","backup_start_wal":"000000020000000000000008","backup_stop_wal":"000000020000000000000008","consistency_reachable":false,"latest_timeline":6,"timeline_path":[2,3,4,5,6],"archive_end_wal":"00000005000000000000000F","arc… (3162 more bytes)
+    restore_k8s_integration_test.go:281: [04:41:09.486]    ok: status=broken consistency_reachable=false gaps=[{Timeline:2 FirstMissing:000000020000000000000008 LastMissing:000000020000000000000008 Count:1}]
+    restore_k8s_integration_test.go:283: [04:41:09.486] 5. restore_from_backup must refuse on the broken chain
+    restore_k8s_integration_test.go:284: [04:41:09.486] POST http://localhost:11103/tool/restore_from_backup args={"stanza":"main","target":"pgbackrest-k8s-destruct"}
+    restore_k8s_integration_test.go:284: [04:41:27.467]   -> HTTP 422 in 17.981s, error="restore_from_backup: refusing to restore — WAL continuity is broken for backup 20261020-184816F: WAL segment 000000020000000000000008, needed for backup 20261020-184816F to reach a consistent state, is missing from the repo: PostgreSQL could not start from this backup. A human must decide whether a restore that can't be verified to reach the end of the archive is still worth it", output=
+    restore_k8s_integration_test.go:288: [04:41:27.467]    ok: refused: restore_from_backup: refusing to restore — WAL continuity is broken for backup 20261020-184816F: WAL segment 000000020000000000000008, needed for backup 20261020-184816F to reach a consistent state, is missing from the repo: PostgreSQL could not start from this backup. A human must decide whether a restore that can't be verified to reach the end of the archive is still worth it
+    restore_k8s_integration_test.go:289: [04:41:27.467] 6. nothing may have been touched: the StatefulSet stays at 1 replica and the canary file survives
+    restore_k8s_integration_test.go:245: [04:41:27.467] kubectl get statefulset pgbackrest-demo -o jsonpath={.spec.replicas}
+    restore_k8s_integration_test.go:245: [04:41:27.519]   -> err=<nil> out=1
+    restore_k8s_integration_test.go:293: [04:41:27.519]    ok: replicas=1
+    restore_k8s_integration_test.go:295: [04:41:27.519] one-off pod on the instance's volumes: test -f /var/lib/postgresql/data/walcheck-canary && echo present
+    restore_k8s_integration_test.go:295: [04:41:29.733]   -> err=<nil> out=present
+    restore_k8s_integration_test.go:298: [04:41:29.733]    ok: canary file present
+    restore_k8s_integration_test.go:254: [04:41:29.733] repair: unhide any hidden segments and bring the instance back
+    restore_k8s_integration_test.go:254: [04:41:29.767] one-off pod on the instance's volumes: for g in $(find /var/lib/pgbackrest/archive -name '*.hidden-by-test'); do mv "$g" "${g%.hidden-by-test}"; done; rm -rf /var/lib/pgbackrest/pg_wal.saved-*
+    restore_k8s_integration_test.go:254: [04:41:34.085]   -> err=<nil> out=
+    restore_k8s_integration_test.go:254: [04:41:34.085] POST http://localhost:11103/tool/restore_from_backup args={"stanza":"main","target":"pgbackrest-k8s-destruct"}
+    restore_k8s_integration_test.go:254: [04:42:06.240]   -> HTTP 200 in 32.156s, error="", output={"output":"P00   WARN: environment contains invalid option 'demo-service-port'\nP00   WARN: environment contains invalid option 'demo-port-5432-tcp-proto'\nP00   WARN: environment contains invalid option 'demo-port-22-tcp-addr'\nP00   WARN: environment contains invalid option 'demo-service-port-postgres'\nP00   WARN: environment contains invalid option 'demo-port-22-tcp-port'\nP00   WARN: environment contains invalid option 'demo-service-port-ssh'\nP00   WARN: environment contains invalid option 'demo-port-5432-tcp-addr'\nP00   WARN: environment contains invalid option 'demo-port-5432-tcp-port'\nP00   WARN: environment contains invalid option 'demo-port'\nP00   WARN: environment contains inv… (1341 more bytes)
+    restore_k8s_integration_test.go:254: [04:42:06.241] POST http://localhost:11103/tool/restart_container args={"reason":"test repair","target":"pgbackrest-k8s-destruct"}
+    restore_k8s_integration_test.go:254: [04:42:08.056]   -> HTTP 200 in 1.816s, error="", output={"server_id":"pgbackrest-k8s-destruct","runtime":"kubectl","target":"pgbackrest-demo","success":true,"output":"StatefulSet pgbackrest-demo scaled from 0 to 1 replicas"}
+    restore_k8s_integration_test.go:254: [04:42:17.313] instance pod pgbackrest-demo-0 is ready
+--- PASS: TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap (94.34s)
+PASS
+ok  	helpdesk/agents/sysadmin	94.832s
+       97.15 real         2.31 user         1.15 sys
+```
+
+So in the nutshell, here's what that show (under -v flag):  
+  - Every tool call: the POST with its args, then the HTTP status, duration, error text and output clipped to 700 bytes. The refusal shows as the full error string. W00t!!  
+  - Every kubectl call and every command run in the Pod or in a one-off Pod: the command, then the error and output clipped to 300 bytes  
+  - The crash: a line when it starts and one when the Pod reaches CrashLoopBackOff and can't be exec'd into. The polling loop that waits for that stays quiet  
+  - The refusal test, numbered: 1 precondition, 2 hide, 3 crash, 4 broken verdict, 5 refusal, 6 nothing touched. Each passing check logs an ok: line with the evidence. That includes the status, `consistency_reachable`, the gap list, the refusal text, the replica count and the canary. W00f  
+  - The repair in cleanup, so you see how the instance was brought back  
+
+Nice, huh? So there you have it: go the forensics route by digging into the audit or run the test with the verbose output to dig deeper into the details.
+
+
 ## VM/host
 
 
