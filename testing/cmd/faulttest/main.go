@@ -760,15 +760,9 @@ func cmdRun(args []string) {
 			// fault's keywords and category describe. Re-check them against the
 			// chain the run actually took, now that it has finished.
 			if !repeatMode && cfg.GatewayURL != "" && resp.RunID != "" && resp.Error == nil {
-				if narrative, nerr := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, resp.RunID); nerr != nil {
-					slog.Warn("chain evidence: could not fetch the incident narrative; the diagnosis is scored on the first hop only", "run_id", resp.RunID, "err", nerr)
-				} else if chain, hops := chainDiagnosticText(narrative); ApplyChainEvidence(f, &evalResult, chain, hops, judgeCompleter != nil && !evalResult.JudgeSkipped) {
+				if hops, changed := applyChainEvidenceFromGateway(cfg.GatewayURL, cfg.GatewayAPIKey, f, &evalResult, resp.RunID,
+					judgeCompleter != nil && !evalResult.JudgeSkipped); changed {
 					fmt.Printf("Chain evidence:      the first hop alone missed the keyword/category criteria; the %d later diagnostic hop(s) met them (score now %d%%)\n", hops, int(evalResult.Score*100))
-					if evalResult.RemediationAttempted {
-						evalResult.OverallScore = evalResult.Score*0.6 + evalResult.RemediationScore*0.4
-					} else {
-						evalResult.OverallScore = evalResult.Score
-					}
 				}
 			}
 

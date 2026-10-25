@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"strings"
 
 	"helpdesk/testing/faultlib"
@@ -148,4 +149,29 @@ func ApplyChainEvidence(f Failure, r *EvalResult, chain string, hops int, judged
 	}
 	r.ChainEvidenceHops = hops
 	return true
+}
+
+// applyChainEvidenceFromGateway fetches the finished run's incident narrative
+// and applies ApplyChainEvidence to r. It reports the number of later
+// diagnostic hops that were counted and whether the score changed. A fetch
+// failure is logged and leaves r untouched: the diagnosis is then scored on
+// the first hop only, as before chain evidence existed. When the score
+// changes, the overall score is recomputed with the remediation score the
+// run already has.
+func applyChainEvidenceFromGateway(gatewayURL, apiKey string, f Failure, r *EvalResult, runID string, judged bool) (hops int, changed bool) {
+	narrative, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
+	if err != nil {
+		slog.Warn("chain evidence: could not fetch the incident narrative; the diagnosis is scored on the first hop only", "run_id", runID, "err", err)
+		return 0, false
+	}
+	chain, hops := chainDiagnosticText(narrative)
+	if !ApplyChainEvidence(f, r, chain, hops, judged) {
+		return hops, false
+	}
+	if r.RemediationAttempted {
+		r.OverallScore = r.Score*0.6 + r.RemediationScore*0.4
+	} else {
+		r.OverallScore = r.Score
+	}
+	return hops, true
 }

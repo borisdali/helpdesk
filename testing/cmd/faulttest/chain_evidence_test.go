@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -179,5 +181,132 @@ func TestApplyChainEvidence_EmptyChainIsANoOp(t *testing.T) {
 	before := r
 	if ApplyChainEvidence(chainTestFault(), &r, "", 0, false) || r.Score != before.Score || r.Passed != before.Passed {
 		t.Errorf("an empty chain changed the result: %+v", r)
+	}
+}
+
+// The gateway's wire format for GET /api/v1/incidents/{run_id}, with the hop
+// findings of the real 2026-10-25 VM run (plr_cea87922) as `vault incidents
+// --summary` printed them. Decoding it proves the JSON tags the chain text
+// relies on, which the struct-built narratives above bypass.
+const chainNarrativeJSON = `{
+  "incident_id": "plr_cea87922",
+  "triage": {
+    "run_id": "plr_cea87922",
+    "playbook": "pbs_db_data_loss_triage",
+    "findings": "single_instance=true; backup_tool=pgbackrest; pitr_decided=false"
+  },
+  "escalations": [
+    {"run_id": "plr_29750e97", "playbook": "pbs_sysadmin_host_triage", "outcome": "transitioned",
+     "transitioned_to": "pbs_pgbackrest_health_triage",
+     "findings": "The data directory is missing the pg_control file, causing PostgreSQL to fail at startup",
+     "diagnostic_report": {"hypotheses": [
+        {"rank": 1, "text": "pg_control missing after a storage fault", "confidence": 0.9, "is_primary": true},
+        {"rank": 2, "text": "disk full corrupted the WAL", "confidence": 0.1, "is_primary": false, "rejected_reason": "no ENOSPC in the log"}]}},
+    {"run_id": "plr_58d7881b", "playbook": "pbs_pgbackrest_health_triage", "outcome": "escalated",
+     "escalated_to": "pbs_pgbackrest_restore_remediate",
+     "findings": "Prior findings confirmed pg_control is missing (data loss); the most recent backup is healthy"}
+  ],
+  "remediation": {"run_id": "plr_ea16622e", "playbook": "pbs_pgbackrest_restore_remediate", "outcome": "resolved",
+                  "findings": "Restore from backup 20261025-125505F succeeded with recovery verified"}
+}`
+
+func narrativeServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/incidents/plr_cea87922" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// End to end through the real fetch and JSON decode: the 25 October failure.
+func TestApplyChainEvidenceFromGateway_RealRunShape(t *testing.T) {
+	srv := narrativeServer(t, http.StatusOK, chainNarrativeJSON)
+	r := firstHopResult(t)
+	r.RemediationAttempted, r.RemediationPassed, r.RemediationScore = true, true, 0.75
+	r.OverallScore = r.Score*0.6 + r.RemediationScore*0.4
+
+	hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false)
+	if !changed || hops != 2 {
+		t.Fatalf("changed=%v hops=%d, want true and 2", changed, hops)
+	}
+	if !r.Passed || !r.KeywordPass || r.ChainEvidenceHops != 2 {
+		t.Errorf("diagnostic did not pass on the chain: %+v", r)
+	}
+	if want := r.Score*0.6 + 0.75*0.4; r.OverallScore < want-1e-9 || r.OverallScore > want+1e-9 {
+		t.Errorf("OverallScore = %.4f, want %.4f (recomputed from the raised score)", r.OverallScore, want)
+	}
+}
+
+// A fetch failure must leave the first-hop result exactly as it was.
+func TestApplyChainEvidenceFromGateway_FetchFailureLeavesTheResult(t *testing.T) {
+	for name, status := range map[string]int{"not found": http.StatusNotFound, "server error": http.StatusInternalServerError} {
+		t.Run(name, func(t *testing.T) {
+			srv := narrativeServer(t, status, "nope")
+			r := firstHopResult(t)
+			before := r
+			hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false)
+			if changed || hops != 0 || r.Score != before.Score || r.Passed != before.Passed || r.OverallScore != before.OverallScore {
+				t.Errorf("a failed fetch changed the result: hops=%d changed=%v %+v", hops, changed, r)
+			}
+		})
+	}
+	t.Run("unparseable body", func(t *testing.T) {
+		srv := narrativeServer(t, http.StatusOK, "<html>")
+		r := firstHopResult(t)
+		if _, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false); changed || r.Passed {
+			t.Errorf("an unparseable narrative changed the result: %+v", r)
+		}
+	})
+}
+
+// A single-hop run (the narrative has no later hops) gets nothing added, even
+// if the triage findings happen to contain a keyword.
+func TestApplyChainEvidenceFromGateway_SingleHopRun(t *testing.T) {
+	srv := narrativeServer(t, http.StatusOK, `{"incident_id":"plr_cea87922","triage":{"findings":"pg_control is mentioned"}}`)
+	r := firstHopResult(t)
+	if hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false); changed || hops != 0 || r.Passed {
+		t.Errorf("a single-hop narrative changed the result: hops=%d changed=%v %+v", hops, changed, r)
+	}
+}
+
+// The wire format decodes into the fields the chain text reads, and only the
+// primary hypothesis of a hop is counted: a rejected alternative that
+// happens to say "corrupt" must not satisfy a keyword.
+func TestChainDiagnosticText_PrimaryHypothesisOnly(t *testing.T) {
+	srv := narrativeServer(t, http.StatusOK, chainNarrativeJSON)
+	n, err := fetchIncidentNarrative(srv.URL, "", "plr_cea87922")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, hops := chainDiagnosticText(n)
+	if hops != 2 {
+		t.Errorf("hops = %d, want 2", hops)
+	}
+	for _, want := range []string{"single_instance=true", "missing the pg_control file", "pg_control missing after a storage fault", "the most recent backup is healthy"} {
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(want)) {
+			t.Errorf("chain text is missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "disk full corrupted the WAL") {
+		t.Errorf("a non-primary hypothesis leaked into the chain text:\n%s", text)
+	}
+	if strings.Contains(text, "Restore from backup") {
+		t.Errorf("the remediation hop leaked into the chain text:\n%s", text)
+	}
+}
+
+// A chain that ended at an escalation with no remediation hop still counts.
+func TestChainDiagnosticText_EscalationsWithoutRemediation(t *testing.T) {
+	n := &incidentNarrative{}
+	n.Escalations = []narrativeEscalationHop{{Findings: "pg_control is missing"}}
+	text, hops := chainDiagnosticText(n)
+	if hops != 1 || !strings.Contains(text, "pg_control") {
+		t.Errorf("got %q, %d hops", text, hops)
 	}
 }
