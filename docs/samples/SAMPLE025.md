@@ -17,15 +17,226 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This sample transcript was created entirely on K8s. Not because the capabilities shown here are new or special (all three were already built and live-verified against Docker), but because K8s is where every one of the real bugs in this transcript was actually found. See [here](SAMPLE010.md), [here](SAMPLE021.md) and [here](SAMPLE019.md) for VM/Bare Metal, the source and container (Docker/Podman) sample transcripts respectively.
 
-This sample transcript is meant to showcase the new capabilities introduced in the [v0.32 release](https://github.com/borisdali/helpdesk/releases/tag/v0.32.0), which is a pgBackRest restore/recovery, but with the harness, safeguards and sanity checks that fire before and after the restore. Yes, it's in-place, so unless these precautions are taken, you may end up with the WORSE situation compared to when you started, i.e. your existing data and WAL segments may get wiped out and not restored/recovered properly.   
+This sample transcript is designed to showcase the new capabilities introduced in the [v0.32 release](https://github.com/borisdali/helpdesk/releases/tag/v0.32.0), which is not just a happy path pgBackRest restore/recovery (that's been shown already, see [here](SAMPLE023.md), but with the harness, safeguards and sanity checks that fire before and after the restore, so... not just the happy path anymore :-)   
+
+And yes, it's in-place, so unless all of these precautions are taken, you may end up with the WORSE situation compared to when you started, i.e. your existing data and WAL segments may get wiped out and not restored/recovered properly.   
   
 That's why we spent so much time to ensure that won't happen. If there's a problem with the backup, the repo, the "hole" in the WAL stream (i.e. it's not continuous), we don't even start a restore. That is, aiHelpDesk refuses to cause potentially more damage and advises you exactly why. That's the only way. Or at least that's the only way we see a reliable database operations to proceed (yes, especially when it's driven by probabilistic AI :-).
   
-The samples are of real runs against the live K8s cluster. Not `helm template`, not a unit test, not a mock:
+The samples are of real runs against the live host/VM and a live K8s cluster. Not just a Docker container fixure, not a `helm template`, not a unit test, not a mock:
 
 ---
 
-## K8s restore integration test
+## 1/ VM/host: a restore via a failure injection test against a remote VM with the WAP-gap
+
+Let's kick this off by running a fault injection test against a Postgres running directly on a (remote) host/VM and so faulttest will use SSH injector in this case. In this case we run faulttest client from the code source, but see the [the previous example](SAMPLE023.md) for how it works when launched from a host deployment (troubleshooting and fixing another host):
+
+```
+[boris@ ~/helpdesk]$ date; time go run ./testing/cmd/faulttest run \
+   --ids db-pgdata-corrupted-vm \
+   --remediate \
+   --via-gateway \
+   --gateway $HELPDESK_GATEWAY_URL \
+   --api-key $HELPDESK_API_KEY \
+   --infra-config ~/infrastructure.json \
+   --conn "host=pgbackrest-vm.test port=5432 dbname=postgres user=postgres password=xxx" \
+   --agent-conn pgbackrest-ubuntu-vm \
+   --ssh-host postgres@pgbackrest-vm.test \
+   --ssh-port 22 \
+   --ssh-key $KEY \
+   --approval-mode force \
+   --gate-escalation \
+   --operator alice@example.com \
+   --users-file users.example.yaml
+
+Sun Oct 25 12:55:44 EDT 2026
+time=2026-10-25T12:55:44.535-04:00 level=INFO msg=--conn host=pgbackrest-vm.test
+time=2026-10-25T12:55:44.535-04:00 level=INFO msg=--agent-conn alias=pgbackrest-ubuntu-vm host=pgbackrest-vm.test
+
+--- Testing: Data directory corrupted — restore from latest backup (real host/VM) (db-pgdata-corrupted-vm) ---
+time=2026-10-25T12:55:44.539-04:00 level=INFO msg="executing injection spec" type=ssh_exec phase=inject
+time=2026-10-25T12:55:45.171-04:00 level=INFO msg="ssh_exec completed" target=postgres@pgbackrest-vm.test output="Job for postgresql@16-main.service failed because the service did not take the steps required by its unit configuration.\nSee \"systemctl status postgresql@16-main.service\" and \"journalctl -xeu postgresql@16-main.service\" for details."
+time=2026-10-25T12:55:45.597-04:00 level=INFO msg="sending prompt to agent via playbook" failure=db-pgdata-corrupted-vm series_id=pbs_db_data_loss_triage playbook_id=pb_b8a6bdf5 gateway=http://localhost:8080 agent-conn="host=pgbackrest-vm.test port=5432 dbname=postgres user=postgres password=xxx"
+time=2026-10-25T12:55:56.568-04:00 level=WARN msg="gateway warning" failure=db-pgdata-corrupted-vm warning="expected evidence pattern not found in provided context: \"PANIC.*could not locate a valid checkpoint\""
+time=2026-10-25T12:55:56.568-04:00 level=WARN msg="gateway warning" failure=db-pgdata-corrupted-vm warning="expected evidence pattern not found in provided context: \"database files are incompatible with server\""
+time=2026-10-25T12:55:56.568-04:00 level=WARN msg="gateway warning" failure=db-pgdata-corrupted-vm warning="expected evidence pattern not found in provided context: \"invalid page.*could not read block\""
+time=2026-10-25T12:55:56.568-04:00 level=WARN msg="gateway warning" failure=db-pgdata-corrupted-vm warning="expected evidence pattern not found in provided context: \"could not find the database system\""
+time=2026-10-25T12:55:56.569-04:00 level=WARN msg="tool evidence using text-based detection; structured tool call data unavailable" failure=db-pgdata-corrupted-vm reason="agent did not emit tool_call_summary DataPart (gateway path or non-ADK agent)"
+time=2026-10-25T12:55:56.569-04:00 level=INFO msg="gate pending: operator review required" failure=db-pgdata-corrupted-vm run_id=plr_cea87922 escalation_target=pbs_sysadmin_host_triage
+
+════════════════════════════════════════════════════════════════
+  INFORMED GATE — review before remediation
+════════════════════════════════════════════════════════════════
+
+  Next playbook     : pbs_sysadmin_host_triage
+  Findings          : single_instance=true; backup_tool=pgbackrest; pitr_decided=false
+  Remediation plan  : Sysadmin — Host/Container Inspection (manual approval)
+                      Inspect a PostgreSQL instance reported as unreachable, whether it runs
+                      in a Docker/Podman container, under systemd directly on a host/VM, or
+                      (handed off further) in a Kubernetes pod. Determine whether it exited
+                      cleanly (manual stop / graceful shutdown) or crashed (OOM kill, panic,
+                      unexpected exit), revise the prior DB agent's root cause hypothesis if
+                      necessary, and provide evidence-based remediation guidance.
+
+time=2026-10-25T12:55:56.570-04:00 level=INFO msg="force-approving gate" run_id=plr_cea87922
+time=2026-10-25T12:57:31.001-04:00 level=INFO msg="waitForChildRunComplete: watching child run" child=plr_29750e97
+time=2026-10-25T12:57:31.666-04:00 level=INFO msg="waitForChildRunComplete: child run hit a second gate mid-chain, force-approving" child=plr_29750e97
+time=2026-10-25T12:57:55.817-04:00 level=INFO msg="waitForChildRunComplete: watching child run" child=plr_58d7881b
+time=2026-10-25T12:57:56.063-04:00 level=INFO msg="waitForChildRunComplete: child run hit a second gate mid-chain, force-approving" child=plr_58d7881b
+time=2026-10-25T12:58:40.072-04:00 level=INFO msg="waitForChildRunComplete: watching child run" child=plr_ea16622e
+time=2026-10-25T12:58:41.753-04:00 level=INFO msg="waitForChildRunComplete: child run complete" child=plr_ea16622e outcome=resolved
+
+  Post-incident feedback (optional, but recommended):
+    Was the triage diagnosis correct? [y/n/skip]: y
+    Root cause: this is a bug, the proper prompt is coming in v0.33
+  Feedback submitted (triage/post_incident run_id=plr_cea87922)
+    Was the remediation approach appropriate? [y/n/skip]: y
+    Remediation approach notes (optional): lgtm
+  Feedback submitted (remediation/post_incident run_id=plr_cea87922)
+  Feedback submitted (remediation/post_incident run_id=plr_ea16622e)
+Remediation: RECOVERED 177.3s after injection (score: 75%)
+Incident plr_cea87922 — recovered 177.3s after the fault was injected
+  Remediation: pbs_pgbackrest_restore_remediate (resolved)
+  Narrative  : GET http://localhost:8080/api/v1/incidents/plr_cea87922
+Vault: draft saved → pb_a2d41569 (activate with 'faulttest vault list')
+  Feedback submitted (triage/post_incident run_id=plr_cea87922)
+time=2026-10-25T13:00:32.961-04:00 level=INFO msg="executing injection spec" type=ssh_exec phase=teardown
+time=2026-10-25T13:00:33.294-04:00 level=INFO msg="ssh_exec completed" target=postgres@pgbackrest-vm.test output="postgresql@16-main is active: nothing to repair"
+Diagnostic Result:   [FAIL] score=20% (keywords=0% tools=100% judge=0%)
+Remediation Result:  [PASS] score=75% (177.3s, playbook)
+Overall Result:      [FAIL] score=42%
+
+=== Fault Test Report: 04f86049 ===
+
+[FAIL] Data directory corrupted — restore from latest backup (real host/VM) (db-pgdata-corrupted-vm) - score: 20% [tool evidence: text match]
+       Keywords: 0% | Tools: 100% | Category: 0% [no judge — add --judge for semantic scoring]
+       Remediation: 75% (177.3s, playbook) | Overall: 42%
+
+--- Summary ---
+Total: 1 | Passed: 0 | Failed: 1 | Rate: 0%
+  database: 0/1 (0%)
+
+Note: 1 fault(s) used text-based tool evidence scoring (agent did not emit
+structured tool call data). These scores may be less reliable. For precise
+tool evidence, point --db-agent directly at the agent A2A URL rather than
+the gateway, or use an ADK-based agent.
+
+Report written to ./faulttest-04f86049.json
+--- BEGIN FAULTTEST REPORT JSON ---
+{
+  "id": "04f86049",
+  "timestamp": "2026-10-25T17:00:33Z",
+  "results": [
+    {
+      "failure_id": "db-pgdata-corrupted-vm",
+      "failure_name": "Data directory corrupted — restore from latest backup (real host/VM)",
+      "category": "database",
+      "score": 0.2,
+      "passed": false,
+      "run_id": "plr_cea87922",
+      "keyword_pass": false,
+      "diagnosis_pass": false,
+      "tool_evidence": true,
+      "ordering_pass": true,
+      "tool_evidence_mode": "text_fallback",
+      "response_text": "I'm beginning triage of an unavailable PostgreSQL instance on bare VM (pgbackrest-vm.test), systemd unit postgresql@16-main. I will follow the \"Database Down — Data Loss Triage\" playbook, starting with Step 1: confirming the failure type and scope using only the Known Infrastructure context.\n\n**Step 1 — Determine static facts from infrastructure context:**\n\nFrom the Known Infrastructure section:\n- **Server**: pgbackrest-ubuntu-vm (pgBackRest Real Ubuntu VM) at pgbackrest-vm.test:5432\n- **Hosting type**: VM with systemd unit `postgresql@16-main` (bare metal / VM-managed, NOT Kubernetes, NOT Docker)\n- **Topology**: Single instance (no replica mentioned in the entry for this server)\n- **Backup tool**: pgBackRest (indicated by the database name \"pgbackrest-ubuntu-vm\")\n\nSince this is a bare VM with systemd management (not Kubernetes, not Docker), I cannot read container logs or systemd journal logs using my own tools. Per Step 1 guidance, I must hand off to the sysadmin agent **before** attempting to diagnose the failure signature myself.\n\n**Determination:**\n- **single_instance**: true (no replica topology listed)\n- **backup_tool**: pgbackrest (database is \"pgBackRest Real Ubuntu VM\")\n- **pitr_decided**: false (no PITR decision made on first pass)",
+      "duration": "11.396435333s",
+      "keyword_score": 0,
+      "tool_score": 1,
+      "diagnosis_score": 0,
+      "gateway_warnings": [
+        "expected evidence pattern not found in provided context: \"PANIC.*could not locate a valid checkpoint\"",
+        "expected evidence pattern not found in provided context: \"database files are incompatible with server\"",
+        "expected evidence pattern not found in provided context: \"invalid page.*could not read block\"",
+        "expected evidence pattern not found in provided context: \"could not find the database system\""
+      ],
+      "remediation_attempted": true,
+      "remediation_passed": true,
+      "recovery_time_seconds": 177.306686375,
+      "remediation_score": 0.75,
+      "remediation_method": "playbook",
+      "overall_score": 0.42000000000000004
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "pass_rate": 0,
+    "categories": {
+      "database": {
+        "total": 1,
+        "passed": 0,
+        "rate": 0
+      }
+    }
+  }
+}
+--- END FAULTTEST REPORT JSON ---
+Evaluation scores posted to auditd: 1/1 runs
+
+real	4m49.668s
+user	0m0.281s
+sys	0m0.395s
+```
+
+Let's get the incident summary first then analyze the results:
+
+```
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents plr_cea87922 \
+   --summary \
+   --gateway $HELPDESK_GATEWAY_URL \
+   --api-key $HELPDESK_API_KEY
+
+Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.32.0-684e43f  ·  host: helpdesk-gateway-65c69bfd8c-fhhxz
+
+time=2026-10-25T13:01:31.221-04:00 level=INFO msg=--conn host=localhost
+time=2026-10-25T13:01:31.221-04:00 level=INFO msg=--agent-conn host=faulttest-db-local
+INCIDENT plr_cea87922 — resolved in 174s
+
+1. TRIAGE        pbs_db_data_loss_triage → pbs_sysadmin_host_triage
+   single_instance=true; backup_tool=pgbackrest; pitr_decided=false
+2. ESCALATION 1  pbs_sysadmin_host_triage → pbs_pgbackrest_health_triage  [plr_29750e97]
+   The data directory is missing the pg_control file, causing PostgreSQL to fail at startup; the most recent pgB…
+3. ESCALATION 2  pbs_pgbackrest_health_triage → pbs_pgbackrest_restore_remediate  [plr_58d7881b]
+   Prior findings confirmed pg_control is missing (data loss); this triage confirms the most recent backup (2026…
+4. REMEDIATION   pbs_pgbackrest_restore_remediate (resolved)  [plr_ea16622e]
+   Restore from backup 20261025-125505F (timestamp 2026-10-25T16:55:08Z) succeeded with recovery verified at tim…
+
+Overall: 42% (diagnosis 0% · remediation 75%)
+```
+
+And the overall outcome is... [FAIL]? Huh. Let's review in detail, what does this run really show us. Well, let's start with the good news: 
+  - Remediation PASS 75%:  
+    All four hops ran, both gates were crossed and the restore came from the fresh backup 20261025-125505F.  
+    Recovery was verified and the service was running 177 seconds after injection.  
+    The teardown found it healthy ("nothing to repair").  
+    So... that's all good!
+
+  - Diagnostic FAIL 20%:  
+    This has nothing to do with the restore.  
+
+  - Why 75% and not 100%:  
+    The speed rule gives 1.0 within half the fault's timeout (150s) and 177s missed it.
+    That's the stopgap rule that is slatetd to get fixed in v0.33
+
+  Now why did the diagnostic fail?
+  - The evaluator scores keyword 50%, category 30% and tools 20%.  
+  - A pass needs at least 0.6 and the keyword check passing.  
+  - The problem is that presently we only score the first hop's response... which comes from the DB Agent in this case.  
+  - That agent has no log tools by design and hands off immediately.  
+  - Its response here contains none of the fault's keywords (`pg_control`, `could not find the database system`, `data directory`, `corrupt`, `restore`) and nothing for the `pgdata_corrupted` category.  
+  - So the result is tools 20% and everything else 0%.  
+  - It's also why the incident has no root cause.
+  - It's the same gap behind the note above in the feedback prompt, so yes, that's the v0.33 item.  
+
+  The Docker version of this fault has the same keywords and passes some runs, whenever hop 1 happens to say "restore" or "data directory". So the result depends on how the model words hop 1.
+
+  Yes, we can get it to pass via a stopgap solution, which would really be just one line in the catalog. Indeed, just add a term hop 1 always emits to `expected_keywords`, such as `single_instance` or `pgbackrest`... but that would be the wrong thing to do, effectively papering over the gap that we need to close properly, so... let's leave it "as is", please ignore the diagnostic part fail for now and let us fix it the right way in the next/v0.33 release!
+
+And with that... let's see how the same restore and WAL-gap detection (failure injection) test works on K8s:
+
+## 2/ K8s: restore integration test
 
 First off, the automated tests. Yes, we run it for every release as part of our CI, but aiHelpDesk is OSS and it's possible that we didn't test your specific platform, so we recommend you run it there yourself too. It's cheap, fast and is designed to give you the first level of confidence.  
   
@@ -46,10 +257,7 @@ This test is strictly opt-in, since it crashes the Pod and it skips unless the c
   HELPDESK_K8S_PGBACKREST_CONTEXT=<context> go test -tags integration -timeout 600s ./agents/sysadmin/ -run K8s_ -v
 ```
 
-It runs from the laptop through the <context> and uses the same `kubectl exec` code path the in-cluster agent uses, with the kubeconfig context instead of the service account.
-
-
-
+It runs from the laptop through the <context> and uses the same `kubectl exec` code path the in-cluster agent uses, with the kubeconfig context instead of the service account. Here's a full example:
 
 ```
 [boris@ ~/helpdesk]$ HELPDESK_K8S_SYSADMIN_API_KEY=$HELPDESK_CLIENT_API_KEY \
@@ -63,6 +271,7 @@ It runs from the laptop through the <context> and uses the same `kubectl exec` c
 --- PASS: TestIntegration_K8sCluster_RestoreRefusesOnRealWALGap (93.79s)
 PASS
 ok      helpdesk/agents/sysadmin        94.255s
+```
 
 Nice! The test passed and `db-destruct` Pod ended up as healthy. This is the WAL-continuity refusal on K8s in action. What it proved, in a real cluster against a real crash:
   - The precondition showed the chain continuous  
@@ -76,7 +285,21 @@ All of this went through the Postgres-backed auditd and the identity-enforcing a
 In a nutshell, this is what the PASS of that test means, but if you are like me and would like to dig deeper, here's one way (aka the forensics): querying the audit events for the test's trace IDs is not a bad place to start:
 
 ```
-[boris@ ~/helpdesk]$ kubectl -n helpdesk-auditd-storage exec postgres-auditd-0 -- psql -U postgres -d auditd -c "select substr(timestamp,12,12) ts, event_type, tool_name, action_class, outcome_status, outcome_duration_ms ms, left(coalesce(outcome_error,''),120) err from audit_events where trace_id like 'tr_k8sit_%' and created_at > now() - interval '3 hours' order by id desc limit 40"
+[boris@ ~/helpdesk]$ kubectl -n helpdesk-auditd-storage \
+  exec postgres-auditd-0 -- psql -U postgres -d auditd \
+   -c "select 
+	substr(timestamp,12,12) ts, 
+	event_type, 
+	tool_name, 
+	action_class, 
+	outcome_status, 
+	outcome_duration_ms ms, 
+	left(coalesce(outcome_error,''),120) err 
+      from audit_events 
+      where trace_id like 'tr_k8sit_%' 
+	and created_at > now() - interval '3 hours' 
+      order by id desc limit 40"
+
       ts      |     event_type     |      tool_name      | action_class | outcome_status | ms  | err
 --------------+--------------------+---------------------+--------------+----------------+-----+-----
  02:43:40.136 | tool_execution     | restart_container   | destructive  | success        | 103 |
@@ -176,14 +399,12 @@ So in the nutshell, here's what that show (under -v flag):
 
 Nice, huh? So there you have it: go the forensics route by digging into the audit or run the test with the verbose output to dig deeper into the details.
 
-
-## VM/host
-
+Now, keep in mind, this is just the "refusal" part of the test, not the full remediation yet :-)
 
 
+## 3/ K8s: restore via a fault injection test
 
-
-## K8s
+Integration test is really reassuring, but let's run the real fault injection test against the in-cluster Postgres (similar to how we ran it against Postgres hosted on a VM in part 1 of this sample transcript):
 
 ```
 [boris@ ~/helpdesk]$ kubectl -n db delete statefulset pgbackrest-demo
@@ -448,9 +669,16 @@ Report written to ./faulttest-fc7ad841.json
 }
 --- END FAULTTEST REPORT JSON ---
 Evaluation scores posted to auditd: 1/1 runs
+```
 
+Good, just as with the VM test above, let's get the summary first:
 
-[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents plr_20317873 --summary --gateway $HELPDESK_GATEWAY_URL
+```
+[boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault incidents plr_20317873 \
+   --summary \
+   --gateway $HELPDESK_GATEWAY_URL \
+   --api-key $HELPDESK_API_KEY
+
 Gateway: $HELPDESK_GATEWAY_URL  ·  version: v0.32.0-684e43f  ·  host: helpdesk-gateway-65c69bfd8c-fhhxz
 
 INCIDENT plr_20317873 — needs_human after 16s
@@ -478,8 +706,8 @@ So the fault passed and the teardown left the Pod as it was. Let's review the re
 
   Limits:
   - The harness ran without `--judge` (the report says so), so the semantic score wasn't used. Add `--judge` if you want that in the record.
-  - This covers detection and the stop at a human. It doesn't cover an agent-driven restore on K8s yet.
-
-
+  - This covers detection and the stop at a human. It doesn't cover an agent-driven restore on K8s yet.  
+  
+And that's a wrap, folks! We'll pick it up with the sample transcript for the upcoming v0.33 release and close the gaps we mentioned here as well. Stay tuned!
 
 
