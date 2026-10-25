@@ -120,7 +120,7 @@ func (r *Remediator) HandlePendingGate(ctx context.Context, f Failure, resp test
 			timeout = d
 		}
 	}
-	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	recoverySecs, err := r.pollRecovery(ctx, verifySQL, spec.VerifyExec, timeout)
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: "playbook"}
 	}
@@ -197,7 +197,7 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 		}
 	}
 
-	recoverySecs, err := r.pollRecovery(ctx, verifySQL, timeout)
+	recoverySecs, err := r.pollRecovery(ctx, verifySQL, spec.VerifyExec, timeout)
 	if err != nil {
 		return RemediationResult{Err: fmt.Errorf("recovery verification: %w", err), Method: method, Score: 0.0}
 	}
@@ -1054,8 +1054,14 @@ func (r *Remediator) triggerAgent(ctx context.Context, agentName, prompt string)
 
 // pollRecovery uses the resolved connection string (infra alias expansion) and
 // delegates to faultlib.PollRecovery.
-func (r *Remediator) pollRecovery(ctx context.Context, verifySQL string, timeout time.Duration) (float64, error) {
-	secs, err := faultlib.PollRecovery(ctx, r.resolvedConnStr(), verifySQL, timeout)
+func (r *Remediator) pollRecovery(ctx context.Context, verifySQL, verifyExec string, timeout time.Duration) (float64, error) {
+	var secs float64
+	var err error
+	if verifyExec != "" {
+		secs, err = faultlib.PollRecoveryExec(ctx, verifyExec, r.cfg.KubeContext, timeout)
+	} else {
+		secs, err = faultlib.PollRecovery(ctx, r.resolvedConnStr(), verifySQL, timeout)
+	}
 	if err == nil {
 		secs = faultlib.RecoveryTime(r.faultStart, secs, time.Now())
 	}

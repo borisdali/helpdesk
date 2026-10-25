@@ -114,6 +114,13 @@ type RemediationSpec struct {
 	Namespace string `yaml:"namespace,omitempty"`
 	// VerifySQL is the SQL query run to confirm recovery (default: "SELECT 1").
 	VerifySQL string `yaml:"verify_sql,omitempty"`
+	// VerifyExec, when set, replaces VerifySQL: a shell script the harness
+	// polls on the machine it runs on until it exits 0 (recovered) or
+	// VerifyTimeout passes. For targets the harness cannot open a psql
+	// connection to, e.g. a Kubernetes pod behind a ClusterIP Service:
+	// `kubectl exec` into it instead. FAULTTEST_K8S_CONTEXT is set when
+	// --context is given.
+	VerifyExec string `yaml:"verify_exec,omitempty"`
 	// VerifyTimeout is the max time to wait for recovery (default: "120s").
 	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }

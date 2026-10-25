@@ -914,6 +914,157 @@ failures:
         narrative: "Same diagnosis and chain as db-pgdata-corrupted (data_loss_triage -> sysadmin host triage -> pgbackrest_health_triage -> pgbackrest_restore_remediate). What differs is the restore: restore_from_backup's result has a pg_wal_tail with replay_through_wal past the archive end and row A's segment in pushed_to_archive, verify_restore_recovery returns verified with replayed_through_wal, and the remediation's findings say the commits in the pg_wal tail were recovered rather than lost."
     timeout: 300s
 
+  - id: db-pgdata-corrupted-k8s
+    name: "Data directory corrupted — restore from latest backup (Kubernetes pod)"
+    category: database
+    severity: critical
+    description: >
+      db-pgdata-corrupted against the self-managed pgBackRest pod on
+      Kubernetes, in its own namespace (db-destruct): pg_control is deleted
+      and the pod deleted, so it crash-loops (CrashLoopBackOff, no kubectl
+      exec) like a real storage loss. The agent-driven chain has to cross
+      four hops on its own: pbs_db_data_loss_triage hands off to
+      pbs_sysadmin_host_triage, which reads the pod's logs (kubectl logs, the
+      crashed run first) and finds "could not find the database system",
+      pbs_pgbackrest_health_triage confirms a healthy backup and a continuous
+      WAL chain, and pbs_pgbackrest_restore_remediate scales the StatefulSet
+      to 0, restores in a one-off pod, and resumes it with restart_container.
+      Added v0.33: v0.32 verified each of those tools in-cluster but the
+      playbooks did not route a Kubernetes data-loss case to them.
+    # Resolved from the gateway's own infrastructure config (an entry with
+    # k8s_namespace db-destruct and k8s_pod_selector app=pgbackrest-demo, see
+    # testing/k8s/helm-values-pgbackrest.yaml); the harness needs none.
+    agent_conn_override: pgbackrest-k8s-destruct
+    prerequisites: |
+      The helpdesk stack deployed in-cluster (or a local stack whose
+      sysadmin agent can reach the cluster) with an inventory entry
+      pgbackrest-k8s-destruct for namespace db-destruct, and the pgBackRest
+      pod applied there with a recent full backup and a clean
+      `pgbackrest check` (what `make integration-k8s` does first):
+        kubectl create namespace db-destruct
+        kubectl apply -n db-destruct -f testing/k8s/pgbackrest-demo.yaml
+        kubectl -n db-destruct exec pgbackrest-demo-0 -- su postgres -c \
+          'pgbackrest --stanza=main --type=full backup'
+      Run with the gate flags, against the gateway:
+        go run ./testing/cmd/faulttest run --ids db-pgdata-corrupted-k8s \
+          --remediate --via-gateway --gateway $GW --api-key <key> \
+          --conn pgbackrest-k8s-destruct --context minikube \
+          --approval-mode force --gate-escalation --operator <you>
+
+      Destructive: the inject and teardown scripts refuse any namespace that
+      does not end in -destruct. Neither needs SSH; both use kubectl from the
+      harness, and recovery is checked with verify_exec (kubectl exec), since
+      the harness has no route to the pod's ClusterIP.
+    inject_timeout: 180s
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db-destruct
+        case "$NS" in *-destruct) ;; *) echo "refusing to crash a database in namespace $NS: it must end in -destruct" >&2; exit 1;; esac
+        K="kubectl $CTX_ARG -n $NS"
+        POD=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        $K exec "$POD" -- rm -f /var/lib/postgresql/data/global/pg_control
+        $K delete pod "$POD" --wait=true
+        # Postgres cannot start without pg_control: wait for the state a real
+        # crash leaves, a pod that exists, is not ready and cannot be exec'd
+        # into (CrashLoopBackOff).
+        for i in $(seq 1 60); do
+          P=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          if [ -n "$P" ] && [ "$($K get pod "$P" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)" != true ]; then
+            if ! $K exec "$P" -- true >/dev/null 2>&1; then
+              sleep 5 # let it crash at least once more
+              echo "crashed: $P is not ready and cannot be exec'd into"
+              exit 0
+            fi
+          fi
+          sleep 3
+        done
+        echo "pod did not reach a crashed, un-exec-able state within 3 minutes" >&2
+        exit 1
+    teardown:
+      type: shell_exec
+      # Repairs the cluster directly, not through any agent tool (same
+      # convention as the Docker and VM faults: --repeat runs skip
+      # remediation, and a failed remediation must not leave the pod down).
+      # Nothing to do when the pod is ready; otherwise it does what the
+      # agent's restore does, by hand: scale to 0, restore in a one-off pod on
+      # the StatefulSet's volumes, scale back up. Also removes the
+      # pg_wal.saved-* copies a restore leaves on the repo volume.
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db-destruct
+        case "$NS" in *-destruct) ;; *) echo "refusing to repair namespace $NS: it must end in -destruct" >&2; exit 1;; esac
+        K="kubectl $CTX_ARG -n $NS"
+        PROMOTED="psql -d testdb -Atc 'SELECT NOT pg_is_in_recovery()'"
+        wait_promoted() {
+          for i in $(seq 1 90); do
+            [ "$($K exec pgbackrest-demo-0 -- su postgres -c "$PROMOTED" 2>/dev/null)" = t ] && return 0
+            sleep 2
+          done
+          echo "pgbackrest-demo-0 did not finish recovery" >&2
+          return 1
+        }
+        READY=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
+        if [ "$READY" = true ]; then
+          wait_promoted
+          $K exec pgbackrest-demo-0 -- sh -c 'rm -rf /var/lib/pgbackrest/pg_wal.saved-*'
+          echo "pgbackrest-demo is ready: nothing to repair"
+          exit 0
+        fi
+        $K scale statefulset/pgbackrest-demo --replicas=0
+        $K wait --for=delete pod -l app=pgbackrest-demo --timeout=120s || true
+        OVR='{"apiVersion":"v1","spec":{"restartPolicy":"Never","volumes":[{"name":"pgdata","persistentVolumeClaim":{"claimName":"pgdata-pgbackrest-demo-0"}},{"name":"pgbackrest-repo","persistentVolumeClaim":{"claimName":"pgbackrest-repo-pgbackrest-demo-0"}}],"containers":[{"name":"fault-repair","image":"docker-postgres-pgbackrest:latest","imagePullPolicy":"Never","command":["su","postgres","-c","PGDATA=$(grep ^pg1-path= /etc/pgbackrest.conf | cut -d= -f2); rm -f $PGDATA/postmaster.pid; pgbackrest --stanza=main --delta restore; rm -rf /var/lib/pgbackrest/pg_wal.saved-*"],"volumeMounts":[{"name":"pgdata","mountPath":"/var/lib/postgresql/data"},{"name":"pgbackrest-repo","mountPath":"/var/lib/pgbackrest"}]}]}}'
+        $K delete pod fault-repair --ignore-not-found --wait=true
+        $K run fault-repair --image=docker-postgres-pgbackrest:latest --restart=Never --overrides="$OVR"
+        PH=""
+        for i in $(seq 1 90); do
+          PH=$($K get pod fault-repair -o jsonpath='{.status.phase}' 2>/dev/null || true)
+          [ "$PH" = Succeeded ] || [ "$PH" = Failed ] && break
+          sleep 2
+        done
+        $K logs fault-repair 2>&1 | grep -v "WARN: environment contains invalid option" || true
+        $K delete pod fault-repair --wait=false
+        [ "$PH" = Succeeded ] || { echo "repair restore ended $PH" >&2; exit 1; }
+        $K scale statefulset/pgbackrest-demo --replicas=1
+        $K wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=300s
+        wait_promoted
+    diagnosis_playbook_series_id: pbs_db_data_loss_triage
+    remediation:
+      # The harness has no route to the pod's ClusterIP, so recovery is
+      # checked from inside it: the instance is serving and has finished
+      # recovery (promoted), not merely accepting read-only connections.
+      verify_exec: |
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        [ "$(kubectl $CTX_ARG -n db-destruct exec pgbackrest-demo-0 -- su postgres -c "psql -d testdb -Atc 'SELECT NOT pg_is_in_recovery()'" 2>/dev/null)" = t ]
+      verify_timeout: "240s"
+    prompt: >
+      Monitoring flagged that this database is unreachable. The
+      connection_string is "{{connection_string}}" — use it verbatim for
+      all tool calls. Please investigate and determine the root cause and
+      appropriate recovery path.
+    evaluation:
+      expected_tools:
+        - get_host_logs
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "pg_control"
+          - "could not find the database system"
+          - "data directory"
+          - "corrupt"
+          - "restore"
+      expected_diagnosis:
+        category: "pgdata_corrupted"
+        narrative: "Same chain as db-pgdata-corrupted over a Kubernetes pod: pbs_db_data_loss_triage front-loads single_instance/backup_tool/pitr_decided and hands off to pbs_sysadmin_host_triage, which reads runtime=kubectl from check_host, reads the pod's logs with get_host_logs (kubectl logs, the crashed run first) and finds the \"could not find the database system\" signature, then transitions to pbs_pgbackrest_health_triage (healthy backup, continuous WAL chain) and pbs_pgbackrest_restore_remediate, which restores in a one-off pod with the StatefulSet scaled to 0 and resumes it with restart_container."
+    timeout: 420s
+
   - id: db-pgdata-corrupted-vm
     name: "Data directory corrupted — restore from latest backup (real host/VM)"
     category: database

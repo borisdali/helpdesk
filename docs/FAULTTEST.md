@@ -377,6 +377,21 @@ remediation:
 
 The query must return successfully (exit 0 from psql) for recovery to be confirmed. A query that returns rows is enough — the row content is not checked. If `verify_sql` is absent, `faulttest` falls back to `SELECT 1` (bare connectivity check).
 
+**Verifying a target the harness cannot connect to (`verify_exec`):**
+
+*Added in v0.33.* `verify_sql` runs through `psql` from the machine faulttest runs on, which for a database in a Kubernetes pod behind a ClusterIP Service has no route. A fault can declare `verify_exec` instead: a shell script the harness runs every few seconds until it exits 0 or `verify_timeout` passes. `FAULTTEST_K8S_CONTEXT` is set when `--context` is given, the same as for the fault's inject and teardown scripts. It replaces `verify_sql` when both are present.
+
+```yaml
+remediation:
+  verify_exec: |
+    CTX_ARG=""
+    [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+    [ "$(kubectl $CTX_ARG -n db-destruct exec pgbackrest-demo-0 -- su postgres -c "psql -d testdb -Atc 'SELECT NOT pg_is_in_recovery()'" 2>/dev/null)" = t ]
+  verify_timeout: "240s"
+```
+
+`db-pgdata-corrupted-k8s` uses it. Recovery time and the speed score are computed exactly as for `verify_sql`.
+
 **Remediation method:**
 
 | `remediation_method` | How it was triggered |

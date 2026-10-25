@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.7"
+version: "1.8"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -81,6 +81,9 @@ guidance: |
   (replay_through_wal), and which segments it pushed to the archive. If its
   detail says a push FAILED, quote that detail in FINDINGS: the new timeline
   then depends on the saved copies until a human archives them.
+  On Kubernetes (check_host runtime=kubectl, see Step 3) the restore scales
+  the instance's StatefulSet to 0 first, so the pod is gone afterwards and
+  its result says to call restart_container: that is what resumes it.
 
   Step 3 — Bring the instance back up:
   Call check_host with the connection_string (target) first and read its
@@ -88,16 +91,24 @@ guidance: |
   confirm it yourself, the same discipline Step 1 already applies to backup
   health. runtime=docker or runtime=podman → call restart_container.
   runtime=systemd → call restart_service instead; restart_container does
-  not apply to a systemd-managed instance and will fail outright. Either
-  way, this restarts the instance against the now-repaired data directory.
+  not apply to a systemd-managed instance and will fail outright.
+  runtime=kubectl → call restart_container: for a Kubernetes target it scales
+  the StatefulSet back up to the size restore_from_backup recorded, and the
+  pod then starts against the restored data directory (no restart_service,
+  no docker). If the instance's pod was not scaled down, there is nothing for
+  it to resume: say so in FINDINGS instead of retrying. Either way, this
+  restarts the instance against the now-repaired data directory.
 
   Step 4 — Confirm recovery:
   Call check_host again to verify the instance is up (Status=running and
   Restarting=false for docker/podman; ActiveState=active, SubState=running
-  for systemd). Call get_host_logs and look for "database system is ready
+  for systemd; for a Kubernetes pod the phase is Running and it is ready —
+  a pod that has only just been resumed can take a minute or two to start
+  and replay WAL, so call check_host once more before concluding it did not
+  come up). Call get_host_logs and look for "database system is ready
   to accept connections" — the same verification pbs_replica_restart_action
   uses, since this agent has no psql-based tools to confirm a live
-  connection directly. For a systemd target specifically, get_host_logs
+  connection directly. On Kubernetes get_host_logs reads `kubectl logs`. For a systemd target specifically, get_host_logs
   (journalctl) typically shows only the service's own lifecycle messages,
   not PostgreSQL's own output — if it doesn't show the "ready to accept
   connections" line, also call read_pg_log_file (do not pass log_path; this

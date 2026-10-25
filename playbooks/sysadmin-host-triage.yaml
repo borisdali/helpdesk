@@ -1,6 +1,6 @@
 series_id: pbs_sysadmin_host_triage
 name: "Sysadmin — Host/Container Inspection"
-version: "2.3"
+version: "2.4"
 playbook_type: triage
 entry_point: false
 execution_mode: agent
@@ -57,18 +57,34 @@ guidance: |
   Call check_host with the connection_string (target). Read the `runtime`
   field FIRST, before anything else in the result:
   - runtime=kubectl → this target is Kubernetes-managed, NOT a Docker/Podman
-    container. Your docker/podman tools (get_host_logs in container mode,
-    check_memory, check_disk, restart_container) do not apply — the workload
-    runs in a pod on a cluster, not on this host. Do NOT proceed to Step 2
-    below. State the pod status from check_host's `details` field (phase,
-    restart_count, last_termination_reason, last_termination_exitcode) as
-    your FINDINGS, then emit exactly:
-      ESCALATE_TO: pbs_k8s_pod_crash_triage
-    The K8s agent has the tools (get_pods, describe_pod, get_pod_logs,
-    read_pod_file) to fully diagnose a Kubernetes pod crash — its exit-code
-    and OOM semantics are not the same as Docker's, so do NOT reuse the
-    exitcode=/oomkilled= reasoning below to interpret them. Do not guess or
-    perform further diagnosis yourself.
+    container. Your docker/podman tools (check_memory, check_disk,
+    restart_container's docker mode) do not apply — the workload runs in a
+    pod on a cluster, not on this host. Its exit-code and OOM semantics are
+    not Docker's either, so do NOT reuse the exitcode=/oomkilled= reasoning
+    below to interpret them. State the pod status from check_host's
+    `details` field (phase, restart_count, last_termination_reason,
+    last_termination_exitcode) as part of your FINDINGS. Then:
+    - If the prior FINDINGS you were handed include single_instance=,
+      backup_tool= and pitr_decided= (this run came from
+      pbs_db_data_loss_triage, which is asking whether this is a data-loss
+      case), do ONE more thing before handing off: call get_host_logs with
+      lines=300. For a Kubernetes pod it runs `kubectl logs`, the crashed
+      container run's output first, so it works while the pod is in
+      CrashLoopBackOff. Do NOT call read_pg_log_file — it execs into the pod,
+      which cannot be done while the pod is crash-looping. Then apply the
+      "could not find the database system" rule in the escalation rules below
+      exactly as for any other runtime: quote the log line verbatim, and if
+      all of its conditions hold, emit, in place of an ESCALATE_TO:
+        FINDINGS: data_loss_restore_candidate=true; <the pod status and the
+        log line, quoted verbatim>
+        TRANSITION_TO: pbs_pgbackrest_health_triage
+      If the log does not contain that line, or any of its conditions does
+      not hold, fall through to the next bullet.
+    - Otherwise, do NOT proceed to Step 2 below. Emit exactly:
+        ESCALATE_TO: pbs_k8s_pod_crash_triage
+      The K8s agent has the tools (get_pods, describe_pod, get_pod_logs,
+      read_pod_file) to fully diagnose a Kubernetes pod crash. Do not guess or
+      perform further diagnosis yourself.
   - runtime=docker or runtime=podman → proceed with the container inspection
     steps below, unchanged.
   - runtime=systemd → this target is a real host/VM, not a container — the
@@ -173,7 +189,9 @@ guidance: |
   - Recommended action and why it is safe (or not safe) to proceed
 
   Escalation rules (emit exactly one ESCALATE_TO if the condition is met):
-  - check_host runtime=kubectl (target is Kubernetes-managed, not docker/podman):
+  - check_host runtime=kubectl (target is Kubernetes-managed, not docker/podman),
+    unless the "could not find the database system" rule further down
+    applies to the pod's logs (see Step 1):
     ESCALATE_TO: pbs_k8s_pod_crash_triage
     (checked FIRST, before any docker/podman-specific rule below — a
     Kubernetes target never falls into the docker rules that follow)
