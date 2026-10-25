@@ -755,6 +755,23 @@ func cmdRun(args []string) {
 				evalResult.OverallScore = evalResult.Score
 			}
 
+			// The first hop is not the whole diagnosis of a multi-hop chain: the
+			// entry playbook hands off to hops that can read the evidence the
+			// fault's keywords and category describe. Re-check them against the
+			// chain the run actually took, now that it has finished.
+			if !repeatMode && cfg.GatewayURL != "" && resp.RunID != "" && resp.Error == nil {
+				if narrative, nerr := fetchIncidentNarrative(cfg.GatewayURL, cfg.GatewayAPIKey, resp.RunID); nerr != nil {
+					slog.Warn("chain evidence: could not fetch the incident narrative; the diagnosis is scored on the first hop only", "run_id", resp.RunID, "err", nerr)
+				} else if chain, hops := chainDiagnosticText(narrative); ApplyChainEvidence(f, &evalResult, chain, hops, judgeCompleter != nil && !evalResult.JudgeSkipped) {
+					fmt.Printf("Chain evidence:      the first hop alone missed the keyword/category criteria; the %d later diagnostic hop(s) met them (score now %d%%)\n", hops, int(evalResult.Score*100))
+					if evalResult.RemediationAttempted {
+						evalResult.OverallScore = evalResult.Score*0.6 + evalResult.RemediationScore*0.4
+					} else {
+						evalResult.OverallScore = evalResult.Score
+					}
+				}
+			}
+
 			// In force mode with judge enabled, auto-submit triage feedback derived
 			// from the judge score so vault calibration accumulates data without
 			// operator input. Feedback is tagged "auto_judge" so calibration can
@@ -804,7 +821,7 @@ func cmdRun(args []string) {
 				}
 			} else {
 				diagLabel := "category"
-				if !evalResult.JudgeSkipped {
+				if judgeCompleter != nil && !evalResult.JudgeSkipped {
 					diagLabel = "judge"
 				}
 				fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",

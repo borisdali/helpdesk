@@ -136,6 +136,26 @@ into `score` itself:
    data at all. See [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
    for why this gate exists.
 
+#### Multi-hop chains: the keywords and category are checked against the whole chain
+
+*Added in v0.33.* A fault whose playbook starts a chain (`--via-gateway`, e.g.
+`db-pgdata-corrupted-vm`: data-loss triage, host triage, health triage, restore) used to be scored on
+the first hop's response only. The entry hop is deliberately limited (`pbs_db_data_loss_triage` has no
+log tools, so it front-loads what it can decide and hands off), and the evidence a fault's
+`expected_keywords` and `expected_diagnosis.category` describe (`pg_control`, "could not find the
+database system", the data directory) is found by the hops after it. A chain that restored the database
+could fail its diagnostic depending on how the entry hop worded its hand-off.
+
+After the run finishes, the harness fetches the incident narrative and re-checks the keyword and category
+criteria against the first hop's response plus the findings (and primary hypothesis) of every later
+*diagnostic* hop. The terminal remediation hop is left out: its findings say "restore" because it
+restored, and whether the fix worked is the remediation score's job. The re-check can only raise a
+score: a first hop that already passed is untouched, the evidence gates above still fail a result
+regardless, and the protocol-violation cap still applies. With `--judge` the diagnosis score stays the
+judge's and only the keyword criterion is re-checked. When it changes anything, the run prints a
+`Chain evidence:` line and the report carries `chain_evidence_hops`. A single-hop run is unaffected, and
+so is `--repeat` (which does not run the chain).
+
 When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
 
 ---

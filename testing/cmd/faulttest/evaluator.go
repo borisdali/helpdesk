@@ -60,6 +60,11 @@ type EvalResult struct {
 	// gateway reports the omission via the fallback gate. A protocol violation
 	// caps the diagnosis score at 0.75 regardless of other eval components.
 	ProtocolViolation bool `json:"protocol_violation,omitempty"`
+	// ChainEvidenceHops is non-zero when the keyword/category criteria were
+	// re-checked against the later hops of a multi-hop chain and that raised
+	// the score (see ApplyChainEvidence): the number of hops past the first
+	// whose findings were counted. The first hop alone did not meet them.
+	ChainEvidenceHops int `json:"chain_evidence_hops,omitempty"`
 	// GatewayWarnings holds warnings returned by the gateway for this run.
 	GatewayWarnings []string `json:"gateway_warnings,omitempty"`
 	// EvidenceWarnings lists hops where the gateway recorded real, code-derived
