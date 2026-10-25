@@ -17,7 +17,7 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This sample transcript was created entirely on K8s. Not because the capabilities shown here are new or special (all three were already built and live-verified against Docker), but because K8s is where every one of the real bugs in this transcript was actually found. See [here](SAMPLE010.md), [here](SAMPLE021.md) and [here](SAMPLE019.md) for VM/Bare Metal, the source and container (Docker/Podman) sample transcripts respectively.
 
-This sample transcript is designed to showcase the new capabilities introduced in the [v0.32 release](https://github.com/borisdali/helpdesk/releases/tag/v0.32.0), which is not just a happy path pgBackRest restore/recovery (that's been shown already, see [here](SAMPLE023.md), but with the harness, safeguards and sanity checks that fire before and after the restore, so... not just the happy path anymore :-)   
+This sample transcript is designed to showcase the new capabilities introduced in the [v0.32 release](https://github.com/borisdali/helpdesk/releases/tag/v0.32.0), which is not just the happy path pgBackRest restore/recovery (that's been shown already, see [here](SAMPLE023.md)), but with the harness, safeguards and sanity checks that fire before and after the restore, so... not just the happy path anymore :-)   
 
 And yes, it's in-place, so unless all of these precautions are taken, you may end up with the WORSE situation compared to when you started, i.e. your existing data and WAL segments may get wiped out and not restored/recovered properly.   
   
@@ -708,6 +708,6 @@ So the fault passed and the teardown left the Pod as it was. Let's review the re
   - The harness ran without `--judge` (the report says so), so the semantic score wasn't used. Add `--judge` if you want that in the record.
   - This covers detection and the stop at a human. It doesn't cover an agent-driven restore on K8s yet.  
   
-And that's a wrap, folks! We'll pick it up with the sample transcript for the upcoming v0.33 release and close the gaps we mentioned here as well. Stay tuned!
+And that's a wrap, folks! We'll pick it up with the new sample transcript for the upcoming v0.33 release and close the gaps we mentioned here as well. Stay tuned!
 
 
