@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -82,7 +83,14 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 // output, or its error text.
 func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
 	c.t.Helper()
-	body, _ := json.Marshal(agentutil.DirectToolRequest{Args: args, Purpose: "remediation"})
+	// An agent that enforces policy through auditd needs a trace_id on every
+	// call (the gateway supplies one in production); without it auditd answers
+	// 400 "agent requests must include trace_id".
+	body, _ := json.Marshal(agentutil.DirectToolRequest{
+		TraceID: fmt.Sprintf("tr_k8sit_%d", time.Now().UnixNano()),
+		Args:    args,
+		Purpose: "remediation",
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.agentURL+"/tool/"+name, bytes.NewReader(body))
