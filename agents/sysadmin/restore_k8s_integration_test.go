@@ -43,6 +43,7 @@ type k8sCluster struct {
 	pod      string
 	agentURL string
 	target   string
+	apiKey   string       // bearer token for an agent that enforces identity; empty when it doesn't
 	host     resolvedHost // the harness's own view, for kubectl from here
 }
 
@@ -65,7 +66,8 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 		t.Fatalf("namespace %q must end in -destruct and target %q must contain destruct: these tests crash and restore its database", ns, target)
 	}
 	c := &k8sCluster{t: t, ctxName: ctxName, ns: ns, agentURL: strings.TrimSuffix(agentURL, "/"), target: target,
-		host: resolvedHost{K8sContext: ctxName, K8sNamespace: ns, K8sPodSelector: k8sPgBackRestPodSelector}}
+		apiKey: os.Getenv("HELPDESK_K8S_SYSADMIN_API_KEY"),
+		host:   resolvedHost{K8sContext: ctxName, K8sNamespace: ns, K8sPodSelector: k8sPgBackRestPodSelector}}
 	// The harness reuses the lifecycle's own kubectl helpers locally; the
 	// tools under test run in the cluster.
 	old := infraConfig
@@ -85,6 +87,9 @@ func (c *k8sCluster) tool(name string, args map[string]any) (string, string) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.agentURL+"/tool/"+name, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		c.t.Fatalf("POST /tool/%s: %v", name, err)

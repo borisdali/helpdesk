@@ -192,6 +192,8 @@ K8S_DESTRUCT_NS     ?= db-destruct
 K8S_DESTRUCT_TARGET ?= pgbackrest-k8s-destruct
 K8S_HELPDESK_NS     ?= helpdesk-system
 K8S_SYSADMIN_PORT   ?= 11103
+# Bearer token for the sysadmin agent's /tool endpoint when the release enforces identity (empty = none).
+K8S_SYSADMIN_API_KEY ?=
 INTEGRATION_K8S_LOG = /tmp/helpdesk-integration-k8s.log
 
 integration-k8s:
@@ -204,7 +206,7 @@ integration-k8s:
 	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
 	@kubectl --context $(K8S_CONTEXT) -n $(K8S_HELPDESK_NS) port-forward svc/helpdesk-sysadmin-agent $(K8S_SYSADMIN_PORT):1103 >/tmp/helpdesk-k8s-sysadmin-pf.log 2>&1 & PF=$$!; \
 		trap "kill $$PF 2>/dev/null" EXIT; sleep 3; \
-		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) \
+		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) HELPDESK_K8S_SYSADMIN_API_KEY=$(K8S_SYSADMIN_API_KEY) \
 		HELPDESK_K8S_PGBACKREST_CONTEXT=$(K8S_CONTEXT) HELPDESK_K8S_PGBACKREST_NAMESPACE=$(K8S_DESTRUCT_NS) \
 		go test --count=1 -tags integration -timeout 1800s -v -run 'K8s' ./agents/sysadmin/... 2>&1 | tee $(INTEGRATION_K8S_LOG); true
 	@$(SUMMARY_CMD) $(INTEGRATION_K8S_LOG)
