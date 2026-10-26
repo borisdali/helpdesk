@@ -1470,3 +1470,167 @@ func TestAuditorSecbotWithPostgresAuditd(t *testing.T) {
 		})
 	}
 }
+
+// faulttestJob renders the chart with the faulttest Job enabled and returns the
+// Job's pod spec and its container's args.
+func faulttestJob(t *testing.T, extra ...string) (podSpec map[string]any, args []string) {
+	t.Helper()
+	flags := append([]string{"faulttest.enabled=true", "faulttest.ids=db-pgbackrest-wal-gap-vm"}, extra...)
+	job, ok := render(t, flags...)["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ = tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in the faulttest Job")
+	}
+	return podSpec, containerArgs(containers[0].(map[string]any))
+}
+
+func hasVolume(podSpec map[string]any, name string) map[string]any {
+	vols, _ := podSpec["volumes"].([]any)
+	for _, v := range vols {
+		if vol, _ := v.(map[string]any); vol["name"] == name {
+			return vol
+		}
+	}
+	return nil
+}
+
+func argWithPrefix(args []string, prefix string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return a
+		}
+	}
+	return ""
+}
+
+// Faults that inject over SSH (a VM) can run from the Job: the key Secret is
+// mounted read-only and private, and the ssh flags are passed. Nothing of it
+// appears unless faulttest.ssh.secretName is set.
+func TestFaulttestJob_SSH(t *testing.T) {
+	t.Run("absent by default", func(t *testing.T) {
+		podSpec, args := faulttestJob(t)
+		if argWithPrefix(args, "--ssh-") != "" {
+			t.Errorf("ssh flags without faulttest.ssh.secretName: %v", args)
+		}
+		if hasVolume(podSpec, "faulttest-ssh") != nil {
+			t.Error("faulttest-ssh volume without faulttest.ssh.secretName")
+		}
+	})
+
+	t.Run("flags, mount and private key mode", func(t *testing.T) {
+		podSpec, args := faulttestJob(t,
+			"faulttest.ssh.secretName=faulttest-ssh-key", "faulttest.ssh.host=postgres@192.168.2.24",
+			"faulttest.ssh.port=2222", "faulttest.ssh.keyName=vm_key")
+		for _, want := range []string{"--ssh-host=postgres@192.168.2.24", "--ssh-key=/etc/faulttest-ssh/vm_key", "--ssh-port=2222"} {
+			if !hasArg(args, want) {
+				t.Errorf("args %v lack %s", args, want)
+			}
+		}
+		vol := hasVolume(podSpec, "faulttest-ssh")
+		if vol == nil {
+			t.Fatal("faulttest-ssh volume not found")
+		}
+		secret, _ := vol["secret"].(map[string]any)
+		if secret["secretName"] != "faulttest-ssh-key" || fmt.Sprint(secret["defaultMode"]) != "256" { // 0400
+			t.Errorf("secret volume = %v, want faulttest-ssh-key with mode 0400", secret)
+		}
+		containers, _ := podSpec["containers"].([]any)
+		var mounted bool
+		for _, m := range containers[0].(map[string]any)["volumeMounts"].([]any) {
+			if mm, _ := m.(map[string]any); mm["name"] == "faulttest-ssh" {
+				mounted = mm["mountPath"] == "/etc/faulttest-ssh" && mm["readOnly"] == true
+			}
+		}
+		if !mounted {
+			t.Error("the key is not mounted read-only at /etc/faulttest-ssh")
+		}
+	})
+
+	t.Run("user and default key name", func(t *testing.T) {
+		_, args := faulttestJob(t, "faulttest.ssh.secretName=k", "faulttest.ssh.host=10.0.0.9", "faulttest.ssh.user=postgres")
+		if !hasArg(args, "--ssh-user=postgres") || !hasArg(args, "--ssh-key=/etc/faulttest-ssh/id_ed25519") {
+			t.Errorf("args = %v", args)
+		}
+		if argWithPrefix(args, "--ssh-port") != "" {
+			t.Errorf("--ssh-port passed with port unset: %v", args)
+		}
+	})
+
+	t.Run("the host is required once a secret is named", func(t *testing.T) {
+		out, err := exec.Command("helm", "template", "test", chartPath(t),
+			"--set", "faulttest.enabled=true", "--set", "faulttest.ids=x", "--set", "faulttest.ssh.secretName=k").CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "faulttest.ssh.host is required") {
+			t.Errorf("want a render failure naming faulttest.ssh.host, got err=%v\n%s", err, out)
+		}
+	})
+
+	t.Run("a release without the block still renders", func(t *testing.T) {
+		podSpec, args := faulttestJob(t, "faulttest.ssh=null")
+		if argWithPrefix(args, "--ssh-") != "" || hasVolume(podSpec, "faulttest-ssh") != nil {
+			t.Error("ssh configured with the block absent")
+		}
+	})
+}
+
+func TestFaulttestJob_AgentConnArg(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.agentConn=pgbackrest-ubuntu-vm")
+	if !hasArg(args, "--agent-conn=pgbackrest-ubuntu-vm") {
+		t.Errorf("args %v lack --agent-conn", args)
+	}
+	if _, args = faulttestJob(t); argWithPrefix(args, "--agent-conn") != "" {
+		t.Errorf("--agent-conn passed by default: %v", args)
+	}
+}
+
+// --users-file is opt-in, and only when the chart actually has a users file to
+// mount: otherwise the flag would name a file that is not there.
+func TestFaulttestJob_UsersFile(t *testing.T) {
+	podSpec, args := faulttestJob(t, "faulttest.usersFile=true", "gateway.identity.usersSecret=helpdesk-users")
+	if !hasArg(args, "--users-file=/etc/helpdesk/users.yaml") || hasVolume(podSpec, "users") == nil {
+		t.Errorf("users file not passed and mounted: args %v", args)
+	}
+	for name, flags := range map[string][]string{
+		"off by default":               {"gateway.identity.usersSecret=helpdesk-users"},
+		"on, but no users file exists": {"faulttest.usersFile=true"},
+	} {
+		podSpec, args := faulttestJob(t, flags...)
+		if argWithPrefix(args, "--users-file") != "" || hasVolume(podSpec, "users") != nil {
+			t.Errorf("%s: users file passed or mounted: %v", name, args)
+		}
+	}
+}
+
+// The shipped example values must keep rendering the Job they describe: a
+// renamed chart value would otherwise leave the bundle's example silently
+// doing nothing.
+func TestFaulttestVMJobExampleRenders(t *testing.T) {
+	example := filepath.Join(filepath.Dir(chartPath(t)), "examples", "faulttest-vm-job.yaml")
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "-f", example).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template -f %s: %v\n%s", example, err, out)
+	}
+	job, ok := parseManifests(t, string(out))["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("the example does not render the faulttest Job")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	for _, want := range []string{"--ids=db-pgdata-corrupted-vm", "--via-gateway", "--remediate", "--gate-escalation",
+		"--approval-mode=force", "--ssh-host=postgres@<vm-ip>", "--ssh-key=/etc/faulttest-ssh/id_ed25519", "--agent-conn=", "--conn="} {
+		if !hasArg(args, want) {
+			t.Errorf("the example's Job lacks %s; args: %v", want, args)
+		}
+	}
+	if hasVolume(podSpec, "faulttest-ssh") == nil {
+		t.Error("the example's Job does not mount the SSH key")
+	}
+}

@@ -1302,6 +1302,8 @@ See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fau
 
 ### 10.5 SSH injection mode
 
+> As of v0.33 the chart renders this for you: set `faulttest.ssh.*` (see [§10.6](#106-a-vm-fault-from-a-job-entirely-in-cluster) and `examples/faulttest-vm-job.yaml`). The hand-written Job below still works.
+
 Some faults require OS-level access to the database host (e.g. `db-wal-disk-full`, which injects FATAL/PANIC log entries and kills the PostgreSQL process to simulate WAL disk exhaustion). These use `ssh_exec` injection: the fault script is streamed to the host over SSH, so no files need to be pre-staged there.
 
 Create a Secret with the SSH private key (once), then submit a Job that mounts it:
@@ -1335,6 +1337,52 @@ volumes:
 ```
 
 `--ssh-host` alone is sufficient to trigger SSH injection mode; `--external` additionally restricts the run to the `external_compat` subset of faults. The `FAULTTEST_CONTAINER` variable is resolved automatically from `infrastructure.json` and passed to inject/teardown scripts — you do not need to set it manually. The SSH target must be reachable from the Kubernetes node (same VPC, egress policy permits port 22). See [docs/FAULTTEST_SAMPLE.md](../../docs/FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for the full Job YAML and a sample run.
+
+### 10.6 A VM fault from a Job, entirely in-cluster
+
+*Added in v0.33.* The faults that break a real host or VM (`db-pgdata-corrupted-vm`,
+`db-pgbackrest-wal-gap-vm`) inject over SSH, so the harness can run as a Job in the cluster with the
+helpdesk agents reaching the same VM over SSH from their pods. Nothing runs on your laptop.
+
+What has to be true first:
+
+1. **The VM is reachable from the pods** on its SSH port (and Postgres port, for the harness's
+   recovery check), and its address resolves in-cluster. Use the IP if the name only resolves on
+   your LAN. On minikube with the Docker driver, test from the node: `minikube ssh -- nc -zv <ip> 22`.
+2. **The agents can SSH to it.** Create the sysadmin agent's Secret (key and `known_hosts`, see
+   [§3.7a](#37a-ssh-to-hosts-and-vms-sysadmin-agent)), and make the VM's inventory entry name the
+   mounted key and an address the pod can reach:
+   `"address": "<vm-ip>"`, `"ssh_user": "postgres"`, `"ssh_key_path": "/etc/helpdesk/ssh/id_ed25519"`.
+3. **The Job can SSH to it.** A Secret with the private key, in the release namespace:
+   `kubectl -n helpdesk-system create secret generic faulttest-ssh-key --from-file=id_ed25519=<key>`.
+   The Job runs `ssh` with `StrictHostKeyChecking=no`, so it needs no `known_hosts`.
+4. **A recent full backup on the VM**, taken after the last restore: the restore hop refuses a stale
+   backup and ends at a human (`no_action`), which is correct but not what the four-hop run is for.
+
+Then run it with [`examples/faulttest-vm-job.yaml`](examples/faulttest-vm-job.yaml) (it ships in the
+bundle; fill in the `<...>` values):
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+  -f faulttest-vm-job.yaml --timeout 20m
+kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f   # in a second terminal
+```
+
+The Job is a Helm hook, so `helm upgrade` blocks until it finishes and the result is in the Job's log
+and its `/reports` directory. Set `faulttest.enabled=false` afterwards, or the next upgrade runs it
+again.
+
+Two runs cover the VM path:
+
+| Run | `faulttest.ids` | Flags | Expected |
+|---|---|---|---|
+| The four-hop restore | `db-pgdata-corrupted-vm` | `remediate`, `gateEscalation`, `approvalMode: force` | data-loss triage, host triage, health triage, restore; the VM is back up |
+| A hidden WAL segment | `db-pgbackrest-wal-gap-vm` | none of those (diagnosis only) | health triage reports the chain `broken` and stops at a human; the restore is refused by design |
+
+If the Job is killed mid-run, the fault's teardown may not have run. On the VM, check
+`systemctl is-active postgresql@16-main` and look for `*.hidden-by-fault` files under the pgBackRest
+archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
+WAL-gap fault.
 
 ## 11. Fleet Playbooks & Vault
 

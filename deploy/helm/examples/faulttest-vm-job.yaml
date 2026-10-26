@@ -1,0 +1,49 @@
+# Reference values: run faulttest from a Job INSIDE the cluster against a real
+# Linux VM that the helpdesk agents reach over SSH (v0.33). See
+# deploy/helm/README.md §10.6 for the prerequisites and the commands.
+#
+# Layer these on top of your release's values:
+#   helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+#     -f faulttest-vm-job.yaml --timeout 20m
+# The Job is a Helm hook: this command blocks until it finishes. Follow it with
+#   kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f
+# and set faulttest.enabled=false afterwards, or the next upgrade runs it again.
+#
+# Replace every <...>. The VM must be reachable from the pods, and its address
+# must resolve in-cluster (use the IP if its name only resolves on your LAN).
+
+faulttest:
+  enabled: true
+
+  # One of the two VM faults per run:
+  #   db-pgdata-corrupted-vm   the four-hop restore chain (needs remediate +
+  #                            gateEscalation below)
+  #   db-pgbackrest-wal-gap-vm a hidden WAL segment: the chain stops at the
+  #                            health triage (three hops, ends at a human);
+  #                            run it WITHOUT remediate
+  ids: db-pgdata-corrupted-vm
+
+  # Through the gateway, as the fault is meant to run.
+  viaGateway: true
+  gatewayAPIKeySecret: <secret holding the gateway API key, key "api-key">
+
+  # The DSN the harness itself uses to check recovery (psql from the pod), and
+  # the inventory key the agents are told to use for the same VM.
+  conn: "host=<vm-ip> port=5432 dbname=postgres user=postgres password=<password>"
+  agentConn: <inventory key of the VM, e.g. pgbackrest-ubuntu-vm>
+
+  # How the harness reaches the VM to break and repair it.
+  ssh:
+    secretName: faulttest-ssh-key     # kubectl create secret generic faulttest-ssh-key --from-file=id_ed25519=<key>
+    host: postgres@<vm-ip>
+    port: 22
+
+  # The restore chain: remediate, cross the mid-chain gates, as a known human.
+  remediate: true
+  gateEscalation: true
+  approvalMode: force
+  operator: <a human user in users.yaml with an override role, e.g. alice@example.com>
+  usersFile: true                      # check the operator against the gateway's users file
+
+  # Narrow the chain's wait if you like; the Job gives up after the fault's timeout.
+  ttlSecondsAfterFinished: 3600

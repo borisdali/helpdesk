@@ -678,6 +678,94 @@ failures:
         narrative: "Same as db-pgbackrest-wal-gap: the agent should read wal_continuity from get_pgbackrest_status and report the chain broken (the segment the latest backup itself needs is missing, consistency_reachable=false), so a restore must not be attempted, and hand the decision to a human rather than call run_pgbackrest_backup or restore_from_backup."
     timeout: 90s
 
+  - id: db-pgbackrest-wal-gap-vm
+    name: "pgBackRest WAL chain broken (real host/VM)"
+    category: database
+    severity: high
+    description: >
+      db-pgbackrest-wal-gap against a real Linux VM reached over SSH: the latest
+      backup's own start segment is moved aside inside the VM's pgBackRest
+      repo, while PostgreSQL is healthy and pgBackRest reports the stanza ok.
+      The health triage (the sysadmin agent's get_pgbackrest_status, dispatched
+      over SSH) must report the chain broken and stop at a human on the
+      pgbackrest_wal_chain_broken signal; a restore from this backup is
+      refused by design, so a chain run this way ends at the health triage and
+      never reaches the restore hop. Added v0.33 to qualify the broken-chain
+      detection on the VM path and, run from a Job, from inside a cluster.
+    # The diagnosis playbook runs on the sysadmin agent, so a direct (non-gateway)
+    # run must ask it too; asked the database agent it would never see the tool.
+    direct_agent: sysadmin
+    prerequisites: |
+      Requires a real Linux VM with PostgreSQL and pgBackRest installed and an
+      initial backup already taken (testing/docker/setup-pgbackrest-vm.sh), and
+      a testing.infra.json db_server entry for it (the setup script prints it).
+      Run through the gateway, diagnosis only (no --remediate), with the VM as
+      both the connection and the SSH target:
+        go run ./testing/cmd/faulttest run --ids db-pgbackrest-wal-gap-vm \
+          --via-gateway --gateway $GW --api-key <key> \
+          --conn "<vm db_server's connection_string>" --agent-conn <vm db_server's key> \
+          --ssh-host postgres@<vm-host> --ssh-port 22 --ssh-key <path>
+      To run it from inside a cluster as a Job, see deploy/helm/README.md §10.6.
+
+      inject moves the latest backup's start segment aside (a name the WAL
+      check ignores), as the Docker fault does; teardown moves it back and is
+      safe to run more than once. Neither touches PGDATA or the running
+      instance, and nothing is written to the archive. They run as the SSH
+      user, which must own the repo (the recommended ssh_user: postgres does);
+      the repo path is read from /etc/pgbackrest.conf (repo1-path, default
+      /var/lib/pgbackrest).
+
+      Either health-triage ending that escalates to a human is correct here:
+      Ending E (broken chain) when the backup is fresh, or Ending C (stale
+      backup, with wal_continuity=broken in its findings) when it isn't.
+      No external_compat variant: ssh_exec always requires real OS access.
+    inject:
+      type: ssh_exec
+      exec_via: "" # filled by --ssh-host at runtime
+      script_inline: |
+        set -e
+        STANZA="main" # EDIT to match your VM's pgBackRest stanza
+        # PGBACKREST_REPO_PATH is a test seam; on a real VM it is unset.
+        REPO="${PGBACKREST_REPO_PATH:-$(grep '^repo1-path=' /etc/pgbackrest.conf 2>/dev/null | cut -d= -f2)}"
+        REPO="${REPO:-/var/lib/pgbackrest}"
+        seg=$(pgbackrest --stanza="$STANZA" info --output=json | grep -o '"start":"[0-9A-F]\{24\}"' | tail -1 | cut -d'"' -f4)
+        test -n "$seg" || { echo "no backup found for stanza $STANZA: take one first" >&2; exit 1; }
+        f=$(ls "$REPO"/archive/"$STANZA"/*/"$(echo "$seg" | cut -c1-16)"/"$seg"-*)
+        mv "$f" "$f.hidden-by-fault"
+        echo "hid $f"
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      script_inline: |
+        REPO="${PGBACKREST_REPO_PATH:-$(grep '^repo1-path=' /etc/pgbackrest.conf 2>/dev/null | cut -d= -f2)}"
+        REPO="${REPO:-/var/lib/pgbackrest}"
+        for f in $(find "$REPO"/archive -name '*.hidden-by-fault'); do
+          mv "$f" "${f%.hidden-by-fault}"
+          echo "restored ${f%.hidden-by-fault}"
+        done
+    diagnosis_playbook_series_id: pbs_pgbackrest_health_triage
+    prompt: >
+      A routine backup audit wants confirmation that this database's latest
+      pgBackRest backup can actually be restored. The connection_string is
+      "{{connection_string}}" — use it verbatim for all tool calls. Please
+      check backup health and say whether a restore from the latest backup
+      would work.
+    evaluation:
+      expected_tools:
+        - get_pgbackrest_status
+      expected_keywords:
+        any_of:
+          - "wal_continuity"
+          - "WAL chain"
+          - "missing"
+          - "consistent state"
+          - "broken"
+      expected_diagnosis:
+        category: "pgbackrest_wal_chain_broken"
+        objective_evidence_signal: pgbackrest_wal_chain_broken
+        narrative: "The agent should read wal_continuity from get_pgbackrest_status (dispatched over SSH to the VM) and report that the chain is broken: the segment the latest backup itself needs (wal_continuity.gaps, consistency_reachable=false) is missing from the repo, so PostgreSQL could not start from that backup and a restore must not be attempted. It should not take the healthy stanza status (status_code=0) as proof the backup is usable, and should hand the decision to a human rather than call run_pgbackrest_backup or restore_from_backup itself."
+    timeout: 120s
+
   - id: db-pgdata-corrupted
     name: "Data directory corrupted — restore from latest backup"
     category: database

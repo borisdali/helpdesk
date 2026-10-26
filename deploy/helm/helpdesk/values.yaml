@@ -591,6 +591,34 @@ faulttest:
   # reading from /dev/tty. Required in K8s Jobs and Docker containers (no TTY).
   emitAndWait: false
 
+  # Connection string or alias sent to the agents in their prompts
+  # (--agent-conn); defaults to conn. For a fault whose target the agents reach
+  # through the inventory (e.g. a VM), conn is the DSN the harness itself uses
+  # for its recovery check and agentConn is the inventory key.
+  agentConn: ""
+
+  # SSH for faults whose injection runs on a host or VM (inject type ssh_exec,
+  # e.g. db-pgdata-corrupted-vm, db-pgbackrest-wal-gap-vm). Name a Secret that
+  # holds the private key and the Job mounts it read-only at /etc/faulttest-ssh
+  # and passes --ssh-host/--ssh-port/--ssh-user/--ssh-key. The Job runs ssh with
+  # StrictHostKeyChecking=no, so no known_hosts is needed here (the sysadmin
+  # agent's own SSH is configured separately: agents.sysadmin.ssh). The host
+  # must be reachable from the pod; use its IP if the name will not resolve.
+  # Create with:
+  #   kubectl -n <ns> create secret generic faulttest-ssh-key --from-file=id_ed25519=/path/to/key
+  ssh:
+    secretName: ""
+    keyName: id_ed25519
+    host: ""     # user@host, or host together with user
+    port: 0      # 0 = ssh's default (22)
+    user: ""     # used when host has no user@
+
+  # Mount the gateway's users file and pass --users-file, so a force-mode run
+  # checks that --operator is a known human user before it auto-approves gates
+  # (needs gateway.identity.usersConfig or usersSecret). Off by default: turning
+  # it on makes an operator that is not in the file an error, not a pass.
+  usersFile: false
+
   # DB password secret — injects a K8s Secret value as PGPASSWORD (or a custom
   # env var name) into the faulttest Job. Required when the connection string
   # does not embed a plain-text password and the injection scripts call psql
