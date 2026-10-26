@@ -1,6 +1,7 @@
 package faultlib
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,5 +179,64 @@ func TestVMWalGap_InjectWithoutABackupFails(t *testing.T) {
 	}
 	if got := repoFiles(t, repo); strings.Join(got, ",") != strings.Join(original, ",") {
 		t.Errorf("repo changed: %v", got)
+	}
+}
+
+// writeExecutingSSHOnPath is a fake ssh that records its argv and then runs the
+// script it is sent on stdin with `bash -s`, as the remote end would. Unlike
+// writeFakeSSHOnPath it lets a fault's real script run, so the whole injector
+// path is exercised: the arguments, the preamble the injector prepends, and the
+// script arriving on stdin.
+func writeExecutingSSHOnPath(t *testing.T) (capturePath string) {
+	t.Helper()
+	dir := t.TempDir()
+	capturePath = filepath.Join(dir, "captured_args")
+	script := "#!/bin/bash\necho \"$*\" >> " + capturePath + "\nexec bash -s\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return capturePath
+}
+
+// The fault as the harness really runs it: through Injector.Inject/Teardown,
+// ssh options and all, the script piped to a remote `bash -s`.
+func TestVMWalGap_ThroughTheInjectorOverSSH(t *testing.T) {
+	f := vmFault(t)
+	repo, env, _ := vmRepo(t, twoBackupsInfo)
+	for _, kv := range env { // the fake ssh runs locally and inherits these
+		k, v, _ := strings.Cut(kv, "=")
+		t.Setenv(k, v)
+	}
+	capture := writeExecutingSSHOnPath(t)
+	original := repoFiles(t, repo)
+
+	inj := NewInjector(&HarnessConfig{SSHHost: "postgres@10.0.0.9", SSHKeyPath: "/etc/faulttest-ssh/id_ed25519", SSHPort: 2222})
+	if err := inj.Inject(context.Background(), f); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	if !hasFile(repoFiles(t, repo), latestSeg+"-abc123.gz.hidden-by-fault") {
+		t.Fatalf("the latest start segment was not hidden through the injector: %v", repoFiles(t, repo))
+	}
+	if err := inj.Teardown(context.Background(), f); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := repoFiles(t, repo); strings.Join(got, ",") != strings.Join(original, ",") {
+		t.Errorf("repo after inject+teardown = %v, want %v", got, original)
+	}
+
+	b, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		for _, want := range []string{"-o StrictHostKeyChecking=no", "-o BatchMode=yes", "-i /etc/faulttest-ssh/id_ed25519", "-p 2222", "postgres@10.0.0.9", "bash -s"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("ssh invocation %q lacks %q", line, want)
+			}
+		}
+	}
+	if n := len(strings.Split(strings.TrimSpace(string(b)), "\n")); n != 2 {
+		t.Errorf("ssh was invoked %d times, want 2 (inject, teardown)", n)
 	}
 }

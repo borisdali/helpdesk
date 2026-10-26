@@ -1347,10 +1347,13 @@ helpdesk agents reaching the same VM over SSH from their pods. Nothing runs on y
 What has to be true first:
 
 1. **The VM is reachable from the pods** on its SSH port (and Postgres port, for the harness's
-   recovery check), and its address resolves in-cluster. Use the IP if the name only resolves on
+   recovery check) and its address resolves in-cluster. The VM's Postgres must also accept the pods:
+   `listen_addresses` covers the VM's LAN address and `pg_hba.conf` allows the cluster's source network
+   (on minikube, the node's address, which is not your laptop's) or the recovery check fails with
+   `connection refused` / `no pg_hba.conf entry` after a restore that actually worked. Use the IP if the name only resolves on
    your LAN. On minikube with the Docker driver, test from the node: `minikube ssh -- nc -zv <ip> 22`.
 2. **The agents can SSH to it.** Create the sysadmin agent's Secret (key and `known_hosts`, see
-   [§3.7a](#37a-ssh-to-hosts-and-vms-sysadmin-agent)), and make the VM's inventory entry name the
+   [§3.7a](#37a-ssh-to-hosts-and-vms-sysadmin-agent)) and make the VM's inventory entry name the
    mounted key and an address the pod can reach:
    `"address": "<vm-ip>"`, `"ssh_user": "postgres"`, `"ssh_key_path": "/etc/helpdesk/ssh/id_ed25519"`.
 3. **The Job can SSH to it.** A Secret with the private key, in the release namespace:
@@ -1369,7 +1372,7 @@ kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f   # 
 ```
 
 The Job is a Helm hook, so `helm upgrade` blocks until it finishes and the result is in the Job's log
-and its `/reports` directory. Set `faulttest.enabled=false` afterwards, or the next upgrade runs it
+and its `/reports` directory. Set `faulttest.enabled=false` afterwards or the next upgrade runs it
 again.
 
 Two runs cover the VM path:
