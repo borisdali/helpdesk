@@ -2927,6 +2927,62 @@ func (g *Gateway) classifyIncidentAttribution(ctx context.Context, runID, respon
 		return
 	}
 	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, pb.RootCauseClasses.Classes)
+	// The entry hop of a chain is often only a hand-off with no diagnosis in
+	// it (pbs_db_data_loss_triage front-loads facts and escalates), so its
+	// label is UNKNOWN. A later hop may already have set a real one; do not
+	// replace it with UNKNOWN.
+	if label == agentutil.AttributionUnknown && attributionKnown(inc.Attribution) {
+		return
+	}
+	g.patchIncidentAttribution(ctx, inc.IncidentID, label)
+}
+
+// attributionKnown reports whether a recorded attribution is a real root-cause
+// class: set, and not the UNKNOWN placeholder.
+func attributionKnown(a string) bool {
+	return a != "" && !strings.EqualFold(a, agentutil.AttributionUnknown)
+}
+
+// classifyChainAttribution sets an incident's root-cause class from a later
+// hop of its chain. classifyIncidentAttribution only ever sees the entry hop,
+// and the entry hop of a multi-hop chain is a hand-off: the agent that has the
+// tools to find the cause is a later one. The first later diagnostic hop that
+// classifies to a real class sets it; it is then left alone.
+//
+// It classifies against the entry playbook's root_cause_classes, the same
+// taxonomy the incident has always used, and skips:
+//   - the entry run itself (classifyIncidentAttribution's job);
+//   - a hop of a remediation playbook, whose text says what was done, not why
+//     it was needed;
+//   - an incident that already has a real class (no LLM call);
+//   - an UNKNOWN result (it would change nothing).
+func (g *Gateway) classifyChainAttribution(ctx context.Context, runID, responseText string) {
+	if g.plannerLLM == nil || strings.TrimSpace(responseText) == "" {
+		return
+	}
+	run, err := g.fetchPlaybookRun(ctx, runID)
+	if err != nil || run == nil || run.EntryRunID == "" || run.EntryRunID == runID {
+		return
+	}
+	inc, err := g.fetchIncidentByEntryRunID(ctx, run.EntryRunID)
+	if err != nil {
+		slog.Warn("classifyChainAttribution: could not look up incident", "run_id", runID, "entry_run_id", run.EntryRunID, "err", err)
+		return
+	}
+	if inc == nil || inc.SeriesID == "" || attributionKnown(inc.Attribution) {
+		return
+	}
+	if hop, err := g.fetchPlaybookBySeriesID(ctx, run.SeriesID); err == nil && hop != nil && hop.PlaybookType == "remediation" {
+		return
+	}
+	entry, err := g.fetchPlaybookBySeriesID(ctx, inc.SeriesID)
+	if err != nil || entry.RootCauseClasses == nil || len(entry.RootCauseClasses.Classes) == 0 {
+		return
+	}
+	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, entry.RootCauseClasses.Classes)
+	if label == agentutil.AttributionUnknown {
+		return
+	}
 	g.patchIncidentAttribution(ctx, inc.IncidentID, label)
 }
 
@@ -3001,6 +3057,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 			responseText = findingsSummary
 		}
 		g.classifyIncidentAttribution(ctx, runID, responseText)
+		g.classifyChainAttribution(ctx, runID, responseText)
 		g.triggerIncidentBundle(ctx, runID, outcome, findingsSummary)
 	}
 }

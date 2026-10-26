@@ -192,21 +192,22 @@ const chainNarrativeJSON = `{
   "incident_id": "plr_cea87922",
   "triage": {
     "run_id": "plr_cea87922",
+    "trace_id": "tr_h1",
     "playbook": "pbs_db_data_loss_triage",
     "findings": "single_instance=true; backup_tool=pgbackrest; pitr_decided=false"
   },
   "escalations": [
-    {"run_id": "plr_29750e97", "playbook": "pbs_sysadmin_host_triage", "outcome": "transitioned",
+    {"run_id": "plr_29750e97", "trace_id": "tr_h2", "playbook": "pbs_sysadmin_host_triage", "outcome": "transitioned",
      "transitioned_to": "pbs_pgbackrest_health_triage",
      "findings": "The data directory is missing the pg_control file, causing PostgreSQL to fail at startup",
      "diagnostic_report": {"hypotheses": [
         {"rank": 1, "text": "pg_control missing after a storage fault", "confidence": 0.9, "is_primary": true},
         {"rank": 2, "text": "disk full corrupted the WAL", "confidence": 0.1, "is_primary": false, "rejected_reason": "no ENOSPC in the log"}]}},
-    {"run_id": "plr_58d7881b", "playbook": "pbs_pgbackrest_health_triage", "outcome": "escalated",
+    {"run_id": "plr_58d7881b", "trace_id": "tr_h3", "playbook": "pbs_pgbackrest_health_triage", "outcome": "escalated",
      "escalated_to": "pbs_pgbackrest_restore_remediate",
      "findings": "Prior findings confirmed pg_control is missing (data loss); the most recent backup is healthy"}
   ],
-  "remediation": {"run_id": "plr_ea16622e", "playbook": "pbs_pgbackrest_restore_remediate", "outcome": "resolved",
+  "remediation": {"run_id": "plr_ea16622e", "trace_id": "tr_h4", "playbook": "pbs_pgbackrest_restore_remediate", "outcome": "resolved",
                   "findings": "Restore from backup 20261025-125505F succeeded with recovery verified"}
 }`
 
@@ -231,7 +232,7 @@ func TestApplyChainEvidenceFromGateway_RealRunShape(t *testing.T) {
 	r.RemediationAttempted, r.RemediationPassed, r.RemediationScore = true, true, 0.75
 	r.OverallScore = r.Score*0.6 + r.RemediationScore*0.4
 
-	hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false)
+	hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, testutil.AgentResponse{RunID: "plr_cea87922"}, nil, false)
 	if !changed || hops != 2 {
 		t.Fatalf("changed=%v hops=%d, want true and 2", changed, hops)
 	}
@@ -250,7 +251,7 @@ func TestApplyChainEvidenceFromGateway_FetchFailureLeavesTheResult(t *testing.T)
 			srv := narrativeServer(t, status, "nope")
 			r := firstHopResult(t)
 			before := r
-			hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false)
+			hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, testutil.AgentResponse{RunID: "plr_cea87922"}, nil, false)
 			if changed || hops != 0 || r.Score != before.Score || r.Passed != before.Passed || r.OverallScore != before.OverallScore {
 				t.Errorf("a failed fetch changed the result: hops=%d changed=%v %+v", hops, changed, r)
 			}
@@ -259,7 +260,7 @@ func TestApplyChainEvidenceFromGateway_FetchFailureLeavesTheResult(t *testing.T)
 	t.Run("unparseable body", func(t *testing.T) {
 		srv := narrativeServer(t, http.StatusOK, "<html>")
 		r := firstHopResult(t)
-		if _, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false); changed || r.Passed {
+		if _, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, testutil.AgentResponse{RunID: "plr_cea87922"}, nil, false); changed || r.Passed {
 			t.Errorf("an unparseable narrative changed the result: %+v", r)
 		}
 	})
@@ -270,7 +271,7 @@ func TestApplyChainEvidenceFromGateway_FetchFailureLeavesTheResult(t *testing.T)
 func TestApplyChainEvidenceFromGateway_SingleHopRun(t *testing.T) {
 	srv := narrativeServer(t, http.StatusOK, `{"incident_id":"plr_cea87922","triage":{"findings":"pg_control is mentioned"}}`)
 	r := firstHopResult(t)
-	if hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, "plr_cea87922", false); changed || hops != 0 || r.Passed {
+	if hops, changed := applyChainEvidenceFromGateway(srv.URL, "", chainTestFault(), &r, testutil.AgentResponse{RunID: "plr_cea87922"}, nil, false); changed || hops != 0 || r.Passed {
 		t.Errorf("a single-hop narrative changed the result: hops=%d changed=%v %+v", hops, changed, r)
 	}
 }
@@ -308,5 +309,177 @@ func TestChainDiagnosticText_EscalationsWithoutRemediation(t *testing.T) {
 	text, hops := chainDiagnosticText(n)
 	if hops != 1 || !strings.Contains(text, "pg_control") {
 		t.Errorf("got %q, %d hops", text, hops)
+	}
+}
+
+// --- tool evidence across the chain -----------------------------------------
+
+// The fault expects the two tools the later hops run. The entry hop (the DB
+// agent) ran neither: in the 2026-10-25 Kubernetes run it called
+// check_connection and create_incident_bundle only, and the fault scored
+// "tools 0%" on a chain that ran get_host_logs and get_pgbackrest_status.
+func chainToolsFault() Failure {
+	f := chainTestFault()
+	f.Evaluation.ExpectedTools = []string{"get_host_logs", "get_pgbackrest_status"}
+	return f
+}
+
+// firstHopStructured is the entry hop's response as the gateway returned it:
+// structured tool calls naming only what the DB agent ran.
+func firstHopStructured() testutil.AgentResponse {
+	return testutil.AgentResponse{
+		Text:  chainFirstHop,
+		RunID: "plr_cea87922",
+		ToolCalls: []testutil.ToolCallResult{
+			{Name: "check_connection", Success: false},
+			{Name: "create_incident_bundle", Success: true},
+		},
+	}
+}
+
+// chainServer serves the incident narrative and the per-trace tool_execution
+// events (trace id -> JSON array) the way the gateway's governance endpoint
+// does, and counts event requests.
+func chainServer(t *testing.T, narrative string, events map[string]string, eventRequests *int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/incidents/plr_cea87922":
+			_, _ = w.Write([]byte(narrative))
+		case "/api/v1/governance/events":
+			if eventRequests != nil {
+				*eventRequests++
+			}
+			body, ok := events[r.URL.Query().Get("trace_id")]
+			if !ok {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write([]byte(body))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+var chainEvents = map[string]string{
+	"tr_h1": `[{"event_type":"tool_execution","tool":{"name":"check_connection","error":"connection refused"}},
+	           {"event_type":"tool_execution","tool":{"name":"create_incident_bundle"}}]`,
+	"tr_h2": `[{"event_type":"tool_execution","tool":{"name":"check_host"}},
+	           {"event_type":"tool_execution","tool":{"name":"get_host_logs"}}]`,
+	"tr_h3": `[{"event_type":"tool_execution","tool":{"name":"get_pgbackrest_status"}}]`,
+	"tr_h4": `[{"event_type":"tool_execution","tool":{"name":"get_pgbackrest_status"}},
+	           {"event_type":"tool_execution","tool":{"name":"restore_from_backup"}},
+	           {"event_type":"tool_execution","tool":{"name":"check_host","error":"no pod"}}]`,
+}
+
+func TestApplyChainEvidenceFromGateway_ToolsRunByLaterHops(t *testing.T) {
+	srv := chainServer(t, chainNarrativeJSON, chainEvents, nil)
+	f := chainToolsFault()
+	resp := firstHopStructured()
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	if r.ToolScore != 0 || r.ToolEvidenceMode != "structured" {
+		t.Fatalf("precondition: the entry hop alone must score 0 tools in structured mode, got %.2f (%s)", r.ToolScore, r.ToolEvidenceMode)
+	}
+
+	_, changed := applyChainEvidenceFromGateway(srv.URL, "", f, &r, resp, nil, false)
+	if !changed {
+		t.Fatal("nothing changed")
+	}
+	if r.ToolScore != 1 || !r.ToolEvidence {
+		t.Errorf("ToolScore = %.2f ToolEvidence = %v, want 1 and true: get_host_logs ran in hop 2 and get_pgbackrest_status in hop 3", r.ToolScore, r.ToolEvidence)
+	}
+	if r.ToolEvidenceMode != "structured+chain" {
+		t.Errorf("ToolEvidenceMode = %q, want structured+chain so a report shows where the evidence came from", r.ToolEvidenceMode)
+	}
+	if !r.Passed || r.Score < 0.6 {
+		t.Errorf("Passed=%v Score=%.2f, want a pass", r.Passed, r.Score)
+	}
+}
+
+// A tool that errored in the later hop is not evidence that it ran: the
+// post-restore check_host in hop 4 failed because the pod was gone.
+func TestApplyChainToolEvidence_AnErroredToolDoesNotCount(t *testing.T) {
+	f := chainTestFault()
+	f.Evaluation.ExpectedTools = []string{"check_host"}
+	srv := chainServer(t, chainNarrativeJSON, map[string]string{
+		"tr_h1": `[]`, "tr_h2": `[]`, "tr_h3": `[]`,
+		"tr_h4": `[{"event_type":"tool_execution","tool":{"name":"check_host","error":"no pod"}}]`,
+	}, nil)
+	resp := firstHopStructured()
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	applyChainEvidenceFromGateway(srv.URL, "", f, &r, resp, nil, false)
+	if r.ToolScore != 0 {
+		t.Errorf("ToolScore = %.2f, want 0: the only check_host call errored", r.ToolScore)
+	}
+}
+
+// What the first hop itself ran still counts alongside the chain's.
+func TestApplyChainToolEvidence_UnionOfTheFirstHopAndTheChain(t *testing.T) {
+	f := chainTestFault()
+	f.Evaluation.ExpectedTools = []string{"check_connection", "get_host_logs"}
+	resp := firstHopStructured()
+	resp.ToolCalls[0].Success = true // check_connection succeeded in the entry hop
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	if r.ToolScore != 0.5 {
+		t.Fatalf("precondition: the entry hop found one of two tools, got %.2f", r.ToolScore)
+	}
+	if !ApplyChainToolEvidence(f, &r, resp, nil, []string{"get_host_logs"}, false) {
+		t.Fatal("nothing changed")
+	}
+	if r.ToolScore != 1 {
+		t.Errorf("ToolScore = %.2f, want 1: check_connection from hop 1 plus get_host_logs from the chain", r.ToolScore)
+	}
+}
+
+// Unreadable event trails can only leave the score where it was.
+func TestApplyChainEvidenceFromGateway_ToolEventsUnavailable(t *testing.T) {
+	srv := chainServer(t, chainNarrativeJSON, map[string]string{}, nil) // every events request answers 500
+	f := chainToolsFault()
+	resp := firstHopStructured()
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	applyChainEvidenceFromGateway(srv.URL, "", f, &r, resp, nil, false)
+	if r.ToolScore != 0 {
+		t.Errorf("ToolScore = %.2f after unreadable tool events, want it unchanged at 0", r.ToolScore)
+	}
+}
+
+// A run that never left its first hop has no later hops to ask about.
+func TestApplyChainEvidenceFromGateway_SingleHopRunFetchesNoToolEvents(t *testing.T) {
+	requests := 0
+	srv := chainServer(t, `{"incident_id":"plr_cea87922","triage":{"trace_id":"tr_h1","findings":"x"}}`, chainEvents, &requests)
+	f := chainToolsFault()
+	resp := firstHopStructured()
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	applyChainEvidenceFromGateway(srv.URL, "", f, &r, resp, nil, false)
+	if requests != 0 {
+		t.Errorf("a single-hop run made %d event requests, want 0", requests)
+	}
+}
+
+func TestApplyChainToolEvidence_NeverLowersAndHonoursTheGates(t *testing.T) {
+	f := chainToolsFault()
+	resp := firstHopStructured()
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	r.EvidenceRequiredButUnconfirmed = true // an evidence gate already failed this result
+	r.Passed = false
+	ApplyChainToolEvidence(f, &r, resp, nil, []string{"get_host_logs", "get_pgbackrest_status"}, false)
+	if r.Passed {
+		t.Error("chain tool evidence passed a result an evidence gate had failed")
+	}
+	before := r
+	if ApplyChainToolEvidence(f, &r, resp, nil, nil, false) || r.Score != before.Score {
+		t.Error("an empty tool list changed the result")
+	}
+	if r.ToolScore < before.ToolScore {
+		t.Error("a score was lowered")
 	}
 }

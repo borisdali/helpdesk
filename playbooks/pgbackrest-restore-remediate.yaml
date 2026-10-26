@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.8"
+version: "1.9"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -96,7 +96,14 @@ guidance: |
   the StatefulSet back up to the size restore_from_backup recorded, and the
   pod then starts against the restored data directory (no restart_service,
   no docker). If the instance's pod was not scaled down, there is nothing for
-  it to resume: say so in FINDINGS instead of retrying. Either way, this
+  it to resume: say so in FINDINGS instead of retrying.
+  On Kubernetes, expect this first check_host to FAIL once restore_from_backup
+  has run: it scaled the StatefulSet to 0, so there is no pod to inspect, and
+  check_host reports that as an error. That is the expected state, not a
+  failed restore and not a reason to stop. The target is Kubernetes-managed
+  (the Known Infrastructure entry says "Kubernetes: ...", and the earlier hops
+  reported runtime=kubectl), so go on to restart_container. Do not retry
+  check_host until after restart_container. Either way, this
   restarts the instance against the now-repaired data directory.
 
   Step 4 — Confirm recovery:

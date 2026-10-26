@@ -760,9 +760,10 @@ func cmdRun(args []string) {
 			// fault's keywords and category describe. Re-check them against the
 			// chain the run actually took, now that it has finished.
 			if !repeatMode && cfg.GatewayURL != "" && resp.RunID != "" && resp.Error == nil {
-				if hops, changed := applyChainEvidenceFromGateway(cfg.GatewayURL, cfg.GatewayAPIKey, f, &evalResult, resp.RunID,
+				if hops, changed := applyChainEvidenceFromGateway(cfg.GatewayURL, cfg.GatewayAPIKey, f, &evalResult, resp, auditTools,
 					judgeCompleter != nil && !evalResult.JudgeSkipped); changed {
-					fmt.Printf("Chain evidence:      the first hop alone missed the keyword/category criteria; the %d later diagnostic hop(s) met them (score now %d%%)\n", hops, int(evalResult.Score*100))
+					fmt.Printf("Chain evidence:      the first hop alone missed some criteria; the later hops of the chain met them (%d later diagnostic hop(s); keywords=%d%% tools=%d%% score now %d%%)\n",
+						hops, int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), int(evalResult.Score*100))
 				}
 			}
 

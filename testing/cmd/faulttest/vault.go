@@ -5294,6 +5294,14 @@ func printIncidentHopSummary(n *incidentNarrative) {
 		}
 	}
 
+	// The incident's root-cause class (the gateway classifies it from the
+	// chain's diagnostic hops, not only the entry hop). UNKNOWN is printed as
+	// it is: an unclassified incident should read as one, not as no line.
+	if n.IncidentRecord != nil && n.IncidentRecord.Attribution != "" {
+		fmt.Println()
+		fmt.Printf("Root cause: %s\n", n.IncidentRecord.Attribution)
+	}
+
 	if n.Evaluation != nil {
 		fmt.Println()
 		parts := []string{fmt.Sprintf("diagnosis %.0f%%", n.Evaluation.DiagnosisScore*100)}

@@ -718,7 +718,9 @@ triage and the entry hop told the DB agent to use `get_pod_logs`, a tool of the 
   database system" rule as for any runtime. It deliberately does not call `read_pg_log_file`, which needs
   exec into a pod that is crash-looping. Without the signature it falls back to
   `pbs_k8s_pod_crash_triage` as before.
-- `pbs_pgbackrest_restore_remediate` (v1.8) resumes the StatefulSet with `restart_container`.
+- `pbs_pgbackrest_restore_remediate` (v1.9) resumes the StatefulSet with `restart_container`. It expects its first
+  `check_host` after the restore to fail on Kubernetes (the restore scaled the StatefulSet to 0, so there is no pod
+  to inspect) and goes on to the restart; the audit trail of the verified run shows exactly that error.
 
 👉 Verified on K8s (2026-10-25) with the whole stack in-cluster, by `db-pgdata-corrupted-k8s`
 (`pg_control` deleted in the `db-destruct` pod, which then crash-looped), through the gateway with

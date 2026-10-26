@@ -1,10 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	neturl "net/url"
 	"strings"
+	"time"
 
 	"helpdesk/testing/faultlib"
+	"helpdesk/testing/testutil"
 )
 
 // Scoring a diagnosis across a whole chain (v0.33).
@@ -128,7 +133,59 @@ func ApplyChainEvidence(f Failure, r *EvalResult, chain string, hops int, judged
 	if !changed {
 		return false
 	}
+	rescoreAfterChain(r, judged)
+	r.ChainEvidenceHops = hops
+	return true
+}
 
+// ApplyChainToolEvidence raises r's tool score by the expected tools that a
+// later hop of the chain ran, which the first hop's own tool calls cannot show:
+// pbs_db_data_loss_triage has no log tools, so get_host_logs (the sysadmin
+// agent's, two hops on) was never among its calls and the fault scored
+// "tools 0%" on a chain that ran every expected tool. chainTools are the names
+// of tools that executed successfully in any hop. A tool counts when the first
+// hop's evidence (resp and auditTools, scored exactly as Evaluate did) or the
+// chain shows it. It only ever raises the score.
+func ApplyChainToolEvidence(f Failure, r *EvalResult, resp testutil.AgentResponse, auditTools, chainTools []string, judged bool) bool {
+	expected := f.Evaluation.ExpectedTools
+	if r == nil || len(expected) == 0 || len(chainTools) == 0 {
+		return false
+	}
+	ran := make(map[string]bool, len(chainTools))
+	for _, name := range chainTools {
+		ran[name] = true
+	}
+	found := 0
+	for _, tool := range expected {
+		if ran[tool] {
+			found++
+			continue
+		}
+		// Not in the chain's list: whatever the first hop's own evidence says.
+		single := f
+		single.Evaluation.ExpectedTools = []string{tool}
+		if score, _, _ := scoreToolEvidence(single, resp, auditTools); score >= 1 {
+			found++
+		}
+	}
+	score := float64(found) / float64(len(expected))
+	if score <= r.ToolScore {
+		return false
+	}
+	r.ToolScore = score
+	r.ToolEvidence = score > 0.5
+	if r.ToolEvidenceMode != "" && !strings.HasSuffix(r.ToolEvidenceMode, "+chain") {
+		r.ToolEvidenceMode += "+chain"
+	}
+	rescoreAfterChain(r, judged)
+	return true
+}
+
+// rescoreAfterChain recomputes r.Score from its (raised) components with the
+// same weights Evaluate used, keeping every rule that made the first-hop
+// result what it was: the protocol-violation cap, an evidence gate's veto, the
+// judge veto, and that a chain can only help.
+func rescoreAfterChain(r *EvalResult, judged bool) {
 	prevScore, prevPassed := r.Score, r.Passed
 	if judged {
 		r.Score = r.ToolScore*0.40 + r.DiagnosisScore*0.40 + r.KeywordScore*0.20
@@ -144,28 +201,100 @@ func ApplyChainEvidence(f Failure, r *EvalResult, chain string, hops int, judged
 	judgeVeto := judged && r.DiagnosisScore < 0.33
 	gated := r.EvidenceCoverageGap || r.EvidenceRequiredButUnconfirmed
 	r.Passed = prevPassed || (r.Score >= 0.6 && r.KeywordPass && r.OrderingPass && !judgeVeto && !gated)
-	if r.Score < prevScore { // belt and braces: a chain can only help
+	if r.Score < prevScore {
 		r.Score = prevScore
 	}
-	r.ChainEvidenceHops = hops
-	return true
+}
+
+// hopTraceIDs returns the trace ID of every hop of the narrative, entry first.
+func hopTraceIDs(n *incidentNarrative) []string {
+	if n == nil {
+		return nil
+	}
+	var ids []string
+	add := func(id string) {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	add(n.Triage.TraceID)
+	for _, e := range n.Escalations {
+		add(e.TraceID)
+	}
+	if n.Remediation != nil {
+		add(n.Remediation.TraceID)
+	}
+	return ids
+}
+
+// fetchChainToolNames returns the names of the tools that executed without
+// error in the given traces, from the audit trail through the gateway's
+// governance events endpoint. A trace that cannot be read contributes nothing
+// (and is logged): fewer tools can only mean a lower score, never a higher one.
+func fetchChainToolNames(gatewayURL, apiKey string, traceIDs []string) []string {
+	var names []string
+	seen := map[string]bool{}
+	client := &http.Client{Timeout: 15 * time.Second}
+	for _, id := range traceIDs {
+		u := strings.TrimSuffix(gatewayURL, "/") + "/api/v1/governance/events?event_type=tool_execution&trace_id=" + neturl.QueryEscape(id)
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			continue
+		}
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			slog.Warn("chain evidence: could not read a hop's tool calls", "trace_id", id, "err", err)
+			continue
+		}
+		var events []auditEvent
+		err = json.NewDecoder(resp.Body).Decode(&events)
+		status := resp.StatusCode
+		resp.Body.Close()
+		if status != http.StatusOK || err != nil {
+			slog.Warn("chain evidence: could not read a hop's tool calls", "trace_id", id, "status", status, "err", err)
+			continue
+		}
+		for _, e := range events {
+			if e.Tool == nil || e.Tool.Name == "" || e.Tool.Error != "" || seen[e.Tool.Name] {
+				continue
+			}
+			seen[e.Tool.Name] = true
+			names = append(names, e.Tool.Name)
+		}
+	}
+	return names
 }
 
 // applyChainEvidenceFromGateway fetches the finished run's incident narrative
-// and applies ApplyChainEvidence to r. It reports the number of later
-// diagnostic hops that were counted and whether the score changed. A fetch
-// failure is logged and leaves r untouched: the diagnosis is then scored on
-// the first hop only, as before chain evidence existed. When the score
-// changes, the overall score is recomputed with the remediation score the
-// run already has.
-func applyChainEvidenceFromGateway(gatewayURL, apiKey string, f Failure, r *EvalResult, runID string, judged bool) (hops int, changed bool) {
-	narrative, err := fetchIncidentNarrative(gatewayURL, apiKey, runID)
+// and applies the chain's evidence to r: the keywords and category from the
+// later diagnostic hops' findings, and the expected tools the later hops ran.
+// resp and auditTools are what the first hop's own evaluation used. It reports
+// the number of later diagnostic hops counted and whether the score changed. A
+// fetch failure is logged and leaves r untouched: the diagnosis is then scored
+// on the first hop only, as before chain evidence existed. When the score
+// changes, the overall score is recomputed with the remediation score the run
+// already has.
+func applyChainEvidenceFromGateway(gatewayURL, apiKey string, f Failure, r *EvalResult, resp testutil.AgentResponse, auditTools []string, judged bool) (hops int, changed bool) {
+	narrative, err := fetchIncidentNarrative(gatewayURL, apiKey, resp.RunID)
 	if err != nil {
-		slog.Warn("chain evidence: could not fetch the incident narrative; the diagnosis is scored on the first hop only", "run_id", runID, "err", err)
+		slog.Warn("chain evidence: could not fetch the incident narrative; the diagnosis is scored on the first hop only", "run_id", resp.RunID, "err", err)
 		return 0, false
 	}
 	chain, hops := chainDiagnosticText(narrative)
-	if !ApplyChainEvidence(f, r, chain, hops, judged) {
+	changed = ApplyChainEvidence(f, r, chain, hops, judged)
+	if len(narrative.Escalations) > 0 || narrative.Remediation != nil {
+		tools := fetchChainToolNames(gatewayURL, apiKey, hopTraceIDs(narrative))
+		if ApplyChainToolEvidence(f, r, resp, auditTools, tools, judged) {
+			changed = true
+			if r.ChainEvidenceHops == 0 {
+				r.ChainEvidenceHops = hops
+			}
+		}
+	}
+	if !changed {
 		return hops, false
 	}
 	if r.RemediationAttempted {

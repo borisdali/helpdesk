@@ -148,7 +148,11 @@ could fail its diagnostic depending on how the entry hop worded its hand-off.
 
 After the run finishes, the harness fetches the incident narrative and re-checks the keyword and category
 criteria against the first hop's response plus the findings (and primary hypothesis) of every later
-*diagnostic* hop. The terminal remediation hop is left out: its findings say "restore" because it
+*diagnostic* hop. The tool criterion gets the same treatment: the tools that executed without error in any
+hop (from the audit trail, by each hop's trace ID, through the gateway's governance events endpoint) count
+toward `expected_tools` alongside what the first hop itself ran, and the report's `tool_evidence_mode`
+gains a `+chain` suffix (`structured+chain`). Before this, a chain whose entry hop had no log tools scored
+`tools 0%` however many of the expected tools the later hops ran. The terminal remediation hop is left out: its findings say "restore" because it
 restored, and whether the fix worked is the remediation score's job. The re-check can only raise a
 score: a first hop that already passed is untouched, the evidence gates above still fail a result
 regardless, and the protocol-violation cap still applies. With `--judge` the diagnosis score stays the
