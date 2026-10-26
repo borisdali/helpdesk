@@ -69,8 +69,12 @@ func TestKubernetesChain_Guidance(t *testing.T) {
 		},
 		{
 			// Hop 4: resumes the StatefulSet, no restart_service / docker.
-			file: "pgbackrest-restore-remediate.yaml", minVersion: "1.9",
-			terms: []string{"runtime=kubectl → call restart_container", "scales the StatefulSet back up", "On Kubernetes get_host_logs reads `kubectl logs`", "expect this first check_host to FAIL once restore_from_backup has run", "Do not retry check_host until after restart_container"},
+			file: "pgbackrest-restore-remediate.yaml", minVersion: "1.10",
+			terms: []string{"runtime=kubectl → call restart_container", "scales the StatefulSet back up", "On Kubernetes get_host_logs reads `kubectl logs`", "expect this first check_host to FAIL once restore_from_backup has run", "Do not retry check_host until after restart_container",
+				// found 2026-10-26 on the Docker fixture: a running container is not a running PostgreSQL
+				"Do not refuse on your own account because check_host reports a container as running",
+				"a Docker or Podman container can stay up after the PostgreSQL inside it has died",
+				"let restore_from_backup decide"},
 		},
 	} {
 		t.Run(c.file, func(t *testing.T) {

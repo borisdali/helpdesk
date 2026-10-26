@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_restore_remediate
 name: "pgBackRest — Restore From Latest Backup"
-version: "1.9"
+version: "1.10"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -54,9 +54,16 @@ guidance: |
     recovery at all.
   - Prior findings mention a replica or primary/replica topology — this
     playbook only handles a single, standalone instance.
-  - You have any doubt the instance is actually down — restore_from_backup
-    itself refuses to run if postgres is still accepting connections, but
-    do not rely on that as your only check; confirm first.
+  - You have real evidence that PostgreSQL is NOT down: the prior hops'
+    findings never mention a startup failure, or something shows it serving.
+    restore_from_backup itself refuses to run if postgres is still accepting
+    connections (pg_isready), and that check is the authoritative one. Do not
+    refuse on your own account because check_host reports a container as
+    running: a Docker or Podman container can stay up after the PostgreSQL
+    inside it has died, so Status=running with Restarting=false says nothing
+    about PostgreSQL. The prior hops already established that it failed to
+    start, from the log lines they quoted. Go on to Step 2 and let
+    restore_from_backup decide; if it refuses, stop and escalate.
 
   Step 1 — Reconfirm backup health:
   Call get_pgbackrest_status with the connection_string (target). Do not
