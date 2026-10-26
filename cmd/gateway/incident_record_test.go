@@ -36,7 +36,11 @@ type mockRunStartAuditd struct {
 	// incidentByRun/playbookBySeriesID/attributionPatchStatus support Phase 2's
 	// classifyIncidentAttribution tests: GET /v1/incidents/by-run/{runID},
 	// GET /v1/fleet/playbooks?series_id=, and forcing a non-204 PATCH response.
-	incidentByRun          *audit.Incident
+	incidentByRun *audit.Incident
+	// incidentRunID, when set, makes the by-run lookup answer only for that
+	// run, as the real store does (an incident row is keyed by its entry run;
+	// a later hop of the chain has none). Unset, any run ID finds it.
+	incidentRunID          string
 	playbookBySeriesID     *audit.Playbook
 	attributionPatchStatus int
 }
@@ -60,7 +64,8 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodGet && m.playbookBySeriesID != nil && r.URL.Query().Get("series_id") != "":
 			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{m.playbookBySeriesID}}) //nolint:errcheck
-		case r.Method == http.MethodGet && m.incidentByRun != nil && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+		case r.Method == http.MethodGet && m.incidentByRun != nil && strings.Contains(r.URL.Path, "/v1/incidents/by-run/") &&
+			(m.incidentRunID == "" || strings.HasSuffix(r.URL.Path, "/"+m.incidentRunID)):
 			json.NewEncoder(w).Encode(m.incidentByRun) //nolint:errcheck
 		case r.Method == http.MethodGet && m.playbook != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
 			json.NewEncoder(w).Encode(m.playbook) //nolint:errcheck
@@ -1392,6 +1397,7 @@ func chainAttributionMock(attribution, hopType string) *mockRunStartAuditd {
 	return &mockRunStartAuditd{
 		priorRun:      &audit.PlaybookRun{RunID: "plr_hop2", EntryRunID: "plr_entry", SeriesID: "pbs_hop"},
 		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_entry", Attribution: attribution},
+		incidentRunID: "plr_entry",
 		playbookBySeriesID: &audit.Playbook{
 			SeriesID:         "pbs_entry",
 			PlaybookType:     hopType,
@@ -1408,7 +1414,9 @@ func attributionPatches(t *testing.T, mock *mockRunStartAuditd) []string {
 		if err := json.Unmarshal([]byte(c.body), &body); err != nil {
 			t.Fatalf("decode patch body: %v", err)
 		}
-		out = append(out, body["attribution"])
+		if a, ok := body["attribution"]; ok {
+			out = append(out, a)
+		}
 	}
 	return out
 }
@@ -1519,5 +1527,38 @@ func TestAttributionKnown(t *testing.T) {
 		if got := attributionKnown(in); got != want {
 			t.Errorf("attributionKnown(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The wiring: a later hop's completion, recorded the way every hop's is,
+// reaches classifyChainAttribution. The tests above call it directly; this
+// is the path that decides whether a chain's incident ever gets a class.
+func TestRecordPlaybookRunComplete_LaterDiagnosticHopClassifiesTheIncident(t *testing.T) {
+	mock := chainAttributionMock(agentutil.AttributionUnknown, "triage")
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		return "missing-data-directory", nil
+	}}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_hop2", audit.OutcomeTransitioned, "", "pbs_pgbackrest_health_triage",
+		`data_loss_restore_candidate=true; logs show "could not find the database system"`, "", "tr_hop2", nil, false, "")
+
+	if got := attributionPatches(t, mock); len(got) != 1 || got[0] != "missing-data-directory" {
+		t.Fatalf("attribution patches = %v, want [missing-data-directory]", got)
+	}
+}
+
+func TestRecordPlaybookRunComplete_RemediationHopLeavesTheClassAlone(t *testing.T) {
+	mock := chainAttributionMock(agentutil.AttributionUnknown, "remediation")
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		return "missing-data-directory", nil
+	}}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_hop2", audit.OutcomeResolved, "", "",
+		"Restore from backup succeeded", "", "tr_hop2", nil, false, "")
+
+	if got := attributionPatches(t, mock); len(got) != 0 {
+		t.Errorf("a remediation hop set the incident's class: %v", got)
 	}
 }

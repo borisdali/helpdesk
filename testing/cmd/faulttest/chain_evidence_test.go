@@ -483,3 +483,54 @@ func TestApplyChainToolEvidence_NeverLowersAndHonoursTheGates(t *testing.T) {
 		t.Error("a score was lowered")
 	}
 }
+
+// The request the harness makes for a hop's tool calls: the gateway's
+// governance events endpoint, filtered to the hop's trace and to tool
+// executions, with the harness's API key.
+func TestFetchChainToolNames_RequestShape(t *testing.T) {
+	var gotAuth, gotType, gotTrace, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+		gotType, gotTrace = r.URL.Query().Get("event_type"), r.URL.Query().Get("trace_id")
+		_, _ = w.Write([]byte(`[{"event_type":"tool_execution","tool":{"name":"get_host_logs"}}]`))
+	}))
+	defer srv.Close()
+
+	names := fetchChainToolNames(srv.URL, "k3y", []string{"tr a&b"})
+	if len(names) != 1 || names[0] != "get_host_logs" {
+		t.Errorf("names = %v, want [get_host_logs]", names)
+	}
+	if gotPath != "/api/v1/governance/events" || gotType != "tool_execution" || gotTrace != "tr a&b" || gotAuth != "Bearer k3y" {
+		t.Errorf("request = %s event_type=%q trace_id=%q auth=%q, want the governance events path, tool_execution, the (escaped) trace id and the bearer key",
+			gotPath, gotType, gotTrace, gotAuth)
+	}
+}
+
+// Tools are de-duplicated across hops, in first-seen order.
+func TestFetchChainToolNames_DeduplicatesAcrossHops(t *testing.T) {
+	srv := chainServer(t, chainNarrativeJSON, chainEvents, nil)
+	names := fetchChainToolNames(srv.URL, "", []string{"tr_h1", "tr_h3", "tr_h4"})
+	want := []string{"create_incident_bundle", "get_pgbackrest_status", "restore_from_backup"} // check_connection and check_host errored
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("names = %v, want %v", names, want)
+	}
+}
+
+// A gateway response with only text (no structured tool calls) still gets the
+// union: what the first hop's text shows plus what the chain ran.
+func TestApplyChainToolEvidence_TextModeUnion(t *testing.T) {
+	f := chainTestFault()
+	f.Evaluation.ExpectedTools = []string{"get_host_logs", "get_pgbackrest_status"}
+	resp := testutil.AgentResponse{Text: "I called get_pgbackrest_status: stanza main, status ok, backup_stale=false."}
+	r := Evaluate(f, resp)
+	r.ResponseText = resp.Text
+	if r.ToolScore != 0.5 {
+		t.Fatalf("precondition: the entry hop's text shows one of two tools, got %.2f (%s)", r.ToolScore, r.ToolEvidenceMode)
+	}
+	if !ApplyChainToolEvidence(f, &r, resp, nil, []string{"get_host_logs"}, false) {
+		t.Fatal("nothing changed")
+	}
+	if r.ToolScore != 1 {
+		t.Errorf("ToolScore = %.2f, want 1: the text showed get_pgbackrest_status, the chain ran get_host_logs", r.ToolScore)
+	}
+}
