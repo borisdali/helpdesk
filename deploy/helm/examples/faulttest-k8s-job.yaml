@@ -44,4 +44,12 @@ faulttest:
   operator: <a human user in users.yaml with an override role, e.g. alice@example.com>
   usersFile: true
 
+
+  # Feedback. A Job has no terminal, so the post-recovery feedback prompt is
+  # skipped and nothing is recorded. Uncomment to raise a Decision Hub card
+  # instead and wait (up to 10 minutes) for someone to resolve it:
+  #   POST /api/v1/decisions/feedback:<plr_id>/resolve
+  # Needs approvalMode: force and an operator, as above. See docs/DECISIONS.md.
+  # emitAndWait: true
+
   ttlSecondsAfterFinished: 3600

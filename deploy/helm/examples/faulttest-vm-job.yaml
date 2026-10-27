@@ -46,4 +46,12 @@ faulttest:
   usersFile: true                      # check the operator against the gateway's users file
 
   # Narrow the chain's wait if you like; the Job gives up after the fault's timeout.
+
+  # Feedback. A Job has no terminal, so the post-recovery feedback prompt is
+  # skipped and nothing is recorded. Uncomment to raise a Decision Hub card
+  # instead and wait (up to 10 minutes) for someone to resolve it:
+  #   POST /api/v1/decisions/feedback:<plr_id>/resolve
+  # Needs approvalMode: force and an operator, as above. See docs/DECISIONS.md.
+  # emitAndWait: true
+
   ttlSecondsAfterFinished: 3600

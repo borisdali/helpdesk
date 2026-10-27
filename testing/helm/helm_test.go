@@ -1863,3 +1863,16 @@ func TestFaulttestRole_ReleaseWithoutTheDestructiveKey(t *testing.T) {
 		t.Error("the base rules are missing")
 	}
 }
+
+// emitAndWait is the Job's only way to record feedback (no terminal): the flag
+// must reach the harness, and must not be on unless asked for, since it makes
+// the run wait up to ten minutes for the feedback card.
+func TestFaulttestJob_EmitAndWait(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.emitAndWait=true", "faulttest.approvalMode=force", "faulttest.operator=alice@example.com")
+	if !hasArg(args, "--emit-and-wait") || !hasArg(args, "--approval-mode=force") || !hasArg(args, "--operator=alice@example.com") {
+		t.Errorf("args %v lack --emit-and-wait with force and an operator", args)
+	}
+	if _, args = faulttestJob(t); argWithPrefix(args, "--emit-and-wait") != "" {
+		t.Errorf("--emit-and-wait on by default: %v", args)
+	}
+}

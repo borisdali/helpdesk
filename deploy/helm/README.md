@@ -1389,6 +1389,8 @@ If the Job is killed mid-run, the fault's teardown may not have run. On the VM, 
 archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
 WAL-gap fault.
 
+> **Feedback in a Job.** A Job has no terminal, so by default the post-recovery feedback prompt is skipped and no feedback is recorded. Set `faulttest.emitAndWait=true` (with `approvalMode: force` and an `operator`) to have the run raise a Decision Hub card instead and wait up to 10 minutes for you to answer it; see [docs/DECISIONS.md](../../docs/DECISIONS.md#running-from-a-job-with---emit-and-wait). It only applies to the restore runs: a fault that ends at a human never recovers, so it raises no card.
+
 ### 10.7 A pod fault from a Job, entirely in-cluster
 
 *Added in v0.33.* The same Job can break and repair a database that runs as a pod in the cluster. The
