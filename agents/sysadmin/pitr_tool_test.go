@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -153,5 +154,108 @@ func TestPlanPITRTool_RecordsToolExecution(t *testing.T) {
 	}
 	if out := events[0].Tool.Result; !strings.Contains(out, plan.PlanDigest) {
 		t.Errorf("audited output lacks the plan digest %s: %s", plan.PlanDigest, out)
+	}
+}
+
+// POST /tool/plan_point_in_time_recovery (faulttest, the gateway) passes JSON
+// maps, not the Go struct: the argument names are part of the contract.
+func TestPlanPITR_DirectRegistry(t *testing.T) {
+	old := cmdRunner
+	cmdRunner = fixtureRunner(t)
+	defer func() { cmdRunner = old }()
+
+	fn, ok := NewSysadminDirectRegistry().Get("plan_point_in_time_recovery")
+	if !ok {
+		t.Fatal("plan_point_in_time_recovery is not in the direct registry")
+	}
+	out, err := fn(context.Background(), map[string]any{
+		"recovery_target_type":  "time",
+		"recovery_target_value": "2026-10-09T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan PITRPlan
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatalf("result is not a PITRPlan: %v: %s", err, out)
+	}
+	if plan.Status != PITRFeasible || plan.PlanDigest == "" {
+		t.Errorf("plan = %+v", plan)
+	}
+	if _, err := fn(context.Background(), map[string]any{"recovery_target_type": "time", "recovery_target_value": "tomorrow"}); err == nil {
+		t.Error("an invalid target must be an error through the registry too")
+	}
+}
+
+// When the newest backup is after the target, the WAL check must be run on
+// the backup that was selected (its own start segment and archive), not on
+// the newest one.
+func TestPlanPITR_ChecksTheSelectedBackup(t *testing.T) {
+	// The fixture's one backup (20261007-043435F) plus a newer one that
+	// finished after the target. Its start segment would give a different
+	// answer: it points at a segment that is not in the archive.
+	info := readFixture(t, "multi_timeline_info.json")
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(info), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	backups := parsed[0]["backup"].([]any)
+	newer := map[string]any{}
+	for k, v := range backups[0].(map[string]any) {
+		newer[k] = v
+	}
+	newer["label"] = "20261010-120000F"
+	newer["timestamp"] = map[string]any{"start": 1791640000, "stop": 1791640010} // 2026-10-10
+	newer["archive"] = map[string]any{"start": "0000000100000000000000FF", "stop": "0000000100000000000000FF"}
+	newer["lsn"] = map[string]any{"start": "0/FFFF0028", "stop": "0/FFFF0100"}
+	parsed[0]["backup"] = append(backups, newer)
+	patched, _ := json.Marshal(parsed)
+
+	wal := fakeWALRun(t, readFixture(t, "multi_timeline_000000010000000000000002.gz"), nil)
+	old := cmdRunner
+	cmdRunner = runnerFunc(func(_ context.Context, _ string, args []string, _ []string) (string, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return string(patched), nil
+		}
+		return wal(args)
+	})
+	defer func() { cmdRunner = old }()
+
+	// Before the newer backup: the original is selected and is continuous.
+	plan, err := planPITRImpl(context.Background(), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"})
+	if err != nil || plan.BackupLabel != "20261007-043435F" || plan.Status != PITRFeasible {
+		t.Fatalf("target before the newer backup: %+v, %v", plan, err)
+	}
+	// After it: the newer one is selected, and its missing WAL is what the
+	// plan reports (proving the check ran on the selected backup).
+	plan, err = planPITRImpl(context.Background(), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-10T18:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.BackupLabel != "20261010-120000F" || plan.Status == PITRFeasible {
+		t.Errorf("target after the newer backup: %+v", plan)
+	}
+}
+
+func TestPlanPITR_StatusReadFails(t *testing.T) {
+	old := cmdRunner
+	cmdRunner = runnerFunc(func(context.Context, string, []string, []string) (string, error) {
+		return "", fmt.Errorf("pgbackrest: command not found")
+	})
+	defer func() { cmdRunner = old }()
+
+	if _, err := planPITRImpl(context.Background(), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"}); err == nil ||
+		!strings.Contains(err.Error(), "reading the backup state") {
+		t.Fatalf("err = %v", err)
+	}
+	// Through the tool wrapper the failure is audited as an error.
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	if _, err := planPITRTool(newSysadminTestContext(), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	events, qerr := store.Query(context.Background(), audit.QueryOptions{ToolName: "plan_point_in_time_recovery", EventType: audit.EventTypeToolExecution})
+	if qerr != nil || len(events) == 0 || events[0].Tool.Error == "" {
+		t.Fatalf("failed call not audited with its error: %v %+v", qerr, events)
 	}
 }
