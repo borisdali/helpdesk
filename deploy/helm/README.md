@@ -1,5 +1,7 @@
 # aiHelpDesk: Deployment on Kubernetes
 
+Which pieces can run where, and which combinations are verified (control plane, faulttest, the target database, auditd storage), is in [Platforms](../../docs/PLATFORMS.md).
+
 If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
 
 This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
@@ -1385,6 +1387,12 @@ Two runs cover the VM path:
 | The four-hop restore | `db-pgdata-corrupted-vm` | `remediate`, `gateEscalation`, `approvalMode: force` | data-loss triage, host triage, health triage, restore; the VM is back up |
 | A hidden WAL segment | `db-pgbackrest-wal-gap-vm` | none of those (diagnosis only) | health triage reports the chain `broken` and stops at a human; the restore is refused by design |
 
+👉 Verified on minikube from the Job against a real Ubuntu VM (2026-10-27, image `k8schain-2247`, the VM reached by name over SSH from both the Job and the sysadmin agent's pod):
+  - `db-pgbackrest-wal-gap-vm` (`plr_85721afd`): `[PASS]` 100%, the signal `pgbackrest_wal_chain_broken` confirmed from the audit trail, the hidden segment restored by the teardown, 27 seconds.
+  - `db-pgdata-corrupted-vm` (`plr_f8cee154`, `emitAndWait` on): `pg_control` removed and the service down, four hops with the first gate approved as `alice@example.com` and the later ones force-approved, recovered 176s after injection (checked with `psql` from the pod), `Root cause: missing-data-directory`, and the teardown found `postgresql@16-main` active.
+
+The pod must be able to resolve the VM's name. A name that exists only in your laptop's `/etc/hosts` (a `.test` name, say) does not resolve in the cluster: on minikube add it to the `hosts` block of the CoreDNS Corefile (`kubectl -n kube-system edit cm coredns`), or use the IP and rebuild `known_hosts` for it.
+
 If the Job is killed mid-run, the fault's teardown may not have run. On the VM, check
 `systemctl is-active postgresql@16-main` and look for `*.hidden-by-fault` files under the pgBackRest
 archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
@@ -1423,6 +1431,10 @@ entry (`testing/k8s/helm-values-pgbackrest.yaml`).
 |---|---|---|---|---|
 | The four-hop restore | `db-pgdata-corrupted-k8s` | `db-destruct` | `rbac.destructive`, `remediate`, `gateEscalation`, `approvalMode: force` | pod crashes, four hops, restored and resumed |
 | A hidden WAL segment | `db-pgbackrest-wal-gap-k8s` | `db` | none of those | health triage reports the chain `broken` and stops at a human |
+
+👉 Verified on minikube from the Job (2026-10-26/27, image `k8schain-2247`, everything in-cluster including faulttest):
+  - `db-pgbackrest-wal-gap-k8s` (`plr_68e31a92`): `[PASS]` 100%, the signal `pgbackrest_wal_chain_broken` fired and confirmed, the hidden segment restored, 25 seconds.
+  - `db-pgdata-corrupted-k8s` (`plr_cb23439f`, `emitAndWait` on): the pod deleted and crash-looping, four hops with the first gate approved as `alice@example.com` and the later ones force-approved, recovered 237s after injection, `Chain evidence … keywords=100% tools=100%`, `Root cause: missing-data-directory`, and a Decision Hub feedback card the Job waited for (answered after about 7 minutes, so the Job ran 11 minutes in all) before it tore down.
 
 ## 11. Fleet Playbooks & Vault
 
