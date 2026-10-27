@@ -1466,8 +1466,21 @@ type GetPgBackRestStatusResult struct {
 // walCheckInput returns what the WAL-continuity check needs about the latest
 // backup, or false when there is no backup to check.
 func (r GetPgBackRestStatusResult) walCheckInput() (walCheckInput, bool) {
+	return r.walCheckInputFor("")
+}
+
+// walCheckInputFor is walCheckInput for the backup with the given label (a
+// point-in-time restore checks the backup it selected, not the newest). An
+// empty label means the newest backup; an unknown label is false.
+func (r GetPgBackRestStatusResult) walCheckInputFor(label string) (walCheckInput, bool) {
 	var last *PgBackRestBackup
 	for i := range r.Backups {
+		if label != "" {
+			if r.Backups[i].Label == label {
+				last = &r.Backups[i]
+			}
+			continue
+		}
 		if last == nil || r.Backups[i].StopTime.After(last.StopTime) {
 			last = &r.Backups[i]
 		}
