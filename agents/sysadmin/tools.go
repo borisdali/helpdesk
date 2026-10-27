@@ -2363,6 +2363,18 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 		return marshalResult(result)
 	})
 
+	r.Register("plan_point_in_time_recovery", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[PlanPITRArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := planPITRImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
 	r.Register("verify_restore_recovery", func(ctx context.Context, args map[string]any) (string, error) {
 		a, err := argsToStruct[VerifyRestoreRecoveryArgs](args)
 		if err != nil {

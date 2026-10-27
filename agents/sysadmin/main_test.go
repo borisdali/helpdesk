@@ -118,3 +118,37 @@ func TestObjectiveEvidenceYAML_WALChainBroken_Shipped(t *testing.T) {
 	}
 	t.Fatal("expected a pgbackrest_wal_chain_broken rule in the real shipped file")
 }
+
+// TestObjectiveEvidenceYAML_PITRSignals_Shipped verifies the shipped rules
+// file wires both verify_restore_recovery signals to the probes the Go schema
+// registers, and that the Helm copy of the file is the same file.
+func TestObjectiveEvidenceYAML_PITRSignals_Shipped(t *testing.T) {
+	_, rules := loadSysadminEvidenceRules("objective_evidence.yaml")
+	want := map[string]string{
+		"restore_recovery_mismatch":  "recovery_mismatch",
+		"restore_target_not_reached": "recovery_target_not_reached",
+	}
+	for _, r := range rules {
+		if probe, ok := want[r.Signal]; ok {
+			if r.Probe != probe || r.Tool != "verify_restore_recovery" {
+				t.Errorf("%s: rule = %+v, want probe %s", r.Signal, r, probe)
+			}
+			delete(want, r.Signal)
+		}
+	}
+	if len(want) > 0 {
+		t.Errorf("missing shipped rules for %v", want)
+	}
+
+	repo, err := os.ReadFile("objective_evidence.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helm, err := os.ReadFile("../../deploy/helm/helpdesk/files/objective-evidence-sysadmin.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(repo) != string(helm) {
+		t.Error("deploy/helm/helpdesk/files/objective-evidence-sysadmin.yaml differs from agents/sysadmin/objective_evidence.yaml: copy it over")
+	}
+}

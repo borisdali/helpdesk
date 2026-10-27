@@ -689,7 +689,13 @@ type pgbackrestRunner func(args []string) (string, error)
 // run for the repo reads it needs: the archive's top level, the newest
 // timeline's history file, the segment listing, and one segment's header.
 func checkWALContinuity(result GetPgBackRestStatusResult, run pgbackrestRunner) WALContinuity {
-	in, ok := result.walCheckInput()
+	return checkWALContinuityFor(result, "", run)
+}
+
+// checkWALContinuityFor is checkWALContinuity for the backup with the given
+// label, or the latest when label is empty.
+func checkWALContinuityFor(result GetPgBackRestStatusResult, label string, run pgbackrestRunner) WALContinuity {
+	in, ok := result.walCheckInputFor(label)
 	if !ok {
 		return WALContinuity{Status: WALNoBackup, Detail: "no backup has completed, so there is nothing to restore from"}
 	}

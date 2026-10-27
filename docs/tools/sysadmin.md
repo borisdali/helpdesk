@@ -2,7 +2,7 @@
 
 # Sysadmin agent tools
 
-The `sysadmin` agent (`sysadmin_agent`) publishes 11 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
+The `sysadmin` agent (`sysadmin_agent`) publishes 12 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
 
 | Tool | Action class | Capabilities |
 |---|---|---|
@@ -11,6 +11,7 @@ The `sysadmin` agent (`sysadmin_agent`) publishes 11 tools to the [Tool Registry
 | [`check_memory`](#check_memory) | read | `host_memory` |
 | [`get_host_logs`](#get_host_logs) | read | `logs` |
 | [`get_pgbackrest_status`](#get_pgbackrest_status) | read | `backup_status` |
+| [`plan_point_in_time_recovery`](#plan_point_in_time_recovery) | read | `recovery_plan` |
 | [`read_pg_log_file`](#read_pg_log_file) | read | `logs` |
 | [`restart_container`](#restart_container) | destructive | `process_restart` |
 | [`restart_service`](#restart_service) | destructive | `process_restart` |
@@ -103,6 +104,22 @@ Check pgBackRest backup-job health: stanza status, the most recent backup's labe
 | `max_age_hours` | integer | no | How many hours old the most recent successful backup may be before it's considered stale. Default 25 (one day plus margin) — override to match the target's actual backup schedule. Zero or negative values fall back to the default; there is no way to force an immediate backup to read as stale via this parameter. |
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
+
+## `plan_point_in_time_recovery`
+
+Dry run of a point-in-time restore: changes nothing. Given a recovery target (time as RFC3339 with a zone, or an LSN), reports which backup would be restored (the newest that finished before the target), whether the archived WAL from that backup to the end of the archive is continuous, whether the target lies inside the archive, and what would be lost (the data after the target, up to the end of the archive). status feasible, not_feasible (detail says why: no backup before the target, a WAL gap, a target past the archive end) or unverified. A feasible time target is only plausible: the archive's times are coarse, and recovery can still run out of WAL before it. The plan_digest identifies exactly this plan.
+
+- **Action class:** read
+- **Capabilities:** `recovery_plan`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `recovery_target_type` | string | yes | Where to stop: 'time' or 'lsn'. |
+| `recovery_target_value` | string | yes | For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one. |
+| `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
+| `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 
 ## `read_pg_log_file`
 

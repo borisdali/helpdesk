@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
+
+	"helpdesk/internal/infra"
 )
 
 // The fixtures are PostgreSQL's real log lines from the Docker pgBackRest
@@ -106,5 +109,110 @@ func TestComparePITRRecovery_PromotedWithoutStop(t *testing.T) {
 	pred := &RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 10:00:00+00", ExpectedTimeline: 2}
 	if st, _ := comparePITRRecovery(pred, parseRecoveryLog(log), parsePITRLog(log)); st != RestoreMismatch {
 		t.Fatalf("got %s", st)
+	}
+}
+
+// verifyRestoreRecoveryImpl end to end for a point-in-time prediction, on the
+// systemd layout (journal has only systemd's lines, recovery is in the log
+// file), driven by the real captured logs.
+func TestVerifyRestoreRecovery_PITR(t *testing.T) {
+	infraConfig = &infra.Config{
+		DBServers: map[string]infra.DBServer{
+			"vm": {Name: "vm", ConnectionString: "host=localhost", VMName: "vm-host",
+				SystemdUnit: "postgresql@16-main", PgLogDir: "/var/log/postgresql"},
+		},
+		VMs: map[string]infra.VM{"vm-host": {Name: "vm-host", Address: "localhost"}},
+	}
+	t.Cleanup(func() {
+		infraConfig = nil
+		restorePredictions.Lock()
+		delete(restorePredictions.byTarget, "vm")
+		restorePredictions.Unlock()
+	})
+
+	logText := ""
+	old := cmdRunner
+	cmdRunner = runnerFunc(func(_ context.Context, name string, args []string, _ []string) (string, error) {
+		joined := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "journalctl"):
+			return "Oct 27 16:23:41 vm systemd[1]: Started postgresql@16-main.service.", nil
+		case strings.Contains(joined, "ls -t"):
+			return "postgresql-16-main.log\n", nil
+		case strings.Contains(joined, "tail"):
+			return logText, nil
+		}
+		return "", nil
+	})
+	t.Cleanup(func() { cmdRunner = old })
+
+	cases := []struct {
+		name    string
+		fixture string
+		pred    RestorePrediction
+		want    string
+		stop    bool
+	}{
+		{"time verified", "time_stop_before_promote.log",
+			RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 19:37:21.437973+00", ExpectedTimeline: 12}, RestoreVerified, true},
+		{"lsn verified", "lsn_stop_after_promote.log",
+			RestorePrediction{TargetType: TargetLSN, TargetValue: "0/19000318", ExpectedTimeline: 13}, RestoreVerified, true},
+		{"target not reached, no timeline line in the log", "target_not_reached.log",
+			RestorePrediction{TargetType: TargetLSN, TargetValue: "0/FF000000", ExpectedTimeline: 14}, RestoreTargetNotReached, false},
+	}
+	for _, c := range cases {
+		logText = pitrFixture(t, c.fixture)
+		saveRestorePrediction("vm", c.pred)
+		res, err := verifyRestoreRecoveryImpl(context.Background(), VerifyRestoreRecoveryArgs{Target: "vm"})
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if res.Status != c.want || (res.StopLine != "") != c.stop {
+			t.Errorf("%s: status=%s stop_line=%q detail=%s", c.name, res.Status, res.StopLine, res.Detail)
+		}
+	}
+
+	// A prediction without a target keeps using the restore-to-latest
+	// comparison, even when the log is a point-in-time one.
+	logText = pitrFixture(t, "time_stop_before_promote.log")
+	saveRestorePrediction("vm", RestorePrediction{RecoverToWAL: "0000000B0000000000000018", ExpectedTimeline: 12})
+	res, _ := verifyRestoreRecoveryImpl(context.Background(), VerifyRestoreRecoveryArgs{Target: "vm"})
+	if res.StopLine != "" || res.Status != RestoreMismatch {
+		t.Errorf("restore-to-latest prediction took the PITR path or lost its mismatch: %+v", res)
+	}
+}
+
+func TestComparePITRRecovery_Unverifiable(t *testing.T) {
+	timeLog := "LOG: starting point-in-time recovery to X\nLOG: recovery stopping before commit of transaction 5, time 2026-10-27 10:00:05+00\nLOG: redo done at 0/5000000\nLOG: selected new timeline ID: 2\n"
+	run := func(pred *RestorePrediction, log string) string {
+		st, _ := comparePITRRecovery(pred, parseRecoveryLog(log), parsePITRLog(log))
+		return st
+	}
+	if st := run(&RestorePrediction{TargetType: TargetTime, TargetValue: "not a time", ExpectedTimeline: 2}, timeLog); st != RestoreUnverified {
+		t.Errorf("unparseable target: %s", st)
+	}
+	if st := run(&RestorePrediction{TargetType: "xid", TargetValue: "1", ExpectedTimeline: 2}, timeLog); st != RestoreUnverified {
+		t.Errorf("unknown type: %s", st)
+	}
+	lsnLog := "LOG: starting point-in-time recovery to WAL location (LSN) \"0/5000000\"\nLOG: recovery stopping after WAL location (LSN) \"0/5000000\"\nLOG: redo done at 0/4000000\nLOG: selected new timeline ID: 2\n"
+	if st := run(&RestorePrediction{TargetType: TargetLSN, TargetValue: "0/5000000", ExpectedTimeline: 2}, lsnLog); st != RestoreMismatch {
+		t.Errorf("redo done before the LSN target: %s", st)
+	}
+	if st := run(&RestorePrediction{TargetType: TargetLSN, TargetValue: "garbage", ExpectedTimeline: 2}, lsnLog); st != RestoreUnverified {
+		t.Errorf("unparseable LSN target: %s", st)
+	}
+	// Not yet restarted: nothing in the log.
+	if st := run(&RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 10:00:00+00", ExpectedTimeline: 2}, "LOG: ready"); st != RestoreNotFound {
+		t.Errorf("no recovery in the log: %s", st)
+	}
+}
+
+// A not-reached FATAL from an earlier attempt must not mask a later
+// successful recovery: only the newest point-in-time start counts.
+func TestParsePITRLog_NewestAttemptWins(t *testing.T) {
+	log := pitrFixture(t, "target_not_reached.log") + pitrFixture(t, "time_stop_before_promote.log")
+	pl := parsePITRLog(log)
+	if pl.NotReached || pl.StopKind != "before" {
+		t.Fatalf("%+v", pl)
 	}
 }
