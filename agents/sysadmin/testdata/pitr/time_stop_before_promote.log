@@ -1,0 +1,18 @@
+2026-10-27 19:38:53.505 UTC [32] LOG:  restored log file "0000000B.history" from archive
+2026-10-27 19:38:53.505 UTC [32] LOG:  starting point-in-time recovery to 2026-10-27 19:37:21.437973+00
+2026-10-27 19:38:53.508 UTC [32] LOG:  restored log file "0000000B.history" from archive
+2026-10-27 19:38:53.534 UTC [32] LOG:  restored log file "0000000B0000000000000015" from archive
+2026-10-27 19:38:53.546 UTC [32] LOG:  redo starts at 0/15000060
+2026-10-27 19:38:53.634 UTC [32] LOG:  restored log file "0000000B0000000000000016" from archive
+2026-10-27 19:38:53.707 UTC [32] LOG:  restored log file "0000000B0000000000000017" from archive
+2026-10-27 19:38:53.794 UTC [32] LOG:  restored log file "0000000B0000000000000018" from archive
+2026-10-27 19:38:53.810 UTC [32] LOG:  completed backup recovery with redo LSN 0/15000060 and end LSN 0/15000138
+2026-10-27 19:38:53.810 UTC [32] LOG:  consistent recovery state reached at 0/15000138
+2026-10-27 19:38:53.810 UTC [32] LOG:  recovery stopping before commit of transaction 742, time 2026-10-27 19:37:23.578405+00
+2026-10-27 19:38:53.810 UTC [9] LOG:  database system is ready to accept read-only connections
+2026-10-27 19:38:53.810 UTC [32] LOG:  redo done at 0/17000028 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.26 s
+2026-10-27 19:38:53.931 UTC [32] LOG:  restored log file "0000000B0000000000000016" from archive
+2026-10-27 19:38:53.950 UTC [32] LOG:  selected new timeline ID: 12
+2026-10-27 19:38:53.971 UTC [32] LOG:  restored log file "0000000B.history" from archive
+2026-10-27 19:38:53.972 UTC [32] LOG:  archive recovery complete
+2026-10-27 19:38:53.981 UTC [9] LOG:  database system is ready to accept connections

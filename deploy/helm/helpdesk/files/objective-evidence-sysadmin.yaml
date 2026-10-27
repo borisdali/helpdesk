@@ -112,3 +112,17 @@
   detail: "PostgreSQL recovery after the restore did not end where predicted — target: %s"
   confirmation_probe: evidence_quote_contains_any
   confirmation_terms: ["mismatch", "stopped early", "went past the predicted end"]
+
+# recovery_target_not_reached (v0.33): true when a point-in-time recovery ran
+# out of WAL before its target and PostgreSQL shut down. PGDATA is intact and
+# the restore can be repeated with an earlier target; the playbook reports it
+# as that, not as a failed restore. The term is the status value, which only
+# this result carries.
+- tool: verify_restore_recovery
+  probe: recovery_target_not_reached
+  operator: "=="
+  threshold: true
+  signal: restore_target_not_reached
+  detail: "Point-in-time recovery ended before its target was reached — target: %s"
+  confirmation_probe: evidence_quote_contains_any
+  confirmation_terms: ["target_not_reached", "ran out of WAL before"]

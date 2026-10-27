@@ -1,0 +1,10 @@
+2026-10-27 19:49:18.280 UTC [32] LOG:  starting point-in-time recovery to WAL location (LSN) "0/FF000000"
+2026-10-27 19:49:18.280 UTC [32] LOG:  starting backup recovery with redo LSN 0/1A000028, checkpoint LSN 0/1A000060, on timeline ID 13
+2026-10-27 19:49:18.319 UTC [32] LOG:  redo starts at 0/1A000028
+2026-10-27 19:49:18.322 UTC [32] LOG:  completed backup recovery with redo LSN 0/1A000028 and end LSN 0/1A000138
+2026-10-27 19:49:18.323 UTC [32] LOG:  consistent recovery state reached at 0/1A000138
+2026-10-27 19:49:18.323 UTC [9] LOG:  database system is ready to accept read-only connections
+2026-10-27 19:49:18.325 UTC [32] LOG:  redo done at 0/1A000138 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-10-27 19:49:18.325 UTC [32] FATAL:  recovery ended before configured recovery target was reached
+2026-10-27 19:49:18.327 UTC [9] LOG:  shutting down due to startup process failure
+2026-10-27 19:49:18.327 UTC [9] LOG:  database system is shut down

@@ -1,0 +1,17 @@
+2026-10-27 19:44:30.390 UTC [32] LOG:  restored log file "0000000C.history" from archive
+2026-10-27 19:44:30.390 UTC [32] LOG:  starting point-in-time recovery to WAL location (LSN) "0/19000318"
+2026-10-27 19:44:30.394 UTC [32] LOG:  restored log file "0000000C.history" from archive
+2026-10-27 19:44:30.523 UTC [32] LOG:  restored log file "0000000C0000000000000018" from archive
+2026-10-27 19:44:30.539 UTC [32] LOG:  redo starts at 0/18000028
+2026-10-27 19:44:30.664 UTC [32] LOG:  restored log file "0000000C0000000000000019" from archive
+2026-10-27 19:44:30.778 UTC [32] LOG:  restored log file "0000000C000000000000001A" from archive
+2026-10-27 19:44:30.806 UTC [32] LOG:  completed backup recovery with redo LSN 0/18000028 and end LSN 0/18000138
+2026-10-27 19:44:30.806 UTC [32] LOG:  consistent recovery state reached at 0/18000138
+2026-10-27 19:44:30.807 UTC [32] LOG:  recovery stopping after WAL location (LSN) "0/19000318"
+2026-10-27 19:44:30.807 UTC [32] LOG:  redo done at 0/19000318 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.26 s
+2026-10-27 19:44:30.807 UTC [9] LOG:  database system is ready to accept read-only connections
+2026-10-27 19:44:30.855 UTC [32] LOG:  restored log file "0000000C0000000000000019" from archive
+2026-10-27 19:44:30.872 UTC [32] LOG:  selected new timeline ID: 13
+2026-10-27 19:44:30.894 UTC [32] LOG:  restored log file "0000000C.history" from archive
+2026-10-27 19:44:30.895 UTC [32] LOG:  archive recovery complete
+2026-10-27 19:44:30.903 UTC [9] LOG:  database system is ready to accept connections
