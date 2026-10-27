@@ -202,3 +202,40 @@ func TestK8sFaultVerifyExec_RecoveredOnlyWhenPromoted(t *testing.T) {
 		}
 	}
 }
+
+// From a Job inside the cluster there is no kubeconfig and so no --context:
+// FAULTTEST_K8S_CONTEXT is empty and kubectl uses the pod's ServiceAccount.
+// The scripts must work that way too, not only with a context set: under
+// `set -e` a careless `[ -n "$CTX" ] && ...` would abort the script right there.
+func TestK8sFaultScripts_WorkWithoutAKubeContext(t *testing.T) {
+	f := k8sFault(t)
+	scenarios := map[string]struct {
+		script string
+		env    []string
+	}{
+		"inject":               {f.Inject.ScriptInline, []string{"READY=false", "EXEC_TRUE_RC=1"}},
+		"teardown (ready)":     {f.Teardown.ScriptInline, []string{"READY=true"}},
+		"teardown (not ready)": {f.Teardown.ScriptInline, []string{"READY=false", "REPAIR_PHASE=Succeeded"}},
+		"verify_exec":          {f.Remediation.VerifyExec, nil},
+	}
+	for name, sc := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			// A later duplicate wins, so this empties the context runScript sets.
+			calls, err := runScript(t, sc.script, append(sc.env, "FAULTTEST_K8S_CONTEXT=")...)
+			if err != nil {
+				t.Fatalf("the script failed without a kube context: %v", err)
+			}
+			if len(calls) == 0 {
+				t.Fatal("the script made no kubectl calls")
+			}
+			for _, c := range calls {
+				if strings.Contains(c, "--context") {
+					t.Errorf("kubectl call with a --context although none was given: %q", c)
+				}
+				if !strings.Contains(c, "-n db-destruct") {
+					t.Errorf("kubectl call outside db-destruct: %q", c)
+				}
+			}
+		})
+	}
+}

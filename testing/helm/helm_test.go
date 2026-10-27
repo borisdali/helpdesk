@@ -1681,11 +1681,13 @@ func kubectlNeeds(verb, resource string) [][]string {
 		if strings.HasPrefix(resource, "statefulset") {
 			return [][]string{{"statefulsets", "get"}}
 		}
-		return [][]string{{"pods", "get"}}
+		// -l (a selector) lists; a name gets. Require both: a fault that selects by label is the common case.
+		return [][]string{{"pods", "get"}, {"pods", "list"}}
 	case "exec":
 		return [][]string{{"pods/exec", "create"}, {"pods", "get"}}
 	case "delete":
-		return [][]string{{"pods", "delete"}}
+		// --wait (the default) watches the object until it is gone.
+		return [][]string{{"pods", "delete"}, {"pods", "get"}, {"pods", "watch"}}
 	case "run":
 		return [][]string{{"pods", "create"}}
 	case "logs":
@@ -1751,6 +1753,9 @@ func TestFaulttestRole_CoversTheKubernetesFaultScripts(t *testing.T) {
 				verb, resource := m[1], m[2]
 				needs := kubectlNeeds(verb, resource)
 				if needs == nil {
+					// A verb this test cannot map to a permission is not "fine": the Role
+					// may not allow it, and a silent skip is how that would go unnoticed.
+					t.Errorf("kubectl %s %s is not mapped to a permission: extend kubectlNeeds and the Role", verb, resource)
 					continue
 				}
 				seen++
@@ -1763,8 +1768,8 @@ func TestFaulttestRole_CoversTheKubernetesFaultScripts(t *testing.T) {
 					continue
 				}
 				for _, n := range needs {
-					if verb == "wait" && n[1] != "get" {
-						continue // get is the one kubectl wait cannot do without
+					if verb == "wait" && n[1] == "list" {
+						continue // wait on a named pod needs get and watch; list only with a selector
 					}
 					if !roleAllows(rules, n[0], n[1]) {
 						t.Errorf("kubectl %s %s needs %s %s, which the Role does not allow", verb, resource, n[1], n[0])
@@ -1843,5 +1848,18 @@ func TestFaulttestK8sJobExampleRenders(t *testing.T) {
 		if !roleAllows(rules, n[0], n[1]) {
 			t.Errorf("the example's Role does not grant %s on %s", n[1], n[0])
 		}
+	}
+}
+
+// A release installed before faulttest.rbac.destructive existed has an rbac
+// block without it (--reuse-values does not merge in new defaults): the Role
+// renders as before, without the destructive rules.
+func TestFaulttestRole_ReleaseWithoutTheDestructiveKey(t *testing.T) {
+	rules := faulttestRoleRules(t, "faulttest.rbac.destructive=null")
+	if roleAllows(rules, "pods", "delete") || roleAllows(rules, "statefulsets/scale", "update") {
+		t.Error("destructive rules granted although the key is absent")
+	}
+	if !roleAllows(rules, "pods/exec", "create") {
+		t.Error("the base rules are missing")
 	}
 }
