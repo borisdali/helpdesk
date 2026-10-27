@@ -24,6 +24,10 @@ faulttest:
   ids: db-pgdata-corrupted-vm
 
   # Through the gateway, as the fault is meant to run.
+  # Required for these faults: the image's faulttest defaults to --external,
+  # which skips any fault not marked external_compat. This passes --external=false.
+  primaryInjection: true
+
   viaGateway: true
   gatewayAPIKeySecret: <secret holding the gateway API key, key "api-key">
 

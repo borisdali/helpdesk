@@ -1626,7 +1626,7 @@ func TestFaulttestVMJobExampleRenders(t *testing.T) {
 	containers, _ := podSpec["containers"].([]any)
 	args := containerArgs(containers[0].(map[string]any))
 	for _, want := range []string{"--ids=db-pgdata-corrupted-vm", "--via-gateway", "--remediate", "--gate-escalation",
-		"--approval-mode=force", "--ssh-host=postgres@<vm-ip>", "--ssh-key=/etc/faulttest-ssh/id_ed25519", "--agent-conn=", "--conn="} {
+		"--approval-mode=force", "--external=false", "--ssh-host=postgres@<vm-ip>", "--ssh-key=/etc/faulttest-ssh/id_ed25519", "--agent-conn=", "--conn="} {
 		if !hasArg(args, want) {
 			t.Errorf("the example's Job lacks %s; args: %v", want, args)
 		}
@@ -1824,7 +1824,7 @@ func TestFaulttestK8sJobExampleRenders(t *testing.T) {
 	podSpec, _ := tmpl["spec"].(map[string]any)
 	containers, _ := podSpec["containers"].([]any)
 	args := containerArgs(containers[0].(map[string]any))
-	for _, want := range []string{"--ids=db-pgdata-corrupted-k8s", "--conn=pgbackrest-k8s-destruct", "--via-gateway", "--remediate", "--gate-escalation", "--approval-mode=force"} {
+	for _, want := range []string{"--ids=db-pgdata-corrupted-k8s", "--conn=pgbackrest-k8s-destruct", "--via-gateway", "--remediate", "--gate-escalation", "--approval-mode=force", "--external=false"} {
 		if !hasArg(args, want) {
 			t.Errorf("the example's Job lacks %s; args: %v", want, args)
 		}
@@ -1874,5 +1874,31 @@ func TestFaulttestJob_EmitAndWait(t *testing.T) {
 	}
 	if _, args = faulttestJob(t); argWithPrefix(args, "--emit-and-wait") != "" {
 		t.Errorf("--emit-and-wait on by default: %v", args)
+	}
+}
+
+// The image's faulttest has no source tree and defaults to --external, which
+// skips every fault not marked external_compat: a Job selecting the Kubernetes
+// or VM faults found "No failures match the specified filters", exited
+// non-zero and failed the hook (found live, 2026-10-26). primaryInjection
+// passes --external=false for them, and stays off by default so the faults
+// that depend on the external default (db-wal-disk-full-k8s) are unchanged.
+func TestFaulttestJob_PrimaryInjection(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.primaryInjection=true")
+	if !hasArg(args, "--external=false") {
+		t.Errorf("args %v lack --external=false", args)
+	}
+	_, args = faulttestJob(t)
+	if argWithPrefix(args, "--external") != "" {
+		t.Errorf("an --external flag is passed by default: %v", args)
+	}
+	_, args = faulttestJob(t, "faulttest.external=true")
+	if !hasArg(args, "--external") || hasArg(args, "--external=false") {
+		t.Errorf("external=true should pass --external alone: %v", args)
+	}
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "--set", "faulttest.enabled=true", "--set", "faulttest.ids=x",
+		"--set", "faulttest.primaryInjection=true", "--set", "faulttest.external=true").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "cannot both be set") {
+		t.Errorf("want a render failure for external+primaryInjection, got err=%v\n%s", err, out)
 	}
 }

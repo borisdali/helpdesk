@@ -1084,6 +1084,7 @@ Key `faulttest.*` values:
 | `categories` | _(all)_ | Comma-separated categories |
 | `judge` | `false` | Enable LLM-as-judge semantic scoring |
 | `targetNamespace` | `helpdesk-test` | Namespace where faults are injected |
+| `primaryInjection` | `false` | Pass `--external=false`: run each fault's own inject/teardown. **Needed for the Kubernetes and VM faults** (§10.6, §10.7); without it the image's `faulttest` defaults to `--external` and reports `No failures match the specified filters` |
 | `ttlSecondsAfterFinished` | `3600` | Auto-delete the Job after N seconds |
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full fault catalog, scoring details and custom catalog authoring.
@@ -1388,6 +1389,8 @@ If the Job is killed mid-run, the fault's teardown may not have run. On the VM, 
 `systemctl is-active postgresql@16-main` and look for `*.hidden-by-fault` files under the pgBackRest
 archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
 WAL-gap fault.
+
+> **"No failures match the specified filters".** The `faulttest` in the image has no source tree, so it defaults to `--external`, which skips every fault not marked `external_compat: true`. The Kubernetes and VM faults aren't, so a Job selecting them runs nothing and the hook fails. Set `faulttest.primaryInjection=true` (the examples do).
 
 > **Feedback in a Job.** A Job has no terminal, so by default the post-recovery feedback prompt is skipped and no feedback is recorded. Set `faulttest.emitAndWait=true` (with `approvalMode: force` and an `operator`) to have the run raise a Decision Hub card instead and wait up to 10 minutes for you to answer it; see [docs/DECISIONS.md](../../docs/DECISIONS.md#running-from-a-job-with---emit-and-wait). It only applies to the restore runs: a fault that ends at a human never recovers, so it raises no card.
 

@@ -526,6 +526,15 @@ faulttest:
   # are skipped automatically when this is true.
   external: false
 
+  # Run each fault's own inject/teardown scripts (passes --external=false). The
+  # faulttest binary in the image has no source tree and so defaults to
+  # --external, which skips every fault not marked external_compat: true, with
+  # "No failures match the specified filters". The Kubernetes and VM faults
+  # (db-pgdata-corrupted-k8s, db-pgbackrest-wal-gap-k8s, db-pgdata-corrupted-vm,
+  # db-pgbackrest-wal-gap-vm) are not marked, so they need this. Leave it off for
+  # faults that are (db-wal-disk-full-k8s). Cannot be combined with external.
+  primaryInjection: false
+
   # Number of times to run each fault. Values > 1 trigger triage consistency
   # certification: a STABLE/UNSTABLE cert is posted to auditd after the run.
   # Leave at 1 for normal (non-certifying) runs.

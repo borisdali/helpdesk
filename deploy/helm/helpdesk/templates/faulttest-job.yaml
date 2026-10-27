@@ -173,6 +173,12 @@ spec:
             {{- if .Values.faulttest.external }}
             - --external
             {{- end }}
+            {{- if .Values.faulttest.primaryInjection }}
+            {{- if .Values.faulttest.external }}
+            {{- fail "faulttest.primaryInjection (--external=false) and faulttest.external (--external) cannot both be set" }}
+            {{- end }}
+            - --external=false
+            {{- end }}
             {{- if .Values.infrastructure }}
             - --infra-config=/etc/helpdesk/infrastructure.json
             {{- end }}
