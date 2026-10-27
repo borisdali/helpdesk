@@ -14,7 +14,7 @@ What is settled and what is not:
 | What exists today and what does not (§2.3, §3.2) | **Facts** about the current code |
 | The service-level structure (§4) | **Design note**: nothing here is measured or offered as an objective yet |
 
-Where each piece can *run* (laptop, Docker, a VM, Kubernetes) is a different question, answered in
+Where each piece can *run* (laptop, Docker, a VM, K8s) is a different question, answered in
 [Platforms](PLATFORMS.md). How aiHelpDesk *diagnoses* the HA and DR of the **databases** it protects is
 [HA_DR.md](HA_DR.md)'s subject; this page is about aiHelpDesk's own availability.
 

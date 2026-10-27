@@ -1,7 +1,7 @@
 # aiHelpDesk platforms: where each piece runs and what is supported
 
 aiHelpDesk is several cooperating pieces and each can run on a different platform: your laptop, Docker,
-a VM, Kubernetes. Which combinations work decides which way an agent reaches a database (SQL, `docker`,
+a VM, K8s. Which combinations work decides which way an agent reaches a database (SQL, `docker`,
 SSH, `kubectl`), what has to be reachable from where and how much of the restore chain is available.
 This page lists the pieces, how they reach each other and which combinations have been **run**, with
 the evidence, as against those that are only implemented. It is not about governance posture (that is
@@ -19,10 +19,10 @@ How to read the status column:
 
 | Piece | What it is | Can run on |
 |---|---|---|
-| **Client** | the operator's `helpdesk-client` or the `faulttest` harness | laptop, a Docker container, a Kubernetes Job (faulttest, via Helm) |
-| **aiHelpDesk services** | gateway, orchestrator, the agents (database, sysadmin, k8s, incident, research) and auditd: the control plane and the governance half of the management plane ([Planes](PLANES.md)) | host processes (`startall.sh`, systemd), Docker Compose, Kubernetes (Helm) |
+| **Client** | the operator's `helpdesk-client` or the `faulttest` harness | laptop, a Docker container, a K8s Job (faulttest, via Helm) |
+| **aiHelpDesk services** | gateway, orchestrator, the agents (database, sysadmin, k8s, incident, research) and auditd: the control plane and the governance half of the management plane ([Planes](PLANES.md)) | host processes (`startall.sh`, systemd), Docker Compose, K8s (Helm) |
 | **auditd storage** | the audit and playbook-run database | SQLite (a file, a Docker volume, a PVC) or a **dedicated** Postgres |
-| **Target PostgreSQL** | the database being diagnosed and repaired | a Docker/Podman container, a systemd VM or host, a Kubernetes pod, an operator-managed cluster, a managed cloud service |
+| **Target PostgreSQL** | the database being diagnosed and repaired | a Docker/Podman container, a systemd VM or host, a K8s Pod, an operator-managed cluster, a managed cloud service |
 | **pgBackRest** | the stanza and repository of a target | the same container, VM or pod as the target (a volume or local path); a remote repository is not handled by the restore ([§6](#6-not-supported-or-not-verified)) |
 | **LLM provider** | the model behind the agents | external; the aiHelpDesk services need outbound access to it |
 
@@ -61,17 +61,17 @@ the operator CLI never touches the target.
 | Docker container | yes | `docker inspect/logs` | yes | yes | **Verified** |
 | Podman container | yes | `podman` equivalents | yes | yes | **Implemented** (not run) |
 | systemd VM or host | yes | SSH, `systemctl`, PostgreSQL log file | yes | yes (`restart_service`) | **Verified**, Ubuntu 24.04 / PostgreSQL 16; RHEL implemented, not run |
-| Kubernetes pod (self-managed StatefulSet with pgBackRest) | yes | `kubectl logs` (crashed run first), pod phase | yes | yes: scale to 0, restore in a one-off pod, resume | **Verified**, single-node cluster |
+| K8s Pod (self-managed StatefulSet with pgBackRest) | yes | `kubectl logs` (crashed run first), pod phase | yes | yes: scale to 0, restore in a one-off pod, resume | **Verified**, single-node cluster |
 | Operator-managed (CloudNativePG) | yes | pod state through the k8s agent | no (it uses Barman, not pgBackRest) | no | Diagnosis **Verified**; restore **Not supported** |
 | Managed cloud service | yes | no host to inspect | no | no | SQL diagnosis only, by design; not run against a managed service |
 
 ## 4. Which services can reach which target
 
-| aiHelpDesk services ↓ · Target → | Docker container | systemd VM (SSH) | Kubernetes pod |
+| aiHelpDesk services ↓ · Target → | Docker container | systemd VM (SSH) | K8s Pod |
 |---|---|---|---|
 | Host processes | **Verified** (same machine, restore chain, 2026-10-26) | **Verified** (restore chain, 2026-10-19 and 2026-10-25) | pgBackRest health and status tools **Verified** through the host's kubeconfig (2026-10-01 demo); the full restore chain from outside the cluster is **Implemented**, not run |
 | Docker Compose | **Implemented**: exercised for diagnosis and incidents in the v0.29 three-platform round (September 2026), not re-run for the restore chain | **Implemented** (not run) | **Implemented** (not run) |
-| Kubernetes (Helm) | **Not supported** unless the node's Docker socket is mounted (`agents.sysadmin.dockerSocket.enabled`): **Implemented**, not run | **Verified**: needs the SSH Secret, a name or IP the pods resolve, a route and `pg_hba` for the cluster | **Verified**: same cluster, RBAC from the chart |
+| K8s (Helm) | **Not supported** unless the node's Docker socket is mounted (`agents.sysadmin.dockerSocket.enabled`): **Implemented**, not run | **Verified**: needs the SSH Secret, a name or IP the pods resolve, a route and `pg_hba` for the cluster | **Verified**: same cluster, RBAC from the chart |
 
 The chart gives the agents the permissions of their own cluster only. A target in a *different* cluster
 needs a kubeconfig the chart does not provide: **Not supported**.
@@ -80,16 +80,16 @@ needs a kubeconfig the chart does not provide: **Not supported**.
 
 Each row is a recorded run; the incident IDs are in the vault (`faulttest vault incidents <id> --summary`).
 
-| Client | aiHelpDesk services | Target | Fault | Run | Date |
-|---|---|---|---|---|---|
-| laptop | host processes | Docker container | `db-pgdata-corrupted` (restore) ×3, `db-pgdata-corrupted-unarchived-tail`, `db-pgbackrest-wal-gap` | `make faulttest-gateway-pgbackrest` | 2026-10-26 |
-| laptop | host processes | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops) | `plr_c18ee2b4`, `plr_cea87922` | 2026-10-19, 2026-10-25 |
-| laptop | Kubernetes | pod | `db-pgdata-corrupted-k8s` (four hops) | `plr_c0d8fb87`, `plr_508a10d2` | 2026-10-25, 2026-10-26 |
-| Kubernetes Job | Kubernetes | pod | `db-pgbackrest-wal-gap-k8s` | `plr_68e31a92` | 2026-10-26 |
-| Kubernetes Job | Kubernetes | pod | `db-pgdata-corrupted-k8s` (four hops, Decision Hub feedback) | `plr_cb23439f` | 2026-10-27 |
-| Kubernetes Job | Kubernetes | Ubuntu VM over SSH | `db-pgbackrest-wal-gap-vm` | `plr_85721afd` | 2026-10-27 |
-| Kubernetes Job | Kubernetes | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops, Decision Hub feedback) | `plr_f8cee154` | 2026-10-27 |
-| `go test` in the repo | Kubernetes | pod | restore refusal, `pg_wal` tail, resume, verify (`make integration-k8s`, 23 checks) | | 2026-10-20 |
+| Client | aiHelpDesk services | Target | Fault | Run |
+|---|---|---|---|---|
+| laptop | host processes | Docker container | `db-pgdata-corrupted` (restore) ×3, `db-pgdata-corrupted-unarchived-tail`, `db-pgbackrest-wal-gap` | `make faulttest-gateway-pgbackrest` |
+| laptop | host processes | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops) | `plr_c18ee2b4`, `plr_cea87922` |
+| laptop | K8s | pod | `db-pgdata-corrupted-k8s` (four hops) | `plr_c0d8fb87`, `plr_508a10d2` |
+| K8s Job | K8s | pod | `db-pgbackrest-wal-gap-k8s` | `plr_68e31a92` |
+| K8s Job | K8s | pod | `db-pgdata-corrupted-k8s` (four hops, Decision Hub feedback) | `plr_cb23439f` |
+| K8s Job | K8s | Ubuntu VM over SSH | `db-pgbackrest-wal-gap-vm` | `plr_85721afd` |
+| K8s Job | K8s | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops, Decision Hub feedback) | `plr_f8cee154` |
+| `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify (`make integration-k8s`, 23 checks) | |
 
 Not yet run: the destructive teardown *repair* branch of `db-pgdata-corrupted-k8s` from a Job (the pod had
 recovered, so the teardown found nothing to repair).
@@ -99,7 +99,7 @@ recovered, so the teardown found nothing to repair).
 | Client | `docker_exec` | `shell_exec` (`kubectl`, `psql`, `docker`) | `ssh_exec` | SQL | Status |
 |---|---|---|---|---|---|
 | Laptop (`go run` or the binary) | needs Docker | yes | yes | yes | **Verified** |
-| Kubernetes Job (Helm) | no: there is no Docker daemon | `kubectl` through the Job's ServiceAccount (a `Role` in `faulttest.targetNamespace`; the destructive faults need `faulttest.rbac.destructive`); `psql` | yes (key Secret `faulttest.ssh`) | yes | **Verified** |
+| K8s Job (Helm) | no: there is no Docker daemon | `kubectl` through the Job's ServiceAccount (a `Role` in `faulttest.targetNamespace`; the destructive faults need `faulttest.rbac.destructive`); `psql` | yes (key Secret `faulttest.ssh`) | yes | **Verified** |
 | Docker container | needs the socket | yes | yes | yes | **Implemented** (see [DECISIONS.md](DECISIONS.md#k8s-and-docker--emit-and-wait)) |
 
 A fault the Job runs must be selected with `faulttest.primaryInjection=true` unless it is marked
@@ -117,7 +117,7 @@ down with it. The chart asks for a separate namespace for this reason.
 
 ## 6. Not supported or not verified
 
-- **A remote pgBackRest repository** (S3, GCS, Azure) for the Kubernetes restore: the one-off restore pod
+- **A remote pgBackRest repository** (S3, GCS, Azure) for the K8s restore: the one-off restore pod
   mounts the StatefulSet's volumes and has no repository credentials. **Not supported** ([BACKUP.md](BACKUP.md#4-roadmap)).
 - **A ReadWriteOnce volume on a multi-node cluster:** the one-off pod is not pinned to the instance's
   node. **Not supported**.
