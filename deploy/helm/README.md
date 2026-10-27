@@ -1027,6 +1027,8 @@ See [here](../../docs/FLEET.md) for the full job definition schema, multi-step e
 
 The binary is baked into the same Docker image as the agents and runs as a Kubernetes Job. There are two ways to trigger it.
 
+Use **Helm (§10.1)** unless you cannot: the chart wires the agent URLs, the model Secret, the infrastructure ConfigMap and the RBAC, re-creates the Job on every run (a Job is immutable, so a plain one cannot be re-applied once finished), and it is the only way to get the v0.33 options (SSH to a VM, a pod fault's RBAC, a users file, `--agent-conn`; §10.6 and §10.7). The hand-written Job (§10.2) is for when you need full control of the Job spec; it predates the gateway flags and carries none of those options.
+
 ### 10.1 Via Helm (recommended)
 
 Because the Helm chart already knows your agent URLs, model API Secret and infrastructure ConfigMap, you only need to name the fault and flip one flag:
@@ -1386,6 +1388,36 @@ If the Job is killed mid-run, the fault's teardown may not have run. On the VM, 
 `systemctl is-active postgresql@16-main` and look for `*.hidden-by-fault` files under the pgBackRest
 archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
 WAL-gap fault.
+
+### 10.7 A pod fault from a Job, entirely in-cluster
+
+*Added in v0.33.* The same Job can break and repair a database that runs as a pod in the cluster. The
+Job works on the pod with its own ServiceAccount (`kubectl exec`, `delete pod`, `scale`, a one-off
+repair pod), the helpdesk agents find and restore it through theirs, and the Job checks the recovery
+from inside the pod, so nothing needs a route from outside. No SSH is involved: that is for a VM
+(§10.6).
+
+The default Role is read plus exec, enough for `db-pgbackrest-wal-gap-k8s`. `db-pgdata-corrupted-k8s`
+also deletes the pod, scales its StatefulSet and runs a repair pod, so it needs
+`faulttest.rbac.destructive=true`. That adds `pods` create and delete, `pods/log` get, and
+`statefulsets` patch with `statefulsets/scale` get, patch and update, and only in
+`faulttest.targetNamespace`, which must be the namespace the fault breaks (`db-destruct`; the fault
+refuses any namespace that does not end in `-destruct`). There is no ClusterRole.
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+  -f faulttest-k8s-job.yaml --timeout 20m
+kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f   # second terminal
+```
+
+with [`examples/faulttest-k8s-job.yaml`](examples/faulttest-k8s-job.yaml). Prerequisites: the demo pod
+applied in `db-destruct` with a recent full backup (`make integration-k8s` does both), and its inventory
+entry (`testing/k8s/helm-values-pgbackrest.yaml`).
+
+| Run | `faulttest.ids` | `targetNamespace` | Flags | Expected |
+|---|---|---|---|---|
+| The four-hop restore | `db-pgdata-corrupted-k8s` | `db-destruct` | `rbac.destructive`, `remediate`, `gateEscalation`, `approvalMode: force` | pod crashes, four hops, restored and resumed |
+| A hidden WAL segment | `db-pgbackrest-wal-gap-k8s` | `db` | none of those | health triage reports the chain `broken` and stops at a human |
 
 ## 11. Fleet Playbooks & Vault
 

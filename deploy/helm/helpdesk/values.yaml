@@ -649,6 +649,13 @@ faulttest:
   # RBAC: create a ServiceAccount, Role (in targetNamespace), and RoleBinding.
   rbac:
     create: true
+    # Also let the Job break and repair a database pod: delete pods, create
+    # (and read the logs of) a one-off repair pod, and scale StatefulSets. The
+    # default Role is read plus exec only, enough for faults that just run
+    # commands in a pod (db-pgbackrest-wal-gap-k8s). The destructive Kubernetes
+    # faults (db-pgdata-corrupted-k8s) need this. Still namespaced: only
+    # targetNamespace, which must be the fault's own namespace (db-destruct).
+    destructive: false
 
   # How long (seconds) to retain the completed Job before auto-deletion.
   # Set to 0 to disable TTL (manual cleanup required).

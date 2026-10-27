@@ -49,6 +49,23 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets", "deployments"]
     verbs: ["get", "list", "watch"]
+  {{- if (.Values.faulttest.rbac | default dict).destructive }}
+  # faulttest.rbac.destructive: the destructive Kubernetes faults delete the
+  # database pod, run a one-off pod to repair it (and read its logs) and scale
+  # its StatefulSet down and up.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
