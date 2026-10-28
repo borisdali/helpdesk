@@ -40,8 +40,8 @@ const (
 type PlanPITRArgs struct {
 	Target             string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
 	Stanza             string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
-	RecoveryTargetType string `json:"recovery_target_type" jsonschema:"required,Where to stop: 'time' or 'lsn'."`
-	RecoveryTargetVal  string `json:"recovery_target_value" jsonschema:"required,For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one."`
+	RecoveryTargetType string `json:"recovery_target_type,omitempty" jsonschema:"Where to stop: 'time' or 'lsn'. Leave empty when the request already carries a recovery target: that one is used and anything you pass is ignored."`
+	RecoveryTargetVal  string `json:"recovery_target_value,omitempty" jsonschema:"For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one. Leave empty when the request already carries a recovery target."`
 }
 
 // PITRPlan is the result of plan_point_in_time_recovery.
@@ -181,6 +181,11 @@ func planPITRImpl(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 }
 
 func planPITRTool(ctx agent.ToolContext, args PlanPITRArgs) (PITRPlan, error) {
+	// A run that carries a human's recovery target plans that target, whatever
+	// the model passed: a plan for another one would only waste the approval.
+	if ap := audit.RecoveryApprovalFromContext(ctx); ap != nil {
+		args.RecoveryTargetType, args.RecoveryTargetVal = ap.Type, ap.Value
+	}
 	start := time.Now()
 	result, err := planPITRImpl(ctx, args)
 	duration := time.Since(start)

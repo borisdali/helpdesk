@@ -334,6 +334,15 @@ type PlaybookRunRequest struct {
 	// unconditionally on every run it triggers (testing/faultlib/runner.go),
 	// the same way it already always sets skip_trust_gate.
 	Origin string `json:"origin,omitempty"`
+
+	// RecoveryTarget is the point-in-time recovery target a human supplies
+	// (see recovery_target.go). The run plans it; restoring to it needs a
+	// gate approval that restates it with the plan digest. Immutable once set.
+	RecoveryTarget *RecoveryTargetSpec `json:"recovery_target,omitempty"`
+	// recoveryApproval is what the agents are given for this hop. Built by the
+	// gateway (the target alone for a run, the full approval at a gate); never
+	// read from a request body.
+	recoveryApproval *audit.RecoveryApproval
 }
 
 // handlePlaybookRun handles POST /api/v1/fleet/playbooks/{id}/run.
@@ -379,6 +388,22 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A recovery target is validated before anything is recorded, and the
+	// playbook that restores to one is never started directly: a restore
+	// needs a human's gate approval of the target and the plan, which only
+	// handleProceedEscalation produces.
+	if req.RecoveryTarget != nil {
+		if err := req.RecoveryTarget.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.recoveryApproval = req.RecoveryTarget.planOnly()
+	}
+	if needsRecoveryApproval(pb.SeriesID) {
+		writeError(w, http.StatusConflict, fmt.Sprintf("%s restores to a recovery target and can only be reached through a gate a human approved with the target, the plan digest and acknowledge_data_loss: start the triage playbook with a recovery_target and approve its gate", pb.SeriesID))
+		return
+	}
+
 	// Resolve effective approval mode: per-run request overrides playbook default.
 	var warnings []string
 	if req.ApprovalMode == "" {
@@ -421,7 +446,7 @@ func (g *Gateway) handlePlaybookRun(w http.ResponseWriter, r *http.Request) {
 	if startTraceID == "" && pb.ExecutionMode == "agent_approve" {
 		startTraceID = audit.NewTraceID()
 	}
-	runID := g.recordPlaybookRunStart(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator, req.Origin)
+	runID := g.recordPlaybookRunStartRT(r.Context(), pb, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, startTraceID, req.PriorRunID, req.TriggerContext, operator, req.Origin, req.RecoveryTarget.stored())
 
 	if pb.ExecutionMode == "agent" {
 		g.handlePlaybookRunAsAgent(w, r, pb, req, runID, warnings)
@@ -573,6 +598,12 @@ func (g *Gateway) runAgentPlaybook(r *http.Request, pb *audit.Playbook, req Play
 			sessionID: req.ApprovalSession,
 		})
 		r = r.WithContext(ctx)
+	}
+
+	// The human's recovery target, for the agent's tools to read from the
+	// request context (never from the model).
+	if req.recoveryApproval != nil {
+		r = r.WithContext(context.WithValue(r.Context(), ctxKeyRecoveryApproval, req.recoveryApproval))
 	}
 
 	runStart := time.Now()
@@ -897,6 +928,11 @@ func (g *Gateway) handlePlaybookRunAsAgent(w http.ResponseWriter, r *http.Reques
 				if len(chain) > 1 {
 					extra["trust_gate_note"] = "this playbook was reached via chaining, not requested directly — check `vault hop-certs <series-id>` for its actual trust record; if it has none, run `faulttest run --repeat N --approval-mode=force` through a fault whose chain passes through it; see docs/CONSISTENCY.md's \"Certification scope\" section"
 				}
+			}
+			// The boundary into a point-in-time restore is a human's: no
+			// approval mode, and not skip_trust_gate, hands it on.
+			if needsRecoveryApproval(nextSeries) && !req.recoveryApproval.Approved() {
+				gateReasons = append(gateReasons, gateReasonRecoveryTarget)
 			}
 			if len(gateReasons) > 0 {
 				req.GateEscalation = true
@@ -1310,6 +1346,8 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 		PriorRunID:       primary.runID,
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
+		RecoveryTarget:   req.RecoveryTarget,
+		recoveryApproval: req.recoveryApproval,
 		// primary.transitionTo != "" means THIS hop was reached via primary's
 		// own TRANSITION_TO (same-domain, same-agent handoff) rather than
 		// ESCALATE_TO (cross-domain handoff to a different agent).
@@ -1338,7 +1376,7 @@ func (g *Gateway) chainEscalation(r *http.Request, primaryPB *audit.Playbook, re
 	// shared function every auto-chained hop goes through.
 	r.Header.Set("X-Purpose", derivedPurpose(nextPB.PlaybookType, req.Purpose))
 
-	chainRunID := g.recordPlaybookRunStart(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"), req.Origin)
+	chainRunID := g.recordPlaybookRunStartRT(r.Context(), nextPB, req.ContextID, req.ConnectionString, req.Namespace, req.Purpose, r.Header.Get("X-Trace-ID"), chainReq.PriorRunID, "", r.Header.Get("X-User"), req.Origin, req.RecoveryTarget.stored())
 	chainRes := g.runAgentPlaybook(r, nextPB, chainReq, nextPB.AgentName, chainRunID)
 
 	if chainRunID != "" {
@@ -1824,6 +1862,16 @@ type ProceedEscalationRequest struct {
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
 	VerdictNotes   string `json:"verdict_notes,omitempty"`
+
+	// Point-in-time restore approval (recovery_target.go): required when the
+	// gate leads to the playbook that restores to a recovery target. The
+	// target restates (never changes) the run's own; PlanDigest is the digest
+	// of the plan_point_in_time_recovery result the operator reviewed;
+	// AcknowledgeDataLoss says they know everything after the target is
+	// discarded.
+	RecoveryTarget      *RecoveryTargetSpec `json:"recovery_target,omitempty"`
+	PlanDigest          string              `json:"plan_digest,omitempty"`
+	AcknowledgeDataLoss bool                `json:"acknowledge_data_loss,omitempty"`
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -1953,6 +2001,37 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// The hop that restores to a recovery target needs a human's approval of
+	// the target, the plan digest and the data-loss acknowledgement, checked
+	// here with the other refusals, before any state changes. A hop that
+	// does not restore still carries the run's target along, to plan.
+	storedTarget := leafRun.RecoveryTarget
+	if storedTarget == "" {
+		storedTarget = run.RecoveryTarget
+	}
+	var recoveryApproval *audit.RecoveryApproval
+	var carriedTarget *RecoveryTargetSpec
+	var recoveryAudit []string
+	if needsRecoveryApproval(nextSeriesID) {
+		ap, status, msg := recoveryApprovalFromGate(req, storedTarget, resolvedBy)
+		if msg != "" {
+			slog.Warn("playbook: gate approval refused — point-in-time restore not approved",
+				"run_id", runID, "leaf_run_id", leafRun.RunID, "resolved_by", resolvedBy, "detail", msg)
+			writeError(w, status, msg)
+			return
+		}
+		recoveryApproval = ap
+		carriedTarget = &RecoveryTargetSpec{Type: ap.Type, Value: ap.Value}
+		recoveryAudit = []string{
+			"recovery_target: " + audit.FormatRecoveryTarget(ap.Type, ap.Value),
+			"plan_digest: " + ap.PlanDigest,
+			"operator acknowledged that everything committed after the target is discarded",
+		}
+	} else if typ, val := audit.ParseRecoveryTarget(storedTarget); typ != "" && val != "" {
+		carriedTarget = &RecoveryTargetSpec{Type: typ, Value: val}
+		recoveryApproval = carriedTarget.planOnly()
+	}
+
 	// primaryOutcome reflects the PRIMARY run's (runID's) own first-hop
 	// signal — distinct from nextSeriesID/isTransition above. chainEscalation
 	// deliberately never updates run.EscalatedTo/TransitionedTo past the
@@ -1965,7 +2044,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	}
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason, recoveryAudit...)
 	// gate_reason passed through from run — see the denied branch above for why.
 	g.recordPlaybookRunComplete(r.Context(), runID, primaryOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
@@ -2009,6 +2088,8 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		ApprovalMode:     req.ApprovalMode,
 		ApprovalSession:  req.ApprovalSession,
 		IsTransition:     isTransition,
+		RecoveryTarget:   carriedTarget,
+		recoveryApproval: recoveryApproval,
 	}
 	// Bridge purpose into the header so proxyToAgentWithTool's policy checks see
 	// it on the chained hop — handlePlaybookRun does this for the initial /run
@@ -2032,7 +2113,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	if remStartTraceID == "" && nextPB.ExecutionMode == "agent_approve" {
 		remStartTraceID = audit.NewTraceID()
 	}
-	remRunID := g.recordPlaybookRunStart(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, leafRun.RunID, "", resolvedBy, remReq.Origin)
+	remRunID := g.recordPlaybookRunStartRT(r.Context(), nextPB, run.ContextID, connStr, namespace, purpose, remStartTraceID, leafRun.RunID, "", resolvedBy, remReq.Origin, remReq.RecoveryTarget.stored())
 
 	slog.Info("playbook: gate approved — chaining to remediation",
 		"triage_run_id", runID, "leaf_run_id", leafRun.RunID, "remediation_series", nextSeriesID,
@@ -2061,7 +2142,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 // recordGateAcknowledged emits a gate_acknowledged audit event.
 // The event's TraceID is set to run.RunID so it can be retrieved via
 // GET /v1/events?trace_id={runID}&event_type=gate_acknowledged.
-func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning, reason string) {
+func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.PlaybookRun, resolvedBy, resolution, approvalMode, confidenceWarning, reason string, extra ...string) {
 	if g.auditor == nil {
 		return
 	}
@@ -2093,6 +2174,7 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 	if reason != "" {
 		reasoningChain = append(reasoningChain, "operator_reason: "+reason)
 	}
+	reasoningChain = append(reasoningChain, extra...)
 	event := &audit.Event{
 		EventID:   "ga_" + uuid.New().String()[:8],
 		Timestamp: time.Now().UTC(),
@@ -2619,6 +2701,12 @@ func (g *Gateway) fetchPlaybookRun(ctx context.Context, runID string) (*audit.Pl
 // recordPlaybookRunStart posts a new run record to auditd and returns the run_id.
 // Best-effort: returns "" on any failure so callers can proceed without blocking.
 func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator, origin string) string {
+	return g.recordPlaybookRunStartRT(ctx, pb, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator, origin, "")
+}
+
+// recordPlaybookRunStartRT is recordPlaybookRunStart for a run that carries a
+// point-in-time recovery target (audit.FormatRecoveryTarget's form).
+func (g *Gateway) recordPlaybookRunStartRT(ctx context.Context, pb *audit.Playbook, contextID, connStr, namespace, purpose, traceID, priorRunID, triggerContext, operator, origin, recoveryTarget string) string {
 	if g.auditURL == "" {
 		return ""
 	}
@@ -2648,6 +2736,7 @@ func (g *Gateway) recordPlaybookRunStart(ctx context.Context, pb *audit.Playbook
 		PriorRunID:       priorRunID,
 		EntryRunID:       entryRunID,
 		TriggerContext:   triggerContext,
+		RecoveryTarget:   recoveryTarget,
 		Operator:         operator,
 	}
 	body, err := json.Marshal(run)

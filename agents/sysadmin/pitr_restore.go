@@ -196,27 +196,62 @@ func pitrRecoverNote(plan PITRPlan, savedTo string) string {
 	return b.String()
 }
 
-func restoreToPITTool(ctx agent.ToolContext, args RestoreToPITArgs) (RestoreToPITResult, error) {
+// RestoreToPITModelArgs is what the model sees of restore_to_point_in_time:
+// which instance, not where to stop. The target, the plan digest and the
+// acknowledgement come from the human's approval, carried in the request
+// context by the gateway (audit.RecoveryApproval), so a model cannot choose,
+// adjust or invent them.
+type RestoreToPITModelArgs struct {
+	Target string `json:"target,omitempty" jsonschema:"Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate."`
+	Stanza string `json:"stanza,omitempty" jsonschema:"pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists."`
+}
+
+// errNoRecoveryApproval is what the tool answers when no human approved a
+// recovery target for this request.
+const errNoRecoveryApproval = "restore_to_point_in_time: refusing to restore — no approved recovery target for this request. " +
+	"This tool restores only to a target a human supplied and approved (with the plan digest and an acknowledgement that later data is discarded) at the gateway; it takes no target from you. " +
+	"Report the plan from plan_point_in_time_recovery and stop: a human approves it at the gate"
+
+// restoreToPITTool is the tool the model calls. Everything that decides what
+// is overwritten comes from the approval in ctx.
+func restoreToPITTool(ctx agent.ToolContext, margs RestoreToPITModelArgs) (RestoreToPITResult, error) {
+	ap := audit.RecoveryApprovalFromContext(ctx)
+	if !ap.Approved() {
+		err := fmt.Errorf("%s", errNoRecoveryApproval)
+		recordRestoreToPIT(ctx, RestoreToPITArgs{Target: margs.Target, Stanza: margs.Stanza}, RestoreToPITResult{}, err, 0)
+		return RestoreToPITResult{}, err
+	}
+	return restoreToPITAudited(ctx, RestoreToPITArgs{Target: margs.Target, Stanza: margs.Stanza,
+		RecoveryTargetType: ap.Type, RecoveryTargetVal: ap.Value, PlanDigest: ap.PlanDigest})
+}
+
+// restoreToPITAudited runs the restore and writes its audit record.
+func restoreToPITAudited(ctx agent.ToolContext, args RestoreToPITArgs) (RestoreToPITResult, error) {
 	start := time.Now()
 	result, err := restoreToPITImpl(ctx, args)
 	duration := time.Since(start)
 	if err == nil {
 		slog.Info("tool ok", "name", "restore_to_point_in_time", "ms", duration.Milliseconds())
 	}
-	if toolAuditor != nil {
-		var errMsg string
-		if err != nil {
-			errMsg = err.Error()
-		}
-		resultJSON, _ := json.Marshal(result)
-		toolAuditor.RecordToolCall(ctx, audit.ToolCall{
-			Name: "restore_to_point_in_time",
-			Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza,
-				"recovery_target_type": args.RecoveryTargetType, "recovery_target_value": args.RecoveryTargetVal, "plan_digest": args.PlanDigest},
-		}, audit.ToolResult{
-			Output: string(resultJSON),
-			Error:  errMsg,
-		}, duration)
-	}
+	recordRestoreToPIT(ctx, args, result, err, duration)
 	return result, err
+}
+
+func recordRestoreToPIT(ctx agent.ToolContext, args RestoreToPITArgs, result RestoreToPITResult, err error, duration time.Duration) {
+	if toolAuditor == nil {
+		return
+	}
+	var errMsg string
+	if err != nil {
+		errMsg = err.Error()
+	}
+	resultJSON, _ := json.Marshal(result)
+	toolAuditor.RecordToolCall(ctx, audit.ToolCall{
+		Name: "restore_to_point_in_time",
+		Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza,
+			"recovery_target_type": args.RecoveryTargetType, "recovery_target_value": args.RecoveryTargetVal, "plan_digest": args.PlanDigest},
+	}, audit.ToolResult{
+		Output: string(resultJSON),
+		Error:  errMsg,
+	}, duration)
 }

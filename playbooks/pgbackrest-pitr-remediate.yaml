@@ -1,0 +1,101 @@
+series_id: pbs_pgbackrest_pitr_remediate
+name: "pgBackRest — Restore To A Recovery Target"
+version: "1.0"
+playbook_type: remediation
+entry_point: false
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Restore a single PostgreSQL instance to a recovery target (a time or an LSN)
+  a human approved, overwriting its data directory, then bring it back up and
+  check that PostgreSQL stopped at the target. Everything committed after the
+  target is discarded. Runs only through a gate that a person approved with
+  the recovery target, the digest of the plan they reviewed, and an
+  acknowledgement that later data is lost; it cannot be started directly and
+  no auto-chain reaches it. Down instances only.
+symptoms:
+  - "pbs_pgbackrest_pitr_triage found a feasible plan and an operator approved it at the gate"
+guidance: |
+  You are the remediation stage of a point-in-time recovery. A person has
+  approved a recovery target and a plan; both travel with this request and
+  are applied by the tools, not by you. You never choose, restate or adjust
+  the target. Your target for every tool call is the connection_string
+  stated at the top of this prompt.
+
+  Step 1 — Restore:
+  Call restore_to_point_in_time with the connection_string (target) only. It
+  restores the approved plan's backup with pgBackRest, stopping at the
+  approved target and promoting to a new timeline, and overwrites the data
+  directory. It refuses, and you stop and report the refusal verbatim
+  without retrying or working around it, when:
+  - there is no approved recovery target for this request,
+  - the instance is still accepting connections,
+  - the instance is a standby or a postmaster is running,
+  - the plan is no longer feasible, or has changed since it was approved
+    (the digest no longer matches),
+  - the tool cannot stop the instance it needs stopped (Kubernetes scale-down).
+  On success its result carries the plan it ran (backup_label,
+  normalized_target, target_timeline, expected_timeline), saved_wal (the
+  pg_wal that was in the data directory, moved aside and not replayed),
+  how_to_recover, and on Kubernetes quiesced: the StatefulSet was scaled to
+  0 and restart_container resumes it.
+
+  Step 2 — Bring the instance up:
+  Call check_host with the connection_string (target) and read its runtime.
+  runtime=docker or podman → restart_container. runtime=systemd →
+  restart_service (restart_container does not apply). runtime=kubectl →
+  restart_container, which scales the StatefulSet back up. On Kubernetes the
+  first check_host fails once the restore has run, because the StatefulSet is
+  at 0: that is expected, go on to restart_container. Starting PostgreSQL
+  begins recovery, which stops at the target.
+
+  Step 3 — Confirm recovery:
+  Call check_host again (a Kubernetes pod can take a minute or two). Call
+  get_host_logs and look for "database system is ready to accept
+  connections"; for a systemd target also read_pg_log_file if the journal
+  shows only service lifecycle lines. Quote the actual lines.
+
+  Step 4 — Verify where recovery ended:
+  Call verify_restore_recovery with the connection_string (target). It
+  compares PostgreSQL's own log with the approved target:
+  - status=verified: report stop_line (PostgreSQL's "recovery stopping …"
+    line), redo_done_lsn and new_timeline as the recovery point.
+  - status=target_not_reached: the archive ran out of WAL before the target;
+    PostgreSQL shut down. The data directory is intact and the instance is
+    NOT running. Do not restart it and do not retry the restore: report it,
+    and that a human can repeat the restore with an earlier target.
+  - status=mismatch: PostgreSQL did not stop where the target says. Quote its
+    detail as an anomaly. Do not retry.
+  - status=not_found: recovery is not in the log yet; if Step 3 shows the
+    instance up, call it once more, then report that the recovery point could
+    not be confirmed.
+  - status=unverified: report its detail; the recovery point is unconfirmed,
+    not wrong.
+
+  Step 5 — Report:
+  FINDINGS with: whether the restore and the restart succeeded; backup_label
+  and normalized_target from Step 1's plan; the recovery point from Step 4
+  (the stop_line, redo_done_lsn, new_timeline PostgreSQL logged); exactly
+  this sentence, filled in: "Everything committed after <normalized_target>
+  was discarded; the pg_wal that was in the data directory is saved in
+  <saved_wal> and was not replayed."; how_to_recover; and any anomaly (a
+  refusal, a failed restart, a new PANIC/FATAL after startup). Say that the
+  next backup should be a fresh full backup, because the database is now on a
+  new timeline.
+
+  Do NOT call any write or destructive tool beyond restore_to_point_in_time
+  Do NOT call any write or destructive tool beyond restore_to_point_in_time
+  and restart_container/restart_service. Do NOT call restore_from_backup.
+  Do NOT retry restore_to_point_in_time. Do NOT emit TRANSITION_TO or ESCALATE_TO
+  — this is a terminal action playbook. Your job ends with FINDINGS, including
+  when the restore refuses.
+escalation:
+  - "restore_to_point_in_time refused — report the refusal; a human decides"
+  - "verify_restore_recovery reports target_not_reached — the archive does not reach the target; repeat with an earlier target"
+  - "verify_restore_recovery reports mismatch — PostgreSQL did not stop at the target"
+  - "restart_container/restart_service fails to bring the instance back up after a successful restore"
+  - "logs show a new PANIC/FATAL immediately after restart"
+target_hints: []

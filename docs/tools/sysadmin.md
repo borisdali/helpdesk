@@ -117,8 +117,8 @@ Dry run of a point-in-time restore: changes nothing. Given a recovery target (ti
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `recovery_target_type` | string | yes | Where to stop: 'time' or 'lsn'. |
-| `recovery_target_value` | string | yes | For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one. |
+| `recovery_target_type` | string | no | Where to stop: 'time' or 'lsn'. Leave empty when the request already carries a recovery target: that one is used and anything you pass is ignored. |
+| `recovery_target_value` | string | no | For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one. Leave empty when the request already carries a recovery target. |
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 
@@ -194,7 +194,7 @@ Restore the database from the latest pgBackRest backup, overwriting the current 
 
 ## `restore_to_point_in_time`
 
-Restore the database to a recovery target (a time or an LSN) instead of to the end of the archive, overwriting the current data directory (destructive — requires operator approval). The target and plan_digest come from an approved plan_point_in_time_recovery: never choose or adjust a target yourself, and use exactly the values you were given. Refuses if the server is still accepting connections, if it is a standby, if a postmaster is running, if the plan is not feasible, or if the plan has changed since it was approved (the digest no longer matches). It restores the backup chosen by the plan with pgBackRest, stopping at the target and promoting to a new timeline; the WAL that was in pg_wal is moved aside (saved_wal) and not replayed. It does NOT keep or push that WAL, so everything committed after the target is discarded. After restarting the instance (restart_container / restart_service), call verify_restore_recovery: it checks PostgreSQL stopped at the target and reports target_not_reached if the archive ran out first. On Kubernetes it scales the StatefulSet to 0 and restores in a one-off pod, as restore_from_backup does.
+Restore the database to a recovery target (a time or an LSN) instead of to the end of the archive, overwriting the current data directory (destructive — requires operator approval). You pass only the instance: the recovery target, the plan digest and the acknowledgement come from the human approval carried with the request, and you cannot choose or change them. Without such an approval it refuses outright. Refuses if the server is still accepting connections, if it is a standby, if a postmaster is running, if the plan is not feasible, or if the plan has changed since it was approved (the digest no longer matches). It restores the backup chosen by the plan with pgBackRest, stopping at the target and promoting to a new timeline; the WAL that was in pg_wal is moved aside (saved_wal) and not replayed. It does NOT keep or push that WAL, so everything committed after the target is discarded. After restarting the instance (restart_container / restart_service), call verify_restore_recovery: it checks PostgreSQL stopped at the target and reports target_not_reached if the archive ran out first. On Kubernetes it scales the StatefulSet to 0 and restores in a one-off pod, as restore_from_backup does.
 
 - **Action class:** destructive
 - **Capabilities:** `data_restore`
@@ -206,9 +206,6 @@ Restore the database to a recovery target (a time or an LSN) instead of to the e
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `plan_digest` | string | yes | The plan_digest from the plan_point_in_time_recovery result that was approved. The restore recomputes the plan and refuses if it no longer matches. |
-| `recovery_target_type` | string | yes | Where to stop: 'time' or 'lsn'. Supplied by the approved request, never chosen by you. |
-| `recovery_target_value` | string | yes | The approved recovery target: an RFC3339 timestamp with a zone, or an LSN. Use exactly the value you were given. |
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 

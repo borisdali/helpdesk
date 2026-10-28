@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 )
 
@@ -64,7 +66,7 @@ func TestRestoreToPIT_Success(t *testing.T) {
 	})
 
 	digest := approvedDigest(t, pitrTestTarget)
-	res, err := restoreToPITTool(mockToolContext{context.Background()}, RestoreToPITArgs{
+	res, err := restoreToPITAudited(mockToolContext{context.Background()}, RestoreToPITArgs{
 		Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: pitrTestTarget, PlanDigest: digest})
 	if err != nil {
 		t.Fatalf("restoreToPITTool: %v", err)
@@ -337,11 +339,11 @@ func TestRestoreToPITTool_RecordsToolExecution(t *testing.T) {
 	digest := approvedDigest(t, pitrTestTarget)
 
 	args := RestoreToPITArgs{Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: pitrTestTarget, PlanDigest: digest}
-	if _, err := restoreToPITTool(newSysadminTestContext(), args); err != nil {
+	if _, err := restoreToPITAudited(newSysadminTestContext(), args); err != nil {
 		t.Fatal(err)
 	}
 	args.PlanDigest = "0000000000000000"
-	if _, err := restoreToPITTool(newSysadminTestContext(), args); err == nil {
+	if _, err := restoreToPITAudited(newSysadminTestContext(), args); err == nil {
 		t.Fatal("a wrong digest must fail")
 	}
 	events, err := store.Query(context.Background(), audit.QueryOptions{ToolName: "restore_to_point_in_time", EventType: audit.EventTypeToolExecution})
@@ -598,5 +600,110 @@ func TestVerifyRestoreRecovery_PITRWithoutPrediction(t *testing.T) {
 	st, _ := compareRecovery(nil, parseRecoveryLog(log))
 	if st != RestoreUnverified {
 		t.Errorf("status = %s, want unverified", st)
+	}
+}
+
+// toolCtxWithApproval is a tool context whose request carried ap, as the
+// trace middleware leaves it for a request from the gateway.
+func toolCtxWithApproval(ap *audit.RecoveryApproval) mockToolContext {
+	return mockToolContext{audit.WithTraceContext(context.Background(), &audit.TraceContext{TraceID: "tr_test", RecoveryApproval: ap})}
+}
+
+// The model-facing tool takes its target only from the human's approval. With
+// no approval, or one that lacks any part of it, nothing runs and the refusal
+// is audited.
+func TestRestoreToPITTool_RefusesWithoutAnApprovedTarget(t *testing.T) {
+	full := audit.RecoveryApproval{Type: TargetTime, Value: pitrTestTarget, PlanDigest: "0123456789abcdef", ApprovedBy: "alice", Acknowledged: true}
+	cases := map[string]*audit.RecoveryApproval{
+		"no approval at all": nil,
+		"a target but no digest, approver or acknowledgement": {Type: TargetTime, Value: pitrTestTarget},
+		"no acknowledgement": {Type: full.Type, Value: full.Value, PlanDigest: full.PlanDigest, ApprovedBy: "alice"},
+		"no approver":        {Type: full.Type, Value: full.Value, PlanDigest: full.PlanDigest, Acknowledged: true},
+		"no digest":          {Type: full.Type, Value: full.Value, ApprovedBy: "alice", Acknowledged: true},
+	}
+	for name, ap := range cases {
+		r := pitrRouter(t, true)
+		old := cmdRunner
+		cmdRunner = r
+		store, cleanup := withRealToolAuditor(t)
+		_, err := restoreToPITTool(toolCtxWithApproval(ap), RestoreToPITModelArgs{Stanza: "main"})
+		events, qerr := store.Query(context.Background(), audit.QueryOptions{ToolName: "restore_to_point_in_time", EventType: audit.EventTypeToolExecution})
+		cleanup()
+		cmdRunner = old
+		if err == nil || !strings.Contains(err.Error(), "no approved recovery target") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		if len(r.calls) != 0 {
+			t.Errorf("%s: %d commands ran before the refusal: %v", name, len(r.calls), r.calls)
+		}
+		if qerr != nil || len(events) != 1 || events[0].Tool.Error == "" {
+			t.Errorf("%s: the refusal was not audited: %v %v", name, events, qerr)
+		}
+	}
+}
+
+func TestRestoreToPITTool_RestoresToTheApprovedTarget(t *testing.T) {
+	r := pitrRouter(t, true)
+	old := cmdRunner
+	cmdRunner = r
+	defer func() { cmdRunner = old }()
+	digest := approvedDigest(t, pitrTestTarget)
+
+	ap := &audit.RecoveryApproval{Type: TargetTime, Value: pitrTestTarget, PlanDigest: digest, ApprovedBy: "alice", Acknowledged: true}
+	res, err := restoreToPITTool(toolCtxWithApproval(ap), RestoreToPITModelArgs{Stanza: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pitrScriptCall(r), "--target='2026-10-09 00:00:00+00'") || res.Prediction == nil || res.Prediction.TargetValue != "2026-10-09 00:00:00+00" {
+		t.Errorf("restore did not use the approved target:\n%s\n%+v", pitrScriptCall(r), res.Prediction)
+	}
+
+	// An approval whose digest is of another plan is still refused by the
+	// recomputed plan, however it got there.
+	r2 := pitrRouter(t, true)
+	cmdRunner = r2
+	stale := *ap
+	stale.PlanDigest = "ffffffffffffffff"
+	if _, err := restoreToPITTool(toolCtxWithApproval(&stale), RestoreToPITModelArgs{Stanza: "main"}); err == nil || !strings.Contains(err.Error(), "plan changed") {
+		t.Errorf("stale digest: err = %v", err)
+	}
+	if pitrScriptCall(r2) != "" {
+		t.Error("the restore ran on a stale digest")
+	}
+}
+
+// The schema the model sees has no place to put a target.
+func TestRestoreToPIT_ModelSchemaHasNoTarget(t *testing.T) {
+	tools, err := createTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := agentutil.ComputeInputSchemas(tools)
+	raw, ok := schemas["restore_to_point_in_time"]
+	if !ok {
+		t.Fatalf("no input schema for restore_to_point_in_time among %d tools", len(schemas))
+	}
+	b, _ := json.Marshal(raw)
+	for _, banned := range []string{"recovery_target", "plan_digest", "acknowledge"} {
+		if strings.Contains(string(b), banned) {
+			t.Errorf("the model-facing schema exposes %q: %s", banned, b)
+		}
+	}
+}
+
+// A run that carries a target plans that target, whatever the model passed.
+func TestPlanPITRTool_UsesTheRequestsTarget(t *testing.T) {
+	old := cmdRunner
+	cmdRunner = fixtureRunner(t)
+	defer func() { cmdRunner = old }()
+	ap := &audit.RecoveryApproval{Type: TargetTime, Value: "2026-10-09T00:00:00Z"}
+	plan, err := planPITRTool(toolCtxWithApproval(ap), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-12T00:00:00Z"})
+	if err != nil || plan.Status != PITRFeasible || plan.NormalizedTarget != "2026-10-09 00:00:00+00" {
+		t.Errorf("plan = %+v, %v: the model's target was used instead of the request's", plan, err)
+	}
+	// With no target on the request, the model's own is planned (a dry run).
+	plan, err = planPITRTool(toolCtxWithApproval(nil), PlanPITRArgs{RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-12T00:00:00Z"})
+	if err != nil || plan.Status != PITRNotFeasible {
+		t.Errorf("plan = %+v, %v", plan, err)
 	}
 }
