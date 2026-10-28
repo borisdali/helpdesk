@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -125,6 +126,9 @@ type recoveryAuditd struct {
 	mu        sync.Mutex
 	runBodies []map[string]any // POST .../runs bodies, in order
 	patches   int
+	// next maps a run to the run that continued from it (prior_run_id), for
+	// gates raised deep in a chain.
+	next map[string]*audit.PlaybookRun
 }
 
 func newRecoveryAuditd(t *testing.T, runs map[string]*audit.PlaybookRun, byID, bySeries map[string]*audit.Playbook) *recoveryAuditd {
@@ -147,6 +151,10 @@ func newRecoveryAuditd(t *testing.T, runs map[string]*audit.PlaybookRun, byID, b
 			}
 			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodGet && p == "/v1/fleet/playbook-runs":
+			if n, ok := m.next[r.URL.Query().Get("prior_run_id")]; ok {
+				json.NewEncoder(w).Encode(map[string]any{"runs": []*audit.PlaybookRun{n}}) //nolint:errcheck
+				return
+			}
 			w.Write([]byte(`{"runs":[]}`)) //nolint:errcheck
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/v1/fleet/playbook-runs/"):
 			if run, ok := runs[strings.TrimPrefix(p, "/v1/fleet/playbook-runs/")]; ok {
@@ -537,5 +545,120 @@ func TestPITRRemediateSeries_MatchesTheShippedPlaybook(t *testing.T) {
 	}
 	if needsRecoveryApproval("pbs_pgbackrest_restore_remediate") || needsRecoveryApproval("") {
 		t.Error("the gate must guard only the point-in-time restore")
+	}
+}
+
+// A gate raised several hops deep is approved against the hop it was raised
+// on (the leaf), not the first run: the leaf's own target is the one that is
+// immutable, and the primary's is the fallback.
+func TestHandleProceedEscalation_PITR_DeepChain_LeafTargetWins(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	primary := gatedPITRRun("")
+	primary.TransitionedTo = "" // the primary's own signal is its first hop's, already done
+	primary.EscalatedTo = "pbs_sysadmin_host_triage"
+	leaf := &audit.PlaybookRun{RunID: "plr_pitrleaf01", PriorRunID: primary.RunID, SeriesID: "pbs_sysadmin_host_triage",
+		Outcome: audit.OutcomeGatePending, TransitionedTo: pitrRemediateSeries, ConnectionString: primary.ConnectionString,
+		FindingsSummary: "plan feasible", RecoveryTarget: "time=2026-10-27T13:00:00Z"}
+
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantCode int
+	}{
+		{"the leaf's target is restated", strings.Replace(pitrApprovalBody, "14:05:00Z", "13:00:00Z", 1), http.StatusOK},
+		{"another target than the leaf's", pitrApprovalBody, http.StatusConflict},
+	} {
+		auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{primary.RunID: primary, leaf.RunID: leaf},
+			map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+		auditd.next = map[string]*audit.PlaybookRun{primary.RunID: leaf}
+		gw := makePlaybookRunGateway(auditd.URL, nil)
+		addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+		if rec := postProceedEscalation(t, gw, primary.RunID, tc.body); rec.Code != tc.wantCode {
+			t.Errorf("%s: got %d, want %d; %s", tc.name, rec.Code, tc.wantCode, rec.Body.String())
+		}
+	}
+}
+
+// Choosing "force" at the gate is allowed: a person is approving, with the
+// target, the digest and the acknowledgement. What force can never do is
+// reach the gate without them (see ForceChainStopsAtPITRRemediate).
+func TestHandleProceedEscalation_PITR_ForceAtTheGate(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	agent := addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+
+	body := strings.Replace(pitrApprovalBody, `"approval_mode":"auto"`, `"approval_mode":"force"`, 1)
+	if rec := postProceedEscalation(t, gw, run.RunID, body); rec.Code != http.StatusOK {
+		t.Fatalf("got %d; %s", rec.Code, rec.Body.String())
+	}
+	if got := sentRecoveryApproval(t, agent); !(&audit.RecoveryApproval{Type: "time", Value: "x", PlanDigest: "d", ApprovedBy: "a", Acknowledged: got["acknowledged"] == true}).Approved() {
+		t.Errorf("recovery_approval = %v", got)
+	}
+	// ...and force without the fields is still refused (RefusalsChangeNothing).
+	if rec := postProceedEscalation(t, gw, run.RunID, `{"resolution":"approved","resolved_by":"alice","approval_mode":"force"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("force without the recovery fields: got %d", rec.Code)
+	}
+}
+
+// A hop that is auto-chained from a run with a target (anything but the
+// restore) carries the target to plan, and records it on its own run.
+func TestHandlePlaybookRun_AutoChain_CarriesTheTargetToTheNextHop(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	other := &audit.Playbook{PlaybookID: "pb_other_rem", SeriesID: "pbs_other_remediate", Name: "Other remediation",
+		PlaybookType: "remediation", ExecutionMode: "agent", AgentName: "other_remediate_agent", ApprovalMode: "auto", IsActive: true}
+	auditd := newRecoveryAuditd(t, nil, map[string]*audit.Playbook{triage.PlaybookID: triage},
+		map[string]*audit.Playbook{remediate.SeriesID: remediate, other.SeriesID: other})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	addCapturingAgent(t, gw, "pitr_sysadmin_agent",
+		"HYPOTHESIS_1: x | CONFIDENCE: 0.95 | EVIDENCE: \"x\"\nROOT_CAUSE: HYPOTHESIS_1\nFINDINGS: ok\nTRANSITION_TO: pbs_other_remediate\n")
+	next := addCapturingAgent(t, gw, "other_remediate_agent", "FINDINGS: done\n")
+
+	rec := postPlaybookRun(t, gw, triage.PlaybookID,
+		`{"connection_string":"postgres://localhost/test","approval_mode":"force","skip_trust_gate":true,"recovery_target":{"type":"lsn","value":"0/3000028"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d; %s", rec.Code, rec.Body.String())
+	}
+	got := sentRecoveryApproval(t, next)
+	if got["type"] != "lsn" || got["value"] != "0/3000028" || got["plan_digest"] != nil || got["acknowledged"] != nil {
+		t.Errorf("the chained hop was sent %v, want the target alone", got)
+	}
+	runs := auditd.startedRuns()
+	if len(runs) != 2 || runs[0]["recovery_target"] != "lsn=0/3000028" || runs[1]["recovery_target"] != "lsn=0/3000028" {
+		t.Errorf("runs recorded as %v, want the target on both", runs)
+	}
+}
+
+// The gate_acknowledged event is the audit record of who approved what: it
+// names the target, the digest and the acknowledgement.
+func TestRecordGateAcknowledged_RecordsThePITRApproval(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	g := &Gateway{auditor: audit.NewGatewayAuditor(store)}
+	run := &audit.PlaybookRun{RunID: "plr_pitraudit01", TransitionedTo: pitrRemediateSeries}
+
+	ap, status, msg := recoveryApprovalFromGate(ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
+	}, "", "alice")
+	if status != 0 {
+		t.Fatalf("%d %s", status, msg)
+	}
+	extra := []string{"recovery_target: " + audit.FormatRecoveryTarget(ap.Type, ap.Value), "plan_digest: " + ap.PlanDigest, "operator acknowledged that everything committed after the target is discarded"}
+	g.recordGateAcknowledged(context.Background(), run, "alice", "approved", "auto", "", "", extra...)
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{TraceIDPrefix: run.RunID, EventTypes: []audit.EventType{audit.EventTypeGateAcknowledged}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events = %d, %v", len(events), err)
+	}
+	chain := strings.Join(events[0].Decision.ReasoningChain, "\n")
+	for _, want := range []string{"operator alice acknowledged", "recovery_target: time=2026-10-27T14:05:00Z", "plan_digest: 0123456789abcdef", "everything committed after the target is discarded"} {
+		if !strings.Contains(chain, want) {
+			t.Errorf("the audit record lacks %q:\n%s", want, chain)
+		}
 	}
 }
