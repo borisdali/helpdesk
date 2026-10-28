@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_remediate
 name: "pgBackRest — Restore To A Recovery Target"
-version: "1.0"
+version: "1.1"
 playbook_type: remediation
 entry_point: false
 execution_mode: agent
@@ -15,7 +15,8 @@ description: |
   target is discarded. Runs only through a gate that a person approved with
   the recovery target, the digest of the plan they reviewed, and an
   acknowledgement that later data is lost; it cannot be started directly and
-  no auto-chain reaches it. Down instances only.
+  no auto-chain reaches it. A running instance is stopped by the restore only
+  when the person who approved the gate also allowed that.
 symptoms:
   - "pbs_pgbackrest_pitr_triage found a feasible plan and an operator approved it at the gate"
 guidance: |
@@ -32,16 +33,24 @@ guidance: |
   directory. It refuses, and you stop and report the refusal verbatim
   without retrying or working around it, when:
   - there is no approved recovery target for this request,
-  - the instance is still accepting connections,
-  - the instance is a standby or a postmaster is running,
+  - the instance is still accepting connections and the approval does not
+    allow stopping it,
+  - the instance is a standby, has replicas, is not archiving WAL or runs
+    under an HA manager, or a postmaster is running,
+  - the running instance's WAL could not be confirmed flushed to the archive,
   - the plan is no longer feasible, or has changed since it was approved
     (the digest no longer matches),
   - the tool cannot stop the instance it needs stopped (Kubernetes scale-down).
   On success its result carries the plan it ran (backup_label,
   normalized_target, target_timeline, expected_timeline), saved_wal (the
   pg_wal that was in the data directory, moved aside and not replayed),
-  how_to_recover, and on Kubernetes quiesced: the StatefulSet was scaled to
-  0 and restart_container resumes it.
+  how_to_recover, and, when the instance was running, pre_stop (its WAL
+  position and clock when it was stopped) and stopped (how it was stopped).
+  On Kubernetes quiesced says the StatefulSet was scaled to 0 and
+  restart_container resumes it. After a refusal that left the instance
+  running, or one that started it again, say which in FINDINGS. If the
+  result says this tool stopped the instance and the restore then failed,
+  the instance is stopped and must stay stopped: report it and stop.
 
   Step 2 — Bring the instance up:
   Call check_host with the connection_string (target) and read its runtime.
@@ -85,6 +94,9 @@ guidance: |
   refusal, a failed restart, a new PANIC/FATAL after startup). Say that the
   next backup should be a fresh full backup, because the database is now on a
   new timeline.
+
+  Do not stop, start or restart anything before restore_to_point_in_time: it
+  stops a running instance itself, in the right order, when it is allowed to.
 
   Do NOT call any write or destructive tool beyond restore_to_point_in_time
   Do NOT call any write or destructive tool beyond restore_to_point_in_time

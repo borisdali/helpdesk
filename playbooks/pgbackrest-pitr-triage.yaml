@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_triage
 name: "pgBackRest — Point-in-Time Recovery Triage"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -58,24 +58,28 @@ guidance: |
   paraphrase them.
 
   Step 2 — Say whether the instance is down:
-  The restore tool refuses to run while PostgreSQL is accepting connections.
-  Call check_host with the connection_string and note what it shows, but do
-  not conclude from a container that is "running" that PostgreSQL is up: a
-  Docker or Podman container can stay up after the PostgreSQL inside it has
-  died. If you cannot tell, say so. Stopping a serving instance is not
-  something this playbook or its restore does.
+  The plan reports instance_serving and archive_flush_required. When the
+  instance is serving, the restore stops it, but only if the person who
+  approves the gate also allows that (allow_stop_serving); it first asks the
+  running instance about itself, flushes its WAL to the archive and checks
+  the plan again. archive_flush_required=true means the target is in WAL the
+  instance has not archived yet, which that flush will archive. Call
+  check_host with the connection_string and note what it shows, but do not
+  conclude from a container that is "running" that PostgreSQL is up: a Docker
+  or Podman container can stay up after the PostgreSQL inside it has died. If
+  you cannot tell, say so. You never stop anything yourself.
 
   Two mutually exclusive endings, pick exactly one:
 
   Ending A — the plan is feasible (status=feasible):
   HYPOTHESIS_1: <the recovery target is reachable from backup <backup_label>> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from the plan output>"
   ROOT_CAUSE: HYPOTHESIS_1
-  FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; instance=<down|serving|unknown>
+  FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; instance=<down|serving|unknown>; archive_flush_required=<true|false>
   TRANSITION_TO: pbs_pgbackrest_pitr_remediate
   The restore does not start on this line: a person reviews this plan at the
   gate and approves it with the plan_digest. If instance=serving, say so
-  prominently in FINDINGS: the restore will refuse until the instance is
-  stopped.
+  prominently in FINDINGS: the restore will stop the running instance, and
+  will refuse to unless the person approving the gate allows it.
 
   Ending B — the plan is not feasible or could not be checked
   (status=not_feasible or unverified), or there is no recovery target:

@@ -158,3 +158,23 @@ func TestPlaybookRunStore_RecoveryTargetColumnMigration(t *testing.T) {
 		t.Fatalf("old row = %+v, %v", old, err)
 	}
 }
+
+// stop_serving is read as a real boolean and never implied by an approval.
+func TestParseRecoveryApproval_StopServing(t *testing.T) {
+	base := map[string]any{"type": "time", "value": "v", "plan_digest": "d", "approved_by": "a", "acknowledged": true}
+	if a := parseRecoveryApproval(base); !a.Approved() || a.StopServing {
+		t.Fatalf("an approval without the flag: %+v", a)
+	}
+	base["stop_serving"] = true
+	if a := parseRecoveryApproval(base); !a.StopServing {
+		t.Errorf("stop_serving:true not read: %+v", a)
+	}
+	base["stop_serving"] = "true"
+	if a := parseRecoveryApproval(base); a.StopServing {
+		t.Error(`stop_serving:"true" (a string) counted as the authorization`)
+	}
+	var none *RecoveryApproval
+	if none != nil && none.StopServing {
+		t.Error("nil")
+	}
+}

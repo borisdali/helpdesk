@@ -75,7 +75,7 @@ func TestIntegration_PlanPITR_RealRepo(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.Status == PITRFeasible {
+		if plan.Status == PITRFeasible && !plan.ArchiveFlushRequired {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -140,7 +140,7 @@ func TestIntegration_RestoreToPIT_RealRestore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.Status == PITRFeasible {
+		if plan.Status == PITRFeasible && !plan.ArchiveFlushRequired {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -230,7 +230,10 @@ func pitrWaitFeasible(t *testing.T, ctx context.Context, typ, val string) PITRPl
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.Status == PITRFeasible {
+		// On a serving instance a target in unarchived WAL is feasible but
+		// still needs a flush; these tests restore a stopped one, so they wait
+		// until the repository itself holds the target.
+		if plan.Status == PITRFeasible && !plan.ArchiveFlushRequired {
 			return plan
 		}
 		if time.Now().After(deadline) {
@@ -348,4 +351,77 @@ func TestIntegration_RestoreToPIT_TargetNotReached_ThenRetry(t *testing.T) {
 		t.Errorf("rows after the retry = %q, want only keep:5", got)
 	}
 	fixturePSQL(t, "DROP TABLE pitr_idle")
+}
+
+// A point-in-time restore of a RUNNING instance, as the gate approval with
+// allow_stop_serving would run it: ask the instance about itself, flush its
+// WAL to the archive, plan again from the repository, stop it (cleanly, then
+// the container), restore in a throwaway container on its volumes, and start
+// it with the same restart_container the playbook uses. The target is in WAL
+// that was not archived when it was chosen, which is what the flush is for.
+func TestIntegration_RestoreToPIT_Live_RealRestore(t *testing.T) {
+	ctx := pitrFixtureSetup(t)
+	t.Cleanup(func() { restoreIntegrationTeardown(t) })
+	oldStop := containerStopTimeout
+	containerStopTimeout = 3 * time.Second // the fixture's PID 1 ignores SIGTERM
+	t.Cleanup(func() { containerStopTimeout = oldStop })
+
+	fixturePSQL(t, "DROP TABLE IF EXISTS pitr_live; CREATE TABLE pitr_live (id int, phase text)")
+	fixturePSQL(t, "INSERT INTO pitr_live SELECT g, 'keep' FROM generate_series(1, 5) g")
+	pitrIncrBackup(t)
+	time.Sleep(3 * time.Second)
+	target := fixturePSQL(t, "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+	time.Sleep(2 * time.Second)
+	// Written after the target, and NOT switched or archived by the test: the
+	// restore's own flush has to get the target's WAL into the repository.
+	fixturePSQL(t, "INSERT INTO pitr_live SELECT g, 'lose' FROM generate_series(6, 10) g")
+
+	plan, err := planPITRImpl(ctx, PlanPITRArgs{Target: "pgbackrest-db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: target})
+	if err != nil || plan.Status != PITRFeasible || !plan.InstanceServing {
+		t.Fatalf("plan of the serving instance: %+v, %v", plan, err)
+	}
+	t.Logf("plan: archive_flush_required=%v digest=%s", plan.ArchiveFlushRequired, plan.PlanDigest)
+	args := RestoreToPITArgs{Target: "pgbackrest-db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: target, PlanDigest: plan.PlanDigest}
+
+	// Without the gate's authorization a serving instance is refused, untouched.
+	if _, err := restoreToPITImpl(ctx, args); err == nil || !strings.Contains(err.Error(), "allow_stop_serving") {
+		t.Fatalf("a serving instance without the authorization: err = %v", err)
+	}
+	if got := fixturePSQL(t, "SELECT count(*) FROM pitr_live"); got != "10" {
+		t.Fatalf("the refused restore changed the data: %s rows", got)
+	}
+
+	args.AllowStopServing = true
+	res, err := restoreToPITImpl(ctx, args)
+	if err != nil {
+		t.Fatalf("restoreToPITImpl on the serving instance: %v", err)
+	}
+	if res.PreStop == nil || res.PreStop.LSN == "" || res.PreStop.Timeline != plan.TargetTimeline || res.PreStop.Replicas != 0 || res.PreStop.ArchiveMode == "off" {
+		t.Errorf("pre_stop = %+v", res.PreStop)
+	}
+	if res.Plan.ArchiveFlushRequired || res.Plan.PlanDigest != plan.PlanDigest || res.SavedWAL == "" || !strings.Contains(res.Stopped, "stopped") {
+		t.Errorf("result = %+v", res)
+	}
+	// The container is down: this tool does not start it.
+	if out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", restoreIntegrationContainer).Output(); err != nil || strings.TrimSpace(string(out)) != "false" {
+		t.Fatalf("the container should be stopped: %q %v", out, err)
+	}
+
+	// The playbook's next step.
+	mark := time.Now()
+	if rr, err := restartContainerImpl(ctx, RestartContainerArgs{Target: "pgbackrest-db", Reason: "start after point-in-time restore"}); err != nil || !rr.Success {
+		t.Fatalf("restart_container: %+v, %v", rr, err)
+	}
+	log := waitForRecoveryLog(t, mark, "database system is ready to accept connections")
+	if !strings.Contains(log, "recovery stopping") {
+		t.Errorf("PostgreSQL did not stop at a target:\n%s", log)
+	}
+	verified, err := verifyRestoreRecoveryImpl(ctx, VerifyRestoreRecoveryArgs{Target: "pgbackrest-db"})
+	if err != nil || verified.Status != RestoreVerified || verified.NewTimeline != plan.ExpectedTimeline {
+		t.Errorf("verify_restore_recovery = %+v, %v", verified, err)
+	}
+	if got := fixturePSQL(t, "SELECT phase || ':' || count(*) FROM pitr_live GROUP BY phase ORDER BY phase"); got != "keep:5" {
+		t.Errorf("rows after the live point-in-time restore = %q, want only keep:5", got)
+	}
+	fixturePSQL(t, "DROP TABLE pitr_live")
 }

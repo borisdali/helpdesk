@@ -139,8 +139,12 @@ usermod -aG systemd-journal postgres
 # written without the flag silently never matched, failing with "a password
 # is required" instead of running. The exact property list could still
 # change later; `--property=*` absorbs that instead of re-breaking.
+#
+# `stop` (v0.33) is for restore_to_point_in_time on a RUNNING instance: when
+# the gate approval allows it, the tool stops the unit (after flushing its WAL
+# to the archive) before restoring. It never starts it: restart_service does.
 cat >/etc/sudoers.d/pgbackrest-test-postgres <<EOF
-postgres ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${PG_UNIT}, /usr/bin/systemctl show --property=* ${PG_UNIT}
+postgres ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${PG_UNIT}, /usr/bin/systemctl stop ${PG_UNIT}, /usr/bin/systemctl show --property=* ${PG_UNIT}
 EOF
 chmod 440 /etc/sudoers.d/pgbackrest-test-postgres
 

@@ -1872,6 +1872,10 @@ type ProceedEscalationRequest struct {
 	RecoveryTarget      *RecoveryTargetSpec `json:"recovery_target,omitempty"`
 	PlanDigest          string              `json:"plan_digest,omitempty"`
 	AcknowledgeDataLoss bool                `json:"acknowledge_data_loss,omitempty"`
+	// AllowStopServing is a separate, explicit authorization for the restore
+	// to stop a RUNNING instance (after flushing its WAL to the archive). Not
+	// implied by anything else here: without it a serving instance is refused.
+	AllowStopServing bool `json:"allow_stop_serving,omitempty"`
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -2022,11 +2026,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 		}
 		recoveryApproval = ap
 		carriedTarget = &RecoveryTargetSpec{Type: ap.Type, Value: ap.Value}
-		recoveryAudit = []string{
-			"recovery_target: " + audit.FormatRecoveryTarget(ap.Type, ap.Value),
-			"plan_digest: " + ap.PlanDigest,
-			"operator acknowledged that everything committed after the target is discarded",
-		}
+		recoveryAudit = recoveryAuditLines(ap)
 	} else if typ, val := audit.ParseRecoveryTarget(storedTarget); typ != "" && val != "" {
 		carriedTarget = &RecoveryTargetSpec{Type: typ, Value: val}
 		recoveryApproval = carriedTarget.planOnly()

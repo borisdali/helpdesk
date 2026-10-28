@@ -124,7 +124,23 @@ func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy s
 		PlanDigest:   strings.TrimSpace(req.PlanDigest),
 		ApprovedBy:   resolvedBy,
 		Acknowledged: true,
+		StopServing:  req.AllowStopServing,
 	}, 0, ""
+}
+
+// recoveryAuditLines is what the gate_acknowledged event says about a
+// point-in-time approval: who approved which target, against which plan, and
+// whether they also authorized stopping the running instance.
+func recoveryAuditLines(ap *audit.RecoveryApproval) []string {
+	lines := []string{
+		"recovery_target: " + audit.FormatRecoveryTarget(ap.Type, ap.Value),
+		"plan_digest: " + ap.PlanDigest,
+		"operator acknowledged that everything committed after the target is discarded",
+	}
+	if ap.StopServing {
+		lines = append(lines, "operator authorized stopping the running instance for the restore")
+	}
+	return lines
 }
 
 // recoveryApprovalMeta is the A2A metadata form of an approval.
@@ -141,6 +157,9 @@ func recoveryApprovalMeta(a *audit.RecoveryApproval) map[string]any {
 	}
 	if a.Acknowledged {
 		m["acknowledged"] = true
+	}
+	if a.StopServing {
+		m["stop_serving"] = true
 	}
 	return m
 }

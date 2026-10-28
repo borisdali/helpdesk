@@ -76,7 +76,9 @@ func TestPITRPlaybooks_Triage(t *testing.T) {
 		"plan_digest",
 		"Do NOT call restore_to_point_in_time or restore_from_backup",
 		"a person reviews this plan at the gate",
-		"Stopping a serving instance is not",
+		"You never stop anything yourself",
+		"allow_stop_serving",
+		"archive_flush_required",
 	} {
 		if !strings.Contains(flat(pb.Guidance), term) {
 			t.Errorf("triage guidance lacks %q", term)
@@ -114,6 +116,10 @@ func TestPITRPlaybooks_Remediate(t *testing.T) {
 		"runtime=kubectl → restart_container",
 		"Everything committed after <normalized_target>",
 		"new timeline",
+		"stops a running instance itself",
+		"does not allow stopping it",
+		"has replicas",
+		"the instance is stopped and must stay stopped",
 	} {
 		if !strings.Contains(flat(pb.Guidance), term) {
 			t.Errorf("remediate guidance lacks %q", term)

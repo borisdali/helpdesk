@@ -65,8 +65,15 @@ type PITRPlan struct {
 	ArchiveEndWAL    string `json:"archive_end_wal,omitempty"`
 	ArchiveEndTime   string `json:"archive_end_time,omitempty"`
 	// DataLoss says what the restore discards.
-	DataLoss      string         `json:"data_loss,omitempty"`
-	WALContinuity *WALContinuity `json:"wal_continuity,omitempty"`
+	DataLoss string `json:"data_loss,omitempty"`
+	// InstanceServing says PostgreSQL was accepting connections when the plan
+	// was made. ArchiveFlushRequired says the target is in WAL the instance
+	// has not archived yet: a restore of a serving instance flushes the
+	// archive first, and the plan holds once it has. No omitempty on either:
+	// false is an answer.
+	InstanceServing      bool           `json:"instance_serving"`
+	ArchiveFlushRequired bool           `json:"archive_flush_required"`
+	WALContinuity        *WALContinuity `json:"wal_continuity,omitempty"`
 	// PlanDigest identifies the decision: stanza, backup, target and
 	// timeline. Not the archive end: on a live instance the archive keeps
 	// growing, and a digest that moved with it would always drift.
@@ -83,7 +90,14 @@ func pitrPlanDigest(stanza, label, normalized string, timeline uint32) string {
 // assessPITRPlan is the pure core: backup is the one selectPITRBackup chose
 // and wal the continuity check for it.
 func assessPITRPlan(stanza string, target RecoveryTarget, normalized string, backup PgBackRestBackup, wal *WALContinuity) PITRPlan {
-	plan := PITRPlan{
+	return assessPITRPlanFor(stanza, target, normalized, backup, wal, false)
+}
+
+// assessPITRPlanFor is assessPITRPlan for an instance that is serving or not.
+// Only a serving instance has WAL that is not archived yet but will be, so
+// only there is a target past the archive end plausible.
+func assessPITRPlanFor(stanza string, target RecoveryTarget, normalized string, backup PgBackRestBackup, wal *WALContinuity, serving bool) PITRPlan {
+	plan := PITRPlan{InstanceServing: serving,
 		Stanza:           stanza,
 		Target:           target,
 		NormalizedTarget: normalized,
@@ -123,11 +137,17 @@ func assessPITRPlan(stanza string, target RecoveryTarget, normalized string, bac
 		if err != nil || err2 != nil {
 			return unverified("the target time or the archive end time (%q) could not be read", wal.ArchiveEndTime)
 		}
-		if !tt.Before(end) {
+		if !tt.Before(end) && serving {
+			plan.ArchiveFlushRequired = true
+		} else if !tt.Before(end) {
 			return notFeasible("the target %s is not before the time the newest archived WAL segment (%s) reached the repository, %s: reaching it would need WAL that was never archived. restore_from_backup restores to the end of the archive",
 				normalized, wal.ArchiveEndWAL, wal.ArchiveEndTime)
 		}
-		plan.DataLoss = fmt.Sprintf("everything committed after %s, up to the end of the archive at %s, is discarded", normalized, wal.ArchiveEndTime)
+		if plan.ArchiveFlushRequired {
+			plan.DataLoss = fmt.Sprintf("everything committed after %s, up to the moment the instance is stopped, is discarded", normalized)
+		} else {
+			plan.DataLoss = fmt.Sprintf("everything committed after %s, up to the end of the archive at %s, is discarded", normalized, wal.ArchiveEndTime)
+		}
 	case TargetLSN:
 		lsn, err := parseLSN(normalized)
 		_, logID, seg, err2 := parseSegmentName(wal.ArchiveEndWAL)
@@ -136,16 +156,27 @@ func assessPITRPlan(stanza string, target RecoveryTarget, normalized string, bac
 		}
 		endSeg := logID*segsPerLogID(wal.SegmentSizeBytes) + seg
 		targetSeg := lsn / wal.SegmentSizeBytes
-		if targetSeg > endSeg {
+		if targetSeg > endSeg && serving {
+			plan.ArchiveFlushRequired = true
+		} else if targetSeg > endSeg {
 			return notFeasible("the target %s is in a WAL segment after the newest archived one (%s): reaching it would need WAL that was never archived", normalized, wal.ArchiveEndWAL)
 		}
-		plan.DataLoss = fmt.Sprintf("all WAL after %s, up to the end of the archive (%s, %d segment(s) later), is discarded", normalized, wal.ArchiveEndWAL, endSeg-targetSeg)
+		if targetSeg <= endSeg {
+			plan.DataLoss = fmt.Sprintf("all WAL after %s, up to the end of the archive (%s, %d segment(s) later), is discarded", normalized, wal.ArchiveEndWAL, endSeg-targetSeg)
+		} else {
+			plan.DataLoss = fmt.Sprintf("all WAL after %s, up to the moment the instance is stopped, is discarded", normalized)
+		}
 	default:
 		return unverified("unknown recovery target type %q", target.Type)
 	}
 
 	plan.PlanDigest = pitrPlanDigest(stanza, backup.Label, normalized, plan.TargetTimeline)
 	plan.Status = PITRFeasible
+	if plan.ArchiveFlushRequired {
+		plan.Detail = fmt.Sprintf("backup %s can be restored and the WAL from it to the end of the archive is continuous. The instance is serving and the target is in WAL it has not archived yet: "+
+			"the restore flushes the archive first (a WAL switch) and then checks this plan again, so it holds only once the WAL is in the repository. Restoring stops the running instance, which the gate must allow", backup.Label)
+		return plan
+	}
 	plan.Detail = fmt.Sprintf("backup %s can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. "+
 		"This is plausible, not certain: the archive's times are coarse, and recovery can still run out of WAL before the target", backup.Label)
 	return plan
@@ -177,7 +208,14 @@ func planPITRImpl(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 	wal := checkWALContinuityFor(status, backup.Label, func(walArgs []string) (string, error) {
 		return runPgBackRestOnTarget(ctx, "plan_point_in_time_recovery", args.Target, walArgs)
 	})
-	return assessPITRPlan(status.Stanza, target, normalized, backup, &wal), nil
+	// Whether the instance is serving decides if a target past the archive end
+	// is plausible. An instance that can't be resolved or asked is treated as
+	// down: the conservative answer.
+	serving := false
+	if inst, ierr := instanceFor(args.Target); ierr == nil {
+		serving, _ = inst.serving(ctx)
+	}
+	return assessPITRPlanFor(status.Stanza, target, normalized, backup, &wal, serving), nil
 }
 
 func planPITRTool(ctx agent.ToolContext, args PlanPITRArgs) (PITRPlan, error) {

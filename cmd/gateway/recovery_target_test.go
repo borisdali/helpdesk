@@ -662,3 +662,86 @@ func TestRecordGateAcknowledged_RecordsThePITRApproval(t *testing.T) {
 		}
 	}
 }
+
+// ── allow_stop_serving ───────────────────────────────────────────────────────
+
+// Stopping a running instance is a separate authorization from approving the
+// target: it is only ever the operator's explicit flag.
+func TestRecoveryApprovalFromGate_StopServingIsSeparate(t *testing.T) {
+	base := ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
+	}
+	ap, status, msg := recoveryApprovalFromGate(base, "", "alice")
+	if status != 0 || ap.StopServing || !ap.Approved() {
+		t.Fatalf("approval without the flag: %+v %d %s", ap, status, msg)
+	}
+	base.AllowStopServing = true
+	ap, status, _ = recoveryApprovalFromGate(base, "", "alice")
+	if status != 0 || !ap.StopServing {
+		t.Fatalf("approval with the flag: %+v", ap)
+	}
+	// The flag alone approves nothing.
+	if _, status, _ := recoveryApprovalFromGate(ProceedEscalationRequest{AllowStopServing: true}, "", "alice"); status != http.StatusBadRequest {
+		t.Errorf("allow_stop_serving alone: status %d, want 400", status)
+	}
+
+	if m := recoveryApprovalMeta(&audit.RecoveryApproval{Type: "time", Value: "v", PlanDigest: "d", ApprovedBy: "a", Acknowledged: true}); m["stop_serving"] != nil {
+		t.Errorf("an approval that does not allow it carries stop_serving: %v", m)
+	}
+	if m := recoveryApprovalMeta(ap); m["stop_serving"] != true {
+		t.Errorf("metadata = %v", m)
+	}
+	lines := strings.Join(recoveryAuditLines(ap), "\n")
+	if !strings.Contains(lines, "authorized stopping the running instance") {
+		t.Errorf("audit lines = %s", lines)
+	}
+	if strings.Contains(strings.Join(recoveryAuditLines(&audit.RecoveryApproval{Type: "time", Value: "v", PlanDigest: "d"}), "\n"), "stopping") {
+		t.Error("an approval that does not allow stopping says it does")
+	}
+}
+
+func TestHandleProceedEscalation_PITR_StopServingReachesTheAgentOnlyWhenAllowed(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"allowed", strings.Replace(pitrApprovalBody, `"acknowledge_data_loss":true`, `"acknowledge_data_loss":true,"allow_stop_serving":true`, 1), true},
+		{"not allowed", pitrApprovalBody, false},
+	} {
+		run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+		auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+			map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+		gw := makePlaybookRunGateway(auditd.URL, nil)
+		agent := addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+		if rec := postProceedEscalation(t, gw, run.RunID, tc.body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d; %s", tc.name, rec.Code, rec.Body.String())
+		}
+		got := sentRecoveryApproval(t, agent)
+		if (got["stop_serving"] == true) != tc.want {
+			t.Errorf("%s: recovery_approval = %v", tc.name, got)
+		}
+	}
+}
+
+func TestResolveDecision_Gate_PITR_StopServing(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	agent := addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	body := strings.Replace(pitrApprovalBody, `"acknowledge_data_loss":true`, `"acknowledge_data_loss":true,"allow_stop_serving":true`, 1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/decisions/gate:"+run.RunID+"/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d; %s", rec.Code, rec.Body.String())
+	}
+	if got := sentRecoveryApproval(t, agent); got["stop_serving"] != true {
+		t.Errorf("the hub dropped allow_stop_serving: %v", got)
+	}
+}

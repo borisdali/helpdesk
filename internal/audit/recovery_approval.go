@@ -23,6 +23,10 @@ type RecoveryApproval struct {
 	// Acknowledged is the operator's explicit acknowledgement that everything
 	// committed after the target is discarded.
 	Acknowledged bool `json:"acknowledged,omitempty"`
+	// StopServing is the operator's separate authorization for the restore to
+	// STOP a running instance (after flushing its WAL to the archive). Without
+	// it a serving instance is refused. Never implied by Approved().
+	StopServing bool `json:"stop_serving,omitempty"`
 }
 
 // Approved reports whether a restore may run on this: a target, the digest of
@@ -41,6 +45,7 @@ func parseRecoveryApproval(v any) *RecoveryApproval {
 	str := func(k string) string { s, _ := m[k].(string); return strings.TrimSpace(s) }
 	a := &RecoveryApproval{Type: str("type"), Value: str("value"), PlanDigest: str("plan_digest"), ApprovedBy: str("approved_by")}
 	a.Acknowledged, _ = m["acknowledged"].(bool)
+	a.StopServing, _ = m["stop_serving"].(bool)
 	if a.Type == "" || a.Value == "" {
 		return nil
 	}
