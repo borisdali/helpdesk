@@ -47,6 +47,10 @@ func TestToolReference(t *testing.T) {
 				{Doc: "MUTATION_TOOLS.md", Section: "1.15 `restore_from_backup`"},
 				{Doc: "BACKUP.md", Section: "3. Restore from backup after data loss"},
 			},
+			"restore_to_point_in_time": {
+				{Doc: "MUTATION_TOOLS.md", Section: "1.15.1 `restore_to_point_in_time`"},
+				{Doc: "BACKUP.md", Section: "3. Restore from backup after data loss"},
+			},
 		},
 	})
 }

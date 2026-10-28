@@ -88,6 +88,10 @@ type pgbackrestRouter struct {
 	restoreErr error
 	pushOut    string // archive-pushing the pg_wal tail
 	pushErr    error
+	// repoRun, when set, answers repo-ls and repo-get (the WAL-continuity
+	// reads) instead of the built-in realInfo fixture, with the joined
+	// command as its single argument.
+	repoRun pgbackrestRunner
 }
 
 func (r *pgbackrestRouter) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
@@ -98,8 +102,12 @@ func (r *pgbackrestRouter) Run(_ context.Context, name string, args []string, _ 
 		return r.readyOut, r.readyErr
 	case strings.Contains(joined, "--delta restore"):
 		return r.restoreOut, r.restoreErr
+	case strings.Contains(joined, "--target-action=promote restore"):
+		return r.restoreOut, r.restoreErr
 	case strings.Contains(joined, "archive-push"):
 		return r.pushOut, r.pushErr
+	case r.repoRun != nil && (strings.Contains(joined, "repo-ls") || strings.Contains(joined, "repo-get")):
+		return r.repoRun([]string{joined})
 	case strings.Contains(joined, "repo-ls") && strings.Contains(joined, "--recurse"):
 		if r.walListing != "" {
 			return r.walListing, nil

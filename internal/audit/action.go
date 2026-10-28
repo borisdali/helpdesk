@@ -112,6 +112,7 @@ var ToolClassification = map[string]ActionClass{
 	"get_pgbackrest_status":       ActionRead,
 	"run_pgbackrest_backup":       ActionWrite,
 	"restore_from_backup":         ActionDestructive,
+	"restore_to_point_in_time":    ActionDestructive,
 	"verify_restore_recovery":     ActionRead,
 	"plan_point_in_time_recovery": ActionRead,
 }

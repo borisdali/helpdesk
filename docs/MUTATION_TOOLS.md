@@ -669,6 +669,45 @@ Under `approval_mode=force`, this specific judgment is not independently re-veri
 
 **Policy note**: does not carry `auto_remediation_eligible` — unlike `restart_container`/`restart_service`, there is no automatic, gate-free path to this tool regardless of playbook configuration.
 
+For a restore that stops at a recovery target instead of at the end of the archive, see [1.15.1 `restore_to_point_in_time`](#1151-restore_to_point_in_time--restore-to-a-recovery-target).
+
+---
+
+#### 1.15.1 `restore_to_point_in_time` — restore to a recovery target
+
+**Action class**: `destructive` (policy pre-check, full audit record)
+
+```
+target                 string   optional — server ID from infrastructure config. Required whenever
+                                 infrastructure config is loaded.
+stanza                 string   optional — pgBackRest stanza name; the only stanza when omitted.
+recovery_target_type   string   required — "time" or "lsn".
+recovery_target_value  string   required — an RFC3339 timestamp with a zone, or an LSN (X/Y).
+plan_digest            string   required — the plan_digest of an approved plan_point_in_time_recovery.
+```
+
+Restores the backup chosen by the plan with `pgbackrest --stanza=<stanza> --delta --set=<backup> --type=<time|lsn> --target=<value> --target-timeline=<n> --target-action=promote restore`. PostgreSQL replays the archive up to the target, stops, and promotes to a new timeline. Everything committed after the target is discarded. The first release handles a **down instance** only; stopping a serving one is not done.
+
+**The target is not the model's to choose.** It comes from the approved request, and `plan_digest` ties it to the plan a human saw: stanza, backup, target and timeline. The tool recomputes the plan and refuses if the digest differs. The dry-run, `plan_point_in_time_recovery` (read), reports the backup, whether the archived WAL from that backup to the end of the archive is continuous, whether the target lies inside the archive, and what would be lost.
+
+**Execution sequence**:
+
+1. Validate the target (RFC3339 with a zone or an LSN; not in the future; no shell syntax) and require `plan_digest`.
+2. Resolve the target; policy pre-check (`CheckTool` with `ActionDestructive`).
+3. **Refuse if `pg_isready` reports the instance accepting connections.**
+4. **Recompute the plan; refuse unless it is `feasible` and its digest equals the approved one.** Not feasible means: no backup finished before the target, a gap in the archived WAL, or a target past the archive end.
+5. Quiesce (Kubernetes: scale the StatefulSet to 0).
+6. One maintenance script: refuse a standby (`standby.signal`) or a running postmaster; move the `pg_wal` segments aside; run the restore above.
+7. Record the prediction (target, backup, expected timeline) for `verify_restore_recovery`; audit the call.
+
+**What it deliberately does differently from `restore_from_backup`**: the saved `pg_wal` is not put back and not pushed to the archive. That WAL is exactly what the target discards, and replaying it would defeat the target. It stays on the host (`saved_wal` in the result) as a forensic copy.
+
+**Verification**: after the restart, `verify_restore_recovery` reads PostgreSQL's own log: the `recovery stopping` line, which side of the target it fell on, and the new timeline. If the archive ran out before the target it reports `target_not_reached`: PostgreSQL shut down, the data directory is intact, and the restore can be repeated with an earlier target.
+
+**Stated limits**: a time target is only bounded by the repository's per-segment times, so a feasible plan is plausible, not certain. The WAL must be continuous to the end of the archive, not just to the target. The timeline pinned is the archive's newest. Undoing an earlier point-in-time restore (a target on an older branch) is not supported.
+
+**Policy note**: not `auto_remediation_eligible`.
+
 ---
 
 ## 1.16 Rollback capability per tool
@@ -693,6 +732,7 @@ Every mutation tool captures state before it executes so the operation can be re
 | `restart_container` | **No** | Restart is instantaneous; pre-flight `check_host`/`get_host_logs` is the control |
 | `restart_service` | **No** | Same as above |
 | `restore_from_backup` | **No** | The restore itself overwrites the pre-state being restored from; `pg_isready` pre-flight refusal and the non-bypassable objective-evidence gate (§1.15) are the controls, not a post-hoc rollback |
+| `restore_to_point_in_time` | **No** | Overwrites the data directory. The approved `plan_digest`, the `pg_isready` refusal and a feasible recomputed plan (§1.15.1) are the controls. The pre-restore `pg_wal` is kept aside and the backups and archived WAL are untouched, so `restore_from_backup` can restore to the end of the archive again |
 
 Future DML tools (`exec_update`, `exec_delete`, `exec_insert`) will capture row-level pre-state using a two-tier model (bounded SELECT or WAL decoding depending on target capabilities).
 

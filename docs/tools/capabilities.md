@@ -66,5 +66,5 @@ Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](
 | `debug_pod_create` | kubernetes | Creates a short-lived debug pod on a node. | [`debug_node_dmesg`](k8s.md#debug_node_dmesg) |
 | `process_restart` | host | Restarts the database process (container or systemd unit). | [`restart_container`](sysadmin.md#restart_container), [`restart_service`](sysadmin.md#restart_service) |
 | `backup_run` | host | Takes a new backup. | [`run_pgbackrest_backup`](sysadmin.md#run_pgbackrest_backup) |
-| `data_restore` | host | Overwrites the data directory from a backup. | [`restore_from_backup`](sysadmin.md#restore_from_backup) |
+| `data_restore` | host | Overwrites the data directory from a backup. | [`restore_from_backup`](sysadmin.md#restore_from_backup), [`restore_to_point_in_time`](sysadmin.md#restore_to_point_in_time) |
 | `bundle_create` | incident | Writes a diagnostic bundle to disk. | [`create_incident_bundle`](incident.md#create_incident_bundle) |

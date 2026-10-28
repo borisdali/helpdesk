@@ -2,7 +2,7 @@
 
 # Sysadmin agent tools
 
-The `sysadmin` agent (`sysadmin_agent`) publishes 12 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
+The `sysadmin` agent (`sysadmin_agent`) publishes 13 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
 
 | Tool | Action class | Capabilities |
 |---|---|---|
@@ -16,6 +16,7 @@ The `sysadmin` agent (`sysadmin_agent`) publishes 12 tools to the [Tool Registry
 | [`restart_container`](#restart_container) | destructive | `process_restart` |
 | [`restart_service`](#restart_service) | destructive | `process_restart` |
 | [`restore_from_backup`](#restore_from_backup) | destructive | `data_restore` |
+| [`restore_to_point_in_time`](#restore_to_point_in_time) | destructive | `data_restore` |
 | [`run_pgbackrest_backup`](#run_pgbackrest_backup) | write | `backup_run` |
 | [`verify_restore_recovery`](#verify_restore_recovery) | read | `recovery_result` |
 
@@ -190,6 +191,26 @@ Restore the database from the latest pgBackRest backup, overwriting the current 
 |---|---|---|---|
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
+
+## `restore_to_point_in_time`
+
+Restore the database to a recovery target (a time or an LSN) instead of to the end of the archive, overwriting the current data directory (destructive — requires operator approval). The target and plan_digest come from an approved plan_point_in_time_recovery: never choose or adjust a target yourself, and use exactly the values you were given. Refuses if the server is still accepting connections, if it is a standby, if a postmaster is running, if the plan is not feasible, or if the plan has changed since it was approved (the digest no longer matches). It restores the backup chosen by the plan with pgBackRest, stopping at the target and promoting to a new timeline; the WAL that was in pg_wal is moved aside (saved_wal) and not replayed. It does NOT keep or push that WAL, so everything committed after the target is discarded. After restarting the instance (restart_container / restart_service), call verify_restore_recovery: it checks PostgreSQL stopped at the target and reports target_not_reached if the archive ran out first. On Kubernetes it scales the StatefulSet to 0 and restores in a one-off pod, as restore_from_backup does.
+
+- **Action class:** destructive
+- **Capabilities:** `data_restore`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.15.1 `restore_to_point_in_time` — restore to a recovery target](../MUTATION_TOOLS.md#1151-restore_to_point_in_time--restore-to-a-recovery-target)
+  - [BACKUP.md › 3. Restore from backup after data loss](../BACKUP.md#3-restore-from-backup-after-data-loss)
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `plan_digest` | string | yes | The plan_digest from the plan_point_in_time_recovery result that was approved. The restore recomputes the plan and refuses if it no longer matches. |
+| `recovery_target_type` | string | yes | Where to stop: 'time' or 'lsn'. Supplied by the approved request, never chosen by you. |
+| `recovery_target_value` | string | yes | The approved recovery target: an RFC3339 timestamp with a zone, or an LSN. Use exactly the value you were given. |
+| `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
+| `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 
 ## `run_pgbackrest_backup`
 
