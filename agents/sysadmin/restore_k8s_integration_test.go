@@ -44,8 +44,11 @@ type k8sCluster struct {
 	pod      string
 	agentURL string
 	target   string
-	apiKey   string       // bearer token for an agent that enforces identity; empty when it doesn't
-	host     resolvedHost // the harness's own view, for kubectl from here
+	apiKey   string // bearer token for an agent that enforces identity; empty when it doesn't
+	// lastPlanRaw is the last plan_point_in_time_recovery output, as the agent
+	// sent it (to tell an agent that predates a field from one that left it out).
+	lastPlanRaw string
+	host        resolvedHost // the harness's own view, for kubectl from here
 }
 
 func k8sInCluster(t *testing.T) *k8sCluster {
@@ -433,6 +436,7 @@ func (c *k8sCluster) planPITR(typ, val string, wantFeasible bool) PITRPlan {
 		if errStr != "" || json.Unmarshal([]byte(out), &plan) != nil {
 			c.t.Fatalf("plan_point_in_time_recovery: %s %s", out, errStr)
 		}
+		c.lastPlanRaw = out
 		// The pod is up while this polls: a target in WAL it has not archived
 		// yet is feasible but still needs a flush, and the restore that
 		// follows (a crashed, stopped instance) cannot flush.
@@ -590,6 +594,11 @@ func TestIntegration_K8sCluster_RestoreToPointInTime_Live(t *testing.T) {
 
 	c.step("2. plan the serving pod: feasible, with a digest")
 	plan := c.planPITR(TargetTime, target, false)
+	// An agent built before the live-instance support does not report whether
+	// the instance is serving, and would refuse (or mishandle) the stop below.
+	if !strings.Contains(c.lastPlanRaw, `"instance_serving"`) {
+		t.Skip("the deployed sysadmin agent predates the live-instance restore (its plan has no instance_serving): rebuild the image, load it into the cluster and helm upgrade, as for the first PITR test")
+	}
 	if plan.Status != PITRFeasible || !plan.InstanceServing || plan.PlanDigest == "" {
 		t.Fatalf("plan = %+v", plan)
 	}
