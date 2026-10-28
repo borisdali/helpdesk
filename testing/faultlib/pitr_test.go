@@ -364,25 +364,33 @@ func TestRemediator_PITRSetupErrors(t *testing.T) {
 
 // ── the catalog's fault ──────────────────────────────────────────────────────
 
-func TestCatalog_DroppedTableFault_IsWellFormed(t *testing.T) {
+func TestCatalog_DroppedTableFaults_AreWellFormed(t *testing.T) {
 	cat, err := LoadBuiltinCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f Failure
-	for _, c := range cat.Failures {
-		if c.ID == "db-pitr-dropped-table" {
-			f = c
+	for _, id := range []string{"db-pitr-dropped-table", "db-pitr-dropped-table-k8s"} {
+		var f Failure
+		for _, c := range cat.Failures {
+			if c.ID == id {
+				f = c
+			}
 		}
+		if f.ID == "" {
+			t.Fatalf("%s is missing from the catalog", id)
+		}
+		t.Run(id, func(t *testing.T) { checkDroppedTableFault(t, f) })
 	}
-	if f.ID == "" {
-		t.Fatal("db-pitr-dropped-table is missing from the catalog")
-	}
+}
+
+func checkDroppedTableFault(t *testing.T, f Failure) {
+	t.Helper()
 	if f.PITR == nil || f.PITR.Type() != "time" || !f.PITR.AllowStopServing {
 		t.Errorf("pitr spec = %+v: the dropped table leaves the database serving, so the approval must allow stopping it", f.PITR)
 	}
-	if f.DiagnosisPlaybookSeriesID != "pbs_pgbackrest_pitr_triage" || f.AgentConnOverride != "pgbackrest-db" || f.DirectAgent != "sysadmin" {
-		t.Errorf("routing = %q %q %q", f.DiagnosisPlaybookSeriesID, f.AgentConnOverride, f.DirectAgent)
+	wantConn := map[string]string{"db-pitr-dropped-table": "pgbackrest-db", "db-pitr-dropped-table-k8s": "pgbackrest-k8s-destruct"}[f.ID]
+	if f.DiagnosisPlaybookSeriesID != "pbs_pgbackrest_pitr_triage" || f.AgentConnOverride != wantConn || f.DirectAgent != "sysadmin" {
+		t.Errorf("routing = %q %q %q, want conn %q", f.DiagnosisPlaybookSeriesID, f.AgentConnOverride, f.DirectAgent, wantConn)
 	}
 	if !strings.Contains(f.Inject.ScriptInline, "echo \"PITR_TARGET time=$T lsn=$LSN\"") {
 		t.Error("the inject script does not print its PITR_TARGET line")
@@ -396,9 +404,15 @@ func TestCatalog_DroppedTableFault_IsWellFormed(t *testing.T) {
 	if strings.Contains(f.Prompt, "2026") || strings.Contains(strings.ToLower(f.Prompt), "lsn=") {
 		t.Errorf("the prompt names a target: the harness supplies it, the model must not be handed one: %q", f.Prompt)
 	}
+	// The check of the rows themselves: verify_sql where the harness can reach
+	// the database, verify_exec (kubectl exec) where it cannot.
+	check := f.Remediation.VerifySQL + f.Remediation.VerifyExec
+	if f.Remediation.VerifySQL == "" && f.Remediation.VerifyExec == "" {
+		t.Error("no verify_sql or verify_exec: the rows are never checked")
+	}
 	for _, want := range []string{"pitr_after_drop", "pitr_orders", "= 5"} {
-		if !strings.Contains(f.Remediation.VerifySQL, want) {
-			t.Errorf("verify_sql lacks %q: %s", want, f.Remediation.VerifySQL)
+		if !strings.Contains(check, want) {
+			t.Errorf("the recovery check lacks %q: %s", want, check)
 		}
 	}
 	if f.TimeoutDuration() < 300*time.Second {

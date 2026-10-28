@@ -1264,6 +1264,168 @@ failures:
         narrative: "Same chain as db-pgdata-corrupted over a Kubernetes pod: pbs_db_data_loss_triage front-loads single_instance/backup_tool/pitr_decided and hands off to pbs_sysadmin_host_triage, which reads runtime=kubectl from check_host, reads the pod's logs with get_host_logs (kubectl logs, the crashed run first) and finds the \"could not find the database system\" signature, then transitions to pbs_pgbackrest_health_triage (healthy backup, continuous WAL chain) and pbs_pgbackrest_restore_remediate, which restores in a one-off pod with the StatefulSet scaled to 0 and resumes it with restart_container."
     timeout: 420s
 
+  - id: db-pitr-dropped-table-k8s
+    name: "A table was dropped on a live database — point-in-time restore to just before (Kubernetes pod)"
+    category: database
+    severity: high
+    description: >
+      db-pitr-dropped-table against the self-managed pgBackRest pod on
+      Kubernetes, in its own namespace (db-destruct): the pod is up and serving
+      when pitr_orders (five rows) is dropped and pitr_after_drop is created.
+      Restoring to the latest backup would replay the DROP, so the recovery is
+      a point-in-time restore to the moment before it. The inject script
+      commits the rows, takes an incremental backup after them, notes the
+      database's own clock and prints it as PITR_TARGET; the harness supplies
+      it on the triage run and, at the gate, with the digest of the plan it
+      read from the in-cluster sysadmin agent. The approval allows stopping the
+      running pod: the restore flushes its WAL to the archive, stops it cleanly,
+      scales the StatefulSet to 0, restores in a one-off pod on its volumes and
+      the playbook resumes it with restart_container. verify_exec then checks
+      the rows themselves from inside the pod.
+    agent_conn_override: pgbackrest-k8s-destruct
+    direct_agent: sysadmin
+    pitr:
+      target_type: time
+      allow_stop_serving: true
+    prerequisites: |
+      The helpdesk stack deployed in-cluster with an inventory entry
+      pgbackrest-k8s-destruct for namespace db-destruct, a sysadmin agent image
+      that has the point-in-time tools (rebuild after v0.33 P4), and the
+      pgBackRest pod applied there with a recent full backup (what
+      `make integration-k8s` does first). From the laptop, forward the gateway
+      and the sysadmin agent (the harness reads the plan from the latter, as an
+      operator would):
+        kubectl -n helpdesk-system port-forward svc/helpdesk-gateway 18080:8080 &
+        kubectl -n helpdesk-system port-forward svc/helpdesk-sysadmin-agent 11103:1103 &
+      Then:
+        go run ./testing/cmd/faulttest run --ids db-pitr-dropped-table-k8s \
+          --remediate --via-gateway --gateway http://localhost:18080 --api-key <key> \
+          --sysadmin-agent http://localhost:11103 --sysadmin-api-key <key> \
+          --conn pgbackrest-k8s-destruct --context minikube \
+          --approval-mode force --gate-escalation --operator <you>
+
+      Destructive: the inject and teardown scripts refuse any namespace that
+      does not end in -destruct. The live restore stops the pod, so do not run
+      this alongside other faults against the same namespace.
+    inject_timeout: 180s
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db-destruct
+        case "$NS" in *-destruct) ;; *) echo "refusing to damage a database in namespace $NS: it must end in -destruct" >&2; exit 1;; esac
+        K="kubectl $CTX_ARG -n $NS"
+        POD=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
+        [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        # SQL goes in on stdin, so no layer of quoting touches it.
+        Q() { printf '%s\n' "$1" | $K exec -i "$POD" -- su postgres -c 'psql -d testdb -v ON_ERROR_STOP=1 -Atq'; }
+        for i in $(seq 1 60); do [ "$(Q 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        [ "$(Q 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ]
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "CREATE TABLE pitr_orders (id int PRIMARY KEY, item text)"
+        Q "INSERT INTO pitr_orders SELECT g, 'order-' || g FROM generate_series(1, 5) g"
+        # A backup that finishes after the rows, so a restore can start from it.
+        $K exec "$POD" -- su postgres -c 'pgbackrest --stanza=main --type=incr backup' >/dev/null 2>&1
+        sleep 3
+        T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        sleep 2
+        # The damage, after the target: another table, and the drop.
+        Q "CREATE TABLE pitr_after_drop (id int)"
+        Q "INSERT INTO pitr_after_drop VALUES (1)"
+        Q "DROP TABLE pitr_orders"
+        echo "PITR_TARGET time=$T lsn=$LSN"
+    teardown:
+      type: shell_exec
+      # (db-pgdata-corrupted-k8s's repair, plus dropping this fault's tables.)
+      # Repairs the cluster directly, not through any agent tool (same
+      # convention as the Docker and VM faults: --repeat runs skip
+      # remediation, and a failed remediation must not leave the pod down).
+      # Nothing to do when the pod is ready; otherwise it does what the
+      # agent's restore does, by hand: scale to 0, restore in a one-off pod on
+      # the StatefulSet's volumes, scale back up. Also removes the
+      # pg_wal.saved-* copies a restore leaves on the repo volume.
+      script_inline: |
+        set -e
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        NS=db-destruct
+        case "$NS" in *-destruct) ;; *) echo "refusing to repair namespace $NS: it must end in -destruct" >&2; exit 1;; esac
+        K="kubectl $CTX_ARG -n $NS"
+        PROMOTED="psql -d testdb -Atc 'SELECT NOT pg_is_in_recovery()'"
+        wait_promoted() {
+          for i in $(seq 1 90); do
+            [ "$($K exec pgbackrest-demo-0 -- su postgres -c "$PROMOTED" 2>/dev/null)" = t ] && return 0
+            sleep 2
+          done
+          echo "pgbackrest-demo-0 did not finish recovery" >&2
+          return 1
+        }
+        READY=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
+        if [ "$READY" = true ]; then
+          wait_promoted
+          $K exec pgbackrest-demo-0 -- sh -c 'rm -rf /var/lib/pgbackrest/pg_wal.saved-*'
+          # Up (remediation worked, or never ran): drop what this fault made and
+          # let the drop reach the archive.
+          $K exec -i pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -v ON_ERROR_STOP=1 -q' <<'SQL'
+        DROP TABLE IF EXISTS pitr_orders;
+        DROP TABLE IF EXISTS pitr_after_drop;
+        SELECT pg_switch_wal();
+        SQL
+          echo "pgbackrest-demo is ready: dropped this fault's tables"
+          exit 0
+        fi
+        $K scale statefulset/pgbackrest-demo --replicas=0
+        $K wait --for=delete pod -l app=pgbackrest-demo --timeout=120s || true
+        OVR='{"apiVersion":"v1","spec":{"restartPolicy":"Never","volumes":[{"name":"pgdata","persistentVolumeClaim":{"claimName":"pgdata-pgbackrest-demo-0"}},{"name":"pgbackrest-repo","persistentVolumeClaim":{"claimName":"pgbackrest-repo-pgbackrest-demo-0"}}],"containers":[{"name":"fault-repair","image":"docker-postgres-pgbackrest:latest","imagePullPolicy":"Never","command":["su","postgres","-c","PGDATA=$(grep ^pg1-path= /etc/pgbackrest.conf | cut -d= -f2); rm -f $PGDATA/postmaster.pid; pgbackrest --stanza=main --delta restore; rm -rf /var/lib/pgbackrest/pg_wal.saved-*"],"volumeMounts":[{"name":"pgdata","mountPath":"/var/lib/postgresql/data"},{"name":"pgbackrest-repo","mountPath":"/var/lib/pgbackrest"}]}]}}'
+        $K delete pod fault-repair --ignore-not-found --wait=true
+        $K run fault-repair --image=docker-postgres-pgbackrest:latest --restart=Never --overrides="$OVR"
+        PH=""
+        for i in $(seq 1 90); do
+          PH=$($K get pod fault-repair -o jsonpath='{.status.phase}' 2>/dev/null || true)
+          [ "$PH" = Succeeded ] || [ "$PH" = Failed ] && break
+          sleep 2
+        done
+        $K logs fault-repair 2>&1 | grep -v "WARN: environment contains invalid option" || true
+        $K delete pod fault-repair --wait=false
+        [ "$PH" = Succeeded ] || { echo "repair restore ended $PH" >&2; exit 1; }
+        $K scale statefulset/pgbackrest-demo --replicas=1
+        $K wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=300s
+        wait_promoted
+    diagnosis_playbook_series_id: pbs_pgbackrest_pitr_triage
+    remediation:
+      # The harness has no route to the pod's ClusterIP, so the rows are checked
+      # from inside it: the dropped table is back with all five rows, the table
+      # made after the drop is gone, and the instance has finished recovery.
+      verify_exec: |
+        CTX_ARG=""
+        [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+        [ "$(kubectl $CTX_ARG -n db-destruct exec pgbackrest-demo-0 -- su postgres -c "psql -d testdb -Atc \"SELECT NOT pg_is_in_recovery() AND to_regclass('public.pitr_after_drop') IS NULL AND (SELECT count(*) FROM public.pitr_orders) = 5\"" 2>/dev/null)" = t ]
+      verify_timeout: "240s"
+    prompt: >
+      An operator reports that the table pitr_orders on this database was
+      dropped by mistake a few minutes ago, and wants the database back as it
+      was just before. The connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. The recovery target comes with this request;
+      do not choose or change one. Plan the point-in-time restore and report
+      whether it is feasible.
+    evaluation:
+      expected_tools:
+        - plan_point_in_time_recovery
+      expected_keywords:
+        any_of:
+          - "plan_digest"
+          - "feasible"
+          - "point-in-time"
+          - "pitr_orders"
+      expected_diagnosis:
+        category: "pitr_plan_feasible"
+        narrative: "Same as db-pitr-dropped-table over a Kubernetes pod: the triage plans the supplied target with plan_point_in_time_recovery and reports it feasible with the plan digest, without choosing a target or calling a restore tool; the chain holds at a gate (recovery_target_required) for the harness to approve; the restore flushes the running pod's WAL, stops it, scales the StatefulSet to 0, restores in a one-off pod and the remediation playbook resumes it with restart_container and verifies where recovery stopped."
+    timeout: 420s
+
   - id: db-pgdata-corrupted-vm
     name: "Data directory corrupted — restore from latest backup (real host/VM)"
     category: database

@@ -89,10 +89,17 @@ Each row is a recorded run; the incident IDs are in the vault (`faulttest vault 
 | K8s Job | K8s | pod | `db-pgdata-corrupted-k8s` (four hops, Decision Hub feedback) | `plr_cb23439f` |
 | K8s Job | K8s | Ubuntu VM over SSH | `db-pgbackrest-wal-gap-vm` | `plr_85721afd` |
 | K8s Job | K8s | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops, Decision Hub feedback) | `plr_f8cee154` |
-| `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify (`make integration-k8s`, 23 checks) | |
+| `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify, and point-in-time restore of a crashed pod and of a **running** one (stop, scale to 0, one-off-pod restore, resume) (`make integration-k8s`, 28 checks; needs `K8S_SYSADMIN_API_KEY` on a release that enforces identity) | 2026-10-28 |
+| `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | point-in-time restore to a time and to an LSN, of a stopped and of a **running** instance (archive flushed, clean stop, restore in a throwaway container, `restart_container`), a target the archive never reaches then retried, and the catalog fault `db-pitr-dropped-table` from inject to `verify_sql` | `agents/sysadmin` `pitr_integration_test.go` |
 
 Not yet run: the destructive teardown *repair* branch of `db-pgdata-corrupted-k8s` from a Job (the pod had
 recovered, so the teardown found nothing to repair).
+
+Point-in-time recovery (v0.33) is **not yet run** with a live model on any platform (the `faulttest`
+fault `db-pitr-dropped-table` is built; its model-free proof is the Docker row above), and **not run at all
+on a systemd VM** (the stop path is tested against a fake SSH server; the VM needs `systemctl stop <unit>`
+in its sudoers file, which `setup-pgbackrest-vm.sh` now grants). The Kubernetes run above did not exercise
+the flush-first branch (its target was already archived); Docker did.
 
 ### Where the faulttest client can run
 

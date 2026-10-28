@@ -76,8 +76,11 @@ func loadConfigFromEnv() *faultlib.HarnessConfig {
 		DBAgentURL:       os.Getenv("FAULTTEST_DB_AGENT_URL"),
 		K8sAgentURL:      os.Getenv("FAULTTEST_K8S_AGENT_URL"),
 		SysadminAgentURL: os.Getenv("FAULTTEST_SYSADMIN_AGENT_URL"),
-		OrchestratorURL:  os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
-		KubeContext:      os.Getenv("FAULTTEST_KUBE_CONTEXT"),
+		// The sysadmin agent's own key; a point-in-time fault reads its plan from
+		// the agent's /tool endpoint with it (the gateway key is the fallback).
+		SysadminAPIKey:  os.Getenv("FAULTTEST_SYSADMIN_API_KEY"),
+		OrchestratorURL: os.Getenv("FAULTTEST_ORCHESTRATOR_URL"),
+		KubeContext:     os.Getenv("FAULTTEST_KUBE_CONTEXT"),
 		// External PG mode: only external_compat faults, SQL-based injection.
 		External: os.Getenv("FAULTTEST_EXTERNAL") == "true",
 		// SSH mode: set FAULTTEST_SSH_HOST to route ssh_exec faults via ExternalInject.
@@ -140,7 +143,6 @@ func findTestingDir() string {
 	}
 	return "testing"
 }
-
 
 // TestMain validates prerequisites before running tests.
 func TestMain(m *testing.M) {
@@ -344,6 +346,12 @@ func TestFaultInjection(t *testing.T) {
 			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
 				remediator.SetFaultStart(faultStart)
+				// A point-in-time fault's recovery target is its inject script's
+				// own output; the Remediator approves the gate with it (and with
+				// nothing for any other fault).
+				if err := remediator.SetPITR(f, cycle.InjectOutput); err != nil {
+					t.Fatalf("Point-in-time target: %v", err)
+				}
 				switch {
 				case resp.Status == "pending_gate":
 					// Triage ended at an escalation gate (e.g. sysadmin cross-domain hand-off).
