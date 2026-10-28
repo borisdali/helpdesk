@@ -16,6 +16,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/playbooks"
+	"helpdesk/testing/faultlib"
 )
 
 func TestRecoveryTargetSpec_Validate(t *testing.T) {
@@ -743,5 +744,61 @@ func TestResolveDecision_Gate_PITR_StopServing(t *testing.T) {
 	}
 	if got := sentRecoveryApproval(t, agent); got["stop_serving"] != true {
 		t.Errorf("the hub dropped allow_stop_serving: %v", got)
+	}
+}
+
+// ── the faulttest harness and the gateway agree on the wire ──────────────────
+
+// What the harness sends at the gate is what the gateway reads: the same JSON
+// goes through the gateway's own decoding and validation, and comes out as an
+// approval that may restore a running instance.
+func TestFaultlibGateApproval_IsWhatTheGatewayAccepts(t *testing.T) {
+	sent := faultlib.ProceedEscalationRequest{
+		Resolution: "approved", ResolvedBy: "faulttest", ApprovalMode: "auto", Purpose: "remediation",
+		RecoveryTarget:      &faultlib.PITRTarget{Type: "time", Value: "2026-10-28T17:11:10Z"},
+		PlanDigest:          "0123456789abcdef",
+		AcknowledgeDataLoss: true,
+		AllowStopServing:    true,
+	}
+	raw, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ProceedEscalationRequest
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields() // a field the harness sends and the gateway ignores would be a silent failure
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("the gateway does not read what the harness sends: %v\n%s", err, raw)
+	}
+	ap, status, msg := recoveryApprovalFromGate(got, "time=2026-10-28T17:11:10Z", "faulttest")
+	if status != 0 || !ap.Approved() || !ap.StopServing || ap.Value != "2026-10-28T17:11:10Z" || ap.PlanDigest != "0123456789abcdef" {
+		t.Fatalf("approval = %+v, status %d %s", ap, status, msg)
+	}
+
+	// Without the stop authorization the harness leaves the field out, and the
+	// gateway reads that as not allowed.
+	sent.AllowStopServing = false
+	raw, _ = json.Marshal(sent)
+	got = ProceedEscalationRequest{}
+	json.Unmarshal(raw, &got) //nolint:errcheck
+	if ap, _, _ := recoveryApprovalFromGate(got, "", "faulttest"); ap == nil || ap.StopServing {
+		t.Errorf("approval = %+v", ap)
+	}
+}
+
+// The recovery_target the harness puts on the triage request is one the
+// gateway accepts and stores.
+func TestFaultlibRunRequest_RecoveryTargetIsWhatTheGatewayAccepts(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"context":         "p",
+		"skip_trust_gate": true,
+		"recovery_target": faultlib.PITRTarget{Type: "lsn", Value: "0/3000028"},
+	})
+	var req PlaybookRunRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	if err := req.RecoveryTarget.Validate(); err != nil || req.RecoveryTarget.stored() != "lsn=0/3000028" {
+		t.Errorf("validate: %v, stored %q", err, req.RecoveryTarget.stored())
 	}
 }

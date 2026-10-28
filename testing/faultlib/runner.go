@@ -173,6 +173,16 @@ func (r *Runner) runViaPlaybook(ctx context.Context, f Failure) testutil.AgentRe
 			reqBody["remediation_series_id"] = f.Remediation.PlaybookID
 		}
 	}
+	// A point-in-time fault names its recovery target on the triage run, as the
+	// operator who starts it would: the gateway stores it on the run and the
+	// plan tool plans exactly that.
+	target, isPITR, terr := PITRTargetFor(ctx, f)
+	if terr != nil {
+		return testutil.AgentResponse{Duration: time.Since(start), Error: fmt.Errorf("fault %s: %w", f.ID, terr)}
+	}
+	if isPITR {
+		reqBody["recovery_target"] = target
+	}
 	body, _ := json.Marshal(reqBody)
 
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbooks/" + playbookID + "/run"

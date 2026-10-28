@@ -83,6 +83,14 @@ type ProceedEscalationRequest struct {
 	// At-gate feedback — captured before remediation runs.
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
 	VerdictNotes   string `json:"verdict_notes,omitempty"`
+
+	// Point-in-time restore approval (the gateway's recovery_target.go). Set by
+	// the Remediator for a PITR fault (Remediator.SetPITR); a caller leaves them
+	// alone.
+	RecoveryTarget      *PITRTarget `json:"recovery_target,omitempty"`
+	PlanDigest          string      `json:"plan_digest,omitempty"`
+	AcknowledgeDataLoss bool        `json:"acknowledge_data_loss,omitempty"`
+	AllowStopServing    bool        `json:"allow_stop_serving,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.
@@ -99,7 +107,8 @@ type ApproveRunStep struct {
 type Remediator struct {
 	cfg        *HarnessConfig
 	client     *http.Client
-	faultStart time.Time // see SetFaultStart
+	faultStart time.Time  // see SetFaultStart
+	pitr       *pitrState // see SetPITR
 }
 
 // longClient is used for calls that block while an agent chain runs (e.g.
@@ -576,6 +585,11 @@ func (r *Remediator) findChildRun(ctx context.Context, priorRunID string) (bool,
 
 // ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req ProceedEscalationRequest) (*ApproveRunResponse, error) {
+	// A point-in-time fault is approved the way an operator approves one: the
+	// target, the digest of the plan they looked at, and the acknowledgements.
+	if err := r.approvePITR(ctx, &req); err != nil {
+		return nil, err
+	}
 	body, _ := json.Marshal(req)
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID + "/proceed-escalation"
 

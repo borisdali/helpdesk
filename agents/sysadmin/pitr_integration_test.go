@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"helpdesk/internal/infra"
+	"helpdesk/testing/faultlib"
 	"helpdesk/testing/testutil"
 )
 
@@ -424,4 +425,109 @@ func TestIntegration_RestoreToPIT_Live_RealRestore(t *testing.T) {
 		t.Errorf("rows after the live point-in-time restore = %q, want only keep:5", got)
 	}
 	fixturePSQL(t, "DROP TABLE pitr_live")
+}
+
+// The catalog's own fault db-pitr-dropped-table, end to end on the Docker
+// fixture with no LLM: its real inject script (which prints the recovery
+// target), the target the harness would parse from it, the plan the harness
+// would read to approve the digest, the live restore the gate approval allows,
+// the playbook's restart, and the fault's own verify_sql. What this leaves to
+// the faulttest run is only the model's part of the chain.
+func TestIntegration_PITRFault_DroppedTable_Catalog(t *testing.T) {
+	ctx := pitrFixtureSetup(t)
+	t.Cleanup(func() { restoreIntegrationTeardown(t) })
+	oldStop := containerStopTimeout
+	containerStopTimeout = 3 * time.Second // the fixture's PID 1 ignores SIGTERM
+	t.Cleanup(func() { containerStopTimeout = oldStop })
+
+	cat, err := faultlib.LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f faultlib.Failure
+	for _, c := range cat.Failures {
+		if c.ID == "db-pitr-dropped-table" {
+			f = c
+		}
+	}
+	if f.ID == "" || f.PITR == nil {
+		t.Fatal("db-pitr-dropped-table is not in the catalog as a PITR fault")
+	}
+	repoRoot, _ := filepath.Abs("../..")
+	injector := faultlib.NewInjector(&faultlib.HarnessConfig{TestingDir: filepath.Join(repoRoot, "testing")})
+
+	injectCtx, cancel := context.WithTimeout(ctx, f.InjectTimeoutDuration())
+	defer cancel()
+	if err := injector.Inject(injectCtx, f); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	t.Cleanup(func() {
+		tctx, c := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer c()
+		if err := injector.Teardown(tctx, f); err != nil {
+			t.Logf("teardown: %v", err)
+		}
+	})
+	target, err := faultlib.ParsePITRMarker(injector.InjectOutput(), f.PITR.Type())
+	if err != nil {
+		t.Fatalf("the inject script's recovery target: %v\noutput: %s", err, injector.InjectOutput())
+	}
+	t.Logf("recovery target %s=%s", target.Type, target.Value)
+
+	// The damage is done and the database is serving.
+	if got := fixturePSQL(t, "SELECT to_regclass('public.pitr_orders') IS NULL AND to_regclass('public.pitr_after_drop') IS NOT NULL"); got != "t" {
+		t.Fatalf("the inject left the database undamaged: %s", got)
+	}
+	if up, _ := mustInstance(t, "pgbackrest-db").serving(ctx); !up {
+		t.Fatal("the fixture should still be serving after the inject")
+	}
+
+	// What the harness reads at the gate, and what the gate approval would carry.
+	plan := pitrWaitPlan(t, ctx, target)
+	if !plan.InstanceServing || plan.PlanDigest == "" {
+		t.Fatalf("plan = %+v", plan)
+	}
+	res, err := restoreToPITImpl(ctx, RestoreToPITArgs{Target: "pgbackrest-db", Stanza: "main", RecoveryTargetType: target.Type,
+		RecoveryTargetVal: target.Value, PlanDigest: plan.PlanDigest, AllowStopServing: f.PITR.AllowStopServing})
+	if err != nil {
+		t.Fatalf("restoreToPITImpl: %v", err)
+	}
+	if res.PreStop == nil || res.Stopped == "" {
+		t.Errorf("result = %+v: a serving instance should have been stopped", res)
+	}
+
+	mark := time.Now()
+	if rr, err := restartContainerImpl(ctx, RestartContainerArgs{Target: "pgbackrest-db", Reason: "start after point-in-time restore"}); err != nil || !rr.Success {
+		t.Fatalf("restart_container: %+v, %v", rr, err)
+	}
+	waitForRecoveryLog(t, mark, "database system is ready to accept connections")
+	verified, err := verifyRestoreRecoveryImpl(ctx, VerifyRestoreRecoveryArgs{Target: "pgbackrest-db"})
+	if err != nil || verified.Status != RestoreVerified {
+		t.Errorf("verify_restore_recovery = %+v, %v", verified, err)
+	}
+
+	// The fault's own recovery check, run the way the harness runs it.
+	if got := fixturePSQL(t, f.Remediation.VerifySQL); got != "t" {
+		t.Errorf("verify_sql = %q, want t (pitr_orders back with five rows, pitr_after_drop gone)", got)
+	}
+}
+
+// pitrWaitPlan plans target until the repository holds it or, for a serving
+// instance, the plan says a flush would (which is what the gate approves).
+func pitrWaitPlan(t *testing.T, ctx context.Context, target faultlib.PITRTarget) PITRPlan {
+	t.Helper()
+	plan, err := planPITRImpl(ctx, PlanPITRArgs{Target: "pgbackrest-db", Stanza: "main", RecoveryTargetType: target.Type, RecoveryTargetVal: target.Value})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("plan: %+v, %v", plan, err)
+	}
+	return plan
+}
+
+func mustInstance(t *testing.T, target string) pgInstance {
+	t.Helper()
+	inst, err := instanceFor(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inst
 }

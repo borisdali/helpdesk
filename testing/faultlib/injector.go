@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"helpdesk/internal/infra"
@@ -18,6 +19,9 @@ import (
 // Injector handles failure injection and teardown.
 type Injector struct {
 	cfg *HarnessConfig
+
+	mu         sync.Mutex
+	lastOutput string // the output of the last Inject (shell_exec); see InjectOutput
 }
 
 // NewInjector creates a new Injector with the given config.
@@ -28,11 +32,27 @@ func NewInjector(cfg *HarnessConfig) *Injector {
 // Inject applies a failure mode. In external mode or when SSHHost is configured,
 // ExternalInject is used when set.
 func (i *Injector) Inject(ctx context.Context, f Failure) error {
+	i.setOutput("")
 	spec := f.Inject
 	if (i.cfg.External || i.cfg.SSHHost != "") && f.ExternalInject.Type != "" {
 		spec = f.ExternalInject
 	}
 	return i.exec(ctx, spec, "inject")
+}
+
+// InjectOutput is the output of the last Inject, for a script that reports
+// something back (a PITR fault's PITR_TARGET line). Only shell_exec injections
+// keep their output; teardown's is not kept.
+func (i *Injector) InjectOutput() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.lastOutput
+}
+
+func (i *Injector) setOutput(s string) {
+	i.mu.Lock()
+	i.lastOutput = s
+	i.mu.Unlock()
 }
 
 // Teardown removes a failure mode. In external mode or when SSHHost is configured,
@@ -67,7 +87,7 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 	case "ssh_exec":
 		err = i.execSSH(ctx, spec)
 	case "shell_exec":
-		err = i.execShell(ctx, spec)
+		err = i.execShell(ctx, spec, phase)
 	default:
 		return fmt.Errorf("unknown inject type: %s", spec.Type)
 	}
@@ -194,7 +214,7 @@ func (i *Injector) execConfig(ctx context.Context, spec InjectSpec) error {
 
 // execShell runs an inline bash script or script file on the local host.
 // Useful for multi-step inject/teardown that mix docker exec, docker cp, etc.
-func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
+func (i *Injector) execShell(ctx context.Context, spec InjectSpec, phase string) error {
 	var scriptContent []byte
 	if spec.ScriptInline != "" {
 		scriptContent = []byte(spec.ScriptInline)
@@ -229,6 +249,9 @@ func (i *Injector) execShell(ctx context.Context, spec InjectSpec) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("shell_exec: %v\n%s", err, output)
+	}
+	if phase == "inject" {
+		i.setOutput(string(output))
 	}
 	slog.Info("shell_exec completed", "output", strings.TrimSpace(string(output)))
 	return nil

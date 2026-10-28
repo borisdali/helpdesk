@@ -62,6 +62,12 @@ func (r *Remediator) SetFaultStart(t time.Time) {
 	r.inner.SetFaultStart(t)
 }
 
+// SetPITR gives the current fault's recovery target (from its inject output) to
+// the Remediator that approves its gate; see faultlib.Remediator.SetPITR.
+func (r *Remediator) SetPITR(f Failure, injectOutput string) error {
+	return r.inner.SetPITR(f, injectOutput)
+}
+
 // NewRemediator creates a Remediator backed by cfg.
 func NewRemediator(cfg *HarnessConfig) *Remediator {
 	return &Remediator{

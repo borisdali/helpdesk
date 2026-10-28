@@ -50,7 +50,12 @@ var ToolPatterns = map[string][]string{
 	"check_memory":          {"memory", "mem", "available", "used"},
 	"read_pg_log_file":      {"postgresql", "log", "fatal", "panic", "crash", "error"},
 	"get_pgbackrest_status": {"pgbackrest", "stanza", "backup_stale", "status_code", "repo"},
-	"run_pgbackrest_backup": {"pgbackrest", "backup", "stanza"},
+	// Words only a point-in-time plan's output carries (plan_digest is its own
+	// field name; the others are the plan's statuses and fields).
+	"plan_point_in_time_recovery": {"plan_digest", "archive_flush_required", "instance_serving", "recovery target", "point-in-time"},
+	"restore_to_point_in_time":    {"saved_wal", "pre_stop", "normalized_target", "recovery target"},
+	"verify_restore_recovery":     {"redo_done_lsn", "stop_line", "target_not_reached", "new_timeline"},
+	"run_pgbackrest_backup":       {"pgbackrest", "backup", "stanza"},
 	// K8s agent tools.
 	"read_pod_file":    {"panic", "fatal", "no space left on device", "pg_wal", "is empty or not found"},
 	"debug_node_dmesg": {"dmesg", "oom", "out of memory", "killed process", "kernel"},

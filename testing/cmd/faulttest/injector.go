@@ -17,7 +17,8 @@ import (
 // directly afterward (e.g. {{connection_string}} prompt substitution, the
 // origConn save/restore dance in main.go) see it.
 type Injector struct {
-	cfg *HarnessConfig
+	cfg        *HarnessConfig
+	lastOutput string // see InjectOutput
 }
 
 // NewInjector creates an Injector backed by cfg.
@@ -30,10 +31,17 @@ func (inj *Injector) Inject(ctx context.Context, f Failure) error {
 	lfCfg := toLFConfig(inj.cfg)
 	// f is already a faultlib.Failure (Failure is a type alias — item 7
 	// dedup, v0.26); no conversion needed.
-	err := faultlib.NewInjector(lfCfg).Inject(ctx, f)
+	fi := faultlib.NewInjector(lfCfg)
+	err := fi.Inject(ctx, f)
 	inj.cfg.ConnStr = lfCfg.ConnStr
+	inj.lastOutput = fi.InjectOutput()
 	return err
 }
+
+// InjectOutput is the output of the last Inject (faultlib.InjectOutputter):
+// the wrapper builds a fresh faultlib.Injector per call, so it keeps the
+// output itself.
+func (inj *Injector) InjectOutput() string { return inj.lastOutput }
 
 // Teardown deactivates a failure mode and restores normal state.
 func (inj *Injector) Teardown(ctx context.Context, f Failure) error {

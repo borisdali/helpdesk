@@ -917,6 +917,35 @@ When writing customer catalog entries, prefer specific queries that directly ver
 
 ---
 
+### 6.6 Point-in-time recovery faults (`pitr:`)
+
+A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected, and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block, and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database; Docker fixture only so far).
+
+```yaml
+pitr:
+  target_type: time          # or lsn; default time
+  allow_stop_serving: true   # the gate approval may stop a RUNNING instance
+```
+
+**The contract with the inject script.** It must print one line, after the rows to keep are committed and before the damage is done, with the database's own clock (and WAL position):
+
+```
+PITR_TARGET time=2026-10-28T17:11:10Z lsn=0/3000028
+```
+
+Only `shell_exec` injections keep their output, and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
+
+**What the harness does with it**, in order:
+
+1. The target goes on the triage run's request as `recovery_target` (`{"type", "value"}`), so the gateway stores it and the plan tool plans exactly that.
+2. The chain stops at the gate into `pbs_pgbackrest_pitr_remediate` (reason `recovery_target_required`) whatever the approval mode.
+3. At the gate the harness reads the plan itself, from the sysadmin agent's `plan_point_in_time_recovery` (read-only), as an operator would, and approves with `recovery_target`, that plan's `plan_digest`, `acknowledge_data_loss`, and `allow_stop_serving` if the fault says so. It **refuses to approve a plan that is not feasible**, and reports why.
+4. `verify_sql` then checks the rows themselves.
+
+**It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset), and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
+
+To prove a PITR fault's script and recovery without a model, `TestIntegration_PITRFault_DroppedTable_Catalog` (`agents/sysadmin`, `go test -tags integration`) loads it from the catalog and runs its real inject, plan, live restore, restart and `verify_sql` on the Docker fixture.
+
 ## 7. Example workflows
 
 ### 7.1 Zero-setup smoke test (auto-DB)

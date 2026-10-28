@@ -1002,6 +1002,117 @@ failures:
         narrative: "Same diagnosis and chain as db-pgdata-corrupted (data_loss_triage -> sysadmin host triage -> pgbackrest_health_triage -> pgbackrest_restore_remediate). What differs is the restore: restore_from_backup's result has a pg_wal_tail with replay_through_wal past the archive end and row A's segment in pushed_to_archive, verify_restore_recovery returns verified with replayed_through_wal, and the remediation's findings say the commits in the pg_wal tail were recovered rather than lost."
     timeout: 300s
 
+  - id: db-pitr-dropped-table
+    name: "A table was dropped on a live database — point-in-time restore to just before"
+    category: database
+    severity: high
+    description: >
+      Logical corruption, not a crash: the database is up and serving when
+      someone drops a table (pitr_orders, five rows) and creates another
+      (pitr_after_drop) that must not survive either. Restoring to the latest
+      backup would replay the DROP, so the only recovery is a point-in-time
+      restore to the moment before it. The inject script commits the rows,
+      takes a backup after them, notes the database's own clock, and only then
+      does the damage; it prints that moment as PITR_TARGET, and the harness
+      supplies it the way the operator who noticed would: on the triage run's
+      request, then at the gate with the plan digest it read from the plan tool
+      and the acknowledgements. pbs_pgbackrest_pitr_triage plans it
+      (read-only); the gateway holds the boundary into
+      pbs_pgbackrest_pitr_remediate at a human gate whatever the approval mode;
+      the approval allows stopping the running instance; the restore flushes
+      its WAL to the archive, stops it, restores to the target in the
+      container's own volumes and the playbook starts it again. verify_sql
+      checks the rows themselves, not the chain's report: the dropped table is
+      back with all five rows and the table made after the drop is gone.
+    agent_conn_override: pgbackrest-db
+    direct_agent: sysadmin
+    pitr:
+      target_type: time
+      allow_stop_serving: true
+    prerequisites: |
+      The dedicated pgBackRest target with archiving configured
+      (testing/docker/setup-pgbackrest-backup.sh), Docker-only. The sysadmin
+      agent must be reachable at FAULTTEST_SYSADMIN_AGENT_URL: the harness
+      reads the plan from it, as the operator would, to approve the digest it
+      reviewed. Run with the gateway and remediation on
+      (faulttest-gateway-pgbackrest). A live restore stops the container, so
+      this fault is not run alongside others against the same target.
+    inject:
+      type: shell_exec
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        Q() { docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 -Atqc "$1"; }
+        # A fault before this one can hand over a server still recovering.
+        for i in $(seq 1 60); do [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ]
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "CREATE TABLE pitr_orders (id int PRIMARY KEY, item text)"
+        Q "INSERT INTO pitr_orders SELECT g, 'order-' || g FROM generate_series(1, 5) g"
+        # A backup that finishes after the rows, so a restore can start from it.
+        docker exec -u postgres "$C" pgbackrest --stanza=main --type=incr backup >/dev/null
+        sleep 3
+        T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        sleep 2
+        # The damage, after the target: another table, and the drop.
+        Q "CREATE TABLE pitr_after_drop (id int)"
+        Q "INSERT INTO pitr_after_drop VALUES (1)"
+        Q "DROP TABLE pitr_orders"
+        echo "PITR_TARGET time=$T lsn=$LSN"
+    inject_timeout: 180s
+    teardown:
+      type: shell_exec
+      # Up (remediation worked, or never ran): drop what this fault made. Down
+      # or stopped (a run that died between the stop and the restart): start
+      # the container, and if PostgreSQL still will not answer, restore to
+      # the latest backup as db-pgdata-corrupted does.
+      script_inline: |
+        set -e
+        C=helpdesk-test-pg-pgbackrest
+        if [ "$(docker inspect -f '{{.State.Running}}' "$C")" != true ]; then docker start "$C"; fi
+        for i in $(seq 1 60); do docker exec "$C" pg_isready -q || break; [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        docker exec -u postgres "$C" sh -c 'rm -rf /var/lib/postgresql/pg_wal.saved-*'
+        if docker exec "$C" pg_isready -q; then
+          docker exec -u postgres "$C" psql -d testdb -v ON_ERROR_STOP=1 \
+            -c "DROP TABLE IF EXISTS pitr_orders" -c "DROP TABLE IF EXISTS pitr_after_drop" -c "SELECT pg_switch_wal()"
+          exit 0
+        fi
+        docker exec -u postgres "$C" sh -c '
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza=main --delta restore
+        '
+        docker restart "$C"
+        for i in $(seq 1 60); do [ "$(docker exec -u postgres "$C" psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+    diagnosis_playbook_series_id: pbs_pgbackrest_pitr_triage
+    remediation:
+      verify_sql: >
+        SELECT to_regclass('public.pitr_after_drop') IS NULL
+           AND (SELECT count(*) FROM public.pitr_orders) = 5
+      verify_timeout: "180s"
+    prompt: >
+      An operator reports that the table pitr_orders on this database was
+      dropped by mistake a few minutes ago, and wants the database back as it
+      was just before. The connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. The recovery target comes with this request;
+      do not choose or change one. Plan the point-in-time restore and report
+      whether it is feasible.
+    evaluation:
+      expected_tools:
+        - plan_point_in_time_recovery
+      expected_keywords:
+        any_of:
+          - "plan_digest"
+          - "feasible"
+          - "point-in-time"
+          - "pitr_orders"
+      expected_diagnosis:
+        category: "pitr_plan_feasible"
+        narrative: "The triage must plan the supplied target with plan_point_in_time_recovery and report it feasible with the plan digest, the backup it would restore and what would be discarded; it must not choose a target, stop anything, or call a restore tool. The chain then holds at a gate (recovery_target_required) for a human; the harness approves the digest it read from the plan. The restore stops the running instance, restores to the target and the remediation playbook restarts it and verifies where recovery stopped."
+    timeout: 420s
+
   - id: db-pgdata-corrupted-k8s
     name: "Data directory corrupted — restore from latest backup (Kubernetes pod)"
     category: database

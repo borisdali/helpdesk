@@ -514,6 +514,23 @@ func cmdRun(args []string) {
 			// (after remediation, which needs the fault to remain injected),
 			// via an explicit call rather than defer since this is a plain
 			// for-loop, not a per-iteration closure.
+			//
+			// A point-in-time fault's recovery target is the inject script's
+			// own output: hand it to the Remediator that approves the gate (and
+			// clear it for any other fault).
+			if perr := remediator.SetPITR(f, cycle.InjectOutput); perr != nil {
+				slog.Error("point-in-time target", "id", f.ID, "rep", rep+1, "err", perr)
+				if terr := faultlib.TeardownFault(injector, f); terr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", terr)
+				}
+				repResults = append(repResults, EvalResult{
+					FailureID:   f.ID,
+					FailureName: f.Name,
+					Category:    f.Category,
+					Error:       fmt.Sprintf("point-in-time target: %v", perr),
+				})
+				break
+			}
 			resp := cycle.Response
 
 			if resp.CrystalBall {
