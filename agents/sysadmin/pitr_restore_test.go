@@ -484,3 +484,119 @@ func TestPITRRestoreScript_RefusesALivePostmaster(t *testing.T) {
 		t.Error("pgbackrest ran with a postmaster alive")
 	}
 }
+
+// Over real SSH (a systemd VM): the plan's reads and the restore script both
+// reach the host, the script as one `sh -c` with the pinned flags. The
+// segment-header read is refused here, so the plan falls back to the
+// backups' LSNs for the segment size, which is the path a host without
+// readable header segments takes.
+func TestRestoreToPIT_SSHDispatch(t *testing.T) {
+	dir := t.TempDir()
+	keyPath, clientPub := generateTestRSAKey(t, dir, "id_rsa")
+
+	var scripts []string
+	srv := startTestSSHServer(t, clientPub, func(cmd string) (string, uint32) {
+		switch {
+		case strings.Contains(cmd, "--target-action=promote"):
+			scripts = append(scripts, cmd)
+			return walTailSavedMarker + "/var/lib/postgresql/pg_wal.saved-20261027T150000Z\nrestore command end: completed successfully\n", 0
+		case strings.Contains(cmd, "pg_isready"):
+			return "no response", 1
+		case strings.Contains(cmd, "'info'"):
+			return readFixture(t, "multi_timeline_info.json"), 0
+		case strings.Contains(cmd, ".history"):
+			return readFixture(t, "multi_timeline_0000001E.history"), 0
+		case strings.Contains(cmd, "repo-get"):
+			return "unable to read", 1
+		case strings.Contains(cmd, "repo-ls") && strings.Contains(cmd, "--recurse"):
+			return readFixture(t, "multi_timeline_listing.json"), 0
+		case strings.Contains(cmd, "repo-ls"):
+			return readFixture(t, "multi_timeline_top.txt"), 0
+		}
+		return "unexpected command: " + cmd, 1
+	})
+	oldKH := os.Getenv("SSH_KNOWN_HOSTS")
+	t.Cleanup(func() { os.Setenv("SSH_KNOWN_HOSTS", oldKH) })                   //nolint:errcheck
+	os.Setenv("SSH_KNOWN_HOSTS", writeKnownHostsFile(t, srv.addr, srv.hostPub)) //nolint:errcheck
+	addr, port := hostPortOf(t, srv.addr)
+	withPgBackRestSSHInfra(t, addr, port, keyPath)
+
+	plan, err := planPITRImpl(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: pitrTestTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("plan over SSH: %+v, %v", plan, err)
+	}
+	if plan.WALContinuity.SegmentSizeSource == SegmentSizeFromWALHeader {
+		t.Errorf("segment size came from a header the server refused to serve")
+	}
+	res, err := restoreToPITImpl(context.Background(), RestoreToPITArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: pitrTestTarget, PlanDigest: plan.PlanDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scripts) != 1 || !strings.Contains(scripts[0], "--set=") || !strings.Contains(scripts[0], "--target-timeline=30") {
+		t.Fatalf("scripts sent over SSH: %v", scripts)
+	}
+	if res.SavedWAL != "/var/lib/postgresql/pg_wal.saved-20261027T150000Z" || res.Quiesced != "" {
+		t.Errorf("result = %+v: want the saved path and no quiesce on a systemd host", res)
+	}
+}
+
+// The approved digest does not depend on how far the archive has grown: a
+// live instance keeps archiving between the plan and the restore.
+func TestPITRPlanDigest_IgnoresArchiveGrowth(t *testing.T) {
+	b := PgBackRestBackup{Label: "L", StopTime: time.Date(2026, 10, 7, 4, 34, 37, 0, time.UTC)}
+	tgt := RecoveryTarget{TargetTime, "2026-10-09T00:00:00Z"}
+	mk := func(endWAL, endTime string) *WALContinuity {
+		return &WALContinuity{Status: WALContinuous, LatestTimeline: 30, ArchiveEndWAL: endWAL, ArchiveEndTime: endTime, SegmentSizeBytes: 16 << 20}
+	}
+	a := assessPITRPlan("main", tgt, "2026-10-09 00:00:00+00", b, mk("0000001E0000000000000005", "2026-10-11T20:30:09Z"))
+	later := assessPITRPlan("main", tgt, "2026-10-09 00:00:00+00", b, mk("0000001E0000000000000099", "2026-10-12T08:00:00Z"))
+	if a.Status != PITRFeasible || later.Status != PITRFeasible || a.PlanDigest != later.PlanDigest {
+		t.Errorf("digests differ as the archive grew: %s vs %s", a.PlanDigest, later.PlanDigest)
+	}
+	// ...but a different backup, target or timeline is a different decision.
+	other := mk("0000001E0000000000000005", "2026-10-11T20:30:09Z")
+	other.LatestTimeline = 31
+	for name, p := range map[string]PITRPlan{
+		"timeline": assessPITRPlan("main", tgt, "2026-10-09 00:00:00+00", b, other),
+		"backup":   assessPITRPlan("main", tgt, "2026-10-09 00:00:00+00", PgBackRestBackup{Label: "M", StopTime: b.StopTime}, mk("0000001E0000000000000005", "2026-10-11T20:30:09Z")),
+		"stanza":   assessPITRPlan("other", tgt, "2026-10-09 00:00:00+00", b, mk("0000001E0000000000000005", "2026-10-11T20:30:09Z")),
+	} {
+		if p.PlanDigest == a.PlanDigest {
+			t.Errorf("a different %s kept the same digest", name)
+		}
+	}
+}
+
+// With no pg_wal (the data directory is what was lost) the script has
+// nothing to save and still restores; on Kubernetes the saved copy goes to
+// the repo volume, because the one-off pod's own filesystem goes with it.
+func TestPITRRestoreScript_NoPgWAL_AndKubernetesSaveLocation(t *testing.T) {
+	out, code, _, _, calls := runPITRScript(t, func(pgdata string) { os.RemoveAll(pgdata + "/pg_wal") })
+	if code != 0 || strings.Contains(out, walTailSavedMarker) {
+		t.Errorf("exit %d, output %q: want a restore and no saved dir", code, out)
+	}
+	if b, err := os.ReadFile(calls); err != nil || !strings.Contains(string(b), "--delta restore") {
+		t.Errorf("pgbackrest was not run: %q %v", b, err)
+	}
+
+	t.Setenv("HELPDESK_WAL_SAVE_IN_REPO", "1")
+	out, code, _, parent, _ := runPITRScript(t, func(pgdata string) {
+		os.WriteFile(pgdata+"/pg_wal/000000010000000000000001", []byte("wal"), 0o644)
+	})
+	savedTo, _, _ := parseWALTailOutput(out)
+	// The repo path is read from the config as written, not resolved.
+	if code != 0 || !strings.HasPrefix(savedTo, parent+"/repo/pg_wal.saved-") {
+		t.Errorf("exit %d, saved to %q: want it under the repo path", code, savedTo)
+	}
+}
+
+// A PITR log with no prediction on record (the agent restarted since the
+// restore) is reported as unverified, never as a pass.
+func TestVerifyRestoreRecovery_PITRWithoutPrediction(t *testing.T) {
+	log := pitrFixture(t, "time_stop_before_promote.log")
+	st, _ := compareRecovery(nil, parseRecoveryLog(log))
+	if st != RestoreUnverified {
+		t.Errorf("status = %s, want unverified", st)
+	}
+}
