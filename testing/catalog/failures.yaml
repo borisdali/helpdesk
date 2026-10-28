@@ -1109,7 +1109,7 @@ failures:
           - "point-in-time"
           - "pitr_orders"
       expected_diagnosis:
-        category: "pitr_plan_feasible"
+        category: "plan_feasible"
         narrative: "The triage must plan the supplied target with plan_point_in_time_recovery and report it feasible with the plan digest, the backup it would restore and what would be discarded; it must not choose a target, stop anything, or call a restore tool. The chain then holds at a gate (recovery_target_required) for a human; the harness approves the digest it read from the plan. The restore stops the running instance, restores to the target and the remediation playbook restarts it and verifies where recovery stopped."
     timeout: 420s
 
@@ -1422,7 +1422,7 @@ failures:
           - "point-in-time"
           - "pitr_orders"
       expected_diagnosis:
-        category: "pitr_plan_feasible"
+        category: "plan_feasible"
         narrative: "Same as db-pitr-dropped-table over a Kubernetes pod: the triage plans the supplied target with plan_point_in_time_recovery and reports it feasible with the plan digest, without choosing a target or calling a restore tool; the chain holds at a gate (recovery_target_required) for the harness to approve; the restore flushes the running pod's WAL, stops it, scales the StatefulSet to 0, restores in a one-off pod and the remediation playbook resumes it with restart_container and verifies where recovery stopped."
     timeout: 420s
 

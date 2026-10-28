@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_triage
 name: "pgBackRest — Point-in-Time Recovery Triage"
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -74,6 +74,11 @@ guidance: |
   Ending A — the plan is feasible (status=feasible):
   HYPOTHESIS_1: <the recovery target is reachable from backup <backup_label>> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from the plan output>"
   ROOT_CAUSE: HYPOTHESIS_1
+  Emit exactly one HYPOTHESIS line in this ending. Do not add a second one to
+  restate a condition the plan already reports (archive_flush_required=true,
+  instance=serving): those are facts for FINDINGS, and a second hypothesis is
+  read as a competing diagnosis and raises an "uncertain diagnosis" warning at
+  the gate.
   FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; instance=<down|serving|unknown>; archive_flush_required=<true|false>
   TRANSITION_TO: pbs_pgbackrest_pitr_remediate
   The restore does not start on this line: a person reviews this plan at the

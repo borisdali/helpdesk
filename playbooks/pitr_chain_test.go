@@ -77,6 +77,8 @@ func TestPITRPlaybooks_Triage(t *testing.T) {
 		"Do NOT call restore_to_point_in_time or restore_from_backup",
 		"a person reviews this plan at the gate",
 		"You never stop anything yourself",
+		"Emit exactly one HYPOTHESIS line in this ending",
+		"read as a competing diagnosis",
 		"allow_stop_serving",
 		"archive_flush_required",
 	} {
