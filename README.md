@@ -130,6 +130,7 @@ aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two gu
 - **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
 - **[High Availability / Disaster Recovery](docs/HA_DR.md)** is the domain-specific deep dive: what's certified today (replication lag, replica disconnection) and what's on the roadmap (replica promotion, Patroni HA)
 - **[Backup & Restore](docs/BACKUP.md)** covers backup-taking health specifically: WAL archiving and pgBackRest job-level status, triage and narrow remediation
+- **[Point-in-time recovery](docs/PITR.md)** restores a single pgBackRest instance to a time or LSN a human chose, down or still serving: the safety model, the operator steps, the limits and what is verified
 
 ## Gateway REST API
 

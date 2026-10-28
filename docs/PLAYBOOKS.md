@@ -612,6 +612,36 @@ When `resolution: "approved"`, the response is whatever the remediation playbook
 
 The gateway emits a `gate_acknowledged` audit event recording the operator's identity, resolution, chosen approval mode, optional reason and any confidence warning. The triage run outcome is updated to `"transitioned"` for transition gates or `"escalated"` for escalation gates. Once resolved, the `reason` is available at any time via `GET /api/v1/decisions/gate:{runID}` in the `extra.resolved_reason` field.
 
+### Approving a point-in-time restore
+
+The gate into `pbs_pgbackrest_pitr_remediate` (reason `recovery_target_required`) is the one gate that needs more
+than a yes. No approval mode, `force` and `skip_trust_gate` included, passes it; the remediation cannot be
+started directly (`409`); and the body must carry the plan that was reviewed:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/fleet/playbook-runs/plr_a3f7c1b2/proceed-escalation \
+  -H "Content-Type: application/json" \
+  -d '{
+    "resolution":            "approved",
+    "resolved_by":           "alice",
+    "approval_mode":         "auto",
+    "recovery_target":       {"type": "time", "value": "2026-10-28T14:05:00Z"},
+    "plan_digest":           "3c7ae8cf0d79ffd9",
+    "acknowledge_data_loss": true,
+    "allow_stop_serving":    true
+  }'
+```
+
+| Field | Rule |
+|---|---|
+| `recovery_target` | Required. Must equal the target the run was started with (`409` otherwise): it cannot be changed once set |
+| `plan_digest` | Required. The 16-character `plan_digest` of the `plan_point_in_time_recovery` result you read, not the one the model reported |
+| `acknowledge_data_loss` | Required `true`: everything committed after the target is discarded |
+| `allow_stop_serving` | Only for an instance that is serving. Approving the target does not imply it |
+
+Each is a `400` when missing; a refusal records nothing and calls no agent. A denial needs none of them. The full
+procedure, including how to read the plan, is in [PITR.md](PITR.md#4-operating-it).
+
 ### Relationship to the two-playbook split
 
 The gate is complementary to — not a replacement for — the triage + remediation playbook pair. Triage and remediation playbooks remain separate, composable artifacts. The gate is a request-level option that adds a human checkpoint at the handoff. `prior_run_id` threading is automatic: the remediation playbook always starts with the full triage findings in context.

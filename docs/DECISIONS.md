@@ -216,6 +216,7 @@ The `{id}` prefix determines routing:
 | `reason` | Optional free-text; for gates it is stored in the audit trail; for feedback it becomes `verdict_notes` |
 | `approval_mode` | Gate only: approval mode for the triggered remediation playbook |
 | `approval_session` | Gate only: session token when `approval_mode=session` |
+| `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving` | Gate only, and only for a point-in-time gate (`gate_reason` `recovery_target_required`): required for approval, ignored otherwise. See [PITR.md](PITR.md#4-operating-it) |
 
 **Examples:**
 

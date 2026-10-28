@@ -260,8 +260,11 @@ the database system") and the instance won't start at all. §1/§2's R/O checks 
 there's nothing left to query. Recovery means overwriting the current data directory with a
 backup, which is the most destructive operation in this project. v0.31 scopes this to the
 narrowest real slice: restore to the latest available pgBackRest backup, a single standalone
-instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
-promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
+instance, no point-in-time target. Replica rebuild after promotion and non-pgBackRest restore
+are explicitly out of scope — see [§4](#4-roadmap).
+
+Restoring to a *chosen moment* instead (a table dropped at 14:05) is a separate tool and playbook pair
+since v0.33, `restore_to_point_in_time`, with its own safety model: see [Point-in-time recovery](PITR.md).
 
 ### **Three layers stand between a diagnosis and `restore_from_backup`**   
 These additional three layers of safegards come on top of the general
@@ -589,7 +592,8 @@ end.
 #### Underneath the layers: what's honest about the remediation, not oversold
 
 `restore_from_backup` is restore-to-latest only — pgBackRest's own default recovery target, no
-`--type`/`--target` flag, matching the stated scope exactly. It refuses outright if `pg_isready`
+`--type`/`--target` flag, matching the stated scope exactly. A recovery target lives in a different tool
+(`restore_to_point_in_time`, [PITR.md](PITR.md)) so this one stays unable to stop early. It refuses outright if `pg_isready`
 reports the instance still accepting connections — confirmed live, this is the one thing standing
 between restoring a dead instance and destroying a live one. It is classified
 `policy.ActionDestructive`, the same tier as `restart_container`/`restart_service`, flowing
@@ -745,6 +749,11 @@ of scope.
 ## 4. Roadmap
 
 Not yet built — tracked, not forgotten:
+
+- **Point-in-time recovery gaps ([PITR.md §7](PITR.md#7-limits)).**  
+  Built in v0.33 for a single instance, to a time or LSN, down or serving. Not yet: a systemd VM run, routing the
+  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive, named restore points
+  and transaction IDs, and approving the gate from `helpdesk-client`.
 
 - **Multi-node volumes and remote repos for the Kubernetes restore (§3).**  
   The agent-driven chain works on K8s since v0.33 ([Kubernetes](#the-agent-driven-chain-on-kubernetes));

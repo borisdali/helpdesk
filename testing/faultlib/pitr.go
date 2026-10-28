@@ -264,3 +264,25 @@ func validatePITR(f Failure) error {
 	}
 	return nil
 }
+
+// PITRSkipReason says why a sweep should not run f, or "" when it can. A
+// point-in-time fault needs the whole gateway chain (the target travels on the
+// triage run, the gate is held, the harness approves it) and the sysadmin
+// agent's URL to read the plan; run any other way it cannot succeed, and its
+// injection would damage a database for nothing.
+func PITRSkipReason(f Failure, cfg HarnessConfig) string {
+	if f.PITR == nil {
+		return ""
+	}
+	switch {
+	case !cfg.ViaGateway:
+		return "a point-in-time fault runs through the gateway (FAULTTEST_VIA_GATEWAY=true)"
+	case !cfg.RemediateEnabled:
+		return "a point-in-time fault needs remediation (FAULTTEST_REMEDIATE=true)"
+	case !cfg.GateEscalation:
+		return "a point-in-time fault needs the gate (FAULTTEST_GATE_ESCALATION=true)"
+	case cfg.SysadminAgentURL == "":
+		return "a point-in-time fault reads its plan from the sysadmin agent (FAULTTEST_SYSADMIN_AGENT_URL)"
+	}
+	return ""
+}

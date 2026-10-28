@@ -419,3 +419,29 @@ func checkDroppedTableFault(t *testing.T, f Failure) {
 		t.Errorf("timeout %s is too short for a flush, a stop, a restore and a restart", f.TimeoutDuration())
 	}
 }
+
+func TestPITRSkipReason(t *testing.T) {
+	pitr := Failure{ID: "p", PITR: &PITRSpec{}}
+	plain := Failure{ID: "x"}
+	full := HarnessConfig{ViaGateway: true, RemediateEnabled: true, GateEscalation: true, SysadminAgentURL: "http://a"}
+
+	if got := PITRSkipReason(plain, HarnessConfig{}); got != "" {
+		t.Errorf("a fault that is not a PITR one is never skipped, got %q", got)
+	}
+	if got := PITRSkipReason(pitr, full); got != "" {
+		t.Errorf("a fully configured run must not skip, got %q", got)
+	}
+	for name, mut := range map[string]func(*HarnessConfig){
+		"via-gateway":     func(c *HarnessConfig) { c.ViaGateway = false },
+		"remediate":       func(c *HarnessConfig) { c.RemediateEnabled = false },
+		"gate-escalation": func(c *HarnessConfig) { c.GateEscalation = false },
+		"sysadmin agent":  func(c *HarnessConfig) { c.SysadminAgentURL = "" },
+	} {
+		c := full
+		mut(&c)
+		got := PITRSkipReason(pitr, c)
+		if got == "" {
+			t.Errorf("without %s the fault cannot run and must be skipped", name)
+		}
+	}
+}

@@ -944,6 +944,8 @@ Only `shell_exec` injections keep their output, and the newest `PITR_TARGET` lin
 
 **It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset), and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
 
+The `go test` sweeps (`make faulttest`, `faulttest-gateway`) skip a PITR fault unless they run through the gateway with remediation, the gate and `FAULTTEST_SYSADMIN_AGENT_URL`, so they never inject a fault they cannot recover. `make faulttest-pitr FAULTTEST_GATEWAY_URL=… FAULTTEST_API_KEY=… FAULTTEST_SYSADMIN_AGENT_URL=…` runs the Docker one (`PITR_FAULT_IDS` picks another) against the pgBackRest fixture.
+
 To prove a PITR fault's script and recovery without a model, `TestIntegration_PITRFault_DroppedTable_Catalog` (`agents/sysadmin`, `go test -tags integration`) loads it from the catalog and runs its real inject, plan, live restore, restart and `verify_sql` on the Docker fixture.
 
 ## 7. Example workflows

@@ -207,6 +207,12 @@ func TestFaultInjection(t *testing.T) {
 				t.Skipf("Agent not reachable at %s", url)
 			}
 
+			// A point-in-time fault only makes sense through the whole gateway
+			// chain; skip it before its injection damages anything.
+			if why := faultlib.PITRSkipReason(f, *cfg); why != "" {
+				t.Skip(why)
+			}
+
 			// Check database connectivity for database failures.
 			if f.Category == "database" && cfg.ConnStr == "" {
 				t.Skip("FAULTTEST_CONN_STR not set")
