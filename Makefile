@@ -200,10 +200,18 @@ integration-k8s:
 	@case "$(K8S_DESTRUCT_NS)" in *-destruct) ;; *) echo "Error: K8S_DESTRUCT_NS=$(K8S_DESTRUCT_NS) must end in -destruct (these tests crash and restore its database)"; exit 1;; esac
 	kubectl --context $(K8S_CONTEXT) get namespace $(K8S_DESTRUCT_NS) >/dev/null 2>&1 || kubectl --context $(K8S_CONTEXT) create namespace $(K8S_DESTRUCT_NS)
 	kubectl --context $(K8S_CONTEXT) apply -n $(K8S_DESTRUCT_NS) -f testing/k8s/pgbackrest-demo.yaml
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
+	@# A pod a previous run left crash-looping (pg_control removed, then the run died
+	@# before it could repair it) must not stop this one: the test harness repairs it
+	@# from the existing backup before testing (it needs K8S_SYSADMIN_API_KEY on a
+	@# release that enforces identity). So waiting for it is best-effort, and the fresh
+	@# backup is taken only when the pod is up to take one.
+	-kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
+	@if kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=20s; then \
+		kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"; \
+		kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"; \
+	else \
+		echo "pgbackrest-demo-0 is not ready: no fresh backup was taken; the test harness will repair it from the existing backup"; \
+	fi
 	@kubectl --context $(K8S_CONTEXT) -n $(K8S_HELPDESK_NS) port-forward svc/helpdesk-sysadmin-agent $(K8S_SYSADMIN_PORT):1103 >/tmp/helpdesk-k8s-sysadmin-pf.log 2>&1 & PF=$$!; \
 		trap "kill $$PF 2>/dev/null" EXIT; sleep 3; \
 		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) HELPDESK_K8S_SYSADMIN_API_KEY=$(K8S_SYSADMIN_API_KEY) \
