@@ -146,8 +146,10 @@ func (r *Remediator) SetPITR(f Failure, injectOutput string) error {
 	return nil
 }
 
-// pitrPlan is the part of plan_point_in_time_recovery's result the harness uses.
-type pitrPlan struct {
+// PITRPlanView is the part of plan_point_in_time_recovery's result the harness
+// uses. Exported so the agent's own tests can hold its result to these JSON
+// names: a renamed field would otherwise read as an empty digest here.
+type PITRPlanView struct {
 	Status               string `json:"status"`
 	Detail               string `json:"detail"`
 	PlanDigest           string `json:"plan_digest"`
@@ -157,8 +159,8 @@ type pitrPlan struct {
 
 // fetchPITRPlan asks the sysadmin agent for the plan of the current target, as
 // an operator running the plan tool would. Read-only.
-func (r *Remediator) fetchPITRPlan(ctx context.Context) (pitrPlan, error) {
-	var plan pitrPlan
+func (r *Remediator) fetchPITRPlan(ctx context.Context) (PITRPlanView, error) {
+	var plan PITRPlanView
 	if r.cfg.SysadminAgentURL == "" {
 		return plan, fmt.Errorf("a point-in-time fault needs the sysadmin agent's URL to read the plan the operator approves (FAULTTEST_SYSADMIN_AGENT_URL)")
 	}
@@ -230,5 +232,35 @@ func (r *Remediator) approvePITR(ctx context.Context, req *ProceedEscalationRequ
 	slog.Info("point-in-time gate: approving the reviewed plan",
 		"target_type", target.Type, "target", target.Value, "plan_digest", plan.PlanDigest,
 		"instance_serving", plan.InstanceServing, "archive_flush_required", plan.ArchiveFlushRequired, "allow_stop_serving", req.AllowStopServing)
+	return nil
+}
+
+// validatePITR checks a fault's pitr block at catalog load, so a mistake
+// fails there rather than minutes into a run (or, for a customer's catalog,
+// on a database): the target type must be one the gateway takes, the inject
+// must be a script whose output the injector keeps and which prints the
+// target, and the fault must run through a diagnosis playbook, because the
+// gateway's triage request is where the target is sent.
+func validatePITR(f Failure) error {
+	if f.PITR == nil {
+		return nil
+	}
+	if t := f.PITR.TargetType; t != "" && t != "time" && t != "lsn" {
+		return fmt.Errorf("fault %q: pitr.target_type %q is not time or lsn", f.ID, t)
+	}
+	for what, spec := range map[string]InjectSpec{"inject": f.Inject, "external_inject": f.ExternalInject} {
+		if what == "external_inject" && spec.Type == "" {
+			continue // unset: the inject is used
+		}
+		if spec.Type != "shell_exec" {
+			return fmt.Errorf("fault %q: a pitr fault's %s must be shell_exec (only its output is kept, and it must print %s), not %q", f.ID, what, PITRMarker, spec.Type)
+		}
+		if !strings.Contains(spec.ScriptInline+spec.Script, PITRMarker) {
+			return fmt.Errorf("fault %q: the %s script never prints a %s line", f.ID, what, PITRMarker)
+		}
+	}
+	if f.DiagnosisPlaybookSeriesID == "" {
+		return fmt.Errorf("fault %q: a pitr fault needs diagnosis_playbook_series_id: the target is sent on the gateway's triage request", f.ID)
+	}
 	return nil
 }

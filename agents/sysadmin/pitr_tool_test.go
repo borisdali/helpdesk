@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/testing/faultlib"
 )
 
 // The multi_timeline fixtures: one full backup 20261007-043435F (stop
@@ -257,5 +259,45 @@ func TestPlanPITR_StatusReadFails(t *testing.T) {
 	events, qerr := store.Query(context.Background(), audit.QueryOptions{ToolName: "plan_point_in_time_recovery", EventType: audit.EventTypeToolExecution})
 	if qerr != nil || len(events) == 0 || events[0].Tool.Error == "" {
 		t.Fatalf("failed call not audited with its error: %v %+v", qerr, events)
+	}
+}
+
+// The harness (testing/faultlib) approves the digest it reads from this plan,
+// with its own struct. Its JSON names are held to the agent's here: a renamed
+// tag would otherwise read there as an empty digest, and the fault would fail
+// as "not feasible" for no visible reason.
+func TestPITRPlanJSON_IsWhatTheHarnessReads(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	_, _ = liveEnv(t)
+	plan := approvedLiveDigest(t, liveTarget) // a serving instance, a target the archive does not hold yet
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view faultlib.PITRPlanView
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Status != plan.Status || view.Detail != plan.Detail || view.PlanDigest != plan.PlanDigest ||
+		view.InstanceServing != plan.InstanceServing || view.ArchiveFlushRequired != plan.ArchiveFlushRequired {
+		t.Errorf("the harness reads %+v from %s", view, raw)
+	}
+	if view.PlanDigest == "" || view.Status != "feasible" || !view.InstanceServing || !view.ArchiveFlushRequired {
+		t.Errorf("view = %+v: the harness would not approve this plan", view)
+	}
+
+	// The envelope a direct tool call wraps it in (what POST /tool returns).
+	env, _ := json.Marshal(agentutil.DirectToolResponse{Output: string(raw)})
+	var out struct {
+		Output string `json:"output"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(env, &out); err != nil || out.Output != string(raw) {
+		t.Errorf("envelope %s: %v", env, err)
+	}
+
+	// And the values the harness compares against: the plan statuses.
+	if PITRFeasible != "feasible" {
+		t.Errorf("PITRFeasible = %q: the harness approves only %q", PITRFeasible, "feasible")
 	}
 }

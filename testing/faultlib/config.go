@@ -40,6 +40,9 @@ func LoadCatalogFromBytes(data []byte, source string) (*Catalog, error) {
 	}
 	for i := range c.Failures {
 		c.Failures[i].Source = source
+		if err := validatePITR(c.Failures[i]); err != nil {
+			return nil, err
+		}
 	}
 	return &c, nil
 }
