@@ -75,8 +75,45 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 	infraConfig = &infra.Config{}
 	t.Cleanup(func() { infraConfig = old })
 	c.pod = "pgbackrest-demo-0"
+	// A previous run that could not repair its pod (a missing API key, an
+	// interrupted run) leaves it crash-looping with pg_control gone. Bring it
+	// back before testing anything, so one bad run does not fail every later one.
+	if !c.tryReady(45 * time.Second) {
+		c.step("the instance pod is not ready: a previous run left it broken; repairing it before testing")
+		c.requireAuth()
+		c.repair()
+	}
 	c.waitReady(3 * time.Minute)
+	// Every test below crashes the pod on purpose. Prove the agent will answer
+	// this harness (reachable, authenticated) BEFORE that: a test that crashed
+	// the pod and then could not call the restore left the cluster broken.
+	c.requireAuth()
 	return c
+}
+
+// requireAuth fails the test, before anything is changed, when the in-cluster
+// agent does not accept this harness's calls.
+func (c *k8sCluster) requireAuth() {
+	c.t.Helper()
+	_, errStr := c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
+	if strings.Contains(errStr, "authentication required") || strings.Contains(errStr, "401") {
+		c.t.Fatalf("the sysadmin agent rejected the call (%s): this release enforces identity, so run `make integration-k8s K8S_SYSADMIN_API_KEY=<a key the agent accepts>`. Nothing was changed", errStr)
+	}
+}
+
+// tryReady reports whether the instance pod becomes ready within timeout.
+func (c *k8sCluster) tryReady(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if pod, ready, err := k8sInstancePod(context.Background(), c.host); err == nil && pod != "" && ready {
+			c.pod = pod
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 // step logs one timestamped line of what the harness is doing, so a passing
