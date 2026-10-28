@@ -95,10 +95,20 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 // agent does not accept this harness's calls.
 func (c *k8sCluster) requireAuth() {
 	c.t.Helper()
+	if msg := c.authProblem(); msg != "" {
+		c.t.Fatal(msg)
+	}
+}
+
+// authProblem is requireAuth's check: "" when the in-cluster agent accepts this
+// harness's calls, else what to do about it.
+func (c *k8sCluster) authProblem() string {
+	c.t.Helper()
 	_, errStr := c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
 	if strings.Contains(errStr, "authentication required") || strings.Contains(errStr, "401") {
-		c.t.Fatalf("the sysadmin agent rejected the call (%s): this release enforces identity, so run `make integration-k8s K8S_SYSADMIN_API_KEY=<a key the agent accepts>`. Nothing was changed", errStr)
+		return fmt.Sprintf("the sysadmin agent rejected the call (%s): this release enforces identity, so run `make integration-k8s K8S_SYSADMIN_API_KEY=<a key the agent accepts>`. Nothing was changed", errStr)
 	}
+	return ""
 }
 
 // tryReady reports whether the instance pod becomes ready within timeout.
