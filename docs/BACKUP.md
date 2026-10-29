@@ -752,8 +752,8 @@ Not yet built — tracked, not forgotten:
 
 - **Point-in-time recovery gaps ([PITR.md §7](PITR.md#7-limits)).**  
   Built in v0.33 for a single instance, to a time or LSN, down or serving. Not yet: a systemd VM run, routing the
-  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive, named restore points
-  and transaction IDs, and approving the gate from `helpdesk-client`.
+  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive, and named restore points
+  and transaction IDs.
 
 - **Multi-node volumes and remote repos for the Kubernetes restore (§3).**  
   The agent-driven chain works on K8s since v0.33 ([Kubernetes](#the-agent-driven-chain-on-kubernetes));

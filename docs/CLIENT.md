@@ -107,6 +107,9 @@ All flags have a corresponding environment variable. The flag takes precedence w
 | `--rollback-dry-run` | _(flag only)_ | `false` | When set with `--rollback-event`, print the plan but do not execute |
 | `--rollback-justification` | _(flag only)_ | _(none)_ | Free-text reason attached to the rollback record and audit trail |
 | `--list-rollbacks` | _(flag only)_ | _(none)_ | List recent rollback records and exit |
+| `--pitr-plan` | _(flag only)_ | `false` | Print the point-in-time recovery plan for `--recovery-target` (read from the sysadmin agent) and exit. Needs `--pitr-server` and `--sysadmin-url`; see [PITR.md](PITR.md#the-short-way-helpdesk-client) |
+| `--pitr-approve` | _(flag only)_ | _(none)_ | Approve the point-in-time gate of the given triage run ID. Needs `--recovery-target-type`, `--recovery-target`, `--plan-digest` and `--acknowledge-data-loss`; `--allow-stop-serving` for a serving instance |
+| `--sysadmin-url`, `--sysadmin-key` | `HELPDESK_SYSADMIN_URL`, `HELPDESK_SYSADMIN_API_KEY` | _(none)_ | The sysadmin agent `--pitr-plan` reads the plan from |
 
 ### Using environment variables
 

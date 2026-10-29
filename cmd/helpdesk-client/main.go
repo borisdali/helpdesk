@@ -54,6 +54,17 @@ func main() {
 		rollbackJustification = flag.String("rollback-justification", "", "Justification text for the rollback (recorded in audit trail)")
 		rollbackDryRun      = flag.Bool("rollback-dry-run", false, "Derive the rollback plan without persisting or executing anything")
 		rollbackPlan        = flag.String("rollback-plan", "", "Print the rollback plan for a tool_execution event ID without persisting")
+		pitrPlanFlag        = flag.Bool("pitr-plan", false, "Print the point-in-time recovery plan for --recovery-target (read from the sysadmin agent) and exit")
+		pitrApprove         = flag.String("pitr-approve", "", "Approve the point-in-time recovery gate of this triage run `ID` (needs --recovery-target-type, --recovery-target, --plan-digest, --acknowledge-data-loss)")
+		recoveryTargetType  = flag.String("recovery-target-type", "", "Recovery target type: time or lsn")
+		recoveryTarget      = flag.String("recovery-target", "", "Recovery target: an RFC3339 time with a zone, or an X/Y LSN")
+		planDigest          = flag.String("plan-digest", "", "plan_digest of the plan you reviewed (from --pitr-plan)")
+		ackDataLoss         = flag.Bool("acknowledge-data-loss", false, "Acknowledge that everything committed after the target is discarded")
+		allowStopServing    = flag.Bool("allow-stop-serving", false, "Allow the restore to stop an instance that is serving")
+		sysadminURL         = flag.String("sysadmin-url", os.Getenv("HELPDESK_SYSADMIN_URL"), "Sysadmin agent `URL` (for --pitr-plan)")
+		sysadminKey         = flag.String("sysadmin-key", os.Getenv("HELPDESK_SYSADMIN_API_KEY"), "Sysadmin agent API key (for --pitr-plan)")
+		pitrServer          = flag.String("pitr-server", "", "Infrastructure alias of the database to restore (for --pitr-plan)")
+		pitrStanza          = flag.String("pitr-stanza", "main", "pgBackRest stanza (for --pitr-plan)")
 		listRollbacks       = flag.Bool("list-rollbacks", false, "List rollback records from the audit service")
 	)
 	flag.Parse()
@@ -79,6 +90,27 @@ func main() {
 	// --plan-fleet-job: does not require a pre-ping (the fleet plan endpoint handles its own auth).
 	if *planFleetJob != "" {
 		if err := runFleetPlan(ctx, cfg, *planFleetJob, *targetHints); err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// --pitr-plan / --pitr-approve: the operator's two steps at a point-in-time gate.
+	if *pitrPlanFlag || *pitrApprove != "" {
+		o := pitrOpts{
+			RunID: *pitrApprove, TargetType: *recoveryTargetType, Target: *recoveryTarget,
+			PlanDigest: *planDigest, AckDataLoss: *ackDataLoss, AllowStop: *allowStopServing,
+			ResolvedBy: *userID, ApprovalMode: "auto",
+			SysadminURL: *sysadminURL, SysadminKey: *sysadminKey, Server: *pitrServer, Stanza: *pitrStanza,
+		}
+		var err error
+		if *pitrApprove != "" {
+			err = runPITRApprove(ctx, cfg, o)
+		} else {
+			err = runPITRPlan(ctx, cfg, o)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
 			os.Exit(1)
 		}

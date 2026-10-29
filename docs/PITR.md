@@ -105,8 +105,9 @@ For a **running** instance the restore step expands ([§5](#5-a-running-instance
 
 ## 4. Operating it
 
-The operator CLI (`helpdesk-client`) does not approve a point-in-time gate yet. Use the API or the Decision
-Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may approve gates.
+Steps 2 and 3 can be done with `helpdesk-client` ([the short way](#the-short-way-helpdesk-client)), with the
+API as below, or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
+approve gates.
 
 **1. Start the triage with the target.** Find the playbook, then run it:
 
@@ -183,6 +184,28 @@ Then:
   decision on who cleans these up).
 - **If the target was wrong,** `restore_from_backup` restores to the end of the archive again: the backups and
   the archived WAL are untouched. See [§7](#7-limits) for what that cannot undo.
+
+### The short way: `helpdesk-client`
+
+```bash
+export HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=$KEY
+export HELPDESK_SYSADMIN_URL=$SYSADMIN HELPDESK_SYSADMIN_API_KEY=$SYSADMIN_KEY
+
+# Read the plan the agent computes for that target (read-only). It prints the facts to decide on and,
+# for a feasible plan, the exact approve command, digest included.
+helpdesk-client --pitr-plan --pitr-server pgbackrest-db \
+  --recovery-target-type time --recovery-target 2026-10-28T14:05:00Z
+
+# Approve that plan for the triage run holding the gate.
+helpdesk-client --user ops@example.com --pitr-approve plr_a3f7c1b2 \
+  --recovery-target-type time --recovery-target 2026-10-28T14:05:00Z \
+  --plan-digest 3c7ae8cf0d79ffd9 --acknowledge-data-loss --allow-stop-serving
+```
+
+Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters, or no
+`--acknowledge-data-loss` is refused before anything is sent, and the gateway's own refusals are printed as
+they come ([§4 table](#4-operating-it)). `--pitr-plan` prints no approve command for a plan that is not
+feasible. Denying a gate does not need any of this.
 
 ## 5. A running instance
 
