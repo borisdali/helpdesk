@@ -143,7 +143,7 @@ func TestDroppedTableTeardown_Kubernetes(t *testing.T) {
 		i0 := strings.Index(log, "scale statefulset/pgbackrest-demo --replicas=0")
 		ir := strings.Index(log, "run fault-repair")
 		i1 := strings.Index(log, "scale statefulset/pgbackrest-demo --replicas=1")
-		if i0 < 0 || ir < 0 || i1 < 0 || !(i0 < ir && ir < i1) {
+		if i0 < 0 || ir < 0 || i1 < 0 || i0 >= ir || ir >= i1 {
 			t.Errorf("want scale to 0, then the repair pod, then scale to 1; got positions %d %d %d:\n%s", i0, ir, i1, log)
 		}
 		if strings.Contains(log, "SQL: DROP TABLE") {

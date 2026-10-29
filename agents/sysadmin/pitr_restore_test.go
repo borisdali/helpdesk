@@ -423,7 +423,7 @@ func TestPITRRestoreScript_SavesWALAsideThenRestores(t *testing.T) {
 		os.WriteFile(pgdata+"/pg_wal/000000010000000000000001", []byte("wal"), 0o644)
 		os.WriteFile(pgdata+"/pg_wal/000000010000000000000002.partial", []byte("p"), 0o644)
 		os.WriteFile(pgdata+"/pg_wal/00000001.history", []byte("h"), 0o644)
-		os.MkdirAll(pgdata+"/pg_wal/archive_status", 0o755)
+		_ = os.MkdirAll(pgdata+"/pg_wal/archive_status", 0o755)
 	})
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, out)
@@ -471,7 +471,7 @@ func TestPITRRestoreScript_RefusesALivePostmaster(t *testing.T) {
 	if err := fake.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer fake.Process.Kill()
+	defer func() { _ = fake.Process.Kill() }()
 	time.Sleep(200 * time.Millisecond)
 	out, code, _, _, calls := runPITRScript(t, func(pgdata string) {
 		os.WriteFile(pgdata+"/postmaster.pid", []byte(fmt.Sprintf("%d\n", fake.Process.Pid)), 0o644)

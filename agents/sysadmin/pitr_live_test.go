@@ -496,7 +496,7 @@ func TestRestoreToPIT_Live_Kubernetes(t *testing.T) {
 			runAt = i
 		}
 	}
-	if !(cleanAt >= 0 && cleanAt < scaleAt && scaleAt < runAt) {
+	if cleanAt < 0 || cleanAt >= scaleAt || scaleAt >= runAt {
 		t.Errorf("clean stop at %d, scale-down at %d, restore pod at %d: want that order", cleanAt, scaleAt, runAt)
 	}
 	if f.replicas != 0 || !strings.Contains(res.Quiesced, "restart_container") || res.PreStop == nil {

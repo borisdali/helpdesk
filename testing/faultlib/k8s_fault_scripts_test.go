@@ -164,7 +164,7 @@ func TestK8sFaultTeardown_RepairsADownPodInOrder(t *testing.T) {
 	down := indexOfCall(calls, "scale statefulset/pgbackrest-demo --replicas=0")
 	run := indexOfCall(calls, "run fault-repair")
 	up := indexOfCall(calls, "scale statefulset/pgbackrest-demo --replicas=1")
-	if down < 0 || run < 0 || up < 0 || !(down < run && run < up) {
+	if down < 0 || run < 0 || up < 0 || down >= run || run >= up {
 		t.Fatalf("want scale to 0, then the one-off restore pod, then scale to 1; calls: %q", calls)
 	}
 	for _, want := range []string{"pgdata-pgbackrest-demo-0", "pgbackrest-repo-pgbackrest-demo-0", "pgbackrest --stanza=main --delta restore", "pg_wal.saved-"} {
