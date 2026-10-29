@@ -46,12 +46,10 @@ type (
 // automatically available here too, and vice versa there's nothing to keep
 // in sync.
 //
-// Only 5 fields below are genuinely CLI-only concerns faultlib.Runner/
+// Only 4 fields below are genuinely CLI-only concerns faultlib.Runner/
 // Injector/Remediator never need: Repeat/ReportPerFault (the CLI's own
 // --repeat outer loop and per-fault reporting), DiagnosisModel (a cert
-// annotation, not consumed by faultlib), SysadminAPIKey (a header this CLI
-// sets on its own registration calls, not part of any faultlib request),
-// and RemediationJudgeEnabled (gates a judge call this CLI's own evaluator
+// annotation, not consumed by faultlib), and RemediationJudgeEnabled (gates a judge call this CLI's own evaluator
 // makes directly, not something faultlib.Remediator triggers).
 type HarnessConfig struct {
 	faultlib.HarnessConfig
@@ -73,10 +71,6 @@ type HarnessConfig struct {
 	// Recorded as an annotation in the stability cert so the cert is self-describing.
 	// Defaults to HELPDESK_MODEL_NAME (the env var that configures the agent server).
 	DiagnosisModel string
-	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
-	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account auth).
-	// Create a service account in the sysadmin's users.yaml and pass its API key here.
-	SysadminAPIKey string
 	// RemediationJudgeEnabled enables LLM-as-judge remediation approach scoring.
 	// Reuses the same judge LLM config (JudgeModel/JudgeVendor/JudgeAPIKey).
 	// Only meaningful when --remediate is also set.

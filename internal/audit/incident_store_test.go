@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -515,5 +516,55 @@ func TestIncidentStore_List_LimitClamping(t *testing.T) {
 	}
 	if len(got) != 5 {
 		t.Errorf("List (limit=500) = %d, want all 5 (under the clamped default)", len(got))
+	}
+}
+
+// UNKNOWN means "nothing was concluded": it never replaces a real root-cause
+// class. A chain's entry hop classifies slowly (an LLM call) and a later hop
+// may set the real class in the meantime, so the rule lives in the UPDATE
+// itself rather than in a caller's earlier read of the row.
+func TestIncidentStore_Update_UnknownNeverReplacesARealAttribution(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+	set := func(id, attribution string) {
+		t.Helper()
+		if err := s.Update(ctx, id, IncidentUpdate{Attribution: &attribution}); err != nil {
+			t.Fatalf("Update(%q): %v", attribution, err)
+		}
+	}
+	get := func(id string) string {
+		t.Helper()
+		got, err := s.GetByID(ctx, id)
+		if err != nil {
+			t.Fatalf("GetByID: %v", err)
+		}
+		return got.Attribution
+	}
+
+	for _, tc := range []struct {
+		name         string
+		initial      []string // attributions applied in order before the update under test
+		update, want string
+	}{
+		{"unset becomes UNKNOWN", nil, "UNKNOWN", "UNKNOWN"},
+		{"unset becomes a real class", nil, "missing-data-directory", "missing-data-directory"},
+		{"UNKNOWN becomes a real class", []string{"UNKNOWN"}, "missing-data-directory", "missing-data-directory"},
+		{"a real class survives a later UNKNOWN", []string{"missing-data-directory"}, "UNKNOWN", "missing-data-directory"},
+		{"a real class can be corrected to another (an operator's fix)", []string{"data-corruption"}, "missing-data-directory", "missing-data-directory"},
+		{"UNKNOWN over UNKNOWN is a no-op", []string{"UNKNOWN"}, "UNKNOWN", "UNKNOWN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inc := &Incident{TraceID: "tr_" + strings.ReplaceAll(tc.name, " ", "_")}
+			if err := s.Create(ctx, inc); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			for _, a := range tc.initial {
+				set(inc.IncidentID, a)
+			}
+			set(inc.IncidentID, tc.update)
+			if got := get(inc.IncidentID); got != tc.want {
+				t.Errorf("attribution = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

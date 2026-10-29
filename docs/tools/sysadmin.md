@@ -2,7 +2,7 @@
 
 # Sysadmin agent tools
 
-The `sysadmin` agent (`sysadmin_agent`) publishes 11 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
+The `sysadmin` agent (`sysadmin_agent`) publishes 13 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
 
 | Tool | Action class | Capabilities |
 |---|---|---|
@@ -11,10 +11,12 @@ The `sysadmin` agent (`sysadmin_agent`) publishes 11 tools to the [Tool Registry
 | [`check_memory`](#check_memory) | read | `host_memory` |
 | [`get_host_logs`](#get_host_logs) | read | `logs` |
 | [`get_pgbackrest_status`](#get_pgbackrest_status) | read | `backup_status` |
+| [`plan_point_in_time_recovery`](#plan_point_in_time_recovery) | read | `recovery_plan` |
 | [`read_pg_log_file`](#read_pg_log_file) | read | `logs` |
 | [`restart_container`](#restart_container) | destructive | `process_restart` |
 | [`restart_service`](#restart_service) | destructive | `process_restart` |
 | [`restore_from_backup`](#restore_from_backup) | destructive | `data_restore` |
+| [`restore_to_point_in_time`](#restore_to_point_in_time) | destructive | `data_restore` |
 | [`run_pgbackrest_backup`](#run_pgbackrest_backup) | write | `backup_run` |
 | [`verify_restore_recovery`](#verify_restore_recovery) | read | `recovery_result` |
 
@@ -104,6 +106,22 @@ Check pgBackRest backup-job health: stanza status, the most recent backup's labe
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 
+## `plan_point_in_time_recovery`
+
+Dry run of a point-in-time restore: changes nothing. Given a recovery target (time as RFC3339 with a zone, or an LSN), reports which backup would be restored (the newest that finished before the target), whether the archived WAL from that backup to the end of the archive is continuous, whether the target lies inside the archive (for a serving instance a target in WAL it has not archived yet is plausible: instance_serving and archive_flush_required say so, and the restore flushes first), and what would be lost (the data after the target, up to the end of the archive). status feasible, not_feasible (detail says why: no backup before the target, a WAL gap, a target past the archive end) or unverified. A feasible time target is only plausible: the archive's times are coarse, and recovery can still run out of WAL before it. The plan_digest identifies exactly this plan.
+
+- **Action class:** read
+- **Capabilities:** `recovery_plan`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `recovery_target_type` | string | no | Where to stop: 'time' or 'lsn'. Leave empty when the request already carries a recovery target: that one is used and anything you pass is ignored. |
+| `recovery_target_value` | string | no | For 'time' an RFC3339 timestamp with a time zone (2026-10-27T14:05:00Z); for 'lsn' a WAL location (0/3000028). Use the value you were given — never infer or guess one. Leave empty when the request already carries a recovery target. |
+| `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
+| `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
+
 ## `read_pg_log_file`
 
 Read the PostgreSQL log file directly from inside the container or pod (via exec). Works when Postgres is down — does not require a live database connection. Use get_host_logs for process stdout/stderr; use this tool for the PostgreSQL log file written by logging_collector.
@@ -173,6 +191,23 @@ Restore the database from the latest pgBackRest backup, overwriting the current 
 |---|---|---|---|
 | `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
 | `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly, not a request to run locally. Only leave this empty when no infrastructure config exists at all (a genuinely colocated deployment). If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
+
+## `restore_to_point_in_time`
+
+Restore the database to a recovery target (a time or an LSN) instead of to the end of the archive, overwriting the current data directory (destructive — requires operator approval). You pass only the instance: the recovery target, the plan digest and the acknowledgement come from the human approval carried with the request, and you cannot choose or change them. Without such an approval it refuses outright. Refuses if the server is still accepting connections unless the approval also allows stopping it (a serving instance is then asked about itself, its WAL is flushed to the archive, the plan is checked again from the repository, and only then is it stopped; it is refused if it is a standby, has replicas, is not archiving, or runs under an HA manager), if a postmaster is running, if the plan is not feasible, or if the plan has changed since it was approved (the digest no longer matches). A stopped instance is left stopped. It restores the backup chosen by the plan with pgBackRest, stopping at the target and promoting to a new timeline; the WAL that was in pg_wal is moved aside (saved_wal) and not replayed. It does NOT keep or push that WAL, so everything committed after the target is discarded. After restarting the instance (restart_container / restart_service), call verify_restore_recovery: it checks PostgreSQL stopped at the target and reports target_not_reached if the archive ran out first. On Kubernetes it scales the StatefulSet to 0 and restores in a one-off pod, as restore_from_backup does.
+
+- **Action class:** destructive
+- **Capabilities:** `data_restore`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+- **See also:**
+  - [MUTATION_TOOLS.md › 1.15.1 `restore_to_point_in_time` — restore to a recovery target](../MUTATION_TOOLS.md#1151-restore_to_point_in_time--restore-to-a-recovery-target)
+  - [BACKUP.md › 3. Restore from backup after data loss](../BACKUP.md#3-restore-from-backup-after-data-loss)
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `stanza` | string | no | pgBackRest stanza name. When omitted, the only stanza present is used — an error if more than one exists. |
+| `target` | string | no | Server ID from infrastructure config. Required whenever infrastructure config is loaded — omitting it then is treated as a resolution failure and errors loudly. If your connection_string/server ID doesn't match a known infrastructure entry, do not guess or omit target — report that as its own finding and escalate. |
 
 ## `run_pgbackrest_backup`
 

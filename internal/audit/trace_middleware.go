@@ -64,14 +64,15 @@ func TraceMiddlewareWithAudit(store *CurrentTraceStore, auditor Auditor, agentNa
 		// Build a TraceContext from the parsed A2A metadata and store it in the
 		// request context so tools can access principal and purpose via context helpers.
 		tc := &TraceContext{
-			TraceID:         traceID,
-			Origin:          "agent",
-			Principal:       parsed.resolvedPrincipal(),
-			Purpose:         parsed.purpose,
-			PurposeNote:     parsed.purposeNote,
-			PurposeExplicit: parsed.purposeExplicit,
-			ApprovalMode:    parsed.approvalMode,
-			ApprovalSession: parsed.approvalSession,
+			TraceID:          traceID,
+			Origin:           "agent",
+			Principal:        parsed.resolvedPrincipal(),
+			Purpose:          parsed.purpose,
+			PurposeNote:      parsed.purposeNote,
+			PurposeExplicit:  parsed.purposeExplicit,
+			ApprovalMode:     parsed.approvalMode,
+			ApprovalSession:  parsed.approvalSession,
+			RecoveryApproval: parsed.recoveryApproval,
 		}
 		r = r.WithContext(WithTraceContext(r.Context(), tc))
 
@@ -123,6 +124,8 @@ type a2aRequestData struct {
 	// Approval context forwarded from the gateway for chained runs:
 	approvalMode    string
 	approvalSession string
+	// A human's point-in-time recovery target, when the run has one:
+	recoveryApproval *RecoveryApproval
 }
 
 // resolvedPrincipal reconstructs the ResolvedPrincipal from A2A metadata fields.
@@ -184,6 +187,7 @@ func parseA2ARequest(body []byte) a2aRequestData {
 		if as, ok := meta["approval_session"].(string); ok {
 			out.approvalSession = as
 		}
+		out.recoveryApproval = parseRecoveryApproval(meta["recovery_approval"])
 		// roles may arrive as []any (JSON array) or []string.
 		if rawRoles, ok := meta["roles"]; ok {
 			switch v := rawRoles.(type) {

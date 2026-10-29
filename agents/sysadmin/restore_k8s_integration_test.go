@@ -44,8 +44,11 @@ type k8sCluster struct {
 	pod      string
 	agentURL string
 	target   string
-	apiKey   string       // bearer token for an agent that enforces identity; empty when it doesn't
-	host     resolvedHost // the harness's own view, for kubectl from here
+	apiKey   string // bearer token for an agent that enforces identity; empty when it doesn't
+	// lastPlanRaw is the last plan_point_in_time_recovery output, as the agent
+	// sent it (to tell an agent that predates a field from one that left it out).
+	lastPlanRaw string
+	host        resolvedHost // the harness's own view, for kubectl from here
 }
 
 func k8sInCluster(t *testing.T) *k8sCluster {
@@ -75,8 +78,55 @@ func k8sInCluster(t *testing.T) *k8sCluster {
 	infraConfig = &infra.Config{}
 	t.Cleanup(func() { infraConfig = old })
 	c.pod = "pgbackrest-demo-0"
+	// A previous run that could not repair its pod (a missing API key, an
+	// interrupted run) leaves it crash-looping with pg_control gone. Bring it
+	// back before testing anything, so one bad run does not fail every later one.
+	if !c.tryReady(45 * time.Second) {
+		c.step("the instance pod is not ready: a previous run left it broken; repairing it before testing")
+		c.requireAuth()
+		c.repair()
+	}
 	c.waitReady(3 * time.Minute)
+	// Every test below crashes the pod on purpose. Prove the agent will answer
+	// this harness (reachable, authenticated) BEFORE that: a test that crashed
+	// the pod and then could not call the restore left the cluster broken.
+	c.requireAuth()
 	return c
+}
+
+// requireAuth fails the test, before anything is changed, when the in-cluster
+// agent does not accept this harness's calls.
+func (c *k8sCluster) requireAuth() {
+	c.t.Helper()
+	if msg := c.authProblem(); msg != "" {
+		c.t.Fatal(msg)
+	}
+}
+
+// authProblem is requireAuth's check: "" when the in-cluster agent accepts this
+// harness's calls, else what to do about it.
+func (c *k8sCluster) authProblem() string {
+	c.t.Helper()
+	_, errStr := c.tool("get_pgbackrest_status", map[string]any{"target": c.target})
+	if strings.Contains(errStr, "authentication required") || strings.Contains(errStr, "401") {
+		return fmt.Sprintf("the sysadmin agent rejected the call (%s): this release enforces identity, so run `make integration-k8s K8S_SYSADMIN_API_KEY=<a key the agent accepts>`. Nothing was changed", errStr)
+	}
+	return ""
+}
+
+// tryReady reports whether the instance pod becomes ready within timeout.
+func (c *k8sCluster) tryReady(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if pod, ready, err := k8sInstancePod(context.Background(), c.host); err == nil && pod != "" && ready {
+			c.pod = pod
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 // step logs one timestamped line of what the harness is doing, so a passing
@@ -362,5 +412,239 @@ func TestIntegration_K8sCluster_RestoreKeepsUnarchivedWAL(t *testing.T) {
 		if !strings.Contains(repo, n+"-") {
 			t.Errorf("tail segment %s is not in the archive", n)
 		}
+	}
+}
+
+// planPITR calls plan_point_in_time_recovery in the cluster until the plan for
+// the target is feasible (the WAL holding it is archived), switching WAL while
+// the instance pod is up. It skips the test when the deployed agent image
+// predates the tool.
+func (c *k8sCluster) planPITR(typ, val string, wantFeasible bool) PITRPlan {
+	c.t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
+			_, _ = c.execRaw("su postgres -c " + shellQuote(`psql -d testdb -Atc "SELECT pg_switch_wal()"`))
+		}
+		time.Sleep(3 * time.Second)
+		out, errStr := c.tool("plan_point_in_time_recovery", map[string]any{"target": c.target, "stanza": "main",
+			"recovery_target_type": typ, "recovery_target_value": val})
+		if strings.Contains(errStr, "unknown tool") {
+			c.t.Skip("the deployed sysadmin agent does not have plan_point_in_time_recovery: rebuild the image, load it into the cluster and helm upgrade")
+		}
+		var plan PITRPlan
+		if errStr != "" || json.Unmarshal([]byte(out), &plan) != nil {
+			c.t.Fatalf("plan_point_in_time_recovery: %s %s", out, errStr)
+		}
+		c.lastPlanRaw = out
+		// The pod is up while this polls: a target in WAL it has not archived
+		// yet is feasible but still needs a flush, and the restore that
+		// follows (a crashed, stopped instance) cannot flush.
+		if !wantFeasible || (plan.Status == PITRFeasible && !plan.ArchiveFlushRequired) {
+			return plan
+		}
+		if time.Now().After(deadline) {
+			c.t.Fatalf("target %s never became feasible: %+v", val, plan)
+		}
+	}
+}
+
+// A point-in-time restore of the demo pod, in-cluster, on a real crash: the
+// agent plans the target (first with the pod up, then again from a one-off
+// pod once it is crash-looping, with the same digest), refuses to restore
+// while the pod is serving, and after the crash scales the StatefulSet to 0,
+// restores in a one-off pod to the target and leaves the pod for
+// restart_container. After the resume, rows committed before the target are
+// there, rows after it are not, and verify_restore_recovery reads the stop
+// line from the pod's logs and reports it verified on the next timeline.
+func TestIntegration_K8sCluster_RestoreToPointInTime(t *testing.T) {
+	c := k8sInCluster(t)
+	t.Cleanup(c.repair)
+	t.Cleanup(func() {
+		if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
+			_, _ = c.exec("su postgres -c " + shellQuote(`psql -d testdb -c "DROP TABLE IF EXISTS pitr_k8s"`))
+		}
+	})
+	clock := func() string {
+		return c.psql("SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+	}
+
+	c.step("1. data: rows to keep, a backup after them, the target from the database's own clock, rows to lose after it")
+	c.psql("DROP TABLE IF EXISTS pitr_k8s")
+	c.psql("CREATE TABLE pitr_k8s (id int, phase text)")
+	c.psql("INSERT INTO pitr_k8s SELECT g, 'keep' FROM generate_series(1, 5) g")
+	if out, err := c.exec("su postgres -c " + shellQuote("pgbackrest --stanza=main --type=incr backup")); err != nil {
+		t.Fatalf("incr backup: %v: %s", err, out)
+	}
+	time.Sleep(3 * time.Second)
+	target := clock()
+	time.Sleep(2 * time.Second)
+	c.psql("INSERT INTO pitr_k8s SELECT g, 'lose' FROM generate_series(6, 10) g")
+
+	c.step("2. plan the target (pod up): feasible, with a digest")
+	plan := c.planPITR(TargetTime, target, true)
+	if plan.PlanDigest == "" || plan.BackupLabel == "" || plan.ExpectedTimeline != plan.TargetTimeline+1 {
+		t.Fatalf("plan = %+v", plan)
+	}
+	c.step("   ok: backup %s, timeline %d -> %d, digest %s", plan.BackupLabel, plan.TargetTimeline, plan.ExpectedTimeline, plan.PlanDigest)
+
+	restoreArgs := map[string]any{"target": c.target, "stanza": "main",
+		"recovery_target_type": TargetTime, "recovery_target_value": target, "plan_digest": plan.PlanDigest}
+
+	c.step("3. restore while the pod is serving must be refused, and nothing scaled")
+	if _, errStr := c.tool("restore_to_point_in_time", restoreArgs); !strings.Contains(errStr, "still accepting connections") {
+		t.Fatalf("restore_to_point_in_time on a serving pod: error = %q, want a refusal", errStr)
+	}
+	if r := c.replicas(); r != "1" {
+		t.Fatalf("replicas = %s after a refused restore, want 1", r)
+	}
+	if got := c.psql("SELECT count(*) FROM pitr_k8s"); got != "10" {
+		t.Fatalf("the refused restore changed the data: %s rows", got)
+	}
+
+	c.step("4. crash the instance (the pod crash-loops and cannot be exec'd into)")
+	c.crash("")
+
+	c.step("5. the same plan from the crashed instance (the agent reads the repo from a one-off pod): same digest")
+	again := c.planPITR(TargetTime, target, false)
+	if again.Status != PITRFeasible || again.PlanDigest != plan.PlanDigest {
+		t.Fatalf("plan on the crashed instance = %+v, want feasible with digest %s", again, plan.PlanDigest)
+	}
+
+	c.step("6. a wrong digest is refused before anything is scaled down")
+	bad := map[string]any{}
+	for k, v := range restoreArgs {
+		bad[k] = v
+	}
+	bad["plan_digest"] = "0000000000000000"
+	if _, errStr := c.tool("restore_to_point_in_time", bad); !strings.Contains(errStr, "plan changed since it was approved") {
+		t.Fatalf("a wrong digest: error = %q, want a refusal", errStr)
+	}
+	if r := c.replicas(); r != "1" {
+		t.Fatalf("replicas = %s after a refused restore, want 1 (nothing quiesced)", r)
+	}
+
+	c.step("7. restore_to_point_in_time: scale to 0, restore in a one-off pod, leave it down for restart_container")
+	out, errStr := c.tool("restore_to_point_in_time", restoreArgs)
+	var res RestoreToPITResult
+	if errStr != "" || json.Unmarshal([]byte(out), &res) != nil {
+		t.Fatalf("restore_to_point_in_time: %s %s", out, errStr)
+	}
+	if res.Prediction == nil || res.Prediction.TargetType != TargetTime || res.Prediction.ExpectedTimeline != plan.ExpectedTimeline {
+		t.Errorf("prediction = %+v", res.Prediction)
+	}
+	if !strings.HasPrefix(res.SavedWAL, "/var/lib/pgbackrest/pg_wal.saved-") {
+		t.Errorf("saved_wal = %q, want the copy on the repo volume (the one-off pod's own filesystem goes with it)", res.SavedWAL)
+	}
+	if r := c.replicas(); r != "0" || !strings.Contains(res.Quiesced, "restart_container") {
+		t.Fatalf("replicas = %s, quiesced = %q: want the StatefulSet left at 0 for restart_container", r, res.Quiesced)
+	}
+
+	c.step("8. resume, and check the data")
+	if _, errStr := c.tool("restart_container", map[string]any{"target": c.target, "reason": "resume after point-in-time restore"}); errStr != "" {
+		t.Fatalf("restart_container: %s", errStr)
+	}
+	c.waitReady(5 * time.Minute)
+	if got := c.psql("SELECT phase || ':' || count(*) FROM pitr_k8s GROUP BY phase ORDER BY phase"); got != "keep:5" {
+		t.Errorf("rows after the point-in-time restore = %q, want only keep:5", got)
+	}
+
+	c.step("9. verify_restore_recovery reads the stop line from the pod's logs")
+	out, errStr = c.tool("verify_restore_recovery", map[string]any{"target": c.target})
+	var verified VerifyRestoreRecoveryResult
+	if errStr != "" || json.Unmarshal([]byte(out), &verified) != nil {
+		t.Fatalf("verify_restore_recovery: %s %s", out, errStr)
+	}
+	if verified.Status != RestoreVerified || verified.NewTimeline != plan.ExpectedTimeline || verified.StopLine == "" || verified.LogSource != "kubectl logs" {
+		t.Errorf("verify_restore_recovery = %+v, want verified on timeline %d from kubectl logs with a stop line", verified, plan.ExpectedTimeline)
+	}
+}
+
+// A point-in-time restore of the demo pod while it is RUNNING (no crash), as
+// the gate approval with allow_stop_serving would run it, in-cluster: the
+// agent asks the running pod about itself, flushes its WAL to the archive,
+// plans again from the repository, stops it cleanly and scales the
+// StatefulSet to 0, restores in a one-off pod to the target and leaves it for
+// restart_container. The target is in WAL the pod had not archived when it was
+// chosen. Without allow_stop_serving the same call is refused and the pod is
+// untouched.
+func TestIntegration_K8sCluster_RestoreToPointInTime_Live(t *testing.T) {
+	c := k8sInCluster(t)
+	t.Cleanup(c.repair)
+	t.Cleanup(func() {
+		if _, ready, _ := k8sInstancePod(context.Background(), c.host); ready {
+			_, _ = c.exec("su postgres -c " + shellQuote(`psql -d testdb -c "DROP TABLE IF EXISTS pitr_k8s_live"`))
+		}
+	})
+	clock := func() string {
+		return c.psql("SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+	}
+
+	c.step("1. data: rows to keep, a backup after them, the target, rows to lose (WAL left unarchived on purpose)")
+	c.psql("DROP TABLE IF EXISTS pitr_k8s_live")
+	c.psql("CREATE TABLE pitr_k8s_live (id int, phase text)")
+	c.psql("INSERT INTO pitr_k8s_live SELECT g, 'keep' FROM generate_series(1, 5) g")
+	if out, err := c.exec("su postgres -c " + shellQuote("pgbackrest --stanza=main --type=incr backup")); err != nil {
+		t.Fatalf("incr backup: %v: %s", err, out)
+	}
+	time.Sleep(3 * time.Second)
+	target := clock()
+	time.Sleep(2 * time.Second)
+	c.psql("INSERT INTO pitr_k8s_live SELECT g, 'lose' FROM generate_series(6, 10) g")
+
+	c.step("2. plan the serving pod: feasible, with a digest")
+	plan := c.planPITR(TargetTime, target, false)
+	// An agent built before the live-instance support does not report whether
+	// the instance is serving, and would refuse (or mishandle) the stop below.
+	if !strings.Contains(c.lastPlanRaw, `"instance_serving"`) {
+		t.Skip("the deployed sysadmin agent predates the live-instance restore (its plan has no instance_serving): rebuild the image, load it into the cluster and helm upgrade, as for the first PITR test")
+	}
+	if plan.Status != PITRFeasible || !plan.InstanceServing || plan.PlanDigest == "" {
+		t.Fatalf("plan = %+v", plan)
+	}
+	c.step("   ok: archive_flush_required=%v, digest %s", plan.ArchiveFlushRequired, plan.PlanDigest)
+	args := map[string]any{"target": c.target, "stanza": "main",
+		"recovery_target_type": TargetTime, "recovery_target_value": target, "plan_digest": plan.PlanDigest}
+
+	c.step("3. without allow_stop_serving the serving pod is refused and untouched")
+	if _, errStr := c.tool("restore_to_point_in_time", args); !strings.Contains(errStr, "allow_stop_serving") {
+		t.Fatalf("error = %q, want a refusal naming allow_stop_serving", errStr)
+	}
+	if r := c.replicas(); r != "1" {
+		t.Fatalf("replicas = %s after a refusal, want 1", r)
+	}
+	if got := c.psql("SELECT count(*) FROM pitr_k8s_live"); got != "10" {
+		t.Fatalf("the refused restore changed the data: %s rows", got)
+	}
+
+	c.step("4. with it: flush, stop, scale to 0, restore in a one-off pod")
+	args["allow_stop_serving"] = true
+	out, errStr := c.tool("restore_to_point_in_time", args)
+	var res RestoreToPITResult
+	if errStr != "" || json.Unmarshal([]byte(out), &res) != nil {
+		t.Fatalf("restore_to_point_in_time: %s %s", out, errStr)
+	}
+	if res.PreStop == nil || res.PreStop.LSN == "" || res.PreStop.Replicas != 0 || res.Plan.ArchiveFlushRequired || res.Plan.PlanDigest != plan.PlanDigest {
+		t.Errorf("result = %+v", res)
+	}
+	if !strings.HasPrefix(res.SavedWAL, "/var/lib/pgbackrest/pg_wal.saved-") {
+		t.Errorf("saved_wal = %q", res.SavedWAL)
+	}
+	if r := c.replicas(); r != "0" || !strings.Contains(res.Quiesced, "restart_container") {
+		t.Fatalf("replicas = %s, quiesced = %q: want the StatefulSet left at 0", r, res.Quiesced)
+	}
+
+	c.step("5. resume, check the data and the recovery point")
+	if _, errStr := c.tool("restart_container", map[string]any{"target": c.target, "reason": "resume after point-in-time restore"}); errStr != "" {
+		t.Fatalf("restart_container: %s", errStr)
+	}
+	c.waitReady(5 * time.Minute)
+	if got := c.psql("SELECT phase || ':' || count(*) FROM pitr_k8s_live GROUP BY phase ORDER BY phase"); got != "keep:5" {
+		t.Errorf("rows after the live point-in-time restore = %q, want only keep:5", got)
+	}
+	out, errStr = c.tool("verify_restore_recovery", map[string]any{"target": c.target})
+	var verified VerifyRestoreRecoveryResult
+	if errStr != "" || json.Unmarshal([]byte(out), &verified) != nil || verified.Status != RestoreVerified || verified.StopLine == "" {
+		t.Errorf("verify_restore_recovery = %s %s", out, errStr)
 	}
 }

@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -200,10 +200,18 @@ integration-k8s:
 	@case "$(K8S_DESTRUCT_NS)" in *-destruct) ;; *) echo "Error: K8S_DESTRUCT_NS=$(K8S_DESTRUCT_NS) must end in -destruct (these tests crash and restore its database)"; exit 1;; esac
 	kubectl --context $(K8S_CONTEXT) get namespace $(K8S_DESTRUCT_NS) >/dev/null 2>&1 || kubectl --context $(K8S_CONTEXT) create namespace $(K8S_DESTRUCT_NS)
 	kubectl --context $(K8S_CONTEXT) apply -n $(K8S_DESTRUCT_NS) -f testing/k8s/pgbackrest-demo.yaml
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=180s
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"
-	kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"
+	@# A pod a previous run left crash-looping (pg_control removed, then the run died
+	@# before it could repair it) must not stop this one: the test harness repairs it
+	@# from the existing backup before testing (it needs K8S_SYSADMIN_API_KEY on a
+	@# release that enforces identity). So waiting for it is best-effort, and the fresh
+	@# backup is taken only when the pod is up to take one.
+	-kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) rollout status statefulset/pgbackrest-demo --timeout=180s
+	@if kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) wait --for=condition=Ready pod/pgbackrest-demo-0 --timeout=20s; then \
+		kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'pgbackrest --stanza=main --type=full backup' 2>&1 | grep -v "WARN: environment contains invalid option"; \
+		kubectl --context $(K8S_CONTEXT) -n $(K8S_DESTRUCT_NS) exec pgbackrest-demo-0 -- su postgres -c 'psql -d testdb -qc CHECKPOINT && pgbackrest --stanza=main check' 2>&1 | grep -v "WARN: environment contains invalid option"; \
+	else \
+		echo "pgbackrest-demo-0 is not ready: no fresh backup was taken; the test harness will repair it from the existing backup"; \
+	fi
 	@kubectl --context $(K8S_CONTEXT) -n $(K8S_HELPDESK_NS) port-forward svc/helpdesk-sysadmin-agent $(K8S_SYSADMIN_PORT):1103 >/tmp/helpdesk-k8s-sysadmin-pf.log 2>&1 & PF=$$!; \
 		trap "kill $$PF 2>/dev/null" EXIT; sleep 3; \
 		HELPDESK_K8S_SYSADMIN_URL=http://localhost:$(K8S_SYSADMIN_PORT) HELPDESK_K8S_SYSADMIN_TARGET=$(K8S_DESTRUCT_TARGET) HELPDESK_K8S_SYSADMIN_API_KEY=$(K8S_SYSADMIN_API_KEY) \
@@ -463,6 +471,40 @@ faulttest-gateway-pgbackrest:
 	FAULTTEST_IDS=db-pgdata-corrupted,db-pgdata-corrupted-unarchived-tail \
 	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
 	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee -a $(FAULTTEST_LOG)
+	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
+
+# Point-in-time recovery fault on the Docker pgBackRest fixture, through the
+# gateway, with a live model. Restores (and stops) the running fixture, so run
+# it alone. The agents must reach the fixture: use the host-process stack
+# (see docs/PITR.md §8), not the Compose agents.
+#   FAULTTEST_GATEWAY_URL        e.g. http://localhost:8080
+#   FAULTTEST_API_KEY            gateway key
+#   FAULTTEST_SYSADMIN_AGENT_URL e.g. http://localhost:1103
+#   FAULTTEST_SYSADMIN_API_KEY   the agent's /tool key (defaults to FAULTTEST_API_KEY)
+#   PITR_FAULT_IDS               default db-pitr-dropped-table
+faulttest-pitr:
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ] || [ -z "$(FAULTTEST_API_KEY)" ] || [ -z "$(FAULTTEST_SYSADMIN_AGENT_URL)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL, FAULTTEST_API_KEY and FAULTTEST_SYSADMIN_AGENT_URL must be set"; \
+		exit 1; \
+	fi
+	@if ! curl -sf -H "Authorization: Bearer $(FAULTTEST_API_KEY)" "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
+		echo "Error: Gateway not reachable at $(FAULTTEST_GATEWAY_URL)"; \
+		exit 1; \
+	fi
+	@echo "Starting pgBackRest test database..."
+	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml \
+		up -d --wait postgres-pgbackrest
+	./testing/docker/setup-pgbackrest-backup.sh
+	@echo "Running the point-in-time recovery fault via gateway..."
+	-FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_REMEDIATE=true \
+	FAULTTEST_GATE_ESCALATION=true \
+	FAULTTEST_APPROVAL_MODE=force \
+	FAULTTEST_SYSADMIN_AGENT_URL="$(FAULTTEST_SYSADMIN_AGENT_URL)" \
+	FAULTTEST_SYSADMIN_API_KEY="$(if $(FAULTTEST_SYSADMIN_API_KEY),$(FAULTTEST_SYSADMIN_API_KEY),$(FAULTTEST_API_KEY))" \
+	FAULTTEST_IDS=$(if $(PITR_FAULT_IDS),$(PITR_FAULT_IDS),db-pitr-dropped-table) \
+	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \
+	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
 # ---------------------------------------------------------------------------

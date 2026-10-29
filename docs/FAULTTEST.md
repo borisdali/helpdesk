@@ -136,6 +136,30 @@ into `score` itself:
    data at all. See [OBJECTIVE_EVIDENCE.md §8](OBJECTIVE_EVIDENCE.md#8-history-from-gate-on-presence-to-gate-on-contradiction)
    for why this gate exists.
 
+#### Multi-hop chains: the keywords and category are checked against the whole chain
+
+*Added in v0.33.* A fault whose playbook starts a chain (`--via-gateway`, e.g.
+`db-pgdata-corrupted-vm`: data-loss triage, host triage, health triage, restore) used to be scored on
+the first hop's response only. The entry hop is deliberately limited (`pbs_db_data_loss_triage` has no
+log tools, so it front-loads what it can decide and hands off), and the evidence a fault's
+`expected_keywords` and `expected_diagnosis.category` describe (`pg_control`, "could not find the
+database system", the data directory) is found by the hops after it. A chain that restored the database
+could fail its diagnostic depending on how the entry hop worded its hand-off.
+
+After the run finishes, the harness fetches the incident narrative and re-checks the keyword and category
+criteria against the first hop's response plus the findings (and primary hypothesis) of every later
+*diagnostic* hop. The tool criterion gets the same treatment: the tools that executed without error in any
+hop (from the audit trail, by each hop's trace ID, through the gateway's governance events endpoint) count
+toward `expected_tools` alongside what the first hop itself ran, and the report's `tool_evidence_mode`
+gains a `+chain` suffix (`structured+chain`). Before this, a chain whose entry hop had no log tools scored
+`tools 0%` however many of the expected tools the later hops ran. The terminal remediation hop is left out: its findings say "restore" because it
+restored, and whether the fix worked is the remediation score's job. The re-check can only raise a
+score: a first hop that already passed is untouched, the evidence gates above still fail a result
+regardless, and the protocol-violation cap still applies. With `--judge` the diagnosis score stays the
+judge's and only the keyword criterion is re-checked. When it changes anything, the run prints a
+`Chain evidence:` line and the report carries `chain_evidence_hops`. A single-hop run is unaffected, and
+so is `--repeat` (which does not run the chain).
+
 When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
 
 ---
@@ -356,6 +380,21 @@ remediation:
 ```
 
 The query must return successfully (exit 0 from psql) for recovery to be confirmed. A query that returns rows is enough — the row content is not checked. If `verify_sql` is absent, `faulttest` falls back to `SELECT 1` (bare connectivity check).
+
+**Verifying a target the harness cannot connect to (`verify_exec`):**
+
+*Added in v0.33.* `verify_sql` runs through `psql` from the machine faulttest runs on, which for a database in a Kubernetes pod behind a ClusterIP Service has no route. A fault can declare `verify_exec` instead: a shell script the harness runs every few seconds until it exits 0 or `verify_timeout` passes. `FAULTTEST_K8S_CONTEXT` is set when `--context` is given, the same as for the fault's inject and teardown scripts. It replaces `verify_sql` when both are present.
+
+```yaml
+remediation:
+  verify_exec: |
+    CTX_ARG=""
+    [ -n "$FAULTTEST_K8S_CONTEXT" ] && CTX_ARG="--context=$FAULTTEST_K8S_CONTEXT"
+    [ "$(kubectl $CTX_ARG -n db-destruct exec pgbackrest-demo-0 -- su postgres -c "psql -d testdb -Atc 'SELECT NOT pg_is_in_recovery()'" 2>/dev/null)" = t ]
+  verify_timeout: "240s"
+```
+
+`db-pgdata-corrupted-k8s` uses it. Recovery time and the speed score are computed exactly as for `verify_sql`.
 
 **Remediation method:**
 
@@ -877,6 +916,37 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 When writing customer catalog entries, prefer specific queries that directly verify the fault condition rather than bare connectivity checks.
 
 ---
+
+### 6.6 Point-in-time recovery faults (`pitr:`)
+
+A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected, and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block, and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database; Docker fixture only so far).
+
+```yaml
+pitr:
+  target_type: time          # or lsn; default time
+  allow_stop_serving: true   # the gate approval may stop a RUNNING instance
+```
+
+**The contract with the inject script.** It must print one line, after the rows to keep are committed and before the damage is done, with the database's own clock (and WAL position):
+
+```
+PITR_TARGET time=2026-10-28T17:11:10Z lsn=0/3000028
+```
+
+Only `shell_exec` injections keep their output, and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
+
+**What the harness does with it**, in order:
+
+1. The target goes on the triage run's request as `recovery_target` (`{"type", "value"}`), so the gateway stores it and the plan tool plans exactly that.
+2. The chain stops at the gate into `pbs_pgbackrest_pitr_remediate` (reason `recovery_target_required`) whatever the approval mode.
+3. At the gate the harness reads the plan itself, from the sysadmin agent's `plan_point_in_time_recovery` (read-only), as an operator would, and approves with `recovery_target`, that plan's `plan_digest`, `acknowledge_data_loss`, and `allow_stop_serving` if the fault says so. It **refuses to approve a plan that is not feasible**, and reports why.
+4. `verify_sql` then checks the rows themselves.
+
+**It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset), and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
+
+The `go test` sweeps (`make faulttest`, `faulttest-gateway`) skip a PITR fault unless they run through the gateway with remediation, the gate and `FAULTTEST_SYSADMIN_AGENT_URL`, so they never inject a fault they cannot recover. `make faulttest-pitr FAULTTEST_GATEWAY_URL=… FAULTTEST_API_KEY=… FAULTTEST_SYSADMIN_AGENT_URL=…` runs the Docker one (`PITR_FAULT_IDS` picks another) against the pgBackRest fixture.
+
+To prove a PITR fault's script and recovery without a model, `TestIntegration_PITRFault_DroppedTable_Catalog` (`agents/sysadmin`, `go test -tags integration`) loads it from the catalog and runs its real inject, plan, live restore, restart and `verify_sql` on the Docker fixture.
 
 ## 7. Example workflows
 

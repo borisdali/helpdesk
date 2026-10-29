@@ -55,6 +55,9 @@ type FaultCycleResult struct {
 	// calling TeardownFault itself once it's actually safe to tear down
 	// (immediately, or after remediation completes).
 	TeardownErr error
+	// InjectOutput is what the injection printed, when the injector keeps it
+	// (InjectOutputter): a PITR fault's recovery target comes from here.
+	InjectOutput string
 }
 
 // RunFaultCycle runs the inject→run phase of one fault, giving injection its
@@ -108,6 +111,10 @@ func RunFaultCycle(ctx context.Context, injector FaultInjector, runner FaultRunn
 	runCtx := ctx
 	if traceID != "" {
 		runCtx = WithFaultTraceID(ctx, traceID)
+	}
+	if o, ok := injector.(InjectOutputter); ok {
+		result.InjectOutput = o.InjectOutput()
+		runCtx = WithInjectOutput(runCtx, result.InjectOutput)
 	}
 	result.Response = runner.Run(runCtx, f)
 	return result

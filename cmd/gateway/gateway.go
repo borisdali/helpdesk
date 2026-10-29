@@ -1509,6 +1509,11 @@ func (g *Gateway) proxyToAgentWithTool(w http.ResponseWriter, r *http.Request, a
 			meta["approval_session"] = ac.sessionID
 		}
 	}
+	// A human's point-in-time recovery target, for the agent's restore tools
+	// to read from their request context. Set only by the playbook handlers.
+	if ra, ok := r.Context().Value(ctxKeyRecoveryApproval).(*audit.RecoveryApproval); ok && ra != nil {
+		meta["recovery_approval"] = recoveryApprovalMeta(ra)
+	}
 
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: prompt})
 	msg.Metadata = meta

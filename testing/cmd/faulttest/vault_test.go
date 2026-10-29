@@ -6355,3 +6355,41 @@ func TestVaultCertCompare_CleanImprovement(t *testing.T) {
 		t.Errorf("expected CLEAN improvement line in output:\n%s", out)
 	}
 }
+
+// The summary view shows the incident's root-cause class, which the gateway
+// classifies from the chain's diagnostic hops. Before, only the full view
+// printed it, so a chain read as having no root cause.
+func TestPrintIncidentJourney_Summary_ShowsTheRootCauseClass(t *testing.T) {
+	serve := func(attribution string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			record := map[string]any{"incident_id": "plr_t1", "status": "resolved"}
+			if attribution != "" {
+				record["attribution"] = attribution
+			}
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+				"incident_id":     "plr_t1",
+				"started_at":      time.Now().UTC().Format(time.RFC3339),
+				"duration_sec":    10.0,
+				"incident_record": record,
+				"triage":          map[string]any{"run_id": "plr_t1", "playbook": "pbs_db_data_loss_triage", "findings": "single_instance=true"},
+			})
+		}))
+	}
+	for attribution, want := range map[string]string{
+		"missing-data-directory": "Root cause: missing-data-directory",
+		"UNKNOWN":                "Root cause: UNKNOWN", // shown as it is, not hidden
+	} {
+		srv := serve(attribution)
+		out := captureStdout(func() { printIncidentJourney(srv.URL, "", "plr_t1", true) })
+		srv.Close()
+		if !strings.Contains(out, want) {
+			t.Errorf("attribution %q: summary missing %q, got:\n%s", attribution, want, out)
+		}
+	}
+	srv := serve("")
+	defer srv.Close()
+	if out := captureStdout(func() { printIncidentJourney(srv.URL, "", "plr_t1", true) }); strings.Contains(out, "Root cause") {
+		t.Errorf("an incident with no attribution recorded must not print a root-cause line, got:\n%s", out)
+	}
+}

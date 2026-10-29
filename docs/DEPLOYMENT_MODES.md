@@ -1,5 +1,7 @@
 # aiHelpDesk Deployment Modes
 
+> This page is about the *trust posture* (who approves what). For *where each piece can run* (laptop, Docker, a VM, Kubernetes) and which combinations are verified, see [Platforms](PLATFORMS.md).
+
 aiHelpDesk is designed to be useful in three distinct operating contexts. The same
 codebase serves all three, but the configuration surface, the operational requirements, and
 the trust model are different enough that it is worth describing them explicitly.

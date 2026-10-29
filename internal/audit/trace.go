@@ -44,6 +44,12 @@ type TraceContext struct {
 
 	// ApprovalSession is the session ID when ApprovalMode == "session".
 	ApprovalSession string `json:"approval_session,omitempty"`
+
+	// RecoveryApproval is the point-in-time recovery target a human supplied
+	// (and, at the gate, approved). Forwarded from the gateway via A2A
+	// metadata; the sysadmin agent's restore tools take their target from
+	// here, never from the model.
+	RecoveryApproval *RecoveryApproval `json:"recovery_approval,omitempty"`
 }
 
 // NewTraceID generates a new trace ID with the default "tr_" prefix.
@@ -98,6 +104,17 @@ func TraceContextFromContext(ctx context.Context) *TraceContext {
 
 // TraceIDFromContext extracts just the trace ID from context.
 // Returns empty string if no trace context is present.
+// RecoveryApprovalFromContext returns the point-in-time recovery target a
+// human supplied for this request, or nil. It is the only source a restore
+// tool may take its target from.
+func RecoveryApprovalFromContext(ctx context.Context) *RecoveryApproval {
+	if tc := TraceContextFromContext(ctx); tc != nil {
+		return tc.RecoveryApproval
+	}
+	return nil
+}
+
+// TraceIDFromContext returns the trace ID from context, or "" if none.
 func TraceIDFromContext(ctx context.Context) string {
 	if tc := TraceContextFromContext(ctx); tc != nil {
 		return tc.TraceID

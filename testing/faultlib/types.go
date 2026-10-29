@@ -65,6 +65,11 @@ type Failure struct {
 	// AgentURLFor.
 	DirectAgent string `yaml:"direct_agent,omitempty"`
 
+	// PITR marks a fault whose remediation is a point-in-time restore: its
+	// inject script prints the recovery target (PITR_TARGET, see pitr.go) and
+	// the harness supplies it, with the plan digest, at the gate.
+	PITR *PITRSpec `yaml:"pitr,omitempty"`
+
 	// ExternalCompat marks faults that work against any PostgreSQL instance over
 	// libpq (no Docker/OS access required). Used to filter the catalog when
 	// --external is set.
@@ -114,6 +119,13 @@ type RemediationSpec struct {
 	Namespace string `yaml:"namespace,omitempty"`
 	// VerifySQL is the SQL query run to confirm recovery (default: "SELECT 1").
 	VerifySQL string `yaml:"verify_sql,omitempty"`
+	// VerifyExec, when set, replaces VerifySQL: a shell script the harness
+	// polls on the machine it runs on until it exits 0 (recovered) or
+	// VerifyTimeout passes. For targets the harness cannot open a psql
+	// connection to, e.g. a Kubernetes pod behind a ClusterIP Service:
+	// `kubectl exec` into it instead. FAULTTEST_K8S_CONTEXT is set when
+	// --context is given.
+	VerifyExec string `yaml:"verify_exec,omitempty"`
 	// VerifyTimeout is the max time to wait for recovery (default: "120s").
 	VerifyTimeout string `yaml:"verify_timeout,omitempty"`
 }
@@ -269,6 +281,12 @@ type HarnessConfig struct {
 	GatewayURL string
 	// GatewayAPIKey is the Bearer token for gateway/auditd auth during remediation.
 	GatewayAPIKey string
+	// SysadminAPIKey is the Bearer token for the sysadmin agent's /tool/ endpoint.
+	// Required when HELPDESK_USERS_FILE is set on the sysadmin agent (service-account
+	// auth): create a service account in its users.yaml and pass its API key here.
+	// Used by the CLI's registration calls and by a point-in-time fault, which reads
+	// the plan from the agent to approve its digest (pitr.go).
+	SysadminAPIKey string
 	// GatewayPurpose is the declared purpose sent in gateway requests (default: "diagnostic").
 	GatewayPurpose string
 	// InfraConfigPath is the path to infrastructure.json for tag safety checks.

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
 
@@ -35,7 +36,11 @@ type mockRunStartAuditd struct {
 	// incidentByRun/playbookBySeriesID/attributionPatchStatus support Phase 2's
 	// classifyIncidentAttribution tests: GET /v1/incidents/by-run/{runID},
 	// GET /v1/fleet/playbooks?series_id=, and forcing a non-204 PATCH response.
-	incidentByRun          *audit.Incident
+	incidentByRun *audit.Incident
+	// incidentRunID, when set, makes the by-run lookup answer only for that
+	// run, as the real store does (an incident row is keyed by its entry run;
+	// a later hop of the chain has none). Unset, any run ID finds it.
+	incidentRunID          string
 	playbookBySeriesID     *audit.Playbook
 	attributionPatchStatus int
 }
@@ -59,7 +64,8 @@ func (m *mockRunStartAuditd) start(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodGet && m.playbookBySeriesID != nil && r.URL.Query().Get("series_id") != "":
 			json.NewEncoder(w).Encode(map[string]any{"playbooks": []*audit.Playbook{m.playbookBySeriesID}}) //nolint:errcheck
-		case r.Method == http.MethodGet && m.incidentByRun != nil && strings.Contains(r.URL.Path, "/v1/incidents/by-run/"):
+		case r.Method == http.MethodGet && m.incidentByRun != nil && strings.Contains(r.URL.Path, "/v1/incidents/by-run/") &&
+			(m.incidentRunID == "" || strings.HasSuffix(r.URL.Path, "/"+m.incidentRunID)):
 			json.NewEncoder(w).Encode(m.incidentByRun) //nolint:errcheck
 		case r.Method == http.MethodGet && m.playbook != nil && strings.Contains(r.URL.Path, "/v1/fleet/playbooks"):
 			json.NewEncoder(w).Encode(m.playbook) //nolint:errcheck
@@ -1380,5 +1386,179 @@ func TestHandlePlaybookRun_FaulttestOriginInRequestBody_ViaRealHTTPHandler(t *te
 	}
 	if body.Origin != audit.IncidentOriginFaulttest {
 		t.Errorf("origin = %q, want %q — a real request body's origin field did not reach the incidents table", body.Origin, audit.IncidentOriginFaulttest)
+	}
+}
+
+// A multi-hop chain's entry hop is a hand-off (pbs_db_data_loss_triage
+// front-loads facts and escalates), so classifying the incident from the entry
+// hop alone gave UNKNOWN for every chain. A later diagnostic hop sets it.
+
+func chainAttributionMock(attribution, hopType string) *mockRunStartAuditd {
+	return &mockRunStartAuditd{
+		priorRun:      &audit.PlaybookRun{RunID: "plr_hop2", EntryRunID: "plr_entry", SeriesID: "pbs_hop"},
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_entry", Attribution: attribution},
+		incidentRunID: "plr_entry",
+		playbookBySeriesID: &audit.Playbook{
+			SeriesID:         "pbs_entry",
+			PlaybookType:     hopType,
+			RootCauseClasses: &audit.RootCauseClassification{Version: "1.0", Classes: []string{"missing-data-directory", "checkpoint-corruption"}},
+		},
+	}
+}
+
+func attributionPatches(t *testing.T, mock *mockRunStartAuditd) []string {
+	t.Helper()
+	var out []string
+	for _, c := range mock.calls(http.MethodPatch, "/v1/incidents/inc_abc") {
+		var body map[string]string
+		if err := json.Unmarshal([]byte(c.body), &body); err != nil {
+			t.Fatalf("decode patch body: %v", err)
+		}
+		if a, ok := body["attribution"]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func TestClassifyChainAttribution_LaterDiagnosticHopSetsTheClass(t *testing.T) {
+	mock := chainAttributionMock(agentutil.AttributionUnknown, "triage")
+	srv := mock.start(t)
+	var prompt string
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		prompt = p
+		return "missing-data-directory", nil
+	}}
+
+	gw.classifyChainAttribution(context.Background(), "plr_hop2", `data_loss_restore_candidate=true; logs show "could not find the database system"`)
+
+	got := attributionPatches(t, mock)
+	if len(got) != 1 || got[0] != "missing-data-directory" {
+		t.Fatalf("attribution patches = %v, want [missing-data-directory]", got)
+	}
+	if !strings.Contains(prompt, "could not find the database system") {
+		t.Errorf("the classifier was not shown the hop's text:\n%s", prompt)
+	}
+}
+
+func TestClassifyChainAttribution_Skips(t *testing.T) {
+	llmCalls := 0
+	llm := func(answer string) func(context.Context, string) (string, error) {
+		return func(ctx context.Context, p string) (string, error) { llmCalls++; return answer, nil }
+	}
+	cases := []struct {
+		name, runID, text string
+		mock              *mockRunStartAuditd
+		answer            string
+		wantLLMCall       bool
+	}{
+		{"the entry run itself is classifyIncidentAttribution's job", "plr_entry", "text",
+			chainAttributionMock("", "triage"), "missing-data-directory", false},
+		{"a remediation hop says what was done, not why", "plr_hop2", "restore succeeded",
+			chainAttributionMock("", "remediation"), "missing-data-directory", false},
+		{"an incident that already has a class is left alone, with no LLM call", "plr_hop2", "text",
+			chainAttributionMock("checkpoint-corruption", "triage"), "missing-data-directory", false},
+		{"an UNKNOWN answer changes nothing", "plr_hop2", "text",
+			chainAttributionMock("", "triage"), agentutil.AttributionUnknown, true},
+		{"no text to classify", "plr_hop2", "  ",
+			chainAttributionMock("", "triage"), "missing-data-directory", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			llmCalls = 0
+			tc.mock.priorRun.RunID = tc.runID
+			if tc.runID == "plr_entry" {
+				tc.mock.priorRun.EntryRunID = "plr_entry"
+			}
+			srv := tc.mock.start(t)
+			gw := &Gateway{auditURL: srv.URL, plannerLLM: llm(tc.answer)}
+			gw.classifyChainAttribution(context.Background(), tc.runID, tc.text)
+			if got := attributionPatches(t, tc.mock); len(got) != 0 {
+				t.Errorf("attribution patches = %v, want none", got)
+			}
+			if (llmCalls > 0) != tc.wantLLMCall {
+				t.Errorf("LLM calls = %d, want a call: %v", llmCalls, tc.wantLLMCall)
+			}
+		})
+	}
+}
+
+func TestClassifyChainAttribution_NoRunOrNoPlanner_NoPatch(t *testing.T) {
+	mock := &mockRunStartAuditd{ // no run served: the lookup 404s
+		incidentByRun:      &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_entry"},
+		playbookBySeriesID: &audit.Playbook{SeriesID: "pbs_entry", RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"a"}}},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: fleetPlannerLLM(t)}
+	gw.classifyChainAttribution(context.Background(), "plr_hop2", "text")
+	if got := attributionPatches(t, mock); len(got) != 0 {
+		t.Errorf("patches with no run record = %v, want none", got)
+	}
+
+	mock2 := chainAttributionMock("", "triage")
+	srv2 := mock2.start(t)
+	gw2 := &Gateway{auditURL: srv2.URL} // plannerLLM unset
+	gw2.classifyChainAttribution(context.Background(), "plr_hop2", "text")
+	if got := attributionPatches(t, mock2); len(got) != 0 {
+		t.Errorf("patches with no planner LLM = %v, want none", got)
+	}
+}
+
+// The entry hop's UNKNOWN must not replace a real class a later hop set, in
+// whichever order the two hops' completions are recorded.
+func TestClassifyIncidentAttribution_UnknownDoesNotReplaceARealClass(t *testing.T) {
+	mock := &mockRunStartAuditd{
+		incidentByRun: &audit.Incident{IncidentID: "inc_abc", SeriesID: "pbs_x", Attribution: "missing-data-directory"},
+		playbookBySeriesID: &audit.Playbook{SeriesID: "pbs_x",
+			RootCauseClasses: &audit.RootCauseClassification{Classes: []string{"missing-data-directory"}}},
+	}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		return agentutil.AttributionUnknown, nil
+	}}
+	gw.classifyIncidentAttribution(context.Background(), "plr_x", "single_instance=true; backup_tool=pgbackrest; pitr_decided=false")
+	if got := attributionPatches(t, mock); len(got) != 0 {
+		t.Errorf("an UNKNOWN replaced a real class: patches %v", got)
+	}
+}
+
+func TestAttributionKnown(t *testing.T) {
+	for in, want := range map[string]bool{"": false, "UNKNOWN": false, "unknown": false, "missing-data-directory": true} {
+		if got := attributionKnown(in); got != want {
+			t.Errorf("attributionKnown(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// The wiring: a later hop's completion, recorded the way every hop's is,
+// reaches classifyChainAttribution. The tests above call it directly; this
+// is the path that decides whether a chain's incident ever gets a class.
+func TestRecordPlaybookRunComplete_LaterDiagnosticHopClassifiesTheIncident(t *testing.T) {
+	mock := chainAttributionMock(agentutil.AttributionUnknown, "triage")
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		return "missing-data-directory", nil
+	}}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_hop2", audit.OutcomeTransitioned, "", "pbs_pgbackrest_health_triage",
+		`data_loss_restore_candidate=true; logs show "could not find the database system"`, "", "tr_hop2", nil, false, "")
+
+	if got := attributionPatches(t, mock); len(got) != 1 || got[0] != "missing-data-directory" {
+		t.Fatalf("attribution patches = %v, want [missing-data-directory]", got)
+	}
+}
+
+func TestRecordPlaybookRunComplete_RemediationHopLeavesTheClassAlone(t *testing.T) {
+	mock := chainAttributionMock(agentutil.AttributionUnknown, "remediation")
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, plannerLLM: func(ctx context.Context, p string) (string, error) {
+		return "missing-data-directory", nil
+	}}
+
+	gw.recordPlaybookRunComplete(context.Background(), "plr_hop2", audit.OutcomeResolved, "", "",
+		"Restore from backup succeeded", "", "tr_hop2", nil, false, "")
+
+	if got := attributionPatches(t, mock); len(got) != 0 {
+		t.Errorf("a remediation hop set the incident's class: %v", got)
 	}
 }

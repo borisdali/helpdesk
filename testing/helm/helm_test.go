@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -1468,5 +1469,436 @@ func TestAuditorSecbotWithPostgresAuditd(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// faulttestJob renders the chart with the faulttest Job enabled and returns the
+// Job's pod spec and its container's args.
+func faulttestJob(t *testing.T, extra ...string) (podSpec map[string]any, args []string) {
+	t.Helper()
+	flags := append([]string{"faulttest.enabled=true", "faulttest.ids=db-pgbackrest-wal-gap-vm"}, extra...)
+	job, ok := render(t, flags...)["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("Job/test-faulttest not found")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ = tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	if len(containers) == 0 {
+		t.Fatal("no containers in the faulttest Job")
+	}
+	return podSpec, containerArgs(containers[0].(map[string]any))
+}
+
+func hasVolume(podSpec map[string]any, name string) map[string]any {
+	vols, _ := podSpec["volumes"].([]any)
+	for _, v := range vols {
+		if vol, _ := v.(map[string]any); vol["name"] == name {
+			return vol
+		}
+	}
+	return nil
+}
+
+func argWithPrefix(args []string, prefix string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return a
+		}
+	}
+	return ""
+}
+
+// Faults that inject over SSH (a VM) can run from the Job: the key Secret is
+// mounted read-only and private, and the ssh flags are passed. Nothing of it
+// appears unless faulttest.ssh.secretName is set.
+func TestFaulttestJob_SSH(t *testing.T) {
+	t.Run("absent by default", func(t *testing.T) {
+		podSpec, args := faulttestJob(t)
+		if argWithPrefix(args, "--ssh-") != "" {
+			t.Errorf("ssh flags without faulttest.ssh.secretName: %v", args)
+		}
+		if hasVolume(podSpec, "faulttest-ssh") != nil {
+			t.Error("faulttest-ssh volume without faulttest.ssh.secretName")
+		}
+	})
+
+	t.Run("flags, mount and private key mode", func(t *testing.T) {
+		podSpec, args := faulttestJob(t,
+			"faulttest.ssh.secretName=faulttest-ssh-key", "faulttest.ssh.host=postgres@192.168.2.24",
+			"faulttest.ssh.port=2222", "faulttest.ssh.keyName=vm_key")
+		for _, want := range []string{"--ssh-host=postgres@192.168.2.24", "--ssh-key=/etc/faulttest-ssh/vm_key", "--ssh-port=2222"} {
+			if !hasArg(args, want) {
+				t.Errorf("args %v lack %s", args, want)
+			}
+		}
+		vol := hasVolume(podSpec, "faulttest-ssh")
+		if vol == nil {
+			t.Fatal("faulttest-ssh volume not found")
+		}
+		secret, _ := vol["secret"].(map[string]any)
+		if secret["secretName"] != "faulttest-ssh-key" || fmt.Sprint(secret["defaultMode"]) != "256" { // 0400
+			t.Errorf("secret volume = %v, want faulttest-ssh-key with mode 0400", secret)
+		}
+		containers, _ := podSpec["containers"].([]any)
+		var mounted bool
+		for _, m := range containers[0].(map[string]any)["volumeMounts"].([]any) {
+			if mm, _ := m.(map[string]any); mm["name"] == "faulttest-ssh" {
+				mounted = mm["mountPath"] == "/etc/faulttest-ssh" && mm["readOnly"] == true
+			}
+		}
+		if !mounted {
+			t.Error("the key is not mounted read-only at /etc/faulttest-ssh")
+		}
+	})
+
+	t.Run("user and default key name", func(t *testing.T) {
+		_, args := faulttestJob(t, "faulttest.ssh.secretName=k", "faulttest.ssh.host=10.0.0.9", "faulttest.ssh.user=postgres")
+		if !hasArg(args, "--ssh-user=postgres") || !hasArg(args, "--ssh-key=/etc/faulttest-ssh/id_ed25519") {
+			t.Errorf("args = %v", args)
+		}
+		if argWithPrefix(args, "--ssh-port") != "" {
+			t.Errorf("--ssh-port passed with port unset: %v", args)
+		}
+	})
+
+	t.Run("the host is required once a secret is named", func(t *testing.T) {
+		out, err := exec.Command("helm", "template", "test", chartPath(t),
+			"--set", "faulttest.enabled=true", "--set", "faulttest.ids=x", "--set", "faulttest.ssh.secretName=k").CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "faulttest.ssh.host is required") {
+			t.Errorf("want a render failure naming faulttest.ssh.host, got err=%v\n%s", err, out)
+		}
+	})
+
+	t.Run("a release without the block still renders", func(t *testing.T) {
+		podSpec, args := faulttestJob(t, "faulttest.ssh=null")
+		if argWithPrefix(args, "--ssh-") != "" || hasVolume(podSpec, "faulttest-ssh") != nil {
+			t.Error("ssh configured with the block absent")
+		}
+	})
+}
+
+func TestFaulttestJob_AgentConnArg(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.agentConn=pgbackrest-ubuntu-vm")
+	if !hasArg(args, "--agent-conn=pgbackrest-ubuntu-vm") {
+		t.Errorf("args %v lack --agent-conn", args)
+	}
+	if _, args = faulttestJob(t); argWithPrefix(args, "--agent-conn") != "" {
+		t.Errorf("--agent-conn passed by default: %v", args)
+	}
+}
+
+// --users-file is opt-in, and only when the chart actually has a users file to
+// mount: otherwise the flag would name a file that is not there.
+func TestFaulttestJob_UsersFile(t *testing.T) {
+	podSpec, args := faulttestJob(t, "faulttest.usersFile=true", "gateway.identity.usersSecret=helpdesk-users")
+	if !hasArg(args, "--users-file=/etc/helpdesk/users.yaml") || hasVolume(podSpec, "users") == nil {
+		t.Errorf("users file not passed and mounted: args %v", args)
+	}
+	for name, flags := range map[string][]string{
+		"off by default":               {"gateway.identity.usersSecret=helpdesk-users"},
+		"on, but no users file exists": {"faulttest.usersFile=true"},
+	} {
+		podSpec, args := faulttestJob(t, flags...)
+		if argWithPrefix(args, "--users-file") != "" || hasVolume(podSpec, "users") != nil {
+			t.Errorf("%s: users file passed or mounted: %v", name, args)
+		}
+	}
+}
+
+// The shipped example values must keep rendering the Job they describe: a
+// renamed chart value would otherwise leave the bundle's example silently
+// doing nothing.
+func TestFaulttestVMJobExampleRenders(t *testing.T) {
+	example := filepath.Join(filepath.Dir(chartPath(t)), "examples", "faulttest-vm-job.yaml")
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "-f", example).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template -f %s: %v\n%s", example, err, out)
+	}
+	job, ok := parseManifests(t, string(out))["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("the example does not render the faulttest Job")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	for _, want := range []string{"--ids=db-pgdata-corrupted-vm", "--via-gateway", "--remediate", "--gate-escalation",
+		"--approval-mode=force", "--external=false", "--ssh-host=postgres@<vm-ip>", "--ssh-key=/etc/faulttest-ssh/id_ed25519", "--agent-conn=", "--conn="} {
+		if !hasArg(args, want) {
+			t.Errorf("the example's Job lacks %s; args: %v", want, args)
+		}
+	}
+	if hasVolume(podSpec, "faulttest-ssh") == nil {
+		t.Error("the example's Job does not mount the SSH key")
+	}
+}
+
+// --- RBAC for faults run from the Job --------------------------------------
+
+type roleRule struct {
+	Resources []string `yaml:"resources"`
+	Verbs     []string `yaml:"verbs"`
+}
+
+func faulttestRoleRules(t *testing.T, extra ...string) []roleRule {
+	t.Helper()
+	flags := append([]string{"faulttest.enabled=true", "faulttest.ids=x", "faulttest.targetNamespace=db-destruct"}, extra...)
+	role, ok := render(t, flags...)["Role/test-faulttest"]
+	if !ok {
+		t.Fatal("Role/test-faulttest not found")
+	}
+	b, _ := yaml.Marshal(role["rules"])
+	var rules []roleRule
+	if err := yaml.Unmarshal(b, &rules); err != nil {
+		t.Fatal(err)
+	}
+	return rules
+}
+
+func roleAllows(rules []roleRule, resource, verb string) bool {
+	for _, r := range rules {
+		hasRes, hasVerb := false, false
+		for _, x := range r.Resources {
+			hasRes = hasRes || x == resource
+		}
+		for _, v := range r.Verbs {
+			hasVerb = hasVerb || v == verb
+		}
+		if hasRes && hasVerb {
+			return true
+		}
+	}
+	return false
+}
+
+// kubectlNeeds returns the (resource, verbs-any-of) a kubectl invocation needs.
+func kubectlNeeds(verb, resource string) [][]string {
+	switch verb {
+	case "get":
+		if strings.HasPrefix(resource, "statefulset") {
+			return [][]string{{"statefulsets", "get"}}
+		}
+		// -l (a selector) lists; a name gets. Require both: a fault that selects by label is the common case.
+		return [][]string{{"pods", "get"}, {"pods", "list"}}
+	case "exec":
+		return [][]string{{"pods/exec", "create"}, {"pods", "get"}}
+	case "delete":
+		// --wait (the default) watches the object until it is gone.
+		return [][]string{{"pods", "delete"}, {"pods", "get"}, {"pods", "watch"}}
+	case "run":
+		return [][]string{{"pods", "create"}}
+	case "logs":
+		return [][]string{{"pods/log", "get"}}
+	case "wait":
+		return [][]string{{"pods", "get"}, {"pods", "watch"}, {"pods", "list"}}
+	case "scale":
+		return [][]string{{"statefulsets", "get"}, {"statefulsets/scale", "get"}, {"statefulsets/scale", "update"}}
+	}
+	return nil
+}
+
+// Every kubectl call the Kubernetes faults make must be allowed by the Role the
+// chart renders for the Job: otherwise a fault passes from a laptop and fails
+// in-cluster on a Forbidden, halfway through breaking the target. The default
+// Role covers the exec-only fault; the destructive one needs
+// faulttest.rbac.destructive.
+func TestFaulttestRole_CoversTheKubernetesFaultScripts(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(chartPath(t)), "..", "..", "testing", "catalog", "failures.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cat struct {
+		Failures []struct {
+			ID     string `yaml:"id"`
+			Inject struct {
+				ScriptInline string `yaml:"script_inline"`
+			} `yaml:"inject"`
+			Teardown struct {
+				ScriptInline string `yaml:"script_inline"`
+			} `yaml:"teardown"`
+			Remed struct {
+				VerifyExec string `yaml:"verify_exec"`
+			} `yaml:"remediation"`
+		} `yaml:"failures"`
+	}
+	if err := yaml.Unmarshal(data, &cat); err != nil {
+		t.Fatal(err)
+	}
+	call := regexp.MustCompile(`(?:\$K|kubectl \$CTX_ARG(?: -n [a-z-]+)?)\s+([a-z]+)(?:\s+(?:--?[a-z-]+(?:=\S+)?\s+)*([A-Za-z/]+))?`)
+
+	cases := []struct {
+		fault string
+		extra []string
+	}{
+		{"db-pgbackrest-wal-gap-k8s", nil},                                       // exec only
+		{"db-pgdata-corrupted-k8s", []string{"faulttest.rbac.destructive=true"}}, // delete, scale, run, logs
+	}
+	for _, tc := range cases {
+		t.Run(tc.fault, func(t *testing.T) {
+			rules := faulttestRoleRules(t, tc.extra...)
+			var scripts string
+			for _, f := range cat.Failures {
+				if f.ID == tc.fault {
+					scripts = f.Inject.ScriptInline + "\n" + f.Teardown.ScriptInline + "\n" + f.Remed.VerifyExec
+				}
+			}
+			if scripts == "" {
+				t.Fatalf("fault %s not found or has no scripts", tc.fault)
+			}
+			seen := 0
+			for _, m := range call.FindAllStringSubmatch(scripts, -1) {
+				verb, resource := m[1], m[2]
+				needs := kubectlNeeds(verb, resource)
+				if needs == nil {
+					// A verb this test cannot map to a permission is not "fine": the Role
+					// may not allow it, and a silent skip is how that would go unnoticed.
+					t.Errorf("kubectl %s %s is not mapped to a permission: extend kubectlNeeds and the Role", verb, resource)
+					continue
+				}
+				seen++
+				if verb == "scale" {
+					// get + (update or patch) on the scale subresource, get on the StatefulSet
+					if !roleAllows(rules, "statefulsets", "get") || !roleAllows(rules, "statefulsets/scale", "get") ||
+						(!roleAllows(rules, "statefulsets/scale", "update") && !roleAllows(rules, "statefulsets/scale", "patch")) {
+						t.Errorf("kubectl scale %s is not allowed by the Role", resource)
+					}
+					continue
+				}
+				for _, n := range needs {
+					if verb == "wait" && n[1] == "list" {
+						continue // wait on a named pod needs get and watch; list only with a selector
+					}
+					if !roleAllows(rules, n[0], n[1]) {
+						t.Errorf("kubectl %s %s needs %s %s, which the Role does not allow", verb, resource, n[1], n[0])
+					}
+				}
+			}
+			if seen == 0 {
+				t.Fatal("no kubectl calls found in the fault's scripts: the parser is broken")
+			}
+		})
+	}
+
+	// The destructive rules are opt-in: the default Role must not grant them.
+	def := faulttestRoleRules(t)
+	for _, n := range [][]string{{"pods", "delete"}, {"pods", "create"}, {"statefulsets/scale", "update"}, {"statefulsets/scale", "patch"}} {
+		if roleAllows(def, n[0], n[1]) {
+			t.Errorf("the default Role grants %s on %s without faulttest.rbac.destructive", n[1], n[0])
+		}
+	}
+}
+
+// No ClusterRole: the Job's reach stays inside the one namespace.
+func TestFaulttestRole_IsNamespacedEvenWhenDestructive(t *testing.T) {
+	objects := render(t, "faulttest.enabled=true", "faulttest.ids=x", "faulttest.targetNamespace=db-destruct", "faulttest.rbac.destructive=true")
+	for name := range objects {
+		if strings.HasPrefix(name, "ClusterRole/") && strings.Contains(name, "faulttest") {
+			t.Errorf("faulttest has a cluster-wide role: %s", name)
+		}
+	}
+	role := objects["Role/test-faulttest"]
+	meta, _ := role["metadata"].(map[string]any)
+	if meta["namespace"] != "db-destruct" {
+		t.Errorf("Role namespace = %v, want db-destruct", meta["namespace"])
+	}
+}
+
+// The Kubernetes example must keep rendering the Job and the namespaced Role it
+// describes, including the destructive rules the fault needs.
+func TestFaulttestK8sJobExampleRenders(t *testing.T) {
+	example := filepath.Join(filepath.Dir(chartPath(t)), "examples", "faulttest-k8s-job.yaml")
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "-f", example).CombinedOutput()
+	if err != nil {
+		t.Fatalf("helm template -f %s: %v\n%s", example, err, out)
+	}
+	objects := parseManifests(t, string(out))
+	job, ok := objects["Job/test-faulttest"]
+	if !ok {
+		t.Fatal("the example does not render the faulttest Job")
+	}
+	spec, _ := job["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	podSpec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := podSpec["containers"].([]any)
+	args := containerArgs(containers[0].(map[string]any))
+	for _, want := range []string{"--ids=db-pgdata-corrupted-k8s", "--conn=pgbackrest-k8s-destruct", "--via-gateway", "--remediate", "--gate-escalation", "--approval-mode=force", "--external=false"} {
+		if !hasArg(args, want) {
+			t.Errorf("the example's Job lacks %s; args: %v", want, args)
+		}
+	}
+	if argWithPrefix(args, "--context") != "" {
+		t.Errorf("--context passed from inside the cluster (it has no kubeconfig): %v", args)
+	}
+	role, ok := objects["Role/test-faulttest"]
+	if !ok {
+		t.Fatal("the example does not render the Role")
+	}
+	if meta, _ := role["metadata"].(map[string]any); meta["namespace"] != "db-destruct" {
+		t.Errorf("Role namespace = %v, want db-destruct", meta["namespace"])
+	}
+	b, _ := yaml.Marshal(role["rules"])
+	var rules []roleRule
+	if err := yaml.Unmarshal(b, &rules); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range [][]string{{"pods", "delete"}, {"pods", "create"}, {"statefulsets/scale", "update"}} {
+		if !roleAllows(rules, n[0], n[1]) {
+			t.Errorf("the example's Role does not grant %s on %s", n[1], n[0])
+		}
+	}
+}
+
+// A release installed before faulttest.rbac.destructive existed has an rbac
+// block without it (--reuse-values does not merge in new defaults): the Role
+// renders as before, without the destructive rules.
+func TestFaulttestRole_ReleaseWithoutTheDestructiveKey(t *testing.T) {
+	rules := faulttestRoleRules(t, "faulttest.rbac.destructive=null")
+	if roleAllows(rules, "pods", "delete") || roleAllows(rules, "statefulsets/scale", "update") {
+		t.Error("destructive rules granted although the key is absent")
+	}
+	if !roleAllows(rules, "pods/exec", "create") {
+		t.Error("the base rules are missing")
+	}
+}
+
+// emitAndWait is the Job's only way to record feedback (no terminal): the flag
+// must reach the harness, and must not be on unless asked for, since it makes
+// the run wait up to ten minutes for the feedback card.
+func TestFaulttestJob_EmitAndWait(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.emitAndWait=true", "faulttest.approvalMode=force", "faulttest.operator=alice@example.com")
+	if !hasArg(args, "--emit-and-wait") || !hasArg(args, "--approval-mode=force") || !hasArg(args, "--operator=alice@example.com") {
+		t.Errorf("args %v lack --emit-and-wait with force and an operator", args)
+	}
+	if _, args = faulttestJob(t); argWithPrefix(args, "--emit-and-wait") != "" {
+		t.Errorf("--emit-and-wait on by default: %v", args)
+	}
+}
+
+// The image's faulttest has no source tree and defaults to --external, which
+// skips every fault not marked external_compat: a Job selecting the Kubernetes
+// or VM faults found "No failures match the specified filters", exited
+// non-zero and failed the hook (found live, 2026-10-26). primaryInjection
+// passes --external=false for them, and stays off by default so the faults
+// that depend on the external default (db-wal-disk-full-k8s) are unchanged.
+func TestFaulttestJob_PrimaryInjection(t *testing.T) {
+	_, args := faulttestJob(t, "faulttest.primaryInjection=true")
+	if !hasArg(args, "--external=false") {
+		t.Errorf("args %v lack --external=false", args)
+	}
+	_, args = faulttestJob(t)
+	if argWithPrefix(args, "--external") != "" {
+		t.Errorf("an --external flag is passed by default: %v", args)
+	}
+	_, args = faulttestJob(t, "faulttest.external=true")
+	if !hasArg(args, "--external") || hasArg(args, "--external=false") {
+		t.Errorf("external=true should pass --external alone: %v", args)
+	}
+	out, err := exec.Command("helm", "template", "test", chartPath(t), "--set", "faulttest.enabled=true", "--set", "faulttest.ids=x",
+		"--set", "faulttest.primaryInjection=true", "--set", "faulttest.external=true").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "cannot both be set") {
+		t.Errorf("want a render failure for external+primaryInjection, got err=%v\n%s", err, out)
 	}
 }

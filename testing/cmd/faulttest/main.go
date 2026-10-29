@@ -514,6 +514,23 @@ func cmdRun(args []string) {
 			// (after remediation, which needs the fault to remain injected),
 			// via an explicit call rather than defer since this is a plain
 			// for-loop, not a per-iteration closure.
+			//
+			// A point-in-time fault's recovery target is the inject script's
+			// own output: hand it to the Remediator that approves the gate (and
+			// clear it for any other fault).
+			if perr := remediator.SetPITR(f, cycle.InjectOutput); perr != nil {
+				slog.Error("point-in-time target", "id", f.ID, "rep", rep+1, "err", perr)
+				if terr := faultlib.TeardownFault(injector, f); terr != nil {
+					slog.Error("teardown failed", "id", f.ID, "rep", rep+1, "err", terr)
+				}
+				repResults = append(repResults, EvalResult{
+					FailureID:   f.ID,
+					FailureName: f.Name,
+					Category:    f.Category,
+					Error:       fmt.Sprintf("point-in-time target: %v", perr),
+				})
+				break
+			}
 			resp := cycle.Response
 
 			if resp.CrystalBall {
@@ -755,6 +772,18 @@ func cmdRun(args []string) {
 				evalResult.OverallScore = evalResult.Score
 			}
 
+			// The first hop is not the whole diagnosis of a multi-hop chain: the
+			// entry playbook hands off to hops that can read the evidence the
+			// fault's keywords and category describe. Re-check them against the
+			// chain the run actually took, now that it has finished.
+			if !repeatMode && cfg.GatewayURL != "" && resp.RunID != "" && resp.Error == nil {
+				if hops, changed := applyChainEvidenceFromGateway(cfg.GatewayURL, cfg.GatewayAPIKey, f, &evalResult, resp, auditTools,
+					judgeCompleter != nil && !evalResult.JudgeSkipped); changed {
+					fmt.Printf("Chain evidence:      the first hop alone missed some criteria; the later hops of the chain met them (%d later diagnostic hop(s); keywords=%d%% tools=%d%% score now %d%%)\n",
+						hops, int(evalResult.KeywordScore*100), int(evalResult.ToolScore*100), int(evalResult.Score*100))
+				}
+			}
+
 			// In force mode with judge enabled, auto-submit triage feedback derived
 			// from the judge score so vault calibration accumulates data without
 			// operator input. Feedback is tagged "auto_judge" so calibration can
@@ -804,7 +833,7 @@ func cmdRun(args []string) {
 				}
 			} else {
 				diagLabel := "category"
-				if !evalResult.JudgeSkipped {
+				if judgeCompleter != nil && !evalResult.JudgeSkipped {
 					diagLabel = "judge"
 				}
 				fmt.Printf("Diagnostic Result:   [%s] score=%d%% (keywords=%d%% tools=%d%% %s=%d%%)\n",

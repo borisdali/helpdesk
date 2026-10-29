@@ -206,7 +206,7 @@ container isn't up) — rather than relying on this live run being repeated by h
 user**:   
 Every *other* SysAdmin-domain tool (`check_host`, `restart_container`, …) explicitly
 checks `host.K8sPodSelector` and dispatches via `kubectl exec` when a target resolves to a
-Kubernetes Pod. `get_pgbackrest_status`/`run_pgbackrest_backup` didn't — a K8s-configured target
+K8s Pod. `get_pgbackrest_status`/`run_pgbackrest_backup` didn't — a K8s-configured target
 silently fell into the SSH-or-local `default` branch and ran `pgbackrest` as a bare local command
 on the *agent's own host*, not an error and not the real target. Confirmed live with a capturing
 test runner before the fix (`cmdRunner.Run` called with `name="pgbackrest"` against a K8s-only
@@ -260,8 +260,11 @@ the database system") and the instance won't start at all. §1/§2's R/O checks 
 there's nothing left to query. Recovery means overwriting the current data directory with a
 backup, which is the most destructive operation in this project. v0.31 scopes this to the
 narrowest real slice: restore to the latest available pgBackRest backup, a single standalone
-instance, no point-in-time target. Full PITR-to-arbitrary-timestamp, replica rebuild after
-promotion and non-pgBackRest restore are explicitly out of scope — see [§4](#4-roadmap).
+instance, no point-in-time target. Replica rebuild after promotion and non-pgBackRest restore
+are explicitly out of scope — see [§4](#4-roadmap).
+
+Restoring to a *chosen moment* instead (a table dropped at 14:05) is a separate tool and playbook pair
+since v0.33, `restore_to_point_in_time`, with its own safety model: see [Point-in-time recovery](PITR.md).
 
 ### **Three layers stand between a diagnosis and `restore_from_backup`**   
 These additional three layers of safegards come on top of the general
@@ -518,11 +521,11 @@ everything the backup's manifest doesn't list, `pg_wal`'s contents included.
 - **The newest too**, not left to Postgres. Postgres archives the old timeline's last segment as
   `.partial` when it promotes, but only when the end of WAL is mid-segment. After a clean
   shutdown (with archiving on, the shutdown switches WAL) the newest segment is complete, the new
-  timeline starts at the next one, and there is no `.partial`. The first version relied on the
-  `.partial`, and the VM run below lost row B's segment from both the archive and `pg_wal` that
+  timeline starts at the next one and there is no `.partial`. The first version relied on the
+  `.partial` and the VM run below lost row B's segment from both the archive and `pg_wal` that
   way. Pushing an incomplete newest segment under its own name is safe: the old timeline is dead
   after the restore, recovery reading it from the archive stops at the same invalid record it
-  would in `pg_wal`, and Postgres, having restored it from the archive, makes no `.partial`.
+  would in `pg_wal` and Postgres, having restored it from the archive, makes no `.partial`.
 - **It reports all of it** in `pg_wal_tail`: `saved_to` (the original copies, kept until a human
   removes them), `replay_through_wal`, `pushed_to_archive`. A failed push doesn't fail the restore;
   the detail says so, which segments still need pushing and where the copies are.
@@ -538,7 +541,7 @@ normal end of WAL, with `redo done at 0/C0000E0`.
 
 `TestIntegration_RestoreFromBackup_KeepsUnarchivedWAL` makes the canary test permanent: both rows
 survive, `verify_restore_recovery` reports `verified` through the tail, every tail segment is in
-the repo, and once the new timeline archives a segment of its own the WAL check is `continuous`
+the repo and once the new timeline archives a segment of its own the WAL check is `continuous`
 across it. With the old restore script it fails. `…_CleanShutdown` is the same canary with
 Postgres shut down cleanly after `pg_control` is gone, as the VM fault's `systemctl restart` does;
 Docker's `docker restart` doesn't shut down cleanly, which is why the first version passed every
@@ -547,7 +550,7 @@ Docker test. With the newest segment left to the `.partial` it fails on the WAL 
 WAL check to be `continuous` onto the new timeline, which the history file alone satisfies.
 Two more cover the
 failure paths: with the repo read-only the push fails but the restore succeeds, both rows come
-back, and pushing from `saved_to` by hand, as the detail says, makes the archive continuous; with
+back and pushing from `saved_to` by hand, as the detail says, makes the archive continuous; with
 PGDATA's parent read-only nothing can be saved and the restore refuses before touching PGDATA.
 `db-pgdata-corrupted-unarchived-tail` runs the same canary through the full agent chain in
 `make faulttest-gateway-pgbackrest`, its `verify_sql` checking the rows themselves.
@@ -564,21 +567,21 @@ with `pbs_pgbackrest_restore_remediate` v1.7, 2026-10-19 (incident `plr_c18ee2b4
   - both rows back, `archive_command` back on, the repo's `wal archive max` now `…12`. The run's
     findings: "Commits after the archive end (000000230000000000000011) were recovered from pg_wal
     through 000000230000000000000013; only changes never written to pg_wal are lost."
-  - but `…13` (row B) was then in neither the archive nor `pg_wal`, and no `.partial` either: the
+  - but `…13` (row B) was then in neither the archive nor `pg_wal` and no `.partial` either: the
     inject's `systemctl restart` had shut Postgres down cleanly, the shutdown's WAL switch made
-    `…13` complete (`redo done at 0/130000D8` is that switch record), and timeline 36 started at
+    `…13` complete (`redo done at 0/130000D8` is that switch record) and timeline 36 started at
     `…14`. The next restore along timeline 36 would have stopped after `…12`. Reproduced on Docker
     the same day, then fixed by pushing the newest segment too (above). The VM's own archive was
     repaired by pushing `…13` from `saved_to`, which is what that directory is kept for.
 
 👉 The same VM canary after the fix, 2026-10-19 (incident `plr_38972d91`, restore hop
-`plr_cd2d34d4`): row A in `00000024…16` (`.ready`), row B in `…17`, and again a clean shutdown,
+`plr_cd2d34d4`): row A in `00000024…16` (`.ready`), row B in `…17` and again a clean shutdown,
 so `…17` was complete (`redo done at 0/170000D8`). `verify_restore_recovery`: `verified`, the
-archive restored through `…17`, new timeline 37; both rows back, and the repo's `wal archive max`
+archive restored through `…17`, new timeline 37; both rows back and the repo's `wal archive max`
 is now `…17`: row B's segment is in the archive this time.
 
 The run before it, a plain VM restore with archiving healthy, also showed the tail on a real
-host: the archive ended on timeline 31 while the server was on 34, and of the two segments in
+host: the archive ended on timeline 31 while the server was on 34 and of the two segments in
 `pg_wal` the header check kept the open one and left out the one Postgres had pre-created
 (Postgres's own log: `unexpected pageaddr 0/E000000 in WAL segment …10`).
 
@@ -589,7 +592,8 @@ end.
 #### Underneath the layers: what's honest about the remediation, not oversold
 
 `restore_from_backup` is restore-to-latest only — pgBackRest's own default recovery target, no
-`--type`/`--target` flag, matching the stated scope exactly. It refuses outright if `pg_isready`
+`--type`/`--target` flag, matching the stated scope exactly. A recovery target lives in a different tool
+(`restore_to_point_in_time`, [PITR.md](PITR.md)) so this one stays unable to stop early. It refuses outright if `pg_isready`
 reports the instance still accepting connections — confirmed live, this is the one thing standing
 between restoring a dead instance and destroying a live one. It is classified
 `policy.ActionDestructive`, the same tier as `restart_container`/`restart_service`, flowing
@@ -641,15 +645,15 @@ other claim in this document is.
 #### Kubernetes: restoring an instance that can't start
 
 *Added in v0.32.* On Docker and the VM the restore runs where Postgres runs: `docker exec` into
-the container, or a shell over SSH on the host. On Kubernetes that breaks exactly when it's needed.
-A Postgres that can't start (`pg_control` gone) exits, the pod goes into `CrashLoopBackOff`, and
-`kubectl exec` into it fails, and with it every pgBackRest command: `get_pgbackrest_status`, the
+the container or a shell over SSH on the host. On K8s that breaks exactly when it's needed.
+A Postgres that can't start (`pg_control` gone) exits, the pod goes into `CrashLoopBackOff` and
+`kubectl exec` into it fails and with it every pgBackRest command: `get_pgbackrest_status`, the
 WAL check, the restore and the push of the `pg_wal` tail. A real Docker container behaves the same
 way; the Docker fixture only hides it, because its entrypoint (`start-with-sshd.sh`) keeps the
 container up after Postgres dies.
 
 So the restore is now a lifecycle with the same steps on every platform
-(`agents/sysadmin/lifecycle.go`), and Kubernetes gets its own implementation of each
+(`agents/sysadmin/lifecycle.go`) and K8s gets its own implementation of each
 (`k8s_lifecycle.go`), for a self-managed Postgres StatefulSet whose image carries pgBackRest:
 
 | Step | Kubernetes | Docker/Podman, host/VM |
@@ -665,13 +669,13 @@ So the restore is now a lifecycle with the same steps on every platform
 - **The restore** refuses while Postgres serves, checks the WAL, scales the StatefulSet to 0 (so
   the crash-looping pod can't start Postgres on PGDATA mid-restore), then runs the same restore
   script as on Docker in a one-off pod. The saved `pg_wal` copy goes on the repo volume: the
-  one-off pod's own disk goes with it, and the data volume is PGDATA itself, which `--delta`
-  cleans. It leaves the StatefulSet at 0, and its `quiesced` field says to resume it with
+  one-off pod's own disk goes with it and the data volume is PGDATA itself, which `--delta`
+  cleans. It leaves the StatefulSet at 0 and its `quiesced` field says to resume it with
   `restart_container`; recovery runs when the pod starts.
 - **RBAC:** the sysadmin agent's ClusterRole gains pods create/delete, StatefulSets
   get/list/patch and their scale subresource. Still no deployments, jobs or nodes.
 
-👉 Verified in-cluster on minikube (2026-10-20), with the whole stack deployed by Helm
+👉 Verified in-cluster on K8s (2026-10-20), with the whole stack deployed by Helm
 (`testing/k8s/helm-values-pgbackrest.yaml`) and the demo pod (`testing/k8s/pgbackrest-demo.yaml`)
 running the stock Postgres entrypoint, so a crash really crash-loops. `make integration-k8s` calls
 the in-cluster sysadmin agent's tools through its `/tool/{name}` endpoint, under its own service
@@ -683,42 +687,77 @@ account, in a namespace of its own that must end in `-destruct`:
     segment and row B in the open one, then a real crash. The restore scaled to 0, restored, saved
     the copy on the repo volume and pushed the tail; `restart_container` scaled back; both rows
     came back, `verify_restore_recovery` read the recovery from `kubectl logs` and reported it
-    `verified` through the tail, and every tail segment was in the archive.
+    `verified` through the tail and every tail segment was in the archive.
 
 The broken-chain detection also ran through the in-cluster agents as a fault
 (`db-pgbackrest-wal-gap-k8s`, via faulttest and the gateway): the health triage reported the chain
 broken and the `pgbackrest_wal_chain_broken` signal fired.
 
-👉 Kubernetes found two bugs in the WAL check that Docker and the VM never showed, both fixed with
+👉 K8s found two bugs in the WAL check that Docker and the VM never showed, both fixed with
 regression tests:
   - **an empty gap list** when the backup's only segment was missing and nothing had been archived
     after it (a brand-new pod): the verdict was right, `broken`, but `gaps` named nothing;
   - **an unreadable `.history` file:** every Service in the pod's namespace injects environment
-    variables pgBackRest warns about on stdout (`environment contains invalid option`), and a
+    variables pgBackRest warns about on stdout (`environment contains invalid option`) and a
     history file read with those lines in front failed to parse, so the check came back
     `unverified` instead of `broken` and the signal never fired. The text reads now drop
     pgBackRest's own log lines, as the JSON reads already skipped them.
 
 And two fixture gaps: `init-pgbackrest.sh` (stanza and `archive_command`) was mounted by the
 compose file rather than built into the image, so the first pod came up without either; and a
-Kubernetes volume is root-owned where a Docker named volume inherits the image's ownership, so the
+K8s volume is root-owned where a Docker named volume inherits the image's ownership, so the
 repo volume needs an init container to hand it to `postgres`.
 
-Not yet: the agent-driven chain on Kubernetes (the data-loss triage routing to the pgBackRest
-health triage, the restore playbook's restart step calling `restart_container`, and the
-`db-pgdata-corrupted-k8s` faults run with `--remediate`); a ReadWriteOnce volume on a multi-node
-cluster (the one-off pod isn't pinned to the instance's node); a remote repo (S3/GCS/Azure), where
-the one-off pod needs the repo's credentials rather than a volume. Operator-managed Postgres
-(CloudNativePG) has no pgBackRest at all and stays out of scope.
+#### The agent-driven chain on Kubernetes
+
+*Added in v0.33.* v0.32 verified each tool in-cluster, but the playbooks did not route a K8s 
+data-loss case to them: the host triage sent every `runtime=kubectl` target straight to the pod-crash
+triage and the entry hop told the DB agent to use `get_pod_logs`, a tool of the K8s Agent. Now:
+
+- `pbs_db_data_loss_triage` (v1.10) hands a K8s-hosted instance to `pbs_sysadmin_host_triage`
+  the same way it does a Docker or systemd one: it front-loads `single_instance`, `backup_tool` and
+  `pitr_decided` and stops.
+- `pbs_sysadmin_host_triage` (v2.4), on `runtime=kubectl` with those findings in hand, calls
+  `get_host_logs` (`kubectl logs`, the crashed run first) and applies the same "could not find the
+  database system" rule as for any runtime. It deliberately does not call `read_pg_log_file`, which needs
+  exec into a pod that is crash-looping. Without the signature it falls back to
+  `pbs_k8s_pod_crash_triage` as before.
+- `pbs_pgbackrest_restore_remediate` (v1.9) resumes the StatefulSet with `restart_container`. It expects its first
+  `check_host` after the restore to fail on Kubernetes (the restore scaled the StatefulSet to 0, so there is no pod
+  to inspect) and goes on to the restart; the audit trail of the verified run shows exactly that error.
+
+👉 Verified on K8s (2026-10-25) with the whole stack in-cluster, by `db-pgdata-corrupted-k8s`
+(`pg_control` deleted in the `db-destruct` pod, which then crash-looped), through the gateway with
+`--remediate --approval-mode force --gate-escalation` (incident `plr_c0d8fb87`, 215s, four hops, both
+mid-chain gates force-approved):
+
+| hop | run | tools it executed (audit trail) |
+|---|---|---|
+| `pbs_db_data_loss_triage` | `plr_c0d8fb87` | `check_connection` (error: the database is down), `create_incident_bundle` |
+| `pbs_sysadmin_host_triage` | `plr_756f360c` | `check_host`, `get_host_logs`; transitioned with `data_loss_restore_candidate=true` |
+| `pbs_pgbackrest_health_triage` | `plr_accc38c0` | `get_pgbackrest_status`; transitioned to the restore |
+| `pbs_pgbackrest_restore_remediate` | `plr_23190a73` | `get_pgbackrest_status`, `restore_from_backup` (30.6s), `check_host` (error: the pod is gone, the restore scaled the StatefulSet to 0), `restart_container`, `check_host`, `get_host_logs`, `verify_restore_recovery` |
+
+The harness confirmed recovery 229.7s after injection, from inside the pod (`verify_exec`: the instance
+is serving and has left recovery).
+
+Not yet: a ReadWriteOnce volume on a multi-node cluster (the one-off pod isn't pinned to the
+instance's node); a remote repo (S3/GCS/Azure), where the one-off pod needs the repo's credentials
+rather than a volume. Operator-managed Postgres (CloudNativePG) has no pgBackRest at all and stays out
+of scope.
 
 ## 4. Roadmap
 
 Not yet built — tracked, not forgotten:
 
-- **The agent-driven restore chain on Kubernetes (§3).**  
-  The tools work in-cluster since v0.32 ([Kubernetes](#kubernetes-restoring-an-instance-that-cant-start));
-  the playbooks don't route a Kubernetes data-loss case to them yet, and multi-node ReadWriteOnce
-  volumes and remote repos aren't handled.
+- **Point-in-time recovery gaps ([PITR.md §7](PITR.md#7-limits)).**  
+  Built in v0.33 for a single instance, to a time or LSN, down or serving. Not yet: a systemd VM run, routing the
+  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive, and named restore points
+  and transaction IDs.
+
+- **Multi-node volumes and remote repos for the Kubernetes restore (§3).**  
+  The agent-driven chain works on K8s since v0.33 ([Kubernetes](#the-agent-driven-chain-on-kubernetes));
+  multi-node ReadWriteOnce volumes and remote repos aren't handled.
 
 - **Backup-check history (planned for v0.33).**  
   Each `get_pgbackrest_status` result is kept today only as a tool-call record in the audit
@@ -767,13 +806,13 @@ Not yet built — tracked, not forgotten:
 
 - **CloudNativePG (and similar K8s operator-managed) backup visibility.**   
   §2's `get_pgbackrest_status`/`run_pgbackrest_backup` now refuse outright (rather than silently
-  running against the wrong host) when a target resolves to a Kubernetes Pod — see §2's own
+  running against the wrong host) when a target resolves to a K8s Pod — see §2's own
   "Verified, not just claimed" callout.  
 
   That refusal is permanent by design, not a stopgap, but the reason is more precise than "CNPG doesn't run pgBackRest": CNPG's own *native* backup path
   is Barman Cloud (itself being moved out of the core operator into an official plugin as of
   1.26+) and the CNPG maintainers have explicitly declined to add pgBackRest support directly
-  to the operator — not an oversight, a stated preference for Kubernetes-native primitives
+  to the operator — not an oversight, a stated preference for K8s-native primitives
   (volume snapshots) over wrapping external tools, plus supportability concerns about bugs in an
   external tool being magnified in a concurrent K8s environment ([cloudnative-pg/cloudnative-pg
   discussion #3145](https://github.com/cloudnative-pg/cloudnative-pg/discussions/3145)).  

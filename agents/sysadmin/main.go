@@ -227,6 +227,22 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	restoreToPITToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "restore_to_point_in_time",
+		Description: "Restore the database to a recovery target (a time or an LSN) instead of to the end of the archive, overwriting the current data directory (destructive — requires operator approval). You pass only the instance: the recovery target, the plan digest and the acknowledgement come from the human approval carried with the request, and you cannot choose or change them. Without such an approval it refuses outright. Refuses if the server is still accepting connections unless the approval also allows stopping it (a serving instance is then asked about itself, its WAL is flushed to the archive, the plan is checked again from the repository, and only then is it stopped; it is refused if it is a standby, has replicas, is not archiving, or runs under an HA manager), if a postmaster is running, if the plan is not feasible, or if the plan has changed since it was approved (the digest no longer matches). A stopped instance is left stopped. It restores the backup chosen by the plan with pgBackRest, stopping at the target and promoting to a new timeline; the WAL that was in pg_wal is moved aside (saved_wal) and not replayed. It does NOT keep or push that WAL, so everything committed after the target is discarded. After restarting the instance (restart_container / restart_service), call verify_restore_recovery: it checks PostgreSQL stopped at the target and reports target_not_reached if the archive ran out first. On Kubernetes it scales the StatefulSet to 0 and restores in a one-off pod, as restore_from_backup does.",
+	}, restoreToPITTool)
+	if err != nil {
+		return nil, err
+	}
+
+	planPITRToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "plan_point_in_time_recovery",
+		Description: "Dry run of a point-in-time restore: changes nothing. Given a recovery target (time as RFC3339 with a zone, or an LSN), reports which backup would be restored (the newest that finished before the target), whether the archived WAL from that backup to the end of the archive is continuous, whether the target lies inside the archive (for a serving instance a target in WAL it has not archived yet is plausible: instance_serving and archive_flush_required say so, and the restore flushes first), and what would be lost (the data after the target, up to the end of the archive). status feasible, not_feasible (detail says why: no backup before the target, a WAL gap, a target past the archive end) or unverified. A feasible time target is only plausible: the archive's times are coarse, and recovery can still run out of WAL before it. The plan_digest identifies exactly this plan.",
+	}, planPITRTool)
+	if err != nil {
+		return nil, err
+	}
+
 	verifyRestoreRecoveryToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "verify_restore_recovery",
 		Description: "After restore_from_backup and the restart, check where PostgreSQL's recovery actually ended against where restore_from_backup predicted it would (the last WAL segment restored from the archive, and the new timeline). Reads PostgreSQL's own recovery log lines. status: verified (as predicted), mismatch (stopped early, went past, or a different timeline — report it), not_found (no completed recovery in the log yet: the instance may not be restarted, or recovery failed before promotion), unverified (no prediction recorded for this target, or nothing restored from the archive). Also returns the exact LSN redo ended at, and replayed_through_wal when recovery replayed WAL that restore_from_backup put back into pg_wal past the archive. Read-only.",
@@ -246,6 +262,8 @@ func createTools() ([]tool.Tool, error) {
 		getPgBackRestStatusToolDef,
 		runPgBackRestBackupToolDef,
 		restoreFromBackupToolDef,
+		restoreToPITToolDef,
+		planPITRToolDef,
 		verifyRestoreRecoveryToolDef,
 	}, nil
 }

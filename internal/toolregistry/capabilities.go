@@ -67,6 +67,7 @@ const (
 	CapHostMemory     = "host_memory"
 	CapBackupStatus   = "backup_status"
 	CapRecoveryResult = "recovery_result"
+	CapRecoveryPlan   = "recovery_plan"
 )
 
 // Capability constants — cross-domain and other agents (observe).
@@ -147,6 +148,7 @@ var Vocabulary = []CapabilityInfo{
 	{CapHostMemory, "CapHostMemory", KindObserve, "host", "Host memory utilization."},
 	{CapBackupStatus, "CapBackupStatus", KindObserve, "host", "Backup repository health and the most recent backup's age."},
 	{CapRecoveryResult, "CapRecoveryResult", KindObserve, "host", "Where recovery after a restore actually ended, checked against the prediction made before it."},
+	{CapRecoveryPlan, "CapRecoveryPlan", KindObserve, "host", "Dry run of a point-in-time restore: the backup it would use, WAL continuity to the target, and what would be lost."},
 
 	// Cross-domain and other agents — observe.
 	{CapLogs, "CapLogs", KindObserve, "cross-domain", "Log lines from the database, its process, a pod, or an uploaded file."},

@@ -6,6 +6,10 @@
 {{- $dbAgent := .Values.faulttest.dbAgentURL | default (printf "http://%s-database-agent:%d" $fullname (.Values.agents.database.port | int)) }}
 {{- $k8sAgent := .Values.faulttest.k8sAgentURL | default (printf "http://%s-k8s-agent:%d" $fullname (.Values.agents.k8s.port | int)) }}
 {{- $sysAgent := .Values.faulttest.sysadminAgentURL | default (printf "http://%s-sysadmin-agent:%d" $fullname (.Values.agents.sysadmin.port | int)) }}
+{{- /* faulttest.ssh may be absent when upgrading with --reuse-values (new chart defaults are not merged in). */ -}}
+{{- $ssh := .Values.faulttest.ssh | default dict }}
+{{- $sshKey := $ssh.keyName | default "id_ed25519" }}
+{{- $usersMounted := and .Values.faulttest.usersFile (or .Values.gateway.identity.usersConfig .Values.gateway.identity.usersSecret) }}
 {{- if .Values.faulttest.rbac.create }}
 ---
 apiVersion: v1
@@ -45,6 +49,23 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets", "deployments"]
     verbs: ["get", "list", "watch"]
+  {{- if (.Values.faulttest.rbac | default dict).destructive }}
+  # faulttest.rbac.destructive: the destructive Kubernetes faults delete the
+  # database pod, run a one-off pod to repair it (and read its logs) and scale
+  # its StatefulSet down and up.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -127,6 +148,22 @@ spec:
             {{- if .Values.faulttest.conn }}
             - --conn={{ .Values.faulttest.conn }}
             {{- end }}
+            {{- if .Values.faulttest.agentConn }}
+            - --agent-conn={{ .Values.faulttest.agentConn }}
+            {{- end }}
+            {{- if $ssh.secretName }}
+            - --ssh-host={{ required "faulttest.ssh.host is required when faulttest.ssh.secretName is set" $ssh.host }}
+            - --ssh-key=/etc/faulttest-ssh/{{ $sshKey }}
+            {{- if $ssh.port }}
+            - --ssh-port={{ $ssh.port }}
+            {{- end }}
+            {{- if $ssh.user }}
+            - --ssh-user={{ $ssh.user }}
+            {{- end }}
+            {{- end }}
+            {{- if $usersMounted }}
+            - --users-file=/etc/helpdesk/users.yaml
+            {{- end }}
             - --db-agent={{ $dbAgent }}
             - --k8s-agent={{ $k8sAgent }}
             - --sysadmin-agent={{ $sysAgent }}
@@ -135,6 +172,12 @@ spec:
             {{- end }}
             {{- if .Values.faulttest.external }}
             - --external
+            {{- end }}
+            {{- if .Values.faulttest.primaryInjection }}
+            {{- if .Values.faulttest.external }}
+            {{- fail "faulttest.primaryInjection (--external=false) and faulttest.external (--external) cannot both be set" }}
+            {{- end }}
+            - --external=false
             {{- end }}
             {{- if .Values.infrastructure }}
             - --infra-config=/etc/helpdesk/infrastructure.json
@@ -216,6 +259,14 @@ spec:
             {{- end }}
             - name: reports
               mountPath: /reports
+            {{- if $ssh.secretName }}
+            - name: faulttest-ssh
+              mountPath: /etc/faulttest-ssh
+              readOnly: true
+            {{- end }}
+            {{- if $usersMounted }}
+            {{- include "helpdesk.usersVolumeMount" . | nindent 12 }}
+            {{- end }}
       volumes:
         {{- if .Values.infrastructure }}
         - name: infra-config
@@ -229,4 +280,13 @@ spec:
         {{- end }}
         - name: reports
           emptyDir: {}
+        {{- if $ssh.secretName }}
+        - name: faulttest-ssh
+          secret:
+            secretName: {{ $ssh.secretName }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $usersMounted }}
+        {{- include "helpdesk.usersVolume" . | nindent 8 }}
+        {{- end }}
 {{- end }}

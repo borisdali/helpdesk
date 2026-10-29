@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1286,5 +1287,62 @@ func TestPlaybookRunHandlers_FaultRunHistory(t *testing.T) {
 	}
 	if len(result2.Entries) != 2 {
 		t.Errorf("filtered entries = %d, want 2", len(result2.Entries))
+	}
+}
+
+// The recovery target the gateway records on a run survives the wire: the
+// start request, a later update and every way of reading the run back.
+func TestPlaybookRunHandlers_RecoveryTarget_RoundTrip(t *testing.T) {
+	srv := newPlaybookRunServer(t)
+
+	// Exactly what the gateway sends: audit.PlaybookRun marshalled.
+	rec := doRunRequest(t, srv, "pb_pitr", audit.PlaybookRun{
+		SeriesID: "pbs_pgbackrest_pitr_triage", ExecutionMode: "agent",
+		RecoveryTarget: audit.FormatRecoveryTarget("time", "2026-10-27T14:05:00Z"),
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d; %s", rec.Code, rec.Body.String())
+	}
+	var created audit.PlaybookRun
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil || created.RunID == "" {
+		t.Fatalf("decode: %v %+v", err, created)
+	}
+
+	read := func(t *testing.T) audit.PlaybookRun {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/"+created.RunID, nil)
+		req.SetPathValue("runID", created.RunID)
+		w := httptest.NewRecorder()
+		srv.handleGetRun(w, req)
+		var got audit.PlaybookRun
+		if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+			t.Fatalf("decode run: %v", err)
+		}
+		return got
+	}
+	if got := read(t); got.RecoveryTarget != "time=2026-10-27T14:05:00Z" {
+		t.Fatalf("recovery_target read back as %q", got.RecoveryTarget)
+	}
+
+	// A PATCH (the run concluding, or a gate being resolved) must not clear it.
+	patch := httptest.NewRequest(http.MethodPatch, "/v1/fleet/playbook-runs/"+created.RunID,
+		strings.NewReader(`{"outcome":"gate_pending","transitioned_to":"pbs_pgbackrest_pitr_remediate","findings_summary":"plan feasible"}`))
+	patch.SetPathValue("runID", created.RunID)
+	patch.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleUpdate(w, patch)
+	if w.Code != http.StatusNoContent && w.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d; %s", w.Code, w.Body.String())
+	}
+	if got := read(t); got.RecoveryTarget != "time=2026-10-27T14:05:00Z" || got.Outcome != "gate_pending" {
+		t.Errorf("after the update: %+v", got)
+	}
+
+	// And the listing the gateway uses to walk a chain carries it too.
+	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs?prior_run_id=none", nil)
+	lw := httptest.NewRecorder()
+	srv.handleList(lw, req)
+	if lw.Code != http.StatusOK {
+		t.Fatalf("list status = %d", lw.Code)
 	}
 }

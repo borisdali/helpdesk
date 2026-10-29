@@ -1466,8 +1466,21 @@ type GetPgBackRestStatusResult struct {
 // walCheckInput returns what the WAL-continuity check needs about the latest
 // backup, or false when there is no backup to check.
 func (r GetPgBackRestStatusResult) walCheckInput() (walCheckInput, bool) {
+	return r.walCheckInputFor("")
+}
+
+// walCheckInputFor is walCheckInput for the backup with the given label (a
+// point-in-time restore checks the backup it selected, not the newest). An
+// empty label means the newest backup; an unknown label is false.
+func (r GetPgBackRestStatusResult) walCheckInputFor(label string) (walCheckInput, bool) {
 	var last *PgBackRestBackup
 	for i := range r.Backups {
+		if label != "" {
+			if r.Backups[i].Label == label {
+				last = &r.Backups[i]
+			}
+			continue
+		}
 		if last == nil || r.Backups[i].StopTime.After(last.StopTime) {
 			last = &r.Backups[i]
 		}
@@ -2344,6 +2357,30 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, err := restoreFromBackupImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("restore_to_point_in_time", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[RestoreToPITArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := restoreToPITImpl(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		return marshalResult(result)
+	})
+
+	r.Register("plan_point_in_time_recovery", func(ctx context.Context, args map[string]any) (string, error) {
+		a, err := argsToStruct[PlanPITRArgs](args)
+		if err != nil {
+			return "", err
+		}
+		result, err := planPITRImpl(ctx, a)
 		if err != nil {
 			return "", err
 		}

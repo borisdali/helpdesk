@@ -1,5 +1,7 @@
 # aiHelpDesk: Deployment on Kubernetes
 
+Which pieces can run where, and which combinations are verified (control plane, faulttest, the target database, auditd storage), is in [Platforms](../../docs/PLATFORMS.md).
+
 If you are new to aiHelpDesk, before reading these instructions, we recommend reviewing the three deployment modes offered by aiHelpDesk: [Personal, Enterprise R/O Governed and Enterprise Full](../../docs/DEPLOYMENT_MODES.md) to see which one suits you best.
 
 This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
@@ -1027,6 +1029,8 @@ See [here](../../docs/FLEET.md) for the full job definition schema, multi-step e
 
 The binary is baked into the same Docker image as the agents and runs as a Kubernetes Job. There are two ways to trigger it.
 
+Use **Helm (§10.1)** unless you cannot: the chart wires the agent URLs, the model Secret, the infrastructure ConfigMap and the RBAC, re-creates the Job on every run (a Job is immutable, so a plain one cannot be re-applied once finished), and it is the only way to get the v0.33 options (SSH to a VM, a pod fault's RBAC, a users file, `--agent-conn`; §10.6 and §10.7). The hand-written Job (§10.2) is for when you need full control of the Job spec; it predates the gateway flags and carries none of those options.
+
 ### 10.1 Via Helm (recommended)
 
 Because the Helm chart already knows your agent URLs, model API Secret and infrastructure ConfigMap, you only need to name the fault and flip one flag:
@@ -1082,6 +1086,7 @@ Key `faulttest.*` values:
 | `categories` | _(all)_ | Comma-separated categories |
 | `judge` | `false` | Enable LLM-as-judge semantic scoring |
 | `targetNamespace` | `helpdesk-test` | Namespace where faults are injected |
+| `primaryInjection` | `false` | Pass `--external=false`: run each fault's own inject/teardown. **Needed for the Kubernetes and VM faults** (§10.6, §10.7); without it the image's `faulttest` defaults to `--external` and reports `No failures match the specified filters` |
 | `ttlSecondsAfterFinished` | `3600` | Auto-delete the Job after N seconds |
 
 See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full fault catalog, scoring details and custom catalog authoring.
@@ -1302,6 +1307,8 @@ See [docs/FAULTTEST.md](../../docs/FAULTTEST.md) for the full CLI reference, fau
 
 ### 10.5 SSH injection mode
 
+> As of v0.33 the chart renders this for you: set `faulttest.ssh.*` (see [§10.6](#106-a-vm-fault-from-a-job-entirely-in-cluster) and `examples/faulttest-vm-job.yaml`). The hand-written Job below still works.
+
 Some faults require OS-level access to the database host (e.g. `db-wal-disk-full`, which injects FATAL/PANIC log entries and kills the PostgreSQL process to simulate WAL disk exhaustion). These use `ssh_exec` injection: the fault script is streamed to the host over SSH, so no files need to be pre-staged there.
 
 Create a Secret with the SSH private key (once), then submit a Job that mounts it:
@@ -1335,6 +1342,99 @@ volumes:
 ```
 
 `--ssh-host` alone is sufficient to trigger SSH injection mode; `--external` additionally restricts the run to the `external_compat` subset of faults. The `FAULTTEST_CONTAINER` variable is resolved automatically from `infrastructure.json` and passed to inject/teardown scripts — you do not need to set it manually. The SSH target must be reachable from the Kubernetes node (same VPC, egress policy permits port 22). See [docs/FAULTTEST_SAMPLE.md](../../docs/FAULTTEST_SAMPLE.md#external-fault-injection-with-ssh) for the full Job YAML and a sample run.
+
+### 10.6 A VM fault from a Job, entirely in-cluster
+
+*Added in v0.33.* The faults that break a real host or VM (`db-pgdata-corrupted-vm`,
+`db-pgbackrest-wal-gap-vm`) inject over SSH, so the harness can run as a Job in the cluster with the
+helpdesk agents reaching the same VM over SSH from their pods. Nothing runs on your laptop.
+
+What has to be true first:
+
+1. **The VM is reachable from the pods** on its SSH port (and Postgres port, for the harness's
+   recovery check) and its address resolves in-cluster. The VM's Postgres must also accept the pods:
+   `listen_addresses` covers the VM's LAN address and `pg_hba.conf` allows the cluster's source network
+   (on minikube, the node's address, which is not your laptop's) or the recovery check fails with
+   `connection refused` / `no pg_hba.conf entry` after a restore that actually worked. Use the IP if the name only resolves on
+   your LAN. On minikube with the Docker driver, test from the node: `minikube ssh -- nc -zv <ip> 22`.
+2. **The agents can SSH to it.** Create the sysadmin agent's Secret (key and `known_hosts`, see
+   [§3.7a](#37a-ssh-to-hosts-and-vms-sysadmin-agent)) and make the VM's inventory entry name the
+   mounted key and an address the pod can reach:
+   `"address": "<vm-ip>"`, `"ssh_user": "postgres"`, `"ssh_key_path": "/etc/helpdesk/ssh/id_ed25519"`.
+3. **The Job can SSH to it.** A Secret with the private key, in the release namespace:
+   `kubectl -n helpdesk-system create secret generic faulttest-ssh-key --from-file=id_ed25519=<key>`.
+   The Job runs `ssh` with `StrictHostKeyChecking=no`, so it needs no `known_hosts`.
+4. **A recent full backup on the VM**, taken after the last restore: the restore hop refuses a stale
+   backup and ends at a human (`no_action`), which is correct but not what the four-hop run is for.
+
+Then run it with [`examples/faulttest-vm-job.yaml`](examples/faulttest-vm-job.yaml) (it ships in the
+bundle; fill in the `<...>` values):
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+  -f faulttest-vm-job.yaml --timeout 20m
+kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f   # in a second terminal
+```
+
+The Job is a Helm hook, so `helm upgrade` blocks until it finishes and the result is in the Job's log
+and its `/reports` directory. Set `faulttest.enabled=false` afterwards or the next upgrade runs it
+again.
+
+Two runs cover the VM path:
+
+| Run | `faulttest.ids` | Flags | Expected |
+|---|---|---|---|
+| The four-hop restore | `db-pgdata-corrupted-vm` | `remediate`, `gateEscalation`, `approvalMode: force` | data-loss triage, host triage, health triage, restore; the VM is back up |
+| A hidden WAL segment | `db-pgbackrest-wal-gap-vm` | none of those (diagnosis only) | health triage reports the chain `broken` and stops at a human; the restore is refused by design |
+
+👉 Verified on minikube from the Job against a real Ubuntu VM (2026-10-27, image `k8schain-2247`, the VM reached by name over SSH from both the Job and the sysadmin agent's pod):
+  - `db-pgbackrest-wal-gap-vm` (`plr_85721afd`): `[PASS]` 100%, the signal `pgbackrest_wal_chain_broken` confirmed from the audit trail, the hidden segment restored by the teardown, 27 seconds.
+  - `db-pgdata-corrupted-vm` (`plr_f8cee154`, `emitAndWait` on): `pg_control` removed and the service down, four hops with the first gate approved as `alice@example.com` and the later ones force-approved, recovered 176s after injection (checked with `psql` from the pod), `Root cause: missing-data-directory`, and the teardown found `postgresql@16-main` active.
+
+The pod must be able to resolve the VM's name. A name that exists only in your laptop's `/etc/hosts` (a `.test` name, say) does not resolve in the cluster: on minikube add it to the `hosts` block of the CoreDNS Corefile (`kubectl -n kube-system edit cm coredns`), or use the IP and rebuild `known_hosts` for it.
+
+If the Job is killed mid-run, the fault's teardown may not have run. On the VM, check
+`systemctl is-active postgresql@16-main` and look for `*.hidden-by-fault` files under the pgBackRest
+archive (`find /var/lib/pgbackrest/archive -name '*.hidden-by-fault'`); renaming them back undoes the
+WAL-gap fault.
+
+> **"No failures match the specified filters".** The `faulttest` in the image has no source tree, so it defaults to `--external`, which skips every fault not marked `external_compat: true`. The Kubernetes and VM faults aren't, so a Job selecting them runs nothing and the hook fails. Set `faulttest.primaryInjection=true` (the examples do).
+
+> **Feedback in a Job.** A Job has no terminal, so by default the post-recovery feedback prompt is skipped and no feedback is recorded. Set `faulttest.emitAndWait=true` (with `approvalMode: force` and an `operator`) to have the run raise a Decision Hub card instead and wait up to 10 minutes for you to answer it; see [docs/DECISIONS.md](../../docs/DECISIONS.md#running-from-a-job-with---emit-and-wait). It only applies to the restore runs: a fault that ends at a human never recovers, so it raises no card.
+
+### 10.7 A pod fault from a Job, entirely in-cluster
+
+*Added in v0.33.* The same Job can break and repair a database that runs as a pod in the cluster. The
+Job works on the pod with its own ServiceAccount (`kubectl exec`, `delete pod`, `scale`, a one-off
+repair pod), the helpdesk agents find and restore it through theirs, and the Job checks the recovery
+from inside the pod, so nothing needs a route from outside. No SSH is involved: that is for a VM
+(§10.6).
+
+The default Role is read plus exec, enough for `db-pgbackrest-wal-gap-k8s`. `db-pgdata-corrupted-k8s`
+also deletes the pod, scales its StatefulSet and runs a repair pod, so it needs
+`faulttest.rbac.destructive=true`. That adds `pods` create and delete, `pods/log` get, and
+`statefulsets` patch with `statefulsets/scale` get, patch and update, and only in
+`faulttest.targetNamespace`, which must be the namespace the fault breaks (`db-destruct`; the fault
+refuses any namespace that does not end in `-destruct`). There is no ClusterRole.
+
+```bash
+helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+  -f faulttest-k8s-job.yaml --timeout 20m
+kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f   # second terminal
+```
+
+with [`examples/faulttest-k8s-job.yaml`](examples/faulttest-k8s-job.yaml). Prerequisites: the demo pod
+applied in `db-destruct` with a recent full backup (`make integration-k8s` does both), and its inventory
+entry (`testing/k8s/helm-values-pgbackrest.yaml`).
+
+| Run | `faulttest.ids` | `targetNamespace` | Flags | Expected |
+|---|---|---|---|---|
+| The four-hop restore | `db-pgdata-corrupted-k8s` | `db-destruct` | `rbac.destructive`, `remediate`, `gateEscalation`, `approvalMode: force` | pod crashes, four hops, restored and resumed |
+| A hidden WAL segment | `db-pgbackrest-wal-gap-k8s` | `db` | none of those | health triage reports the chain `broken` and stops at a human |
+
+👉 Verified on minikube from the Job (2026-10-26/27, image `k8schain-2247`, everything in-cluster including faulttest):
+  - `db-pgbackrest-wal-gap-k8s` (`plr_68e31a92`): `[PASS]` 100%, the signal `pgbackrest_wal_chain_broken` fired and confirmed, the hidden segment restored, 25 seconds.
+  - `db-pgdata-corrupted-k8s` (`plr_cb23439f`, `emitAndWait` on): the pod deleted and crash-looping, four hops with the first gate approved as `alice@example.com` and the later ones force-approved, recovered 237s after injection, `Chain evidence … keywords=100% tools=100%`, `Root cause: missing-data-directory`, and a Decision Hub feedback card the Job waited for (answered after about 7 minutes, so the Job ran 11 minutes in all) before it tore down.
 
 ## 11. Fleet Playbooks & Vault
 

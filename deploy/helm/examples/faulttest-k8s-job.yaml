@@ -1,0 +1,59 @@
+# Reference values: run faulttest from a Job INSIDE the cluster against a
+# database that runs as a pod in the same cluster (v0.33). Nothing runs on your
+# laptop: the Job breaks the pod with its own ServiceAccount, the helpdesk
+# agents find and repair it, and the Job checks the recovery from inside it.
+# See deploy/helm/README.md §10.7.
+#
+#   helm upgrade helpdesk ./helm/helpdesk -n helpdesk-system --reuse-values \
+#     -f faulttest-k8s-job.yaml --timeout 20m
+#   kubectl -n helpdesk-system logs -l app.kubernetes.io/component=faulttest -f
+# The Job is a Helm hook: the command blocks until it finishes. Set
+# faulttest.enabled=false afterwards, or the next upgrade runs it again.
+#
+# Prerequisites: the pgBackRest demo pod (testing/k8s/pgbackrest-demo.yaml)
+# applied in the namespace below with a recent full backup, and an inventory
+# entry for it (k8s_namespace + k8s_pod_selector, see
+# testing/k8s/helm-values-pgbackrest.yaml). Replace every <...>.
+
+faulttest:
+  enabled: true
+
+  # The four-hop restore of a crashed pod. For the hidden-WAL-segment fault
+  # instead, use ids db-pgbackrest-wal-gap-k8s with targetNamespace "db", conn
+  # pgbackrest-k8s, and turn off remediate, gateEscalation and rbac.destructive
+  # (it only runs commands in the pod; it stops at the health triage by design).
+  ids: db-pgdata-corrupted-k8s
+
+  # Required for these faults: the image's faulttest defaults to --external,
+  # which skips any fault not marked external_compat. This passes --external=false.
+  primaryInjection: true
+
+  viaGateway: true
+  gatewayAPIKeySecret: <secret holding the gateway API key, key "api-key">
+
+  # The inventory key of the pod. The Job needs no DSN of its own: recovery is
+  # checked with `kubectl exec` (the fault's verify_exec), not psql over the network.
+  conn: pgbackrest-k8s-destruct
+
+  # The namespace the fault breaks. It is also where the Job's Role is created,
+  # and the fault refuses any namespace that does not end in -destruct.
+  targetNamespace: db-destruct
+  rbac:
+    create: true
+    destructive: true   # delete the pod, scale the StatefulSet, run a repair pod
+
+  remediate: true
+  gateEscalation: true
+  approvalMode: force
+  operator: <a human user in users.yaml with an override role, e.g. alice@example.com>
+  usersFile: true
+
+
+  # Feedback. A Job has no terminal, so the post-recovery feedback prompt is
+  # skipped and nothing is recorded. Uncomment to raise a Decision Hub card
+  # instead and wait (up to 10 minutes) for someone to resolve it:
+  #   POST /api/v1/decisions/feedback:<plr_id>/resolve
+  # Needs approvalMode: force and an operator, as above. See docs/DECISIONS.md.
+  # emitAndWait: true
+
+  ttlSecondsAfterFinished: 3600

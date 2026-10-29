@@ -45,6 +45,7 @@ Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](
 | `host_memory` | host | Host memory utilization. | [`check_memory`](sysadmin.md#check_memory) |
 | `backup_status` | host | Backup repository health and the most recent backup's age. | [`get_pgbackrest_status`](sysadmin.md#get_pgbackrest_status) |
 | `recovery_result` | host | Where recovery after a restore actually ended, checked against the prediction made before it. | [`verify_restore_recovery`](sysadmin.md#verify_restore_recovery) |
+| `recovery_plan` | host | Dry run of a point-in-time restore: the backup it would use, WAL continuity to the target, and what would be lost. | [`plan_point_in_time_recovery`](sysadmin.md#plan_point_in_time_recovery) |
 | `logs` | cross-domain | Log lines from the database, its process, a pod, or an uploaded file. | [`read_pg_log`](database.md#read_pg_log), [`read_uploaded_file`](database.md#read_uploaded_file), [`get_pod_logs`](k8s.md#get_pod_logs), [`read_pod_file`](k8s.md#read_pod_file), [`get_host_logs`](sysadmin.md#get_host_logs), [`read_pg_log_file`](sysadmin.md#read_pg_log_file) |
 | `incident_history` | incident | Previously created incident bundles. | [`list_incidents`](incident.md#list_incidents) |
 | `web_search` | research | Web search results. | [`google_search`](research.md#google_search) |
@@ -65,5 +66,5 @@ Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](
 | `debug_pod_create` | kubernetes | Creates a short-lived debug pod on a node. | [`debug_node_dmesg`](k8s.md#debug_node_dmesg) |
 | `process_restart` | host | Restarts the database process (container or systemd unit). | [`restart_container`](sysadmin.md#restart_container), [`restart_service`](sysadmin.md#restart_service) |
 | `backup_run` | host | Takes a new backup. | [`run_pgbackrest_backup`](sysadmin.md#run_pgbackrest_backup) |
-| `data_restore` | host | Overwrites the data directory from a backup. | [`restore_from_backup`](sysadmin.md#restore_from_backup) |
+| `data_restore` | host | Overwrites the data directory from a backup. | [`restore_from_backup`](sysadmin.md#restore_from_backup), [`restore_to_point_in_time`](sysadmin.md#restore_to_point_in_time) |
 | `bundle_create` | incident | Writes a diagnostic bundle to disk. | [`create_incident_bundle`](incident.md#create_incident_bundle) |

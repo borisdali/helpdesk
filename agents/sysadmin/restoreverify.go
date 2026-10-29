@@ -54,6 +54,13 @@ type RestorePrediction struct {
 	// SegmentSizeBytes maps the redo-done LSN to a segment.
 	SegmentSizeBytes uint64 `json:"segment_size_bytes,omitempty"`
 	PredictedAt      string `json:"predicted_at"`
+	// TargetType/TargetValue are set for a point-in-time restore
+	// (restore_to_point_in_time): the recovery target, normalized, that
+	// recovery must stop at. Empty for restore-to-latest. When set,
+	// RecoverToWAL and ReplayThroughWAL are unused: recovery ends at the
+	// target, not at the end of the archive (pitrverify.go).
+	TargetType  string `json:"target_type,omitempty"`
+	TargetValue string `json:"target_value,omitempty"`
 }
 
 // restorePredictionFrom returns the prediction a restore of wal's backup
@@ -171,6 +178,10 @@ const (
 	RestoreMismatch   = "mismatch"
 	RestoreNotFound   = "not_found"
 	RestoreUnverified = "unverified"
+	// RestoreTargetNotReached: a point-in-time recovery ran out of WAL before
+	// the target. PostgreSQL shut down; PGDATA is intact and the restore can
+	// be repeated with an earlier target.
+	RestoreTargetNotReached = "target_not_reached"
 )
 
 // VerifyRestoreRecoveryArgs defines arguments for verify_restore_recovery.
@@ -199,6 +210,9 @@ type VerifyRestoreRecoveryResult struct {
 	ReplayedThroughWAL string `json:"replayed_through_wal,omitempty"`
 	// LogSource says which log the recovery lines came from.
 	LogSource string `json:"log_source,omitempty"`
+	// StopLine is PostgreSQL's "recovery stopping ..." line, for a
+	// point-in-time restore.
+	StopLine string `json:"stop_line,omitempty"`
 }
 
 // compareRecovery is the pure core of verify_restore_recovery.
@@ -296,10 +310,14 @@ func verifyRestoreRecoveryImpl(ctx context.Context, args VerifyRestoreRecoveryAr
 	// them to /var/log/postgresql/) or logging_collector is on.
 	var rec recoveryLog
 	var tried []string
+	var texts []string // every log read, for the point-in-time checks
+	var found string   // the one the recovery was found in
 	if logs, err := getHostLogsImpl(ctx, GetHostLogsArgs{Target: args.Target, Lines: recoveryLogLines}); err == nil {
 		tried = append(tried, logs.Runtime+" logs")
+		texts = append(texts, logs.Logs)
 		if rec = parseRecoveryLog(logs.Logs); rec.Found {
 			res.LogSource = logs.Runtime + " logs"
+			found = logs.Logs
 		}
 	} else {
 		tried = append(tried, "host logs ("+err.Error()+")")
@@ -307,8 +325,10 @@ func verifyRestoreRecoveryImpl(ctx context.Context, args VerifyRestoreRecoveryAr
 	if !rec.Found {
 		if logs, err := readPgLogFileImpl(ctx, ReadPgLogFileArgs{Target: args.Target, Lines: recoveryLogLines}); err == nil {
 			tried = append(tried, "PostgreSQL log file")
+			texts = append(texts, logs.Logs)
 			if rec = parseRecoveryLog(logs.Logs); rec.Found {
 				res.LogSource = "PostgreSQL log file"
+				found = logs.Logs
 			}
 		} else {
 			tried = append(tried, "PostgreSQL log file ("+err.Error()+")")
@@ -319,7 +339,20 @@ func verifyRestoreRecoveryImpl(ctx context.Context, args VerifyRestoreRecoveryAr
 	res.NewTimeline = rec.NewTimeline
 	res.RedoDoneLSN = rec.RedoDoneLSN
 	res.ConsistentLSN = rec.ConsistentLSN
-	res.Status, res.Detail = compareRecovery(res.Expected, rec)
+	if res.Expected != nil && res.Expected.TargetType != "" {
+		pl := parsePITRLog(found)
+		if !rec.Found {
+			for _, t := range texts {
+				if pl = parsePITRLog(t); pl.NotReached {
+					break
+				}
+			}
+		}
+		res.StopLine = pl.StopLine
+		res.Status, res.Detail = comparePITRRecovery(res.Expected, rec, pl)
+	} else {
+		res.Status, res.Detail = compareRecovery(res.Expected, rec)
+	}
 	if res.Status == RestoreVerified && res.Expected != nil {
 		res.ReplayedThroughWAL = res.Expected.ReplayThroughWAL
 	}
@@ -345,6 +378,9 @@ var restoreVerifyEvidenceSchema = evidence.NewToolSchema[RestoreVerifySummary]("
 }).
 	Bool("recovery_mismatch", func(s RestoreVerifySummary) bool {
 		return s.Status == RestoreMismatch
+	}).
+	Bool("recovery_target_not_reached", func(s RestoreVerifySummary) bool {
+		return s.Status == RestoreTargetNotReached
 	}).
 	Register()
 

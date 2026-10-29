@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -81,6 +83,14 @@ type ProceedEscalationRequest struct {
 	// At-gate feedback — captured before remediation runs.
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
 	VerdictNotes   string `json:"verdict_notes,omitempty"`
+
+	// Point-in-time restore approval (the gateway's recovery_target.go). Set by
+	// the Remediator for a PITR fault (Remediator.SetPITR); a caller leaves them
+	// alone.
+	RecoveryTarget      *PITRTarget `json:"recovery_target,omitempty"`
+	PlanDigest          string      `json:"plan_digest,omitempty"`
+	AcknowledgeDataLoss bool        `json:"acknowledge_data_loss,omitempty"`
+	AllowStopServing    bool        `json:"allow_stop_serving,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.
@@ -97,7 +107,8 @@ type ApproveRunStep struct {
 type Remediator struct {
 	cfg        *HarnessConfig
 	client     *http.Client
-	faultStart time.Time // see SetFaultStart
+	faultStart time.Time  // see SetFaultStart
+	pitr       *pitrState // see SetPITR
 }
 
 // longClient is used for calls that block while an agent chain runs (e.g.
@@ -207,7 +218,13 @@ func (r *Remediator) VerifyRecovery(ctx context.Context, f Failure, method strin
 	if f.AgentConnOverride != "" {
 		connStr = ResolvedAgentConnStr(r.cfg, f)
 	}
-	recoverySecs, err := PollRecovery(ctx, connStr, verifySQL, timeout)
+	var recoverySecs float64
+	var err error
+	if spec.VerifyExec != "" {
+		recoverySecs, err = PollRecoveryExec(ctx, spec.VerifyExec, r.cfg.KubeContext, timeout)
+	} else {
+		recoverySecs, err = PollRecovery(ctx, connStr, verifySQL, timeout)
+	}
 	if err == nil {
 		recoverySecs = RecoveryTime(r.faultStart, recoverySecs, time.Now())
 	}
@@ -568,6 +585,11 @@ func (r *Remediator) findChildRun(ctx context.Context, priorRunID string) (bool,
 
 // ProceedEscalation calls POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
 func (r *Remediator) ProceedEscalation(ctx context.Context, runID string, req ProceedEscalationRequest) (*ApproveRunResponse, error) {
+	// A point-in-time fault is approved the way an operator approves one: the
+	// target, the digest of the plan they looked at, and the acknowledgements.
+	if err := r.approvePITR(ctx, &req); err != nil {
+		return nil, err
+	}
 	body, _ := json.Marshal(req)
 	reqURL := r.cfg.GatewayURL + "/api/v1/fleet/playbook-runs/" + runID + "/proceed-escalation"
 
@@ -862,11 +884,37 @@ func (r *Remediator) WaitForStepApprovalViaHub(ctx context.Context, approvalID s
 // Exported so callers that need a different connStr (e.g. after alias resolution)
 // can call it directly without constructing a full Remediator.
 func PollRecovery(ctx context.Context, connStr, verifySQL string, timeout time.Duration) (float64, error) {
+	return pollUntil(ctx, timeout, func() error {
+		return testutil.RunSQLBool(ctx, connStr, verifySQL)
+	})
+}
+
+// PollRecoveryExec is PollRecovery for a fault that declares verify_exec:
+// it runs script with bash until it exits 0 or timeout elapses. kubeContext,
+// when non-empty, is passed to the script as FAULTTEST_K8S_CONTEXT, the same
+// variable the fault's inject and teardown scripts get.
+func PollRecoveryExec(ctx context.Context, script, kubeContext string, timeout time.Duration) (float64, error) {
+	return pollUntil(ctx, timeout, func() error {
+		cmd := exec.CommandContext(ctx, "bash", "-c", script)
+		cmd.Env = os.Environ()
+		if kubeContext != "" {
+			cmd.Env = append(cmd.Env, "FAULTTEST_K8S_CONTEXT="+kubeContext)
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("verify_exec: %v\n%s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	})
+}
+
+// pollUntil calls check every 5 seconds until it succeeds, returning the
+// elapsed seconds, or until timeout.
+func pollUntil(ctx context.Context, timeout time.Duration, check func() error) (float64, error) {
 	deadline := time.Now().Add(timeout)
 	start := time.Now()
 
 	for {
-		err := testutil.RunSQLBool(ctx, connStr, verifySQL)
+		err := check()
 		if err == nil {
 			return time.Since(start).Seconds(), nil
 		}

@@ -2,6 +2,7 @@ package faultlib
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -970,4 +971,42 @@ func findCatalog() string {
 		}
 	}
 	return ""
+}
+
+// Every shell script in the built-in catalog must parse. A typo in an inject,
+// teardown or verify_exec script otherwise shows up mid-run, after the fault is
+// already half-injected: the cost of a faulty teardown is a broken target.
+// docker_exec scripts run in the container's own shell and are not checked.
+func TestBuiltinCatalog_ShellScriptsParse(t *testing.T) {
+	cat, err := LoadBuiltinCatalog()
+	if err != nil {
+		t.Fatalf("LoadBuiltinCatalog: %v", err)
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	checked := 0
+	check := func(id, what, script string) {
+		t.Helper()
+		if strings.TrimSpace(script) == "" {
+			return
+		}
+		cmd := exec.Command("bash", "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("fault %q %s does not parse: %v\n%s", id, what, err, out)
+		}
+		checked++
+	}
+	for _, f := range cat.Failures {
+		for what, spec := range map[string]InjectSpec{"inject": f.Inject, "teardown": f.Teardown, "external_inject": f.ExternalInject, "external_teardown": f.ExternalTeardown} {
+			if spec.Type == "shell_exec" || spec.Type == "ssh_exec" {
+				check(f.ID, what, spec.ScriptInline)
+			}
+		}
+		check(f.ID, "remediation.verify_exec", f.Remediation.VerifyExec)
+	}
+	if checked < 10 {
+		t.Errorf("only %d scripts checked: the catalog walk is broken", checked)
+	}
 }

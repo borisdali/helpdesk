@@ -216,6 +216,7 @@ The `{id}` prefix determines routing:
 | `reason` | Optional free-text; for gates it is stored in the audit trail; for feedback it becomes `verdict_notes` |
 | `approval_mode` | Gate only: approval mode for the triggered remediation playbook |
 | `approval_session` | Gate only: session token when `approval_mode=session` |
+| `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving` | Gate only, and only for a point-in-time gate (`gate_reason` `recovery_target_required`): required for approval, ignored otherwise. See [PITR.md](PITR.md#4-operating-it) |
 
 **Examples:**
 
@@ -384,9 +385,32 @@ With `--emit-and-wait`:
   POST http://helpdesk:8080/api/v1/decisions/feedback:plr_a3f7c1b2/resolve
   Body: {"resolution":"approved"|"denied","resolved_by":"...","reason":"..."}
   ```
-  Faulttest then exits with a pass result. The card persists in the hub until an operator answers it — there is no TTY prompt and no blocking wait. Resolving it records `verdict_correct` and contributes to the playbook's accuracy rate in the Vault.
+  Faulttest then polls the card every 15 seconds for up to 10 minutes (`Waiting for feedback (10m timeout, Ctrl+C to skip)`) and continues without feedback if nobody answers; the fault's result does not depend on it. There is no TTY prompt. The card persists in the hub until an operator answers it, even after faulttest has given up waiting. Resolving it records `verdict_correct` and contributes to the playbook's accuracy rate in the Vault. In a Job, that wait is up to ten extra minutes of run time unless someone resolves the card (see [Running from a Job](#running-from-a-job-with---emit-and-wait)).
 
 This makes faulttest safe to run inside a Kubernetes Job or a Docker container where `/dev/tty` is not available.
+
+### Running from a Job with `--emit-and-wait`
+
+*Chart: `faulttest.emitAndWait=true`.* Without a terminal, faulttest behaves in one of two ways, and which one you want depends on whether you want the feedback loop:
+
+| | `emitAndWait` off (the chart default) | `emitAndWait` on |
+|---|---|---|
+| Gate | `--approval-mode force` approves it at once; otherwise it auto-approves with the configured mode | with `--approval-mode force` and an `--operator` it is approved at once, as the accountable identity; **without force it waits for a human** to resolve `gate:<run>` in the hub |
+| Mid-chain gates (a hop after the first) | force-approved in force mode; **outside force mode they are not auto-approved**, the chain stops there and the run ends without a recovery | the same |
+| Post-recovery feedback | the prompt cannot open `/dev/tty` and is **silently skipped**: no card, no verdict, nothing for the Vault's accuracy rate | a `feedback:<run>` card is created and faulttest waits up to 10 minutes for it |
+| Run time | the chain only | the chain, plus up to 10 minutes if nobody answers |
+
+For an unattended run (CI, a recertification) leave it off and accept that no feedback is recorded. For a demo or a supervised run turn it on with `approvalMode: force` and an `operator`, and answer the card while the Job waits:
+
+```bash
+# what is pending
+curl -s -H "Authorization: Bearer $KEY" $GW/api/v1/decisions | jq '.[] | {id, type, summary}'
+# the diagnosis was right
+curl -s -X POST $GW/api/v1/decisions/feedback:<plr_id>/resolve -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' -d '{"resolution":"approved","resolved_by":"alice@example.com","reason":"correct"}'
+```
+
+Feedback is only requested after a **verified recovery** of a gate-escalation run, so the hidden-WAL-segment faults (which end at a human and never recover) raise no card either way.
 
 ---
 

@@ -711,6 +711,7 @@ Optional request body:
 | `context` | Free-form operator context: server name, symptoms, log lines, recent changes. Used to evaluate `requires_evidence` patterns. |
 | `context_id` | A2A session ID to resume a multi-turn session |
 | `prior_run_id` | `plr_*` run ID of a prior investigation; its `findings_summary` is injected into the prompt for continuity |
+| `recovery_target` | `{"type": "time"\|"lsn", "value": "..."}`. Only for `pbs_pgbackrest_pitr_triage`: the point a human wants to recover to (RFC3339 with a zone, or an `X/Y` LSN). It is validated here (`400` if malformed), stored on the run, and **planned, not approved**. See [PITR.md](PITR.md#4-operating-it) |
 
 Response fields (in addition to the standard `text`, `agent`, `task_id`, `context_id`):
 
@@ -970,7 +971,7 @@ Resolve any decision type. The `{id}` prefix determines routing:
 
 | Prefix | Routes to |
 |---|---|
-| `gate:{runID}` | Playbook `proceed-escalation` endpoint |
+| `gate:{runID}` | Playbook `proceed-escalation` endpoint (a point-in-time gate also takes `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving`: [PLAYBOOKS.md](PLAYBOOKS.md#approving-a-point-in-time-restore)) |
 | `fleet:{approvalID}` | `PATCH {auditURL}/v1/approvals/{approvalID}` |
 | `step:{approvalID}` | `PATCH {auditURL}/v1/approvals/{approvalID}` |
 

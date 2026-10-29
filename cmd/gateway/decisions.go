@@ -122,6 +122,12 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		ApprovalSession string `json:"approval_session,omitempty"`
 		VerdictCorrect  *bool  `json:"verdict_correct,omitempty"`
 		VerdictNotes    string `json:"verdict_notes,omitempty"`
+		// A gate that leads to a point-in-time restore is approved with these
+		// (recovery_target.go); they are handed on to proceed-escalation as is.
+		RecoveryTarget      *RecoveryTargetSpec `json:"recovery_target,omitempty"`
+		PlanDigest          string              `json:"plan_digest,omitempty"`
+		AcknowledgeDataLoss bool                `json:"acknowledge_data_loss,omitempty"`
+		AllowStopServing    bool                `json:"allow_stop_serving,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -135,7 +141,12 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case strings.HasPrefix(id, "gate:"):
 		runID := strings.TrimPrefix(id, "gate:")
-		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession, req.VerdictCorrect, req.VerdictNotes)
+		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession, req.VerdictCorrect, req.VerdictNotes, map[string]any{
+			"recovery_target":       req.RecoveryTarget,
+			"plan_digest":           req.PlanDigest,
+			"acknowledge_data_loss": req.AcknowledgeDataLoss,
+			"allow_stop_serving":    req.AllowStopServing,
+		})
 
 	case strings.HasPrefix(id, "fleet:"), strings.HasPrefix(id, "step:"):
 		approvalID := id[strings.Index(id, ":")+1:]
@@ -152,7 +163,7 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 
 // resolveGate delegates gate resolution to handleProceedEscalation by
 // rewriting the request URL and body to match that handler's expected form.
-func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string, verdictCorrect *bool, verdictNotes string) {
+func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, resolution, resolvedBy, approvalMode, approvalSession string, verdictCorrect *bool, verdictNotes string, passthrough map[string]any) {
 	payload := map[string]any{
 		"resolution":       resolution,
 		"resolved_by":      resolvedBy,
@@ -164,6 +175,9 @@ func (g *Gateway) resolveGate(w http.ResponseWriter, r *http.Request, runID, res
 	}
 	if verdictNotes != "" {
 		payload["verdict_notes"] = verdictNotes
+	}
+	for k, v := range passthrough {
+		payload[k] = v
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

@@ -1,0 +1,105 @@
+series_id: pbs_pgbackrest_pitr_triage
+name: "pgBackRest — Point-in-Time Recovery Triage"
+version: "1.2"
+playbook_type: triage
+entry_point: true
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+# The only follow-on is the restore itself. The gateway never lets this
+# transition run on its own: the boundary into pbs_pgbackrest_pitr_remediate is
+# held at a human gate (gate_reason recovery_target_required) whatever the
+# approval mode, because the restore needs a person to approve the recovery
+# target, the plan digest this triage reports, and that data after the target
+# is discarded.
+transitions_to:
+  - pbs_pgbackrest_pitr_remediate
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Plan a point-in-time restore of a single PostgreSQL instance managed with
+  pgBackRest: restore the database as it was at a moment a human chose (a
+  time or an LSN), instead of to the end of the archive. Read-only. The
+  recovery target comes with the request from the operator who started this
+  run; this playbook never chooses one. It reports which backup would be
+  restored, whether the archived WAL from that backup to the end of the
+  archive is continuous, whether the target is inside the archive, what would
+  be discarded, and a plan digest the operator quotes when approving the
+  restore at the gate.
+root_cause_classes:
+  version: "1.0"
+  classes:
+    - pitr-plan-feasible
+    - pitr-plan-not-feasible
+    - pitr-plan-unverified
+symptoms:
+  - "an operator wants the database as it was at a given time or LSN (a dropped table, a bad deploy, logical corruption)"
+  - "data loss that restoring to the latest backup would not undo, because the damage is in the latest data"
+guidance: |
+  You are planning a point-in-time restore. You change nothing. Your target
+  for every tool call is the connection_string stated at the top of this
+  prompt.
+
+  The recovery target (a time or an LSN) is carried with this request by the
+  gateway: the plan tool uses it and ignores any target you pass. Never
+  choose, adjust, round or "improve" a target, and never infer one from the
+  operator's wording. If the plan tool says it has no recovery target, stop:
+  report that no recovery target was supplied.
+
+  Step 1 — Plan:
+  Call plan_point_in_time_recovery with the connection_string (target) only.
+  It reports status (feasible, not_feasible, unverified), a detail sentence,
+  the backup it would restore (backup_label, backup_stop_time), the recovery
+  target as pgBackRest will receive it (normalized_target), the timeline now
+  and the one PostgreSQL will create (target_timeline, expected_timeline),
+  where the archive ends (archive_end_wal, archive_end_time), what would be
+  discarded (data_loss), the WAL check it ran (wal_continuity) and a
+  plan_digest. Quote these from the tool output; do not recompute or
+  paraphrase them.
+
+  Step 2 — Say whether the instance is down:
+  The plan reports instance_serving and archive_flush_required. When the
+  instance is serving, the restore stops it, but only if the person who
+  approves the gate also allows that (allow_stop_serving); it first asks the
+  running instance about itself, flushes its WAL to the archive and checks
+  the plan again. archive_flush_required=true means the target is in WAL the
+  instance has not archived yet, which that flush will archive. Call
+  check_host with the connection_string and note what it shows, but do not
+  conclude from a container that is "running" that PostgreSQL is up: a Docker
+  or Podman container can stay up after the PostgreSQL inside it has died. If
+  you cannot tell, say so. You never stop anything yourself.
+
+  Two mutually exclusive endings, pick exactly one:
+
+  Ending A — the plan is feasible (status=feasible):
+  HYPOTHESIS_1: <the recovery target is reachable from backup <backup_label>> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from the plan output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  Emit exactly one HYPOTHESIS line in this ending. Do not add a second one to
+  restate a condition the plan already reports (archive_flush_required=true,
+  instance=serving): those are facts for FINDINGS, and a second hypothesis is
+  read as a competing diagnosis and raises an "uncertain diagnosis" warning at
+  the gate.
+  FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; instance=<down|serving|unknown>; archive_flush_required=<true|false>
+  TRANSITION_TO: pbs_pgbackrest_pitr_remediate
+  The restore does not start on this line: a person reviews this plan at the
+  gate and approves it with the plan_digest. If instance=serving, say so
+  prominently in FINDINGS: the restore will stop the running instance, and
+  will refuse to unless the person approving the gate allows it.
+
+  Ending B — the plan is not feasible or could not be checked
+  (status=not_feasible or unverified), or there is no recovery target:
+  HYPOTHESIS_1: <why the target cannot be restored to> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote of the plan's detail>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: plan_status=<status>; detail=<the plan's detail, verbatim>; backup_label=<backup_label if any>; archive_end_time=<archive_end_time if any>
+  ESCALATE_TO: none
+  A human decides what to do: pick another target, or a restore that cannot
+  be verified to reach the end of the archive. Do not suggest a different
+  target on your own.
+
+  Do NOT call any write or destructive tool. Do NOT call
+  restore_to_point_in_time or restore_from_backup.
+escalation:
+  - "plan status not_feasible: no backup before the target, a gap in the archived WAL, or a target past the end of the archive"
+  - "plan status unverified: the WAL continuity check could not run"
+  - "no recovery target was supplied with the request"
+target_hints: []

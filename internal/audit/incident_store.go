@@ -198,8 +198,12 @@ func (s *IncidentStore) Update(ctx context.Context, incidentID string, u Inciden
 		args = append(args, *u.Status)
 	}
 	if u.Attribution != nil {
-		sets = append(sets, "attribution = ?")
-		args = append(args, *u.Attribution)
+		// UNKNOWN means "nothing was concluded", so it never replaces a real
+		// root-cause class. Decided in the UPDATE itself, not by the caller
+		// from an earlier read: a chain's entry hop classifies (slowly, via an
+		// LLM) and a later hop may set the real class in the meantime.
+		sets = append(sets, "attribution = CASE WHEN CAST(? AS TEXT) = 'UNKNOWN' AND attribution NOT IN ('', 'UNKNOWN') THEN attribution ELSE ? END")
+		args = append(args, *u.Attribution, *u.Attribution)
 	}
 	if u.Severity != nil {
 		sets = append(sets, "severity = ?")

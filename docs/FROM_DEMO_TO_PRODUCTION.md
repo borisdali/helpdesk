@@ -94,6 +94,7 @@ Two things keep this from decaying into a static tool:
 | Doc | What it covers |
 |---|---|
 | [DEPLOYMENT_MODES.md](DEPLOYMENT_MODES.md) | The three trust postures in full detail |
+| [PLATFORMS.md](PLATFORMS.md) | Where each piece runs (laptop, Docker, VM, Kubernetes), what reaches what, and what is verified |
 | [deploy/docker-compose/README.md](../deploy/docker-compose/README.md) | Installation mechanics, both Docker and bare-binary routes |
 | [RIGHTS_AND_THE_FLYWHEEL.md](RIGHTS_AND_THE_FLYWHEEL.md) | The loop this page's stage 3 is asking you to let run |
 | [VAULT.md](VAULT.md#three-customer-workflows) | Playbook linking, draft review, regression monitoring |
