@@ -50,7 +50,7 @@ A configurable cooldown (default: 5 minutes) prevents incident flooding.
 
 ## Command Line Flags
 
-For details on how to run `secbot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#38-security-responder-secbot) for running via Docker containers, [here](../../deploy/host#77-security-responder-secbot) for running directly on a host and [here](../../deploy/helm/README.md#98-security-responder-secbot) for running on K8s.
+For details on how to run `secbot` in your specific deployment environment see [here](../../deploy/docker-compose/README.md#39-security-responder-secbot) for running via Docker containers, [here](../../deploy/host#79-security-responder-secbot) for running directly on a host and [here](../../deploy/helm/README.md#99-security-responder-secbot) for running on K8s.
 
 ```
 -socket string

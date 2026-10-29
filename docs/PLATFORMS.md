@@ -152,7 +152,7 @@ down with it. The chart asks for a separate namespace for this reason.
 
 | You are connecting | Read |
 |---|---|
-| a cluster to a VM | [Helm README §3.7a](../deploy/helm/README.md#37a-ssh-to-hosts-and-vms-sysadmin-agent) and [§10.6](../deploy/helm/README.md#106-a-vm-fault-from-a-job-entirely-in-cluster): the SSH Secrets, the VM's name resolving in-cluster (a `.test` name in your `/etc/hosts` does not), a route and `pg_hba` for the cluster |
+| a cluster to a VM | [Helm README §3.7](../deploy/helm/README.md#37-ssh-to-hosts-and-vms-sysadmin-agent) and [§10.6](../deploy/helm/README.md#106-a-vm-fault-from-a-job-entirely-in-cluster): the SSH Secrets, the VM's name resolving in-cluster (a `.test` name in your `/etc/hosts` does not), a route and `pg_hba` for the cluster |
 | a cluster to a pod target | [Helm README §10.7](../deploy/helm/README.md#107-a-pod-fault-from-a-job-entirely-in-cluster): the inventory's `k8s_pod_selector`, the Role |
 | a laptop harness to a cluster | a kubeconfig context for `shell_exec` and a port-forward to the gateway |
 | auditd to Postgres | [Helm README](../deploy/helm/README.md) and `deploy/helm/examples/postgres-auditd.yaml` |

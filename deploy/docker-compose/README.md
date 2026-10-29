@@ -4,6 +4,42 @@ If you are new to aiHelpDesk, before reading these instructions, we recommend re
 
 This guide covers running aiHelpDesk on a host inside the Docker containers (orchestrated via Docker Compose). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM (no Docker) or on K8s.
 
+<!-- toc -->
+**Contents**
+
+- [1. Deployment from binary](#1-deployment-from-binary)
+- [2. Deployment from source (by cloning the repo):](#2-deployment-from-source-by-cloning-the-repo)
+- [3. AI Governance Components](#3-ai-governance-components)
+  - [3.1 Enabling Governance (Docker Compose)](#31-enabling-governance-docker-compose)
+  - [3.2 Enabling Governance (Binary Deployment)](#32-enabling-governance-binary-deployment)
+  - [3.3 Policy Configuration](#33-policy-configuration)
+  - [3.4 Managing Approvals](#34-managing-approvals)
+  - [3.5 Explaining Policy Decisions (govexplain)](#35-explaining-policy-decisions-govexplain)
+  - [3.6 Running the SRE Bot (srebot)](#36-running-the-sre-bot-srebot)
+  - [3.7 Running the Compliance Reporter (govbot)](#37-running-the-compliance-reporter-govbot)
+  - [3.8 Running the Fleet Runner (fleet-runner)](#38-running-the-fleet-runner-fleet-runner)
+  - [3.9 Security Responder (secbot)](#39-security-responder-secbot)
+  - [3.10 Notification Configuration](#310-notification-configuration)
+  - [3.11 Identity & Access Control](#311-identity--access-control)
+    - [Static identity provider](#static-identity-provider)
+    - [JWT identity provider](#jwt-identity-provider)
+    - [Requiring explicit purpose for sensitive resources](#requiring-explicit-purpose-for-sensitive-resources)
+- [4. Using the Gateway API](#4-using-the-gateway-api)
+- [5. Fault Injection Testing (faulttest)](#5-fault-injection-testing-faulttest)
+  - [LLM-as-judge scoring](#llm-as-judge-scoring)
+  - [SSH injection mode](#ssh-injection-mode)
+- [6. Fleet Playbooks & Vault](#6-fleet-playbooks--vault)
+  - [Browsing Playbooks](#browsing-playbooks)
+  - [Auto-generated Playbook drafts](#auto-generated-playbook-drafts)
+  - [Reviewing and activating a draft](#reviewing-and-activating-a-draft)
+  - [Vault — fault↔playbook coverage](#vault--faultplaybook-coverage)
+  - [Remediation mode](#remediation-mode)
+- [7. Troubleshooting](#7-troubleshooting)
+  - [Interactive REPL Shows Empty Responses](#interactive-repl-shows-empty-responses)
+  - [Database Agent Prompts for Password](#database-agent-prompts-for-password)
+  - [Agents Not Discovered](#agents-not-discovered)
+<!-- /toc -->
+
 ## 1. Deployment from binary
 
 There are two ways to deploy and run aiHelpDesk on non-K8s environments, i.e. VMs or bare metal. In both cases the first step is downloading the right tarball for your platform. There are five tarballs available for every aiHelpDesk release. The first one that ends with "-deploy.tar.gz" is intended for section 1.1 below (run aiHelpDesk agents in Docker containers). The other four tarballs are binaries specific to a platform and are intended for section 1.2
@@ -470,7 +506,7 @@ Key flags (set via `command:` in `docker-compose.yaml`):
 
 > **Note:** `secbot` must be able to reach the audit socket at `/data/audit/audit.sock` (the shared `audit-data` volume) and the Gateway at `http://gateway:8080`. Both are wired correctly in the provided `docker-compose.yaml`.
 
-### 3.9 Notification Configuration
+### 3.10 Notification Configuration
 
 Configure approval and alert notifications in `.env`:
 
@@ -487,7 +523,7 @@ HELPDESK_EMAIL_FROM=helpdesk@example.com
 HELPDESK_EMAIL_TO=ops@example.com
 ```
 
-### 3.10 Identity & Access Control
+### 3.11 Identity & Access Control
 
 By default the Gateway accepts `X-User` and `X-Roles` headers without verification (`HELPDESK_IDENTITY_PROVIDER=none`). For production deployments, enable the static or JWT identity provider.
 

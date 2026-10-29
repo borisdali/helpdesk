@@ -4,6 +4,51 @@ If you are new to aiHelpDesk, before reading these instructions, we recommend re
 
 This guide covers running aiHelpDesk directly on a host — a Linux or macOS machine — without Docker or Kubernetes. All binaries are statically compiled and have no external runtime dependencies beyond `psql` and `kubectl` (only needed by the database and K8s agents at query time). This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host inside Docker containers (via Docker Compose) or on K8s.
 
+<!-- toc -->
+**Contents**
+
+- [1. What's in the Tarball](#1-whats-in-the-tarball)
+- [2. Quick Start](#2-quick-start)
+- [3. Prerequisites](#3-prerequisites)
+- [4. Configuration](#4-configuration)
+- [5. Starting and Stopping](#5-starting-and-stopping)
+  - [5.1 Persistent Deployment (systemd)](#51-persistent-deployment-systemd)
+    - [Install](#install)
+    - [Managing services](#managing-services)
+    - [Logs (journald)](#logs-journald)
+    - [Service dependency order](#service-dependency-order)
+- [6. Using helpdesk-client](#6-using-helpdesk-client)
+  - [6.1 Headless / API Mode](#61-headless--api-mode)
+- [7. AI Governance](#7-ai-governance)
+  - [7.1 Enabling Governance](#71-enabling-governance)
+  - [7.2 Policy Configuration](#72-policy-configuration)
+  - [7.3 Identity & Access Control](#73-identity--access-control)
+    - [Static identity provider](#static-identity-provider)
+    - [JWT identity provider](#jwt-identity-provider)
+    - [Requiring explicit purpose for sensitive resources](#requiring-explicit-purpose-for-sensitive-resources)
+  - [7.4 Managing Approvals](#74-managing-approvals)
+  - [7.5 Explaining Policy Decisions (govexplain)](#75-explaining-policy-decisions-govexplain)
+  - [7.6 Real-time Audit Monitor (auditor)](#76-real-time-audit-monitor-auditor)
+  - [7.7 Running the SRE Bot (srebot)](#77-running-the-sre-bot-srebot)
+  - [7.8 Running the Compliance Reporter (govbot)](#78-running-the-compliance-reporter-govbot)
+  - [7.9 Security Responder (secbot)](#79-security-responder-secbot)
+  - [7.10 Running the Fleet Runner (fleet-runner)](#710-running-the-fleet-runner-fleet-runner)
+- [8. Fault Injection Testing (faulttest)](#8-fault-injection-testing-faulttest)
+  - [LLM-as-judge scoring](#llm-as-judge-scoring)
+  - [SSH injection mode](#ssh-injection-mode)
+- [9. Fleet Playbooks & Vault](#9-fleet-playbooks--vault)
+  - [Browsing playbooks](#browsing-playbooks)
+  - [Auto-generated playbook drafts](#auto-generated-playbook-drafts)
+  - [Reviewing and activating a draft](#reviewing-and-activating-a-draft)
+  - [Vault — fault↔playbook coverage](#vault--faultplaybook-coverage)
+  - [Remediation mode](#remediation-mode)
+- [10. Troubleshooting](#10-troubleshooting)
+  - [Port already in use](#port-already-in-use)
+  - [Agent exits immediately](#agent-exits-immediately)
+  - [approvals / govexplain: "audit service URL required"](#approvals--govexplain-audit-service-url-required)
+  - [Database connection refused](#database-connection-refused)
+<!-- /toc -->
+
 ## 1. What's in the Tarball
 
 ```
@@ -172,13 +217,13 @@ tail -f /tmp/helpdesk-auditd.log
 tail -f /tmp/helpdesk-gateway.log
 ```
 
-## 5.1 Persistent Deployment (systemd)
+### 5.1 Persistent Deployment (systemd)
 
 `startall.sh` is designed for development and quick evaluation. For production servers where services must survive reboots and be managed by the OS, install aiHelpDesk as systemd units.
 
 > The `systemd/` directory is included only in Linux binary tarballs (`linux-amd64`, `linux-arm64`). On macOS use `startall.sh`.
 
-### Install
+#### Install
 
 ```bash
 # Core stack (auditd, agents, gateway)
@@ -210,7 +255,7 @@ sudo cp infrastructure.json /opt/helpdesk/        # if you have one
 sudo nano /opt/helpdesk/.env                       # set HELPDESK_MODEL_VENDOR, MODEL_NAME, API_KEY
 ```
 
-### Managing services
+#### Managing services
 
 ```bash
 # Start / stop the full stack
@@ -229,7 +274,7 @@ sudo systemctl enable --now helpdesk-auditor.service helpdesk-secbot.service
 sudo systemctl disable --now helpdesk-auditor.service helpdesk-secbot.service
 ```
 
-### Logs (journald)
+#### Logs (journald)
 
 ```bash
 # Follow gateway logs
@@ -242,7 +287,7 @@ sudo journalctl -u 'helpdesk-*' -f
 sudo journalctl -u helpdesk-database-agent.service -n 100 --no-pager
 ```
 
-### Service dependency order
+#### Service dependency order
 
 ```
 helpdesk-auditd  ──► agents (parallel) ──► helpdesk-gateway
@@ -298,7 +343,7 @@ HELPDESK_CLIENT_AGENT=database
 
 See [docs/CLIENT.md](../../docs/CLIENT.md) for the full flag reference, all purpose values, and per-agent examples.
 
-## 6.1 Headless / API Mode
+### 6.1 Headless / API Mode
 
 For programmatic access via raw HTTP. See [API.md](../../docs/API.md) for the full endpoint reference.
 

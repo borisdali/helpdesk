@@ -6,6 +6,72 @@ If you are new to aiHelpDesk, before reading these instructions, we recommend re
 
 This guide covers running aiHelpDesk on K8s, deployed via Helm Charts. This is one of the three supported deployment platforms in addition to running aiHelpDesk directly on a host/VM or inside Docker containers.
 
+<!-- toc -->
+**Contents**
+
+- [1. Prerequisites](#1-prerequisites)
+- [2. Quick Start (deployment from prebuilt bundle/images)](#2-quick-start-deployment-from-prebuilt-bundleimages)
+- [3. Configuration](#3-configuration)
+  - [3.1 Model Settings](#31-model-settings)
+  - [3.2 K8s Agent Cluster Access](#32-k8s-agent-cluster-access)
+  - [3.3 Infrastructure Inventory](#33-infrastructure-inventory)
+  - [3.4 Database Authentication](#34-database-authentication)
+  - [3.5 Identity & Access Control](#35-identity--access-control)
+    - [Static identity provider](#static-identity-provider)
+    - [JWT identity provider](#jwt-identity-provider)
+    - [Requiring explicit purpose for sensitive resources](#requiring-explicit-purpose-for-sensitive-resources)
+  - [3.6 Custom Namespace](#36-custom-namespace)
+  - [3.7 SSH to Hosts and VMs (sysadmin agent)](#37-ssh-to-hosts-and-vms-sysadmin-agent)
+  - [3.8 Gateway Access](#38-gateway-access)
+- [4. Interactive Session](#4-interactive-session)
+  - [4.1 Get the binary](#41-get-the-binary)
+  - [4.2 Expose the Gateway](#42-expose-the-gateway)
+  - [4.3 Connect and query](#43-connect-and-query)
+  - [4.4 Fallback: kubectl exec (in-cluster REPL)](#44-fallback-kubectl-exec-in-cluster-repl)
+- [5. Architecture Recap](#5-architecture-recap)
+- [6. Deployment from Source](#6-deployment-from-source)
+- [7. Using the Gateway API](#7-using-the-gateway-api)
+- [8. Helper Scripts](#8-helper-scripts)
+- [9. AI Governance](#9-ai-governance)
+  - [9.1 Governance Components](#91-governance-components)
+  - [9.2 Enable Governance](#92-enable-governance)
+  - [9.3 Governed Operating Modes](#93-governed-operating-modes)
+  - [9.4 Policy Configuration](#94-policy-configuration)
+  - [9.5 Approval Workflow](#95-approval-workflow)
+  - [9.6 Explaining Policy Decisions (govexplain)](#96-explaining-policy-decisions-govexplain)
+  - [9.7 Running the SRE Bot (srebot)](#97-running-the-sre-bot-srebot)
+  - [9.8 Running the Compliance Reporter (govbot)](#98-running-the-compliance-reporter-govbot)
+  - [9.9 Security Responder (secbot)](#99-security-responder-secbot)
+  - [9.10 Running the jobs on multiple databases (via Fleet Management's fleet-runner)](#910-running-the-jobs-on-multiple-databases-via-fleet-managements-fleet-runner)
+    - [Prerequisite: dedicated fleet-runner API key](#prerequisite-dedicated-fleet-runner-api-key)
+    - [Scheduled jobs](#scheduled-jobs)
+    - [Ad-hoc jobs](#ad-hoc-jobs)
+- [10. Fault Injection Testing (faulttest)](#10-fault-injection-testing-faulttest)
+  - [10.1 Via Helm (recommended)](#101-via-helm-recommended)
+  - [10.2 Via K8s Job (the hard way)](#102-via-k8s-job-the-hard-way)
+    - [Step 1 — Find your infrastructure ConfigMap name](#step-1--find-your-infrastructure-configmap-name)
+    - [Step 2 — Run the Job](#step-2--run-the-job)
+    - [Running kubernetes-category faults (e.g. db-wal-disk-full-k8s)](#running-kubernetes-category-faults-eg-db-wal-disk-full-k8s)
+  - [10.3 Listing faults without a full run](#103-listing-faults-without-a-full-run)
+  - [10.4 LLM-as-judge scoring](#104-llm-as-judge-scoring)
+  - [10.5 SSH injection mode](#105-ssh-injection-mode)
+  - [10.6 A VM fault from a Job, entirely in-cluster](#106-a-vm-fault-from-a-job-entirely-in-cluster)
+  - [10.7 A pod fault from a Job, entirely in-cluster](#107-a-pod-fault-from-a-job-entirely-in-cluster)
+- [11. Fleet Playbooks & Vault](#11-fleet-playbooks--vault)
+  - [Browsing playbooks](#browsing-playbooks)
+  - [Auto-generated playbook drafts](#auto-generated-playbook-drafts)
+  - [Reviewing and activating a draft](#reviewing-and-activating-a-draft)
+  - [Vault — fault↔playbook coverage](#vault--faultplaybook-coverage)
+  - [Remediation mode](#remediation-mode)
+- [12. Troubleshooting](#12-troubleshooting)
+  - [12.1 Interactive REPL Shows Empty Responses](#121-interactive-repl-shows-empty-responses)
+  - [12.2 Agents Not Discovered](#122-agents-not-discovered)
+  - [12.3 API Key Issues](#123-api-key-issues)
+  - [12.4 K8s Context Not Found](#124-k8s-context-not-found)
+  - [12.5 Database Agent Prompts for Password](#125-database-agent-prompts-for-password)
+- [13. Uninstall](#13-uninstall)
+<!-- /toc -->
+
 ## 1. Prerequisites
 
 - Kubernetes cluster (1.24+)
@@ -300,7 +366,7 @@ governance:
 
 This is an agent-level pre-check. Callers pass `X-Purpose: diagnostic` (HTTP API) or set `orchestrator.sessionPurpose: diagnostic` (interactive REPL).
 
-### 3.7 Custom Namespace
+### 3.6 Custom Namespace
 
 Install to any namespace using `--namespace` and `--create-namespace`:
 
@@ -312,7 +378,7 @@ helm install helpdesk ./helm/helpdesk \
     --set model.name=claude-haiku-4-5-20251001
 ```
 
-### 3.7a SSH to Hosts and VMs (sysadmin agent)
+### 3.7 SSH to Hosts and VMs (sysadmin agent)
 
 To let the in-cluster sysadmin agent reach a VM or host over SSH (targets whose
 `infrastructure.json` entry sets `ssh_user` and `ssh_key_path`), mount a Secret with the key and a
@@ -745,7 +811,7 @@ kubectl -n helpdesk-system create configmap helpdesk-policies \
 kubectl -n helpdesk-system rollout restart deploy/helpdesk-database-agent deploy/helpdesk-k8s-agent
 ```
 
-### 9.4 Approval Workflow
+### 9.5 Approval Workflow
 
 Configure approval notifications:
 
@@ -793,7 +859,7 @@ curl -X POST http://localhost:1199/v1/approvals/apr_xxx/approve \
   -d '{"approved_by": "admin", "reason": "LGTM, verified safe"}'
 ```
 
-### 9.5 Explaining Policy Decisions (govexplain)
+### 9.6 Explaining Policy Decisions (govexplain)
 
 `govexplain` is baked into every pod image. Exec into any running pod to use it — the `gateway` pod is the most convenient since its `HELPDESK_AUDIT_URL` is already set:
 
@@ -819,7 +885,7 @@ kubectl -n helpdesk-system exec -it deploy/helpdesk-auditd -- \
   govexplain --auditd http://localhost:1199 --list --since 1h
 ```
 
-### 9.6 Running the SRE Bot (srebot)
+### 9.7 Running the SRE Bot (srebot)
 
 `srebot` is a one-shot tool — use `kubectl run` with `--rm` so the pod is cleaned up on exit:
 
@@ -842,7 +908,7 @@ kubectl -n helpdesk-system run srebot --rm -it --restart=Never \
     -conn 'host=db.example.com port=5432 dbname=myapp user=admin'
 ```
 
-### 9.7 Running the Compliance Reporter (govbot)
+### 9.8 Running the Compliance Reporter (govbot)
 
 `govbot` is deployed as a Kubernetes CronJob (runs automatically on the configured schedule). To trigger it immediately:
 
@@ -855,7 +921,7 @@ kubectl -n helpdesk-system create job govbot-now \
 kubectl -n helpdesk-system logs -f job/govbot-now
 ```
 
-### 9.8 Security Responder (secbot)
+### 9.9 Security Responder (secbot)
 
 Unlike the CLI tools above, `secbot` is a **long-running daemon** — enable it once and it watches the audit stream continuously. It automatically creates incident bundles when it detects:
 
@@ -890,7 +956,7 @@ kubectl -n helpdesk-system logs -f deploy/helpdesk-secbot
 
 > **Socket vs. HTTP polling:** When `governance.auditd.persistence.enabled=true`, `auditor` and `secbot` connect to `auditd` via a shared Unix socket on a PersistentVolumeClaim. If your storage class only supports `ReadWriteOnce`, all three pods must land on the same node — use a `ReadWriteMany` class or add a `podAffinity` rule to co-locate them. When persistence is **disabled** (the default), there is no shared volume; instead, the chart automatically switches `auditor` and `secbot` to **HTTP polling mode**, where they poll `auditd`'s `/v1/events` endpoint every 5 seconds. No manual configuration is needed — the correct mode is selected based on the `persistence.enabled` flag.
 
-### 9.9 Running the jobs on multiple databases (via Fleet Management's fleet-runner)
+### 9.10 Running the jobs on multiple databases (via Fleet Management's fleet-runner)
 
 `fleet-runner` applies a multi-step sequence across infrastructure targets with canary → wave → circuit-breaker rollout logic. There are two usage patterns:
 
@@ -1358,7 +1424,7 @@ What has to be true first:
    `connection refused` / `no pg_hba.conf entry` after a restore that actually worked. Use the IP if the name only resolves on
    your LAN. On minikube with the Docker driver, test from the node: `minikube ssh -- nc -zv <ip> 22`.
 2. **The agents can SSH to it.** Create the sysadmin agent's Secret (key and `known_hosts`, see
-   [§3.7a](#37a-ssh-to-hosts-and-vms-sysadmin-agent)) and make the VM's inventory entry name the
+   [§3.7](#37-ssh-to-hosts-and-vms-sysadmin-agent)) and make the VM's inventory entry name the
    mounted key and an address the pod can reach:
    `"address": "<vm-ip>"`, `"ssh_user": "postgres"`, `"ssh_key_path": "/etc/helpdesk/ssh/id_ed25519"`.
 3. **The Job can SSH to it.** A Secret with the private key, in the release namespace:
@@ -1643,7 +1709,7 @@ To validate a specific fault+playbook pair, also add `--id db-max-connections` (
 
 3. **Direct API calls** - Use curl with the Gateway REST API (see Section 7).
 
-### 10.2 Agents Not Discovered
+### 12.2 Agents Not Discovered
 
 **Symptom:** Orchestrator logs show "agent not available" or discovery failures.
 
@@ -1654,7 +1720,7 @@ kubectl -n helpdesk-system get svc
 kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
 ```
 
-### 10.3 API Key Issues
+### 12.3 API Key Issues
 
 **Symptom:** Agents fail with authentication errors to the LLM provider.
 
@@ -1663,7 +1729,7 @@ kubectl -n helpdesk-system logs deploy/helpdesk-orchestrator
 kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 ```
 
-### 10.4 K8s Context Not Found
+### 12.4 K8s Context Not Found
 
 **Symptom:** K8s agent reports "context does not exist" when querying pods.
 
@@ -1673,7 +1739,7 @@ kubectl -n helpdesk-system get secret helpdesk-api-key -o yaml
 - For databases in the **same cluster** as aiHelpDesk: use empty context (`""`) in `infrastructure.json`. The agent will use in-cluster authentication via its service account.
 - For databases in **other clusters**: mount a kubeconfig as a secret (see Section 3.2).
 
-### 10.5 Database Agent Prompts for Password
+### 12.5 Database Agent Prompts for Password
 
 **Symptom:** The database agent asks for a password every time it connects to a database or logs `fe_sendauth: no password supplied`.
 
