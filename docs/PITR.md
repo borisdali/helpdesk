@@ -91,8 +91,8 @@ sequenceDiagram
   O->>G: POST playbooks/{id}/run  recovery_target
   G->>T: A2A metadata: the target (to plan, not approved)
   T->>P: plan_point_in_time_recovery
-  T-->>G: FINDINGS plan_status=feasible; plan_digest=…  TRANSITION_TO restore
-  G-->>O: pending_gate, gate_reason=recovery_target_required
+  T-->>G: FINDINGS plan_status=feasible, plan_digest=…  TRANSITION_TO restore
+  G-->>O: pending_gate, next playbook pitr_remediate (gate held until a target is approved)
   O->>G: approve: recovery_target + plan_digest + acknowledge_data_loss (+ allow_stop_serving)
   G->>R: A2A metadata: the full approval
   R->>P: restore_to_point_in_time (flush, stop, restore)
@@ -124,11 +124,17 @@ curl -s -X POST "$GW/api/v1/fleet/playbooks/$PB/run" \
   }'
 ```
 
-A time is RFC3339 **with a zone**; an LSN is `X/Y`. A malformed target is a `400` and nothing is recorded.
+A time is RFC3339 **with a zone**; an LSN is `X/Y`. A malformed target is a `400` and nothing is recorded. A bare
+`2026-10-28 14:05:00` is refused for that reason. To get the right form from the database's own clock:
+
+```sql
+SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+```
 Use the database's own clock when you note the moment: `SELECT clock_timestamp()`.
 
-**2. Read the plan.** The response is `pending_gate` with `gate_reason` `recovery_target_required` and the
-triage's `escalation_findings` carry `plan_status`, `plan_digest`, `backup_label`, `timeline`,
+**2. Read the plan.** The response is `pending_gate` with `transition_target` `pbs_pgbackrest_pitr_remediate`
+(`gate_reason` is reported only when the request did not set `gate_escalation`; the gate holds either way, and an
+approval without a target is refused) and the triage's `escalation_findings` carry `plan_status`, `plan_digest`, `backup_label`, `timeline`,
 `archive_end_time`, `data_loss`, `instance` (down or serving) and `archive_flush_required`. The digest in
 those findings was reported by a model. To review the plan itself, ask the sysadmin agent, as the harness
 does:
@@ -298,9 +304,15 @@ Recorded runs are in [PLATFORMS.md §5](PLATFORMS.md#5-verified-combinations).
 |---|---|---|---|
 | Docker fixture | time and LSN; a target never reached, then retried | yes | **yes** (`db-pitr-dropped-table`) |
 | Kubernetes pod | yes, in-cluster | yes, in-cluster | **yes** (`db-pitr-dropped-table-k8s`) |
-| systemd VM | script tested; no real VM | stop path tested against a fake SSH server only | no |
+| systemd VM (Ubuntu, over SSH) | script tested | **yes** (live `sudo systemctl stop`, pgBackRest 2.60.0, services on a laptop) | yes, started and approved by hand (below) |
 
-One live-model run per platform: it shows the chain works, not how reliably the model gets it right.
+One live-model run per platform: it shows the chain works, not how reliably the model gets it right. The VM run was
+manual, not a catalog fault: there is no `db-pitr-dropped-table-vm` yet. A table was created and populated, an
+incremental backup taken, the target noted from the database's clock, a later table created and the first dropped;
+the triage was started with `curl`, the plan read with `helpdesk-client --pitr-plan` and the gate approved with
+`--pitr-approve ... --allow-stop-serving`. Checked by hand afterwards: the dropped table was back with its 5 rows,
+the table created after the target was gone, the cluster was on timeline 45, and the log showed `recovery stopping
+before commit`, `redo done`, `selected new timeline ID: 45`, `archive recovery complete`.
 
 **Tests:**
 

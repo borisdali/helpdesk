@@ -701,10 +701,12 @@ failures:
       a testing.infra.json db_server entry for it (the setup script prints it).
       Run through the gateway, diagnosis only (no --remediate), with the VM as
       both the connection and the SSH target:
-        go run ./testing/cmd/faulttest run --ids db-pgbackrest-wal-gap-vm \
+        go run ./testing/cmd/faulttest run --ids db-pgbackrest-wal-gap-vm --external=false \
           --via-gateway --gateway $GW --api-key <key> \
           --conn "<vm db_server's connection_string>" --agent-conn <vm db_server's key> \
-          --ssh-host postgres@<vm-host> --ssh-port 22 --ssh-key <path>
+          --ssh-host postgres@<vm-host> --ssh-port 22 --ssh-key <absolute path> \
+          --infra-config <absolute path>
+      (--external=false is required: the standalone binary defaults to external-compatible faults only.)
       To run it from inside a cluster as a Job, see deploy/helm/README.md §10.6.
 
       inject moves the latest backup's start segment aside (a name the WAL
@@ -1452,10 +1454,14 @@ failures:
       testing.infra.json db_server entry for the VM with systemd_unit and
       pg_log_dir set correctly for your distro (the setup script prints the
       exact entry to add). Run with:
-        go run ./testing/cmd/faulttest run --ids db-pgdata-corrupted-vm \
-          --remediate --ssh-host=<user@vm-host> --ssh-port=<port> \
-          --ssh-key=<path> --conn=<vm db_server's connection_string> \
-          --agent-conn=<vm db_server's key> --infra-config=<path> ...
+        go run ./testing/cmd/faulttest run --ids db-pgdata-corrupted-vm --external=false \
+          --remediate --gate-escalation --approval-mode force --operator <user> \
+          --via-gateway --gateway $GW --api-key <key> \
+          --ssh-host=<user@vm-host> --ssh-port=<port> \
+          --ssh-key=<absolute path> --conn=<vm db_server's connection_string> \
+          --agent-conn=<vm db_server's key> --infra-config=<absolute path>
+      Without --gate-escalation only the first hop runs: it hands off to the
+      sysadmin agent and scores low, and nothing is restored.
 
       The injection/teardown scripts below assume the dispatch user has
       passwordless sudo for `systemctl restart <unit>` (or runs as root) —

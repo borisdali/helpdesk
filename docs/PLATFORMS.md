@@ -54,6 +54,16 @@ the operator CLI never touches the target.
 | a `k8s_pod_selector` (and `k8s_namespace`) | `kubectl`, with the agent's own ServiceAccount when in-cluster | a pod |
 | none of these | SQL only (the database agent) | anything that has no host tier |
 
+**Services on a laptop, database on a Linux VM.** A common host-process setup: the gateway and agents run on your
+laptop (unpacked from `make binaries`, started with `startall.sh`) and the database and pgBackRest repository run on
+a VM reached over SSH. The agent needs a route to the VM's SSH port and PostgreSQL port, and the VM's name resolving on
+the laptop. The agent checks the VM's host key against `~/.ssh/known_hosts` (or `SSH_KNOWN_HOSTS`) and, if that file
+is absent, logs a warning and skips the check. Set both `HELPDESK_INFRA_CONFIG` (in the `.env` that
+`startall.sh` reads) and each VM's `ssh_key_path` to **absolute** paths: a relative path resolves against the agent's
+working directory and fails with a key-read error (`check_host` reports it). An agent started before the setting
+changed keeps the old infra file, so restart it and check `HELPDESK_INFRA_CONFIG` in its environment. A laptop that
+sleeps, or a VM that hibernates, shows up as an SSH `i/o timeout` and nothing else.
+
 ## 3. What aiHelpDesk can do per target
 
 | Target | Diagnose (SQL) | Host state and logs | pgBackRest health + WAL check | Agent-driven restore | Status |
@@ -91,16 +101,17 @@ Each row is a recorded run; the incident IDs are in the vault (`faulttest vault 
 | K8s Job | K8s | Ubuntu VM over SSH | `db-pgdata-corrupted-vm` (four hops, Decision Hub feedback) | `plr_f8cee154` |
 | laptop | K8s | pod | `db-pitr-dropped-table-k8s` (a table dropped on the running pod: plan, gate held at `recovery_target_required`, running pod flushed, stopped and restored to the target, resumed, rows checked), 121.9s after injection | `plr_5e4dba37` (remediation `plr_bcbb05cf`), 2026-10-28 |
 | laptop | host processes | Docker container | `db-pitr-dropped-table` (a table dropped on the running container: plan, gate held, running container flushed, stopped and restored in a throwaway container, restarted, rows checked), 106.1s after injection | `plr_245be7fb` (remediation `plr_52c37957`), 2026-10-28 |
+| laptop | host processes | Ubuntu VM over SSH | point-in-time restore of a table dropped on the running VM, started by hand: triage with a time target, plan read with `helpdesk-client --pitr-plan`, gate approved with `--pitr-approve ... --allow-stop-serving`; live instance flushed, stopped with `sudo systemctl stop`, restored from an incremental backup, restarted; log and rows checked by hand (timeline 44 to 45) | `plr_2577a3bc` (remediation `plr_1516145c`), 2026-10-29 |
 | `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify, and point-in-time restore of a crashed pod and of a **running** one (stop, scale to 0, one-off-pod restore, resume) (`make integration-k8s`, 28 checks; needs `K8S_SYSADMIN_API_KEY` on a release that enforces identity) | 2026-10-28 |
 | `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | point-in-time restore to a time and to an LSN, of a stopped and of a **running** instance (archive flushed, clean stop, restore in a throwaway container, `restart_container`), a target the archive never reaches then retried, and the catalog fault `db-pitr-dropped-table` from inject to `verify_sql` | `agents/sysadmin` `pitr_integration_test.go` |
 
 Not yet run: the destructive teardown *repair* branch of `db-pgdata-corrupted-k8s` from a Job (the pod had
 recovered, so the teardown found nothing to repair).
 
-Point-in-time recovery (v0.33) has run with a live model once on a Kubernetes pod and once on the Docker fixture (the
-two rows above, 100% remediation each; both plans reported `archive_flush_required=true`, so the flush-first branch has run
-on both). It has **not** run on a systemd VM (the stop path is tested against a fake SSH server; the VM needs
-`systemctl stop <unit>` in its sudoers file, which `setup-pgbackrest-vm.sh` now grants). One run per platform says the
+Point-in-time recovery (v0.33) has run with a live model once on a Kubernetes pod, once on the Docker fixture (100%
+remediation each; both plans reported `archive_flush_required=true`, so the flush-first branch has run on both) and
+once on a systemd VM over SSH, the last by hand rather than as a catalog fault (there is no VM PITR fault yet). The VM
+needs `systemctl stop <unit>` in its sudoers file, which `setup-pgbackrest-vm.sh` grants. One run per platform says the
 chain works, not how often.
 
 ### Where the faulttest client can run
