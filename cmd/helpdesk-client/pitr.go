@@ -44,6 +44,28 @@ type pitrOpts struct {
 	Stanza      string
 }
 
+// pitrFlagValues are the parsed command-line values the two commands read.
+type pitrFlagValues struct {
+	ApproveRunID                   string
+	TargetType, Target, PlanDigest string
+	AckDataLoss, AllowStop         bool
+	User, SysadminURL, SysadminKey string
+	Server, Stanza                 string
+}
+
+// newPITROpts maps the flags to the options. It is the one place a flag is tied
+// to a field, so it is the one place a wiring mistake can hide. The approval
+// mode is fixed: the operator's decision is the gate itself, and the PITR
+// restore has no per-step prompts to answer.
+func newPITROpts(f pitrFlagValues) pitrOpts {
+	return pitrOpts{
+		RunID: f.ApproveRunID, TargetType: f.TargetType, Target: f.Target,
+		PlanDigest: f.PlanDigest, AckDataLoss: f.AckDataLoss, AllowStop: f.AllowStop,
+		ResolvedBy: f.User, ApprovalMode: "auto",
+		SysadminURL: f.SysadminURL, SysadminKey: f.SysadminKey, Server: f.Server, Stanza: f.Stanza,
+	}
+}
+
 var planDigestRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 func (o pitrOpts) targetSpec() (map[string]string, error) {

@@ -98,12 +98,12 @@ func main() {
 
 	// --pitr-plan / --pitr-approve: the operator's two steps at a point-in-time gate.
 	if *pitrPlanFlag || *pitrApprove != "" {
-		o := pitrOpts{
-			RunID: *pitrApprove, TargetType: *recoveryTargetType, Target: *recoveryTarget,
+		o := newPITROpts(pitrFlagValues{
+			ApproveRunID: *pitrApprove, TargetType: *recoveryTargetType, Target: *recoveryTarget,
 			PlanDigest: *planDigest, AckDataLoss: *ackDataLoss, AllowStop: *allowStopServing,
-			ResolvedBy: *userID, ApprovalMode: "auto",
-			SysadminURL: *sysadminURL, SysadminKey: *sysadminKey, Server: *pitrServer, Stanza: *pitrStanza,
-		}
+			User: *userID, SysadminURL: *sysadminURL, SysadminKey: *sysadminKey,
+			Server: *pitrServer, Stanza: *pitrStanza,
+		})
 		var err error
 		if *pitrApprove != "" {
 			err = runPITRApprove(ctx, cfg, o)

@@ -165,3 +165,26 @@ func TestRunPITRPlan_AgentErrorSurfaces(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Every field a flag can set must arrive in the options, each from its own
+// flag: distinct values catch a swapped pair, not just a dropped one.
+func TestNewPITROpts_MapsEveryFlag(t *testing.T) {
+	got := newPITROpts(pitrFlagValues{
+		ApproveRunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
+		AckDataLoss: true, AllowStop: true, User: "ops@example.com",
+		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
+	})
+	want := pitrOpts{
+		RunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
+		AckDataLoss: true, AllowStop: true, ResolvedBy: "ops@example.com", ApprovalMode: "auto",
+		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
+	}
+	if got != want {
+		t.Errorf("newPITROpts =\n%+v\nwant\n%+v", got, want)
+	}
+	// The acknowledgements are never implied by anything else.
+	z := newPITROpts(pitrFlagValues{ApproveRunID: "plr_9"})
+	if z.AckDataLoss || z.AllowStop {
+		t.Errorf("acknowledgements must default to false: %+v", z)
+	}
+}
