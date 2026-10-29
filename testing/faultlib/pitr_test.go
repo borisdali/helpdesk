@@ -398,7 +398,7 @@ func checkDroppedTableFault(t *testing.T, f Failure) {
 	// The target is printed AFTER the damage is made would be wrong: it must be
 	// noted before it, and the damage must come after.
 	script := f.Inject.ScriptInline
-	if !(strings.Index(script, "T=$(Q") < strings.Index(script, "DROP TABLE pitr_orders") && strings.Index(script, "DROP TABLE pitr_orders") < strings.Index(script, "echo \"PITR_TARGET")) {
+	if strings.Index(script, "T=$(Q") >= strings.Index(script, "DROP TABLE pitr_orders") || strings.Index(script, "DROP TABLE pitr_orders") >= strings.Index(script, "echo \"PITR_TARGET") {
 		t.Error("the target must be read before the table is dropped")
 	}
 	if strings.Contains(f.Prompt, "2026") || strings.Contains(strings.ToLower(f.Prompt), "lsn=") {

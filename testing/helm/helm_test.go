@@ -1762,7 +1762,7 @@ func TestFaulttestRole_CoversTheKubernetesFaultScripts(t *testing.T) {
 				if verb == "scale" {
 					// get + (update or patch) on the scale subresource, get on the StatefulSet
 					if !roleAllows(rules, "statefulsets", "get") || !roleAllows(rules, "statefulsets/scale", "get") ||
-						!(roleAllows(rules, "statefulsets/scale", "update") || roleAllows(rules, "statefulsets/scale", "patch")) {
+						(!roleAllows(rules, "statefulsets/scale", "update") && !roleAllows(rules, "statefulsets/scale", "patch")) {
 						t.Errorf("kubectl scale %s is not allowed by the Role", resource)
 					}
 					continue
