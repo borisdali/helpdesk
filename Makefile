@@ -286,7 +286,7 @@ faulttest-fast:
 	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
-	go test -tags faulttest -timeout 1200s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test -tags faulttest -timeout 2400s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose \
@@ -307,7 +307,7 @@ faulttest-fast-nocache:
 	@echo "Running fault tests (excluding k8s-node-memory-pressure)..."
 	-FAULTTEST_REPLICA_CONN_STR="host=localhost port=15433 dbname=testdb user=postgres password=testpass" \
 	FAULTTEST_EXCLUDE_IDS="k8s-node-memory-pressure" \
-	go test --count=1 -tags faulttest -timeout 1200s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
+	go test --count=1 -tags faulttest -timeout 2400s -v ./testing/faulttest/... 2>&1 | tee $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 	@echo "Stopping test infrastructure..."
 	docker compose \
