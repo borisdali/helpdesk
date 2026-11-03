@@ -995,3 +995,45 @@ func TestRunGateLoop_BoundedGateApprovals(t *testing.T) {
 		t.Fatalf("RunGateLoop = %v after %d approvals, want an error after %d", err, n, maxChainGates)
 	}
 }
+
+// ── gate approvals honour agent_conn_override ─────────────────────────────────
+
+// A fault with agent_conn_override is triaged against its own target; the gate
+// approval must name that same target, or the gateway refuses it as a retarget
+// ("a gate approval can't retarget the remediation"). Found when
+// FAULTTEST_AGENT_CONN_STR was exported and make faulttest-pitr failed with 409.
+func TestGateApprovals_UseTheFaultsAgentConnOverride(t *testing.T) {
+	const shared, override = "shared-db", "pgbackrest-db-local"
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		cs, _ := body["connection_string"].(string)
+		got = append(got, cs)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ApproveRunResponse{Status: "complete"}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{GatewayURL: srv.URL, ConnStr: "base", AgentConnStr: shared}
+	r := NewRemediator(cfg)
+
+	if _, err := r.ProceedStep(context.Background(), "plr_a", 1, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	r.SetFault(Failure{ID: "db-x", AgentConnOverride: override})
+	if _, err := r.ProceedStep(context.Background(), "plr_a", 1, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ProceedEscalation(context.Background(), "plr_a", ProceedEscalationRequest{Resolution: "approved", ConnectionString: r.AgentConnStr()}); err != nil {
+		t.Fatal(err)
+	}
+	r.SetFault(Failure{ID: "db-y"})
+	if _, err := r.ProceedStep(context.Background(), "plr_a", 1, "approved"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{shared, override, override, shared}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("connection strings sent = %v, want %v", got, want)
+	}
+}

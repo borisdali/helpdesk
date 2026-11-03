@@ -109,6 +109,7 @@ type Remediator struct {
 	client     *http.Client
 	faultStart time.Time  // see SetFaultStart
 	pitr       *pitrState // see SetPITR
+	fault      *Failure   // see SetFault
 }
 
 // longClient is used for calls that block while an agent chain runs (e.g.
@@ -148,6 +149,24 @@ func RecoveryTime(faultStart time.Time, pollSecs float64, now time.Time) float64
 // after the remediation chain has finished.
 func (r *Remediator) SetFaultStart(t time.Time) {
 	r.faultStart = t
+}
+
+// SetFault names the fault being run, so the gate approvals and playbook
+// triggers sent for it carry the same connection string its triage prompt and
+// recovery check used: ResolvedAgentConnStr, which honours the fault's
+// agent_conn_override. Without it they fall back to the harness-wide string,
+// which the gateway refuses as a retarget of a gate already pinned to the
+// override (409 "a gate approval can't retarget the remediation").
+func (r *Remediator) SetFault(f Failure) {
+	r.fault = &f
+}
+
+// AgentConnStr is the connection string a request for the current fault sends.
+func (r *Remediator) AgentConnStr() string {
+	if r.fault != nil {
+		return ResolvedAgentConnStr(r.cfg, *r.fault)
+	}
+	return ResolvedAgentConnStr(r.cfg, Failure{})
 }
 
 // NewRemediator creates a new Remediator with the given config.
@@ -290,10 +309,7 @@ func (r *Remediator) RunPlaybook(ctx context.Context, seriesID, priorRunID, name
 		return nil, fmt.Errorf("resolving playbook %q: %w", seriesID, err)
 	}
 
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
+	connStr := r.AgentConnStr()
 	// skip_trust_gate, origin: faulttest traffic is evaluation, never a real
 	// incident — see the matching comments in faultlib/runner.go. RunPlaybook
 	// is currently only ever called with a non-empty priorRunID (chained from
@@ -410,10 +426,7 @@ func (r *Remediator) RunGateLoop(ctx context.Context, gate *ApproveRunResponse) 
 	if approvalMode == "" {
 		approvalMode = "auto"
 	}
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
+	connStr := r.AgentConnStr()
 	proceedReq := ProceedEscalationRequest{
 		Resolution:       "approved",
 		ResolvedBy:       "faulttest",
@@ -700,10 +713,7 @@ func (r *Remediator) runApprovalLoop(ctx context.Context, initial *ApproveRunRes
 // ProceedStep calls POST /api/v1/fleet/playbook-runs/{runID}/proceed.
 // resolution is "approved" or "denied".
 func (r *Remediator) ProceedStep(ctx context.Context, runID string, stepIndex int, resolution string) (*ApproveRunResponse, error) {
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
+	connStr := r.AgentConnStr()
 	proceedBody, _ := json.Marshal(map[string]any{
 		"resolution":        resolution,
 		"resolved_by":       "faulttest",

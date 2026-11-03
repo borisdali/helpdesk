@@ -494,6 +494,7 @@ func cmdRun(args []string) {
 			// 36+ minutes before that fix).
 			callStart := time.Now()
 			remediator.SetFaultStart(callStart)
+			remediator.SetFault(f)
 			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {
 				cfg.ConnStr = origConn
 			})

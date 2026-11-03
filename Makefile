@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools fmt-check docs-links
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -55,6 +55,15 @@ fleet-runner:
 # ---------------------------------------------------------------------------
 
 # Target for standard cached tests
+# Fails if any tracked Go file is not gofmt-clean (same check CI runs via golangci-lint).
+fmt-check:
+	@out=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$out" ]; then echo "not gofmt-clean (run: gofmt -w <file>):"; echo "$$out"; exit 1; fi
+
+# Fails on broken relative links / #anchors in docs/*.md, README.md and deploy READMEs.
+docs-links:
+	@python3 -I scripts/check-doc-anchors.py
+
 test:
 	-go test -v $(TESTARGS) ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
 	@$(SUMMARY_CMD) $(TEST_LOG)
