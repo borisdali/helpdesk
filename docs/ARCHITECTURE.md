@@ -834,7 +834,7 @@ echo $HELPDESK_API_KEY
 ```
 
 ### 13.4 AI Governance (and audit in particular) System Issues
-See the [here](AIGOVERNANCE.md#10-troubleshooting) for known/reported issues
+See the [here](AIGOVERNANCE.md#11-troubleshooting) for known/reported issues
 pertaining to AI Governance in general and the built-in
 audit system in particular.
 

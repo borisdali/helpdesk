@@ -475,7 +475,7 @@ This is another point worth mentioning. You probably noticed the intentional asy
 
 ## The defense-in-depth that makes this safe:
 
-A gate approval can request an `approval_mode`, but the gateway clamps it against the caller's role via `enforceApprovalOverride` (see [here](../cmd/gateway/playbooks.go#L135)).
+A gate approval can request an `approval_mode`, but the gateway clamps it against the caller's role via `enforceApprovalOverride` (see [here](../../cmd/gateway/playbooks.go#L135)).
 So an API-key caller approving a gate with `approval_mode:force` (or `auto`) would get silently downgraded. 
 This makes the chain to proceed in the `manual` or `review` mode and every destructive step still hits the role-checked step-approval gate. 
 The API-key holder can say "go ahead and try", but can't bypass the DBA at the actual destructive call.
@@ -490,7 +490,7 @@ The API-key holder can say "go ahead and try", but can't bypass the DBA at the a
 >   Regardless of how the run was kicked off.
 > 
 
-aiHelpDesk is OSS, so it's obviously possible to configure it to equivalent of DBA-gating of steps too by simply changing `POST /api/v1/decisions/{id}/resolve` [here](../internal/authz/gateway_routes.go#L52) from `{AdminBypass: true}` to `{RequireRoles: ["dba", "fleet-approver"], AdminBypass: true}`, but we don't recommend going down this route because it flattens the distinction. The current model is the standard "service can request, human-with-role authorizes the write" split.
+aiHelpDesk is OSS, so it's obviously possible to configure it to equivalent of DBA-gating of steps too by simply changing `POST /api/v1/decisions/{id}/resolve` [here](../../internal/authz/gateway_routes.go#L52) from `{AdminBypass: true}` to `{RequireRoles: ["dba", "fleet-approver"], AdminBypass: true}`, but we don't recommend going down this route because it flattens the distinction. The current model is the standard "service can request, human-with-role authorizes the write" split.
 
 It may be also worth pointing out that a Bearer-API-key request would also have been rejected if the API key had no role mapped to it. 
 The fact that alice with X-User: alice@example.com succeeded (no Bearer at all) means she's resolved as an identity with the `dba` role via the users file (or equivalent JWT authn if it's used in favor of `static`).

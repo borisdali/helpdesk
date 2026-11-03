@@ -14,6 +14,7 @@ FILES = sorted(set(
     + glob.glob(os.path.join(ROOT, "deploy", "**", "README.md"), recursive=True)
 ))
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 HEAD = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 
 
@@ -26,12 +27,16 @@ def slug(text):
 
 
 def scan(path):
-    anchors, links, seen, fence = set(), [], {}, False
+    anchors, links, seen, fence = set(), [], {}, None
     for n, line in enumerate(open(path, encoding="utf-8"), 1):
-        if line.lstrip().startswith(("```", "~~~")):
-            fence = not fence
-            continue
+        fm = FENCE.match(line)
         if fence:
+            # CommonMark: closes on the same char, at least as long, no info string.
+            if fm and fm.group(1)[0] == fence[0] and len(fm.group(1)) >= len(fence) and not fm.group(2).strip():
+                fence = None
+            continue
+        if fm:
+            fence = fm.group(1)
             continue
         m = HEAD.match(line)
         if m:

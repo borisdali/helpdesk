@@ -170,7 +170,7 @@ aiHelpDesk agents can be called by humans via the Orchestrator or by upstream ag
 - **[SREBot](cmd/srebot/README.md)** is the O11y watcher that calls aiHelpDesk to diagnose a database and ask for AI-powered triage
 - **[SecBot](cmd/secbot/README.md)** is the Security responder that fires alerts for governance violations in real-time and creates incident bundles
 - **[GovBot](cmd/govbot/README.md)** is the Compliance reporter that queries governance endpoints and posts structured snapshots to Slack on a schedule
-- **[Real-Time Auditor](docs/AIGOVERNANCE.md#77-auditor-cli-cmdauditor)** is the Long-running daemon that connects to the audit socket and fires webhook/email/syslog alerts
+- **[Real-Time Auditor](docs/AUDIT.md#9-auditor-cli)** is the Long-running daemon that connects to the audit socket and fires webhook/email/syslog alerts
 
 See [here](docs/INTRO_DIALOG.md) for a sample interactive dialog with a human operator.
 

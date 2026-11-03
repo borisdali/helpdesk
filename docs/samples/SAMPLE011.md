@@ -7,7 +7,7 @@ The raw sample commands and deliberations presented below complement this blog p
 
 It all starts with the [Vault](../VAULT.md). If you need a background, start there. Next, head over to [this page](../VAULT_METRICS.md) to see how aiHelpDesk turns your [Incident](../INCIDENTS.md) data into a learning signal.
 
-For more context, aiHelpDesk Fault Injection Testing is well documented [here](../FAULTTEST.md), with multiple [examples availble](FAULTTEST_SAMPLE.md) on [K8s](SAMPLE005.md), [Docker/Podman](SAMPLE006.md) and on a [host/VM](SAMPLE007.md). 
+For more context, aiHelpDesk Fault Injection Testing is well documented [here](../FAULTTEST.md), with multiple [examples availble](../FAULTTEST_SAMPLE.md) on [K8s](SAMPLE005.md), [Docker/Podman](SAMPLE006.md) and on a [host/VM](SAMPLE007.md). 
 
 ---
 

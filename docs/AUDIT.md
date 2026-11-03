@@ -893,4 +893,4 @@ The gateway proxy is read-only. Writing results goes directly to auditd (done au
 Direct tool calls via `POST /api/v1/db/{tool}` and direct A2A calls to agents
 without `trace_id` in message metadata produce events with no `trace_id`. These
 appear in `GET /v1/events` but not in `GET /v1/journeys`. See
-[JOURNEYS.md — Journey Coverage](JOURNEYS.md#journey-coverage) for details.
+[JOURNEYS.md — Journey Coverage](JOURNEYS.md#7-journey-coverage) for details.

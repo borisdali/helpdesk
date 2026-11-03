@@ -415,7 +415,7 @@ When running with `--gate-escalation` and an interactive terminal is available, 
 
 The reason is sent as `"reason"` in the `proceed-escalation` request and is stored in the `gate_acknowledged` audit event. It appears as `extra.resolved_reason` in `GET /api/v1/decisions/gate:{runID}`. In `--emit-and-wait` mode the prompt is skipped (no terminal).
 
-**Post-recovery feedback prompt:**
+#### Post-recovery feedback prompt
 
 After a successful recovery (verification SQL returns true), `faulttest` optionally prompts for two feedback questions when an interactive terminal is available and `--gateway` is set:
 

@@ -286,7 +286,7 @@ See `deploy/docker-compose/docker-compose.yaml`, `deploy/helm/helpdesk/values.ya
 
 **The same gap came back in v0.31 for the sysadmin agent**, which gained its own rules file
 (`get_pgbackrest_status` → `pgbackrest_backup_unhealthy`, the restore chain's
-[Layer 2](BACKUP.md#layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose))
+[Layer 2](BACKUP.md#-layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose))
 in v0.30 without anyone revisiting the packaging. No deployment path shipped or pointed at
 it, so every packaged install ran the restore chain's one deterministic gate disabled.
 Every live test had set the env var by hand or run from the repo, so none caught it. The

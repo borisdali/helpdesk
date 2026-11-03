@@ -219,7 +219,7 @@ This only helps a **self-managed** Postgres Pod (a plain
 `Deployment`, pgBackRest installed in the image) — an operator-managed one like CloudNativePG,
 which doesn't run `pgbackrest` inside its Pod at all, now fails with a real, honest "command not
 found" from inside that Pod instead of a hardcoded refusal naming one specific operator. See
-[§3](#3-roadmap) for the separate, still-open question of operator-managed (CNPG-style) backup
+[§4](#4-roadmap) for the separate, still-open question of operator-managed (CNPG-style) backup
 visibility, which this change does not address.
 
 **A parsing bug found live against an actual K8s Pod**:  
@@ -271,15 +271,15 @@ These additional three layers of safegards come on top of the general
 [AI Governance](AIGOVERNANCE.md) that every playbook runs already (which includes the Policy Engine, [Informed Consent](INFORMED_CONSENT.md) gates,
 [Evidence-Provenance](OBJECTIVE_EVIDENCE.md) checks, the [`trust_not_earned`](CONSISTENCY.md) certification gate):
 
-1. [**Each hop decides only what it can see**](#layer-1-each-hop-decides-only-what-it-can-see):  
+1. [**Each hop decides only what it can see**](#-layer-1-each-hop-decides-only-what-it-can-see):  
    The chain is split so no agent ever has to infer a condition it has no tool to observe.
-2. [**The backup-health gate is deterministic code, not model prose**](#layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose):  
+2. [**The backup-health gate is deterministic code, not model prose**](#-layer-2-the-backup-health-gate-is-deterministic-code-not-model-prose):  
    The `pgbackrest_backup_unhealthy` objective-evidence signal force-gates the chain, even under `approval_mode=force`.
-3. [**Fails closed by design, not by accident**](#layer-3-fails-closed-by-design-not-by-accident):  
+3. [**Fails closed by design, not by accident**](#-layer-3-fails-closed-by-design-not-by-accident):  
    A restore needs an explicit, narrow conjunction of findings and a silence or ambiguity flat out stops the chain.
 
 Only Layer 2 is fully independent of the model. Layers 1 and 3 are carried out through
-LLM-interpreted playbook guidance (see [the honest limit](#layer-3-fails-closed-by-design-not-by-accident)
+LLM-interpreted playbook guidance (see [the honest limit](#-layer-3-fails-closed-by-design-not-by-accident)
 under Layer 3). Underneath all three, the tool itself refuses to run against a live instance
 or onto a WAL chain it can't confirm reaches the end of the archive (v0.32, see
 [WAL continuity](#wal-continuity-the-restore-refuses-a-chain-it-cant-finish)) and pgBackRest

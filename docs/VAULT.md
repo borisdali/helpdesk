@@ -1285,7 +1285,7 @@ faulttest vault import <file.yaml> \
 
 Imports a local YAML playbook file as a draft. This is the recommended way to add hand-authored or externally sourced playbooks to the Vault without going through the three-step curl workflow.
 
-The YAML format is the same as [the import endpoint](PLAYBOOKS.md#importing-a-playbook): `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`, `series_id`, etc.
+The YAML format is the same as [the import endpoint](PLAYBOOKS.md#importing-playbooks): `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`, `series_id`, etc.
 
 ```bash
 # Import as a draft (review with vault diff before activating)

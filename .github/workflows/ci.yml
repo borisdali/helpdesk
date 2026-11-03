@@ -7,6 +7,13 @@ on:
     branches: [main]
 
 jobs:
+  docs-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Broken doc links and anchors
+        run: make docs-links
+
   test:
     runs-on: ubuntu-latest
 

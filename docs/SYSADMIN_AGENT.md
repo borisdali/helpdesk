@@ -11,7 +11,7 @@ The SysAdmin agent is the execution backend for `execution_mode: agent_approve` 
 ## Table of Contents
 
 1. [Port and startup](#1-port-and-startup)
-2. [Infrastructure config — the `host` block](#2-infrastructure-config--the-host-block)
+2. [Infrastructure config — the `host` block](#2-infrastructure-config--vm-and-dbserver-fields)
 3. [Server ID resolution](#3-server-id-resolution)
 4. [Tools](#4-tools)
 5. [Container runtime dispatch](#5-container-runtime-dispatch)
