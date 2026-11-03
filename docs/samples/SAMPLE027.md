@@ -21,7 +21,7 @@ This sample transcript is designed to showcase a single new capability introduce
 
 ---
 
-Before we start with the manual tests it's worth mentioning that we have an automated one as well, with its own make target in fact called `make faulttest-pitr`. See the [last section](SAMPLE027.md#make-faulttest-pitr) of this transcript for details (to be sure, this test is in addition to `make faulttest-gateway-pgbackrest` that we released earlier in v0.32).
+Before we start with the manual tests it's worth mentioning that we have an automated one as well, with its own make target in fact called `make faulttest-pitr`. See the [one before last section](SAMPLE027.md#make-faulttest-pitr) of this transcript for details (to be sure, this test is in addition to `make faulttest-gateway-pgbackrest` that we released earlier in v0.32, see [the very last section](SAMPLE027.md#make-faulttest-gateway-pgbackrest) for the log of that run).
 
 
 ## TL;DR
@@ -1046,7 +1046,11 @@ stanza: main
 This is the automated test (with its own [make target](../../Makefile#L476)) that relies on aiHelpDesk standard failure injection testing system, designed to exercise PITR functionality. Here's how to run it locally:
 
 ```
-[boris@ ~/helpdesk]$ date; time FAULTTEST_GATEWAY_URL=http://localhost:8080 FAULTTEST_API_KEY=gateway-api-key FAULTTEST_SYSADMIN_AGENT_URL=http://localhost:1103 make faulttest-pitr
+[boris@ ~/helpdesk]$ date; time FAULTTEST_GATEWAY_URL=http://localhost:8080 \
+  FAULTTEST_API_KEY=$HELPDESK_API_KEY \
+  FAULTTEST_SYSADMIN_AGENT_URL=http://localhost:1103 \
+  make faulttest-pitr
+
 Mon Nov  2 20:16:47 EST 2026
 Starting pgBackRest test database...
 docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml \
@@ -1113,6 +1117,140 @@ user	0m0.913s
 sys	0m1.069s
 ```
 
+
+## `make faulttest-gateway-pgbackrest`
+
+This is the general pgBackRest automated test (see the PITR specific one in the previous section):
+
+```
+[boris@ ~/helpdesk]$ date; time FAULTTEST_GATEWAY_URL=http://localhost:8080 \
+  FAULTTEST_API_KEY=gateway-api-key \
+  make faulttest-gateway-pgbackrest
+
+Mon Nov  2 21:14:20 EST 2026
+Starting pgBackRest test database...
+docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml \
+		up -d --wait postgres-pgbackrest
+[+] Running 1/1
+ ✔ Container helpdesk-test-pg-pgbackrest  Healthy                                                                                                                                                                                            0.5s
+./testing/docker/setup-pgbackrest-backup.sh
+2026-11-03 02:14:21.505 P00   INFO: backup command begin 2.59.3: --exec-id=5390-23bb808b --log-level-console=info --pg1-path=/var/lib/postgresql/data --repo1-path=/var/lib/pgbackrest --repo1-retention-full=2 --stanza=main --type=full
+2026-11-03 02:14:21.590 P00   INFO: execute backup start: backup begins after the next regular checkpoint completes
+2026-11-03 02:14:21.880 P00   INFO: backup start archive = 000000020000000000000012, lsn = 0/12000060
+2026-11-03 02:14:21.880 P00   INFO: check archive for prior segment 000000020000000000000011
+2026-11-03 02:14:25.028 P00   INFO: execute backup stop and wait for all WAL segments to archive
+2026-11-03 02:14:25.080 P00   INFO: backup stop archive = 000000020000000000000012, lsn = 0/12000138
+2026-11-03 02:14:25.086 P00   INFO: check archive for segment(s) 000000020000000000000012:000000020000000000000012
+2026-11-03 02:14:25.200 P00   INFO: new backup label = 20261103-021421F
+2026-11-03 02:14:25.223 P00   INFO: full backup size = 29.4MB, file total = 1265
+2026-11-03 02:14:25.223 P00   INFO: backup command end: completed successfully (3736ms)
+2026-11-03 02:14:25.224 P00   INFO: expire command begin 2.59.3: --exec-id=5390-23bb808b --log-level-console=info --repo1-path=/var/lib/pgbackrest --repo1-retention-full=2 --stanza=main
+2026-11-03 02:14:25.228 P00   INFO: repo1: expire full backup set 20261102-231319F, 20261102-231319F_20261102-231326I
+2026-11-03 02:14:25.233 P00   INFO: repo1: remove expired backup 20261102-231319F_20261102-231326I
+2026-11-03 02:14:25.242 P00   INFO: repo1: remove expired backup 20261102-231319F
+2026-11-03 02:14:25.527 P00   INFO: repo1: 16-1 remove archive, start = 000000010000000000000008, stop = 00000001000000000000000C
+2026-11-03 02:14:25.527 P00   INFO: expire command end: completed successfully (304ms)
+Running pgBackRest health-triage faults via gateway (diagnosis only)...
+FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_IDS=db-pgbackrest-repo-unreadable,db-pgbackrest-wal-gap \
+	FAULTTEST_CONN_STR="host=localhost port=15435 dbname=testdb user=postgres password=testpass" \
+	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee /tmp/helpdesk-faulttest.log
+=== RUN   TestFaultInjection
+    faulttest_test.go:184: Running 2 fault injection tests
+=== RUN   TestFaultInjection/db-pgbackrest-repo-unreadable
+    faulttest_test.go:261: Injecting failure...
+2026/11/02 21:14:27 INFO executing injection spec type=docker_exec phase=inject
+2026/11/02 21:14:28 INFO sending prompt to agent via playbook failure=db-pgbackrest-repo-unreadable series_id=pbs_pgbackrest_health_triage playbook_id=pb_baf4d849 gateway=http://localhost:8080 agent-conn="host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+    faulttest_test.go:302: Agent responded in 11.759099959s (1606 chars)
+    faulttest_test.go:328: Evaluation: score=90%, keywords=true, diagnosis=true, tools=true
+    faulttest_test.go:281: Tearing down...
+2026/11/02 21:14:39 INFO executing injection spec type=docker_exec phase=teardown
+=== RUN   TestFaultInjection/db-pgbackrest-wal-gap
+    faulttest_test.go:261: Injecting failure...
+2026/11/02 21:14:39 INFO executing injection spec type=docker_exec phase=inject
+2026/11/02 21:14:40 INFO sending prompt to agent via playbook failure=db-pgbackrest-wal-gap series_id=pbs_pgbackrest_health_triage playbook_id=pb_baf4d849 gateway=http://localhost:8080 agent-conn="host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+    faulttest_test.go:302: Agent responded in 12.961990333s (1559 chars)
+    faulttest_test.go:328: Evaluation: score=100%, keywords=true, diagnosis=true, tools=true
+    faulttest_test.go:281: Tearing down...
+2026/11/02 21:14:52 INFO executing injection spec type=docker_exec phase=teardown
+=== NAME  TestFaultInjection
+    faulttest_test.go:404: === SUMMARY: 2/2 passed, 0 failed, 0 skipped ===
+--- PASS: TestFaultInjection (25.06s)
+    --- PASS: TestFaultInjection/db-pgbackrest-repo-unreadable (11.94s)
+    --- PASS: TestFaultInjection/db-pgbackrest-wal-gap (13.12s)
+PASS
+ok  	helpdesk/testing/faulttest	25.554s
+Running db-pgdata-corrupted faults via gateway (restore remediation, force mode)...
+FAULTTEST_VIA_GATEWAY=true \
+	FAULTTEST_REMEDIATE=true \
+	FAULTTEST_IDS=db-pgdata-corrupted,db-pgdata-corrupted-unarchived-tail \
+	FAULTTEST_CONN_STR="host=localhost port=15435 dbname=testdb user=postgres password=testpass" \
+	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee -a /tmp/helpdesk-faulttest.log
+=== RUN   TestFaultInjection
+    faulttest_test.go:184: Running 2 fault injection tests
+=== RUN   TestFaultInjection/db-pgdata-corrupted
+    faulttest_test.go:261: Injecting failure...
+2026/11/02 21:14:55 INFO executing injection spec type=shell_exec phase=inject
+2026/11/02 21:15:05 INFO shell_exec completed output=helpdesk-test-pg-pgbackrest
+2026/11/02 21:15:05 INFO sending prompt to agent via playbook failure=db-pgdata-corrupted series_id=pbs_db_data_loss_triage playbook_id=pb_1bd65de2 gateway=http://localhost:8080 agent-conn="host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+2026/11/02 21:15:18 WARN gateway warning failure=db-pgdata-corrupted warning="expected evidence pattern not found in provided context: \"PANIC.*could not locate a valid checkpoint\""
+2026/11/02 21:15:18 WARN gateway warning failure=db-pgdata-corrupted warning="expected evidence pattern not found in provided context: \"database files are incompatible with server\""
+2026/11/02 21:15:18 WARN gateway warning failure=db-pgdata-corrupted warning="expected evidence pattern not found in provided context: \"invalid page.*could not read block\""
+2026/11/02 21:15:18 WARN gateway warning failure=db-pgdata-corrupted warning="expected evidence pattern not found in provided context: \"could not find the database system\""
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "PANIC.*could not locate a valid checkpoint"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "database files are incompatible with server"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "invalid page.*could not read block"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "could not find the database system"
+    faulttest_test.go:302: Agent responded in 12.716827542s (2096 chars)
+    faulttest_test.go:328: Evaluation: score=70%, keywords=true, diagnosis=false, tools=true
+2026/11/02 21:15:18 INFO agent: informed gate pending run_id=plr_7bc6f820 gate_type="" target=pbs_sysadmin_host_triage confidence_warning=""
+2026/11/02 21:16:40 INFO gate approved: chain stopped at another gate, approving it gate=2 run_id=plr_37751666 gate_reason=trust_not_earned
+2026/11/02 21:16:58 INFO gate approved: chain stopped at another gate, approving it gate=3 run_id=plr_4f48522e gate_reason=trust_not_earned
+2026/11/02 21:17:34 INFO gate approved: remediation triggered status="" summary="" gates=3
+    faulttest_test.go:378: Remediation verified: method=gate_loop, recovered_in=159.1s, score=0.75
+    faulttest_test.go:281: Tearing down...
+2026/11/02 21:17:34 INFO executing injection spec type=shell_exec phase=teardown
+2026/11/02 21:17:34 INFO shell_exec completed output="postgres is up: nothing to repair"
+=== RUN   TestFaultInjection/db-pgdata-corrupted-unarchived-tail
+    faulttest_test.go:261: Injecting failure...
+2026/11/02 21:17:34 INFO executing injection spec type=shell_exec phase=inject
+2026/11/02 21:17:51 INFO shell_exec completed output="ALTER SYSTEM\n pg_reload_conf \n----------------\n t\n(1 row)\n\nNOTICE:  table \"canary_wal_tail\" does not exist, skipping\nDROP TABLE\nCREATE TABLE\nINSERT 0 1\n pg_switch_wal \n---------------\n 0/15023790\n(1 row)\n\nINSERT 0 1\nhelpdesk-test-pg-pgbackrest"
+2026/11/02 21:17:52 INFO sending prompt to agent via playbook failure=db-pgdata-corrupted-unarchived-tail series_id=pbs_db_data_loss_triage playbook_id=pb_1bd65de2 gateway=http://localhost:8080 agent-conn="host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+2026/11/02 21:18:06 WARN gateway warning failure=db-pgdata-corrupted-unarchived-tail warning="expected evidence pattern not found in provided context: \"PANIC.*could not locate a valid checkpoint\""
+2026/11/02 21:18:06 WARN gateway warning failure=db-pgdata-corrupted-unarchived-tail warning="expected evidence pattern not found in provided context: \"database files are incompatible with server\""
+2026/11/02 21:18:06 WARN gateway warning failure=db-pgdata-corrupted-unarchived-tail warning="expected evidence pattern not found in provided context: \"invalid page.*could not read block\""
+2026/11/02 21:18:06 WARN gateway warning failure=db-pgdata-corrupted-unarchived-tail warning="expected evidence pattern not found in provided context: \"could not find the database system\""
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "PANIC.*could not locate a valid checkpoint"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "database files are incompatible with server"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "invalid page.*could not read block"
+    faulttest_test.go:299: Gateway warning: expected evidence pattern not found in provided context: "could not find the database system"
+    faulttest_test.go:302: Agent responded in 14.332228417s (2404 chars)
+    faulttest_test.go:328: Evaluation: score=85%, keywords=true, diagnosis=true, tools=true
+2026/11/02 21:18:06 INFO agent: informed gate pending run_id=plr_a3bd335f gate_type="" target=pbs_sysadmin_host_triage confidence_warning=""
+2026/11/02 21:19:19 INFO gate approved: chain stopped at another gate, approving it gate=2 run_id=plr_739cb62f gate_reason=trust_not_earned
+2026/11/02 21:19:36 INFO gate approved: chain stopped at another gate, approving it gate=3 run_id=plr_a5b5bfa0 gate_reason=trust_not_earned
+2026/11/02 21:20:17 INFO gate approved: remediation triggered status="" summary="" gates=3
+    faulttest_test.go:378: Remediation verified: method=gate_loop, recovered_in=163.0s, score=0.75
+    faulttest_test.go:281: Tearing down...
+2026/11/02 21:20:17 INFO executing injection spec type=shell_exec phase=teardown
+2026/11/02 21:20:17 INFO shell_exec completed output="ALTER SYSTEM\n pg_reload_conf \n----------------\n t\n(1 row)\n\nDROP TABLE\n pg_switch_wal \n---------------\n 0/16009168\n(1 row)"
+=== NAME  TestFaultInjection
+    faulttest_test.go:404: === SUMMARY: 2/2 passed, 0 failed, 0 skipped ===
+--- PASS: TestFaultInjection (322.89s)
+    --- PASS: TestFaultInjection/db-pgdata-corrupted (159.22s)
+    --- PASS: TestFaultInjection/db-pgdata-corrupted-unarchived-tail (163.67s)
+PASS
+ok  	helpdesk/testing/faulttest	323.235s
+
+=== Test Summary ===
+  Total:  6
+  Passed: 6
+  Failed: 0
+
+real	5m57.655s
+user	0m1.641s
+sys	0m1.655s
+```
 
 And that's a wrap for this transcript, folks!
 
