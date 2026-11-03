@@ -551,11 +551,11 @@ func formatDetails(details map[string]any) string {
 
 // Metrics exposes Prometheus metrics.
 type Metrics struct {
-	mu              sync.Mutex
-	eventsTotal     int64
-	alertsTotal     map[AlertLevel]int64
+	mu                 sync.Mutex
+	eventsTotal        int64
+	alertsTotal        map[AlertLevel]int64
 	delegationsByAgent map[string]int64
-	errorsByAgent   map[string]int64
+	errorsByAgent      map[string]int64
 }
 
 func NewMetrics() *Metrics {
@@ -645,13 +645,13 @@ type Auditor struct {
 
 // SecurityAlert represents a security-related alert for incident creation.
 type SecurityAlert struct {
-	Type      string    `json:"type"`
-	Severity  string    `json:"severity"`
-	Message   string    `json:"message"`
-	EventID   string    `json:"event_id"`
-	TraceID   string    `json:"trace_id"`
+	Type      string         `json:"type"`
+	Severity  string         `json:"severity"`
+	Message   string         `json:"message"`
+	EventID   string         `json:"event_id"`
+	TraceID   string         `json:"trace_id"`
 	Details   map[string]any `json:"details"`
-	Timestamp time.Time `json:"timestamp"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // NewAuditor creates a new auditor with initialized state.
@@ -1458,15 +1458,15 @@ func (a *Auditor) recordSecurityAlert(alertType string, level AlertLevel, messag
 // sendSecurityIncident POSTs a security incident to the configured webhook.
 func (a *Auditor) sendSecurityIncident(alert SecurityAlert) {
 	incident := map[string]any{
-		"type":        "security_incident",
-		"alert_type":  alert.Type,
-		"severity":    alert.Severity,
-		"message":     alert.Message,
-		"event_id":    alert.EventID,
-		"trace_id":    alert.TraceID,
-		"details":     alert.Details,
-		"timestamp":   alert.Timestamp.Format(time.RFC3339),
-		"source":      "audit_monitor",
+		"type":       "security_incident",
+		"alert_type": alert.Type,
+		"severity":   alert.Severity,
+		"message":    alert.Message,
+		"event_id":   alert.EventID,
+		"trace_id":   alert.TraceID,
+		"details":    alert.Details,
+		"timestamp":  alert.Timestamp.Format(time.RFC3339),
+		"source":     "audit_monitor",
 	}
 
 	body, err := json.Marshal(incident)

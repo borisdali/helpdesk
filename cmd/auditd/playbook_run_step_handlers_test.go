@@ -147,8 +147,8 @@ func TestPlaybookRunStepHandlers_List_OK(t *testing.T) {
 	srv := newRunStepHandlerServer(t)
 	runID := "plr_list01"
 
-	doCreateStep(t, srv, runID, map[string]any{"agent": "database", "tool": "get_blocking_queries"})   //nolint:errcheck
-	doCreateStep(t, srv, runID, map[string]any{"agent": "database", "tool": "terminate_connection"})    //nolint:errcheck
+	doCreateStep(t, srv, runID, map[string]any{"agent": "database", "tool": "get_blocking_queries"}) //nolint:errcheck
+	doCreateStep(t, srv, runID, map[string]any{"agent": "database", "tool": "terminate_connection"}) //nolint:errcheck
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/fleet/playbook-runs/"+runID+"/steps", nil)
 	req.SetPathValue("runID", runID)

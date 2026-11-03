@@ -14,15 +14,15 @@ import (
 
 // ToolEntry describes one registered tool.
 type ToolEntry struct {
-	Name          string         `json:"name"`
-	Agent         string         `json:"agent"`                  // "database" or "k8s"
-	Description   string         `json:"description"`
-	InputSchema   map[string]any `json:"input_schema,omitempty"` // JSON Schema properties
-	ActionClass   string         `json:"action_class"`           // "read", "write", "destructive"
-	FleetEligible              bool           `json:"fleet_eligible"`               // hard gate: planner only sees these
-	AutoRemediationEligible    bool           `json:"auto_remediation_eligible"`    // eligible for agent_auto playbooks
-	Capabilities  []string       `json:"capabilities,omitempty"` // controlled vocabulary (Cap* constants)
-	Supersedes    []string       `json:"supersedes,omitempty"`   // tool names this one makes redundant
+	Name                    string         `json:"name"`
+	Agent                   string         `json:"agent"` // "database" or "k8s"
+	Description             string         `json:"description"`
+	InputSchema             map[string]any `json:"input_schema,omitempty"`    // JSON Schema properties
+	ActionClass             string         `json:"action_class"`              // "read", "write", "destructive"
+	FleetEligible           bool           `json:"fleet_eligible"`            // hard gate: planner only sees these
+	AutoRemediationEligible bool           `json:"auto_remediation_eligible"` // eligible for agent_auto playbooks
+	Capabilities            []string       `json:"capabilities,omitempty"`    // controlled vocabulary (Cap* constants)
+	Supersedes              []string       `json:"supersedes,omitempty"`      // tool names this one makes redundant
 	// AgentVersion is the agent's version string at discovery time (from card.Version).
 	AgentVersion string `json:"agent_version,omitempty"`
 	// SchemaFingerprint is the sha256[:12] hex of the tool's Declaration().Parameters JSON.

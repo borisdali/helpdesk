@@ -69,17 +69,17 @@ type RuleSummary struct {
 
 // ApprovalConfig describes the approval workflow configuration.
 type ApprovalConfig struct {
-	Enabled          bool   `json:"enabled"`
+	Enabled           bool   `json:"enabled"`
 	WebhookConfigured bool   `json:"webhook_configured"`
 	EmailConfigured   bool   `json:"email_configured"`
-	DefaultTimeout   string `json:"default_timeout"`
-	PendingCount     int    `json:"pending_count"`
+	DefaultTimeout    string `json:"default_timeout"`
+	PendingCount      int    `json:"pending_count"`
 }
 
 // AuditStatus describes the audit system status.
 type AuditStatus struct {
 	Enabled     bool   `json:"enabled"`
-	Backend     string `json:"backend"`      // "sqlite" or "postgres"
+	Backend     string `json:"backend"` // "sqlite" or "postgres"
 	EventsTotal int    `json:"events_total"`
 	ChainValid  bool   `json:"chain_valid"`
 	LastEventAt string `json:"last_event_at,omitempty"`
@@ -216,10 +216,10 @@ func (s *governanceServer) handleGetInfo(w http.ResponseWriter, r *http.Request)
 
 	// Approval configuration
 	info.Approvals = ApprovalConfig{
-		Enabled:          true, // Always enabled since auditd handles approvals
+		Enabled:           true, // Always enabled since auditd handles approvals
 		WebhookConfigured: s.notifier != nil && s.notifier.webhookURL != "",
 		EmailConfigured:   s.notifier != nil && s.notifier.smtpHost != "" && len(s.notifier.emailTo) > 0,
-		DefaultTimeout:   "60m", // Default from approval_handlers.go
+		DefaultTimeout:    "60m", // Default from approval_handlers.go
 	}
 
 	// Get pending approval count
@@ -536,14 +536,14 @@ type PolicyCheckRequest struct {
 
 // PolicyCheckResponse is returned by POST /v1/governance/check.
 type PolicyCheckResponse struct {
-	Effect           string               `json:"effect"`                     // allow / deny / require_approval
+	Effect           string               `json:"effect"` // allow / deny / require_approval
 	PolicyName       string               `json:"policy_name"`
 	Message          string               `json:"message,omitempty"`
 	Explanation      string               `json:"explanation"`
 	RequiresApproval bool                 `json:"requires_approval,omitempty"`
 	Trace            policy.DecisionTrace `json:"trace"`
-	EventID          string               `json:"event_id"`  // pol_* event recorded atomically
-	TraceID          string               `json:"trace_id"`  // echoed back; chk_* prefix means auto-generated (direct call)
+	EventID          string               `json:"event_id"` // pol_* event recorded atomically
+	TraceID          string               `json:"trace_id"` // echoed back; chk_* prefix means auto-generated (direct call)
 }
 
 // handlePolicyCheck handles POST /v1/governance/check.

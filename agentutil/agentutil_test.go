@@ -1528,10 +1528,10 @@ type mockSchemaTool struct {
 	decl *genai.FunctionDeclaration
 }
 
-func (m *mockSchemaTool) Name() string                                        { return m.name }
-func (m *mockSchemaTool) Description() string                                 { return "mock " + m.name }
-func (m *mockSchemaTool) IsLongRunning() bool                                 { return false }
-func (m *mockSchemaTool) Declaration() *genai.FunctionDeclaration             { return m.decl }
+func (m *mockSchemaTool) Name() string                            { return m.name }
+func (m *mockSchemaTool) Description() string                     { return "mock " + m.name }
+func (m *mockSchemaTool) IsLongRunning() bool                     { return false }
+func (m *mockSchemaTool) Declaration() *genai.FunctionDeclaration { return m.decl }
 
 // makeMockSchemaTool creates a mock tool whose Declaration uses ParametersJsonSchema
 // (type any), matching what functiontool.New produces in production.
@@ -1904,4 +1904,3 @@ func TestNewReasoningCallback_TextAndFunctionCall_CallsRecord(t *testing.T) {
 		t.Errorf("text+function call: got (%v, %v), want (nil, nil)", resp, err)
 	}
 }
-

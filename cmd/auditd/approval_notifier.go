@@ -119,16 +119,16 @@ func (n *ApprovalNotifier) NotifyResolved(ctx context.Context, approval *audit.S
 // sendWebhook sends a webhook notification.
 func (n *ApprovalNotifier) sendWebhook(approval *audit.StoredApproval, eventType string) {
 	payload := map[string]any{
-		"event_type":  "approval_" + eventType,
-		"approval_id": approval.ApprovalID,
-		"status":      approval.Status,
-		"action":      approval.ActionClass,
-		"tool":        approval.ToolName,
-		"agent":       approval.AgentName,
-		"resource":    approval.ResourceType + "/" + approval.ResourceName,
+		"event_type":   "approval_" + eventType,
+		"approval_id":  approval.ApprovalID,
+		"status":       approval.Status,
+		"action":       approval.ActionClass,
+		"tool":         approval.ToolName,
+		"agent":        approval.AgentName,
+		"resource":     approval.ResourceType + "/" + approval.ResourceName,
 		"requested_by": approval.RequestedBy,
 		"requested_at": approval.RequestedAt.Format(time.RFC3339),
-		"timestamp":   time.Now().Format(time.RFC3339),
+		"timestamp":    time.Now().Format(time.RFC3339),
 	}
 
 	if approval.ResolvedBy != "" {

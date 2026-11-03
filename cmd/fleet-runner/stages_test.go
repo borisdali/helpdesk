@@ -207,8 +207,8 @@ func TestRunStages_WaveGate_RequestsApproval(t *testing.T) {
 	def.Strategy.Defaults()
 
 	rcfg := runnerConfig{
-		auditURL:            auditd.URL,
-		jobID:               "wave-gate-test-2",
+		auditURL:             auditd.URL,
+		jobID:                "wave-gate-test-2",
 		approvalPollInterval: 10 * time.Millisecond,
 	}
 

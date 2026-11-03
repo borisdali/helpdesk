@@ -175,9 +175,9 @@ func TestLastTerminatedState(t *testing.T) {
 		want     *LastTerminatedState
 	}{
 		{
-			name:    "no last state",
+			name:     "no last state",
 			statuses: []corev1.ContainerStatus{{RestartCount: 0}},
-			wantNil: true,
+			wantNil:  true,
 		},
 		{
 			name: "OOMKilled",
@@ -388,9 +388,9 @@ func TestEventTimestamp(t *testing.T) {
 		{
 			name: "prefers LastTimestamp",
 			event: corev1.Event{
-				LastTimestamp:      metav1.NewTime(now),
-				EventTime:         metav1.NewMicroTime(earlier),
-				ObjectMeta:        metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(creation)},
+				LastTimestamp: metav1.NewTime(now),
+				EventTime:     metav1.NewMicroTime(earlier),
+				ObjectMeta:    metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(creation)},
 			},
 			want: now,
 		},

@@ -923,7 +923,7 @@ func TestPatchDeploymentResourcesTool_PreStateReadFailure_ToolStillRuns(t *testi
 	// If either pre-state kubectl read fails, the patch must still proceed.
 	defer withMockKubectlSequence(
 		kubectlResponse{out: "", err: fmt.Errorf("connection refused")}, // limit read fails
-		kubectlResponse{out: "192Mi", err: nil},                        // request read succeeds
+		kubectlResponse{out: "192Mi", err: nil},                         // request read succeeds
 		kubectlResponse{out: `deployment.apps/postgres resource requirements updated` + "\n", err: nil},
 		kubectlResponse{out: "512Mi", err: nil},
 	)()

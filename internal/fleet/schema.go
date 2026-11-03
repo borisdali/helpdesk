@@ -28,10 +28,10 @@ type Step struct {
 
 // JobDef is the top-level fleet job definition, loaded from a JSON file.
 type JobDef struct {
-	Name         string   `json:"name"`
-	Change       Change   `json:"change"`
-	Targets      Targets  `json:"targets"`
-	Strategy     Strategy `json:"strategy"`
+	Name     string   `json:"name"`
+	Change   Change   `json:"change"`
+	Targets  Targets  `json:"targets"`
+	Strategy Strategy `json:"strategy"`
 	// PlanTraceID links this job to the NL planner audit event that generated it.
 	// Set by the planner when saving the job definition; carried through to the
 	// fleet_jobs audit record so the three auditability questions can be answered:
@@ -112,4 +112,3 @@ func (s *Strategy) defaults() {
 func (s *Strategy) Defaults() {
 	s.defaults()
 }
-

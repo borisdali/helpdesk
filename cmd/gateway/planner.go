@@ -479,7 +479,6 @@ Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
 }`, infraSummary, toolCatalog, intentSection, guidanceSection, description, hints)
 }
 
-
 // resolveTargetsFromInfra resolves fleet job Targets against the infra config,
 // returning the list of matched server keys. This is the gateway-side equivalent
 // of the fleet-runner's resolveTargets.

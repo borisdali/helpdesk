@@ -31,10 +31,11 @@ import (
 // identityPolicyYAML exercises role-based, sensitivity-based, and purpose-based rules.
 //
 // Policy priority rationale:
-//   200 emergency-break-glass — oncall+emergency overrides everything
-//   110 pii-protection        — PII resources: reads require purpose, writes denied
-//    80 dba-policy            — DBA can read freely; DBA can write unless purpose=diagnostic
-//    10 default-policy        — everyone else: allow reads, deny writes
+//
+//	200 emergency-break-glass — oncall+emergency overrides everything
+//	110 pii-protection        — PII resources: reads require purpose, writes denied
+//	 80 dba-policy            — DBA can read freely; DBA can write unless purpose=diagnostic
+//	 10 default-policy        — everyone else: allow reads, deny writes
 //
 // Diagnostic-purpose write blocking is embedded in dba-policy (blocked_purposes: [diagnostic])
 // rather than a separate policy, to avoid the policy evaluation ordering problem: a standalone

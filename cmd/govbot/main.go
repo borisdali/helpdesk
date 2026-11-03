@@ -87,15 +87,15 @@ type integrityStatus struct {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	gateway       := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
-	apiKey        := flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Bearer token for gateway authentication")
-	auditAPIKey   := flag.String("audit-api-key", os.Getenv("HELPDESK_AUDIT_API_KEY"), "Bearer token for auditd authentication (used with -audit-url)")
-	sinceStr      := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
-	webhook       := flag.String("webhook", "", "Slack webhook URL for posting report summary")
-	dryRun        := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
-	auditURL      := flag.String("audit-url", os.Getenv("HELPDESK_AUDIT_URL"), "Auditd service URL for persisting compliance history (e.g. http://auditd:1199). Takes precedence over -history-db.")
-	historyDB     := flag.String("history-db", "", "Path to govbot history database (SQLite path or postgres:// DSN). Used when -audit-url is not set.")
-	showHistory   := flag.Int("show-history", 0, "Print last N compliance runs and exit (requires -audit-url or -history-db)")
+	gateway := flag.String("gateway", "http://localhost:8080", "Gateway base URL")
+	apiKey := flag.String("api-key", os.Getenv("HELPDESK_CLIENT_API_KEY"), "Bearer token for gateway authentication")
+	auditAPIKey := flag.String("audit-api-key", os.Getenv("HELPDESK_AUDIT_API_KEY"), "Bearer token for auditd authentication (used with -audit-url)")
+	sinceStr := flag.String("since", "24h", "Look-back window for audit events (e.g. 24h, 7d, 2w)")
+	webhook := flag.String("webhook", "", "Slack webhook URL for posting report summary")
+	dryRun := flag.Bool("dry-run", false, "Collect and print report but do not post to webhook")
+	auditURL := flag.String("audit-url", os.Getenv("HELPDESK_AUDIT_URL"), "Auditd service URL for persisting compliance history (e.g. http://auditd:1199). Takes precedence over -history-db.")
+	historyDB := flag.String("history-db", "", "Path to govbot history database (SQLite path or postgres:// DSN). Used when -audit-url is not set.")
+	showHistory := flag.Int("show-history", 0, "Print last N compliance runs and exit (requires -audit-url or -history-db)")
 	historyRetain := flag.Int("history-retain", 365, "Maximum number of runs to keep in local history database (ignored when -audit-url is set)")
 	flag.Parse()
 	gatewayAPIKey = *apiKey

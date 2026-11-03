@@ -111,7 +111,7 @@ func TestConnStrHost_DSN(t *testing.T) {
 	}{
 		{"host=myhost port=5432 dbname=prod user=postgres", "myhost"},
 		{"host=192.168.1.1 port=5432", "192.168.1.1"},
-		{"dbname=prod user=postgres", ""},  // no host field
+		{"dbname=prod user=postgres", ""}, // no host field
 		{"", ""},
 	}
 

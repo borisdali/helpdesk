@@ -13,9 +13,9 @@ import (
 
 // LastTerminatedState holds the exit details for the most recent container termination.
 type LastTerminatedState struct {
-	Reason    string `json:"reason"`               // e.g. "OOMKilled", "Error", "Completed"
-	ExitCode  int32  `json:"exit_code"`
-	OOMKilled bool   `json:"oomkilled"`
+	Reason     string `json:"reason"` // e.g. "OOMKilled", "Error", "Completed"
+	ExitCode   int32  `json:"exit_code"`
+	OOMKilled  bool   `json:"oomkilled"`
 	FinishedAt string `json:"finished_at,omitempty"` // RFC3339 timestamp
 }
 
@@ -155,15 +155,15 @@ type NodeCondition struct {
 
 // NodeStatusInfo extends NodeInfo with condition and resource capacity details.
 type NodeStatusInfo struct {
-	Name             string          `json:"name"`
-	Status           string          `json:"status"`
-	Roles            []string        `json:"roles"`
-	KubeletVersion   string          `json:"kubelet_version"`
-	Conditions       []NodeCondition `json:"conditions"`
-	AllocatableCPU   string          `json:"allocatable_cpu"`
-	AllocatableMem   string          `json:"allocatable_memory"`
-	CapacityCPU      string          `json:"capacity_cpu"`
-	CapacityMem      string          `json:"capacity_memory"`
+	Name           string          `json:"name"`
+	Status         string          `json:"status"`
+	Roles          []string        `json:"roles"`
+	KubeletVersion string          `json:"kubelet_version"`
+	Conditions     []NodeCondition `json:"conditions"`
+	AllocatableCPU string          `json:"allocatable_cpu"`
+	AllocatableMem string          `json:"allocatable_memory"`
+	CapacityCPU    string          `json:"capacity_cpu"`
+	CapacityMem    string          `json:"capacity_memory"`
 }
 
 // GetNodeStatusResult is the structured result for the get_node_status tool.
@@ -174,21 +174,21 @@ type GetNodeStatusResult struct {
 
 // PodResourceInfo holds requests, limits, and live usage for one container.
 type PodResourceInfo struct {
-	PodName        string `json:"pod_name"`
-	ContainerName  string `json:"container_name"`
-	CPURequest     string `json:"cpu_request,omitempty"`
-	CPULimit       string `json:"cpu_limit,omitempty"`
-	CPUUsage       string `json:"cpu_usage,omitempty"`  // from kubectl top; empty if metrics unavailable
-	MemRequest     string `json:"mem_request,omitempty"`
-	MemLimit       string `json:"mem_limit,omitempty"`
-	MemUsage       string `json:"mem_usage,omitempty"`  // from kubectl top; empty if metrics unavailable
+	PodName       string `json:"pod_name"`
+	ContainerName string `json:"container_name"`
+	CPURequest    string `json:"cpu_request,omitempty"`
+	CPULimit      string `json:"cpu_limit,omitempty"`
+	CPUUsage      string `json:"cpu_usage,omitempty"` // from kubectl top; empty if metrics unavailable
+	MemRequest    string `json:"mem_request,omitempty"`
+	MemLimit      string `json:"mem_limit,omitempty"`
+	MemUsage      string `json:"mem_usage,omitempty"` // from kubectl top; empty if metrics unavailable
 }
 
 // GetPodResourcesResult is the structured result for the get_pod_resources tool.
 type GetPodResourcesResult struct {
-	Containers      []PodResourceInfo `json:"containers"`
-	Count           int               `json:"count"`
-	MetricsNote     string            `json:"metrics_note,omitempty"` // set when live usage unavailable
+	Containers  []PodResourceInfo `json:"containers"`
+	Count       int               `json:"count"`
+	MetricsNote string            `json:"metrics_note,omitempty"` // set when live usage unavailable
 }
 
 // --- Conversion helpers ---

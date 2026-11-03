@@ -46,11 +46,11 @@ func main() {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
 			dbKeys := make([]string, 0, len(infraConfig.DBServers))
-		for k := range infraConfig.DBServers {
-			dbKeys = append(dbKeys, k)
-		}
-		sort.Strings(dbKeys)
-		slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
+			for k := range infraConfig.DBServers {
+				dbKeys = append(dbKeys, k)
+			}
+			sort.Strings(dbKeys)
+			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
 	}
 
@@ -565,4 +565,3 @@ func loadDBEvidenceRules(path string) (activeConnRules, replicationRules, backup
 	slog.Info("objective_evidence rules loaded", "path", path, "get_active_connections_rules", len(activeConnRules), "get_replication_status_rules", len(replicationRules), "get_backup_status_rules", len(backupArchiverRules))
 	return activeConnRules, replicationRules, backupArchiverRules
 }
-

@@ -109,8 +109,8 @@ func BuildRollbackJobDef(
 	}
 
 	rollbackDef := &fleet.JobDef{
-		Name:   fmt.Sprintf("rollback: %s", originalDef.Name),
-		Change: fleet.Change{Steps: reverseSteps},
+		Name:     fmt.Sprintf("rollback: %s", originalDef.Name),
+		Change:   fleet.Change{Steps: reverseSteps},
 		Targets:  rollbackTargets,
 		Strategy: rollbackStrategy,
 	}
