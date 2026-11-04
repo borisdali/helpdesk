@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -190,6 +191,153 @@ func TestPlanPITRWithEstimate_EndToEnd(t *testing.T) {
 	if plan.Status != PITRNotFeasible || plan.DataLossEstimate != nil {
 		t.Errorf("a plan that cannot be restored got an estimate: %+v", plan)
 	}
+}
+
+// A serving instance is asked where its history ends. The simulated one says
+// 2026-10-28T10:00:00Z, 0/20000000; the target is 8 days 10 hours earlier.
+func TestPlanPITRWithEstimate_ServingInstanceUsesItsOwnClock(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	sim, _ := liveEnv(t)
+	args := PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget}
+
+	plan, err := planPITRWithEstimate(context.Background(), args)
+	if err != nil || plan.Status != PITRFeasible || !plan.InstanceServing {
+		t.Fatalf("plan = %+v, %v", plan, err)
+	}
+	e := plan.DataLossEstimate
+	if e == nil || e.Basis != lossBasisLive || e.UpperBound || e.To != "2026-10-28T10:00:00Z" {
+		t.Fatalf("estimate = %+v", e)
+	}
+	if want := int64(8*86400 + 10*3600); e.WindowSeconds == nil || *e.WindowSeconds != want {
+		t.Errorf("window = %v, want %d", e.WindowSeconds, want)
+	}
+	if !sim.did("preflight") {
+		t.Error("the running instance was never asked")
+	}
+
+	// The keys helpdesk-client reads are part of the contract.
+	raw, _ := json.Marshal(plan)
+	var m struct {
+		Estimate map[string]any `json:"data_loss_estimate"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"summary", "as_of", "unmeasured"} {
+		if _, ok := m.Estimate[k]; !ok {
+			t.Errorf("data_loss_estimate has no %q: %s", k, raw)
+		}
+	}
+}
+
+func TestPlanPITRWithEstimate_FallsBackToTheArchive(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	args := PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"}
+
+	t.Run("a serving instance that cannot be asked", func(t *testing.T) {
+		sim, _ := liveEnv(t)
+		sim.preErr = errors.New("psql: connection refused")
+		plan, err := planPITRWithEstimate(context.Background(), args)
+		if err != nil || plan.Status != PITRFeasible || !plan.InstanceServing {
+			t.Fatalf("plan = %+v, %v", plan, err)
+		}
+		if e := plan.DataLossEstimate; e == nil || e.Basis != lossBasisArchive || !e.UpperBound {
+			t.Errorf("estimate = %+v: a failed question must not fail the plan or pretend to be exact", e)
+		}
+	})
+
+	t.Run("a down instance is never asked", func(t *testing.T) {
+		sim, _ := liveEnv(t)
+		sim.up = false
+		plan, err := planPITRWithEstimate(context.Background(), args)
+		if err != nil || plan.Status != PITRFeasible || plan.InstanceServing {
+			t.Fatalf("plan = %+v, %v", plan, err)
+		}
+		if e := plan.DataLossEstimate; e == nil || e.Basis != lossBasisArchive {
+			t.Errorf("estimate = %+v", e)
+		}
+		if sim.did("preflight") {
+			t.Error("a down instance was asked where it is")
+		}
+	})
+}
+
+// The restore reports what it discarded, measured when it ran.
+func TestRestoreToPIT_ReportsTheLossItCaused(t *testing.T) {
+	t.Run("serving: from the instance's position when it was stopped", func(t *testing.T) {
+		withPgBackRestDockerInfra(t)
+		_, _ = liveEnv(t)
+		plan := approvedLiveDigest(t, liveTarget)
+		res, err := restoreToPITImpl(context.Background(), liveArgs(plan))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := res.DataLoss
+		if e == nil || e.Basis != lossBasisLive || e.UpperBound || e.To != "2026-10-28T10:00:00Z" {
+			t.Fatalf("data_loss = %+v", e)
+		}
+		if want := int64(8*86400 + 10*3600); *e.WindowSeconds != want {
+			t.Errorf("window = %d, want %d", *e.WindowSeconds, want)
+		}
+		if res.Plan.DataLossEstimate != nil {
+			t.Error("the restore's plan carries an estimate: it is recomputed around the ordered steps and must stay out of them")
+		}
+	})
+
+	t.Run("down: from the end of the archive", func(t *testing.T) {
+		withPgBackRestDockerInfra(t)
+		sim, _ := liveEnv(t)
+		sim.up = false
+		args := PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main", RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"}
+		plan, err := planPITRImpl(context.Background(), args)
+		if err != nil || plan.Status != PITRFeasible {
+			t.Fatalf("plan: %+v, %v", plan, err)
+		}
+		res, err := restoreToPITImpl(context.Background(), RestoreToPITArgs{Target: "pgbackrest_db", Stanza: "main",
+			RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z", PlanDigest: plan.PlanDigest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e := res.DataLoss; e == nil || e.Basis != lossBasisArchive || !e.UpperBound || e.WindowSeconds == nil || *e.WindowSeconds <= 0 {
+			t.Errorf("data_loss = %+v", e)
+		}
+	})
+}
+
+func TestEstimateDataLoss_Boundaries(t *testing.T) {
+	t.Run("an LSN at the very end of the archive is the last segment's remainder", func(t *testing.T) {
+		// Segment 16 starts at 0x10000000; the target is its first byte.
+		e := estimateDataLoss(RecoveryTarget{Type: TargetLSN}, "0/10000000", lossWAL(), nil, lossNow)
+		if e == nil || *e.Segments != 0 || *e.WALBytes != 16<<20 {
+			t.Errorf("estimate = %+v", e)
+		}
+	})
+	t.Run("an LSN past the end of the archive on a down instance loses nothing it can see", func(t *testing.T) {
+		e := estimateDataLoss(RecoveryTarget{Type: TargetLSN}, "0/20000000", lossWAL(), nil, lossNow)
+		if e == nil || *e.WALBytes != 0 || *e.Segments != 0 {
+			t.Errorf("estimate = %+v", e)
+		}
+	})
+	t.Run("an LSN in the high log id", func(t *testing.T) {
+		w := lossWAL()
+		w.ArchiveEndWAL = "000000010000000200000003" // log 2, seg 3 -> segment 2*256+3
+		e := estimateDataLoss(RecoveryTarget{Type: TargetLSN}, "2/01000000", w, nil, lossNow)
+		if e == nil || *e.Segments != 2 {
+			t.Errorf("estimate = %+v", e)
+		}
+	})
+	t.Run("a target with a zone offset is measured in absolute time", func(t *testing.T) {
+		// 03:59 at +02:00 is 01:59 UTC, the same instant as the other tests.
+		e := estimateDataLoss(RecoveryTarget{Type: TargetTime, Value: "2026-11-03T03:59:00+02:00"}, "x", lossWAL(), nil, lossNow)
+		if e == nil || *e.WindowSeconds != 21*60 {
+			t.Errorf("estimate = %+v", e)
+		}
+	})
+	t.Run("an unknown target type", func(t *testing.T) {
+		if e := estimateDataLoss(RecoveryTarget{Type: "xid"}, "1", lossWAL(), nil, lossNow); e != nil {
+			t.Errorf("got %+v", e)
+		}
+	})
 }
 
 func TestHumanUnits(t *testing.T) {
