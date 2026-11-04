@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_triage
 name: "pgBackRest — Point-in-Time Recovery Triage"
-version: "1.2"
+version: "1.3"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -43,11 +43,20 @@ guidance: |
   The recovery target (a time or an LSN) is carried with this request by the
   gateway: the plan tool uses it and ignores any target you pass. Never
   choose, adjust, round or "improve" a target, and never infer one from the
-  operator's wording. If the plan tool says it has no recovery target, stop:
-  report that no recovery target was supplied.
+  operator's wording. The operator's words ("a few minutes ago") are not the
+  target and are not missing it: the target is injected into the tool, not
+  into the text you can read. Conclude that no recovery target was supplied
+  only when the plan tool itself returns a result saying so. A prompt that
+  names no time or LSN is not that result, and neither is a tool error.
 
   Step 1 — Plan:
   Call plan_point_in_time_recovery with the connection_string (target) only.
+  "target" is the server ID from the Known Infrastructure whose connection
+  matches the connection_string, and it is the only argument you pass: the
+  recovery target, stanza and everything else are filled in for you. A call
+  with no target is rejected. If a call is rejected for a missing or wrong
+  target, correct it and call again (the same server ID goes to every tool);
+  do not stop, and do not report on a plan you have not received.
   It reports status (feasible, not_feasible, unverified), a detail sentence,
   the backup it would restore (backup_label, backup_stop_time), the recovery
   target as pgBackRest will receive it (normalized_target), the timeline now

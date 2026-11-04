@@ -72,6 +72,14 @@ func TestPITRPlaybooks_Triage(t *testing.T) {
 	for _, term := range []string{
 		"plan_point_in_time_recovery with the connection_string (target) only",
 		"ignores any target you pass",
+		// A model that took "(target) only" to mean "no arguments" got every call
+		// rejected, never received a plan, and reported "no recovery target
+		// supplied" (run plr_abf5aa5e, 2026-11-03).
+		"is the server ID from the Known Infrastructure",
+		"A call with no target is rejected",
+		"correct it and call again",
+		"do not report on a plan you have not received",
+		"Conclude that no recovery target was supplied only when the plan tool itself returns a result saying so",
 		"Never choose, adjust, round or \"improve\" a target",
 		"plan_digest",
 		"Do NOT call restore_to_point_in_time or restore_from_backup",
