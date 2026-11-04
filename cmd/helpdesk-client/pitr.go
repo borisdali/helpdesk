@@ -159,6 +159,12 @@ type pitrPlan struct {
 		Summary    string   `json:"summary"`
 		AsOf       string   `json:"as_of"`
 		Unmeasured []string `json:"unmeasured"`
+		// Objective sets the estimate against the database's recovery point
+		// objective.
+		Objective *struct {
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"objective"`
 	} `json:"data_loss_estimate"`
 }
 
@@ -186,6 +192,15 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		fmt.Fprintf(&b, "Estimated loss     : %s\n", e.Summary)
 		if len(e.Unmeasured) > 0 {
 			fmt.Fprintf(&b, "Not counted        : %s\n", strings.Join(e.Unmeasured, "; "))
+		}
+		if o := e.Objective; o != nil {
+			// Say it loudly when the loss is, or may be, more than the database
+			// is supposed to lose: a person approving should not miss it.
+			label := "RPO check          "
+			if o.Status == "exceeds" || o.Status == "may_exceed" {
+				label = "RPO CHECK (!)      "
+			}
+			fmt.Fprintf(&b, "%s: %s: %s\n", label, o.Status, o.Detail)
 		}
 	}
 	state := "down"

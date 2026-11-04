@@ -106,7 +106,7 @@ For a **running** instance the restore step expands ([§5](#5-a-running-instance
 ## 4. Operating it
 
 Steps 2 and 3 can be done with `helpdesk-client` ([the short way](#the-short-way-helpdesk-client)), with the
-API as below, or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
+API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
 approve gates.
 
 **1. Start the triage with the target.** Find the playbook, then run it:
@@ -133,7 +133,7 @@ SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"
 Use the database's own clock when you note the moment: `SELECT clock_timestamp()`.
 
 **2. Read the plan.** The response is `pending_gate` with `transition_target` `pbs_pgbackrest_pitr_remediate`
-(`gate_reason` is reported only when the request did not set `gate_escalation`; the gate holds either way, and an
+(`gate_reason` is reported only when the request did not set `gate_escalation`; the gate holds either way and an
 approval without a target is refused) and the triage's `escalation_findings` carry `plan_status`, `plan_digest`, `backup_label`, `timeline`,
 `archive_end_time`, `data_loss`, `instance` (down or serving) and `archive_flush_required`. The digest in
 those findings was reported by a model. To review the plan itself, ask the sysadmin agent, as the harness
@@ -153,16 +153,33 @@ Read `status`, `backup_label`, `data_loss`, `data_loss_estimate`, `instance_serv
 
 | Target | Instance | You get | Precision |
 |---|---|---|---|
-| time | serving | the span from the target to the database's own clock now | exact, and growing until the instance is stopped |
+| time | serving | the span from the target to the database's own clock now | exact and growing until the instance is stopped |
 | time | down | the span from the target to when the newest archived segment reached the repo | an upper bound |
 | LSN | serving | WAL bytes from the target to the instance's current position | exact |
 | LSN | down | WAL bytes and whole segments from the target to the end of the newest archived segment | an upper bound |
 
 It does not count transactions (that needs the WAL decoded), it cannot tell the bad writes from the good ones
-(everything after the target is counted), and on a down instance it cannot see WAL that was never archived. Each
+(everything after the target is counted) and on a down instance it cannot see WAL that was never archived. Each
 estimate lists these under `unmeasured`. It is not part of the plan digest, so it can move while the plan waits
 for approval; `as_of` says when it was made. The result of the restore carries a `data_loss` figure measured when
 the restore ran, to compare with the one that was approved.
+
+**Against the objective.** The estimate is set against the database's `rpo` ([OBJECTIVES.md](OBJECTIVES.md)) in
+`data_loss_estimate.objective` and `helpdesk-client --pitr-plan` prints it as `RPO check`. It is a flag, not a
+refusal: a point-in-time restore loses data by choice and the person at the gate may accept more than the objective.
+What it must not do is let them accept it unaware, so every case says something:
+
+| `status` | Means |
+|---|---|
+| `within` | The loss is within the `rpo` (for an upper-bound estimate, even at that bound) |
+| `exceeds` | The loss is more than the `rpo`; the detail says by how much |
+| `may_exceed` | The estimate is an upper bound (a down instance) and the bound is over the `rpo`: the real loss may be less |
+| `not_comparable` | An LSN target has no time span until the WAL is read |
+| `no_objective` | No `rpo` for this database, its environment or the fleet or the target is not a configured database: the loss is unchecked |
+| `objective_invalid` | The config tried to set an `rpo` and got it wrong (`problems` says how): fix `infrastructure.json` and treat the loss as unchecked |
+
+`exceeds` and `may_exceed` print as `RPO CHECK (!)`. The comparison also appears on the restore result's `data_loss`.
+Approving a plan that exceeds the objective does not yet need anything beyond `acknowledge_data_loss`.
 
 **3. Approve the plan you read.**
 
@@ -223,8 +240,8 @@ helpdesk-client --user ops@example.com --pitr-approve plr_a3f7c1b2 \
   --plan-digest 3c7ae8cf0d79ffd9 --acknowledge-data-loss --allow-stop-serving
 ```
 
-Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters, or no
-`--acknowledge-data-loss` is refused before anything is sent, and the gateway's own refusals are printed as
+Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters or no
+`--acknowledge-data-loss` is refused before anything is sent and the gateway's own refusals are printed as
 they come ([§4 table](#4-operating-it)). `--pitr-plan` prints no approve command for a plan that is not
 feasible. Denying a gate does not need any of this.
 
@@ -326,7 +343,7 @@ manual, not a catalog fault: there is no `db-pitr-dropped-table-vm` yet. A table
 incremental backup taken, the target noted from the database's clock, a later table created and the first dropped;
 the triage was started with `curl`, the plan read with `helpdesk-client --pitr-plan` and the gate approved with
 `--pitr-approve ... --allow-stop-serving`. Checked by hand afterwards: the dropped table was back with its 5 rows,
-the table created after the target was gone, the cluster was on timeline 45, and the log showed `recovery stopping
+the table created after the target was gone, the cluster was on timeline 45 and the log showed `recovery stopping
 before commit`, `redo done`, `selected new timeline ID: 45`, `archive recovery complete`.
 
 **Tests:**

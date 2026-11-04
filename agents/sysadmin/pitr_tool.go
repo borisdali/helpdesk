@@ -244,7 +244,7 @@ func planPITRWithEstimate(ctx context.Context, args PlanPITRArgs) (PITRPlan, err
 			}
 		}
 	}
-	plan.DataLossEstimate = estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now())
+	plan.DataLossEstimate = withObjective(estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now()), args.Target)
 	return plan, nil
 }
 

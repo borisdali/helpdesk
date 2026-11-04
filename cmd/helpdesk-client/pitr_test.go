@@ -131,6 +131,33 @@ func TestFormatPITRPlan_ShowsTheMeasuredLossAndWhatIsNotCounted(t *testing.T) {
 	}
 }
 
+func TestFormatPITRPlan_ShowsTheRPOCheck_LoudWhenItMayBeExceeded(t *testing.T) {
+	plan := func(status, detail string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"d1","data_loss_estimate":{"summary":"s","objective":{"status":"` + status + `","detail":"` + detail + `"}}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, status := range []string{"exceeds", "may_exceed"} {
+		got := formatPITRPlan(plan(status, "1h 18m 07s discarded against an RPO of 15m 00s"), goodOpts())
+		if !strings.Contains(got, "RPO CHECK (!)") || !strings.Contains(got, status+": 1h 18m 07s discarded against an RPO of 15m 00s") {
+			t.Errorf("%s is not shown loudly:\n%s", status, got)
+		}
+	}
+	for _, status := range []string{"within", "not_comparable", "no_objective", "objective_invalid"} {
+		got := formatPITRPlan(plan(status, "detail text"), goodOpts())
+		if strings.Contains(got, "(!)") || !strings.Contains(got, "RPO check") || !strings.Contains(got, status+": detail text") {
+			t.Errorf("%s:\n%s", status, got)
+		}
+	}
+	// An agent without the check (an older one) prints no RPO line.
+	if got := formatPITRPlan(pitrPlan{Status: "feasible", PlanDigest: "d1"}, goodOpts()); strings.Contains(got, "RPO") {
+		t.Errorf("a plan with no comparison printed one:\n%s", got)
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {

@@ -249,7 +249,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 			args.PlanDigest, plan.PlanDigest, plan.BackupLabel, plan.TargetTimeline)
 	}
 
-	result.DataLoss = estimateDataLoss(target, normalized, plan.WALContinuity, result.PreStop, time.Now())
+	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, result.PreStop, time.Now()), args.Target)
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string

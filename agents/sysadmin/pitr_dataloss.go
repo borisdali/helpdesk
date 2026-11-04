@@ -62,6 +62,10 @@ type DataLossEstimate struct {
 	Unmeasured []string `json:"unmeasured,omitempty"`
 	// Summary is the estimate in one sentence a person can read at the gate.
 	Summary string `json:"summary"`
+	// Objective sets the estimate against the database's recovery point
+	// objective (pitr_rpo.go). Absent when the estimate was made without
+	// asking which database it is for.
+	Objective *RPOComparison `json:"objective,omitempty"`
 }
 
 // estimateDataLoss measures what restoring to target discards. normalized is
