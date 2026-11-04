@@ -147,7 +147,10 @@ func assessPITRPlanFor(stanza string, target RecoveryTarget, normalized string, 
 			return notFeasible("the target %s is not before the time the newest archived WAL segment (%s) reached the repository, %s: reaching it would need WAL that was never archived. restore_from_backup restores to the end of the archive",
 				normalized, wal.ArchiveEndWAL, wal.ArchiveEndTime)
 		}
-		if plan.ArchiveFlushRequired {
+		// A serving instance is flushed and then stopped, whether or not the
+		// target needed the flush: what it committed up to the stop is gone,
+		// not just what reached the archive.
+		if serving {
 			plan.DataLoss = fmt.Sprintf("everything committed after %s, up to the moment the instance is stopped, is discarded", normalized)
 		} else {
 			plan.DataLoss = fmt.Sprintf("everything committed after %s, up to the end of the archive at %s, is discarded", normalized, wal.ArchiveEndTime)
@@ -165,7 +168,7 @@ func assessPITRPlanFor(stanza string, target RecoveryTarget, normalized string, 
 		} else if targetSeg > endSeg {
 			return notFeasible("the target %s is in a WAL segment after the newest archived one (%s): reaching it would need WAL that was never archived", normalized, wal.ArchiveEndWAL)
 		}
-		if targetSeg <= endSeg {
+		if targetSeg <= endSeg && !serving {
 			plan.DataLoss = fmt.Sprintf("all WAL after %s, up to the end of the archive (%s, %d segment(s) later), is discarded", normalized, wal.ArchiveEndWAL, endSeg-targetSeg)
 		} else {
 			plan.DataLoss = fmt.Sprintf("all WAL after %s, up to the moment the instance is stopped, is discarded", normalized)

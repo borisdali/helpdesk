@@ -304,6 +304,39 @@ func TestRestoreToPIT_ReportsTheLossItCaused(t *testing.T) {
 	})
 }
 
+// The sentence under "will be discarded" must agree with the estimate: a
+// serving instance is stopped, so the loss runs to the stop even when the
+// target is inside the archive and no flush was needed (SAMPLE027's VM run
+// said "up to the end of the archive" for exactly that case).
+func TestPlanDataLossSentence_FollowsTheInstanceState(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	sim, _ := liveEnv(t)
+	for _, c := range []struct{ typ, val string }{
+		{TargetTime, "2026-10-09T00:00:00Z"}, // inside the archive: no flush needed
+		{TargetLSN, "0/4000000"},
+	} {
+		args := PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main", RecoveryTargetType: c.typ, RecoveryTargetVal: c.val}
+
+		sim.up = true
+		plan, err := planPITRImpl(context.Background(), args)
+		if err != nil || plan.Status != PITRFeasible || !plan.InstanceServing || plan.ArchiveFlushRequired {
+			t.Fatalf("%s serving: %+v, %v", c.typ, plan, err)
+		}
+		if !strings.Contains(plan.DataLoss, "up to the moment the instance is stopped") {
+			t.Errorf("%s serving, inside the archive: data_loss = %q", c.typ, plan.DataLoss)
+		}
+
+		sim.up = false
+		plan, err = planPITRImpl(context.Background(), args)
+		if err != nil || plan.Status != PITRFeasible || plan.InstanceServing {
+			t.Fatalf("%s down: %+v, %v", c.typ, plan, err)
+		}
+		if !strings.Contains(plan.DataLoss, "up to the end of the archive") {
+			t.Errorf("%s down: data_loss = %q", c.typ, plan.DataLoss)
+		}
+	}
+}
+
 func TestEstimateDataLoss_Boundaries(t *testing.T) {
 	t.Run("an LSN at the very end of the archive is the last segment's remainder", func(t *testing.T) {
 		// Segment 16 starts at 0x10000000; the target is its first byte.
