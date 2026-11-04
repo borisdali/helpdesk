@@ -32,6 +32,12 @@ type DBServer struct {
 	Tags                  []string `json:"tags,omitempty"`                    // Tags for policy matching (e.g., "production", "staging")
 	Sensitivity           []string `json:"sensitivity,omitempty"`             // Sensitivity classes (e.g., "pii", "critical")
 	ApprovalOverrideRoles []string `json:"approval_override_roles,omitempty"` // Roles allowed to request a less restrictive approval_mode than the playbook declares. Empty = unrestricted.
+	// Environment names the group this database belongs to (prod, staging,
+	// dev). Unlike a tag it must be declared under Config.Environments.
+	Environment string `json:"environment,omitempty"`
+	// Objectives override the environment's and the fleet default's, field by
+	// field. See objectives.go.
+	Objectives *Objectives `json:"objectives,omitempty"`
 }
 
 // ResolvedConnectionString returns ConnectionString with the password appended when
@@ -85,6 +91,10 @@ type Config struct {
 	DBServers   map[string]DBServer   `json:"db_servers"`
 	K8sClusters map[string]K8sCluster `json:"k8s_clusters"`
 	VMs         map[string]VM         `json:"vms"`
+	// Environments declares the groups a database may name, each with the
+	// objectives its members share. Defaults apply to everything else.
+	Environments map[string]Environment `json:"environments,omitempty"`
+	Defaults     *Defaults              `json:"defaults,omitempty"`
 }
 
 // Load loads infrastructure configuration from a JSON file.
@@ -97,6 +107,9 @@ func Load(path string) (*Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
+	}
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid infrastructure config: %w", err)
 	}
 
 	return &config, nil
