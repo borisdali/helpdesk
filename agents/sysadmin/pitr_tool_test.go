@@ -184,6 +184,12 @@ func TestPlanPITR_DirectRegistry(t *testing.T) {
 	if plan.Status != PITRFeasible || plan.PlanDigest == "" {
 		t.Errorf("plan = %+v", plan)
 	}
+	// The dry run an operator reads over HTTP carries the same data-loss
+	// estimate as the model-facing tool (found 2026-11-03: it did not, because
+	// this registry called planPITRImpl directly).
+	if plan.DataLossEstimate == nil || plan.DataLossEstimate.Summary == "" {
+		t.Errorf("the direct registry's plan has no data-loss estimate: %s", out)
+	}
 	if _, err := fn(context.Background(), map[string]any{"recovery_target_type": "time", "recovery_target_value": "tomorrow"}); err == nil {
 		t.Error("an invalid target must be an error through the registry too")
 	}

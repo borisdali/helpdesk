@@ -2380,7 +2380,7 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 		if err != nil {
 			return "", err
 		}
-		result, err := planPITRImpl(ctx, a)
+		result, err := planPITRWithEstimate(ctx, a)
 		if err != nil {
 			return "", err
 		}
