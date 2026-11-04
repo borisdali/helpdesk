@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_triage
 name: "pgBackRest — Point-in-Time Recovery Triage"
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -62,9 +62,12 @@ guidance: |
   target as pgBackRest will receive it (normalized_target), the timeline now
   and the one PostgreSQL will create (target_timeline, expected_timeline),
   where the archive ends (archive_end_wal, archive_end_time), what would be
-  discarded (data_loss), the WAL check it ran (wal_continuity) and a
-  plan_digest. Quote these from the tool output; do not recompute or
-  paraphrase them.
+  discarded (data_loss), how much that is and whether it is more than the
+  database is meant to lose (data_loss_estimate: its summary and its
+  objective.status and objective.detail), the WAL check it ran
+  (wal_continuity) and a plan_digest. Quote these from the tool output; do
+  not recompute or paraphrase them. If data_loss_estimate or its objective
+  is absent, say so; do not work out a loss or an objective yourself.
 
   Step 2 — Say whether the instance is down:
   The plan reports instance_serving and archive_flush_required. When the
@@ -88,12 +91,15 @@ guidance: |
   instance=serving): those are facts for FINDINGS, and a second hypothesis is
   read as a competing diagnosis and raises an "uncertain diagnosis" warning at
   the gate.
-  FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; instance=<down|serving|unknown>; archive_flush_required=<true|false>
+  FINDINGS: plan_status=feasible; plan_digest=<plan_digest>; recovery_target=<normalized_target>; backup_label=<backup_label>; timeline=<target_timeline>-><expected_timeline>; archive_end_time=<archive_end_time>; data_loss=<data_loss>; loss_estimate=<data_loss_estimate.summary>; rpo_check=<data_loss_estimate.objective.status>: <data_loss_estimate.objective.detail>; instance=<down|serving|unknown>; archive_flush_required=<true|false>
   TRANSITION_TO: pbs_pgbackrest_pitr_remediate
   The restore does not start on this line: a person reviews this plan at the
   gate and approves it with the plan_digest. If instance=serving, say so
   prominently in FINDINGS: the restore will stop the running instance, and
-  will refuse to unless the person approving the gate allows it.
+  will refuse to unless the person approving the gate allows it. Likewise,
+  if rpo_check is exceeds or may_exceed, say so prominently in FINDINGS: the
+  restore discards more than the database is meant to lose, and the person
+  approving the gate must know that. Report it; do not decide anything on it.
 
   Ending B — the plan is not feasible or could not be checked
   (status=not_feasible or unverified), or there is no recovery target:
