@@ -114,6 +114,23 @@ func TestFormatPITRPlan_FeasibleShowsTheApproveCommand(t *testing.T) {
 	}
 }
 
+func TestFormatPITRPlan_ShowsTheMeasuredLossAndWhatIsNotCounted(t *testing.T) {
+	var p pitrPlan
+	raw := `{"status":"feasible","plan_digest":"d1","data_loss_estimate":{"summary":"at most 21m 00s of history discarded","as_of":"2026-11-03T02:30:00Z","unmeasured":["the number of transactions","which writes were wanted"]}}`
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatal(err)
+	}
+	got := formatPITRPlan(p, goodOpts())
+	for _, want := range []string{"Estimated loss     : at most 21m 00s of history discarded", "Not counted        : the number of transactions; which writes were wanted"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(formatPITRPlan(pitrPlan{Status: "feasible", PlanDigest: "d1"}, goodOpts()), "Estimated loss") {
+		t.Error("a plan without an estimate printed one")
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {

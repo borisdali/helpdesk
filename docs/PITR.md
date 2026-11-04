@@ -146,8 +146,23 @@ curl -s -X POST "$SYSADMIN/tool/plan_point_in_time_recovery" \
        "recovery_target_type":"time","recovery_target_value":"2026-10-28T14:05:00Z"}}' | jq -r .output | jq .
 ```
 
-Read `status`, `backup_label`, `data_loss`, `instance_serving`, `archive_flush_required` and `plan_digest`. A
-plan that is not `feasible` has a `detail` saying why; do not approve around it.
+Read `status`, `backup_label`, `data_loss`, `data_loss_estimate`, `instance_serving`, `archive_flush_required` and
+`plan_digest`. A plan that is not `feasible` has a `detail` saying why; do not approve around it.
+
+`data_loss_estimate` says how much the restore throws away, as far as it can be measured without reading WAL:
+
+| Target | Instance | You get | Precision |
+|---|---|---|---|
+| time | serving | the span from the target to the database's own clock now | exact, and growing until the instance is stopped |
+| time | down | the span from the target to when the newest archived segment reached the repo | an upper bound |
+| LSN | serving | WAL bytes from the target to the instance's current position | exact |
+| LSN | down | WAL bytes and whole segments from the target to the end of the newest archived segment | an upper bound |
+
+It does not count transactions (that needs the WAL decoded), it cannot tell the bad writes from the good ones
+(everything after the target is counted), and on a down instance it cannot see WAL that was never archived. Each
+estimate lists these under `unmeasured`. It is not part of the plan digest, so it can move while the plan waits
+for approval; `as_of` says when it was made. The result of the restore carries a `data_loss` figure measured when
+the restore ran, to compare with the one that was approved.
 
 **3. Approve the plan you read.**
 

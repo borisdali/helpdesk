@@ -153,6 +153,13 @@ type pitrPlan struct {
 	InstanceServing      bool   `json:"instance_serving"`
 	ArchiveFlushRequired bool   `json:"archive_flush_required"`
 	PlanDigest           string `json:"plan_digest"`
+	// DataLossEstimate is how much the restore discards, as far as it is
+	// measured without reading WAL.
+	DataLossEstimate *struct {
+		Summary    string   `json:"summary"`
+		AsOf       string   `json:"as_of"`
+		Unmeasured []string `json:"unmeasured"`
+	} `json:"data_loss_estimate"`
 }
 
 // formatPITRPlan renders the plan for a person, ending with the exact command
@@ -174,6 +181,12 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	}
 	if p.DataLoss != "" {
 		fmt.Fprintf(&b, "Will be discarded  : %s\n", p.DataLoss)
+	}
+	if e := p.DataLossEstimate; e != nil && e.Summary != "" {
+		fmt.Fprintf(&b, "Estimated loss     : %s\n", e.Summary)
+		if len(e.Unmeasured) > 0 {
+			fmt.Fprintf(&b, "Not counted        : %s\n", strings.Join(e.Unmeasured, "; "))
+		}
 	}
 	state := "down"
 	if p.InstanceServing {

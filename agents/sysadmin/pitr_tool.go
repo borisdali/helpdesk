@@ -66,6 +66,10 @@ type PITRPlan struct {
 	ArchiveEndTime   string `json:"archive_end_time,omitempty"`
 	// DataLoss says what the restore discards.
 	DataLoss string `json:"data_loss,omitempty"`
+	// DataLossEstimate measures it as far as it can be without reading WAL.
+	// Not part of the plan digest: on a serving instance it grows while the
+	// plan waits for approval.
+	DataLossEstimate *DataLossEstimate `json:"data_loss_estimate,omitempty"`
 	// InstanceServing says PostgreSQL was accepting connections when the plan
 	// was made. ArchiveFlushRequired says the target is in WAL the instance
 	// has not archived yet: a restore of a serving instance flushes the
@@ -218,6 +222,29 @@ func planPITRImpl(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 	return assessPITRPlanFor(status.Stanza, target, normalized, backup, &wal, serving), nil
 }
 
+// planPITRWithEstimate is the plan an operator reads: planPITRImpl plus the
+// measured data loss. The estimate asks a serving instance where its history
+// ends right now (more exact than the end of the archive), so it is made only
+// here, for the dry run, and not in planPITRImpl, which the restore calls
+// again and again around its own ordered steps. An instance that cannot be
+// asked gets the archive-based figure.
+func planPITRWithEstimate(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
+	plan, err := planPITRImpl(ctx, args)
+	if err != nil || plan.Status != PITRFeasible {
+		return plan, err
+	}
+	var live *LivePreState
+	if plan.InstanceServing {
+		if inst, ierr := instanceFor(args.Target); ierr == nil && !inst.local {
+			if pre, perr := livePreflight(ctx, inst); perr == nil {
+				live = &pre
+			}
+		}
+	}
+	plan.DataLossEstimate = estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now())
+	return plan, nil
+}
+
 func planPITRTool(ctx agent.ToolContext, args PlanPITRArgs) (PITRPlan, error) {
 	// A run that carries a human's recovery target plans that target, whatever
 	// the model passed: a plan for another one would only waste the approval.
@@ -225,7 +252,7 @@ func planPITRTool(ctx agent.ToolContext, args PlanPITRArgs) (PITRPlan, error) {
 		args.RecoveryTargetType, args.RecoveryTargetVal = ap.Type, ap.Value
 	}
 	start := time.Now()
-	result, err := planPITRImpl(ctx, args)
+	result, err := planPITRWithEstimate(ctx, args)
 	duration := time.Since(start)
 	if err == nil {
 		slog.Info("tool ok", "name", "plan_point_in_time_recovery", "ms", duration.Milliseconds(), "status", result.Status)

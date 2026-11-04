@@ -72,6 +72,11 @@ type RestoreToPITResult struct {
 	// PreStop is what a serving instance reported just before it was stopped:
 	// its WAL position and clock, the most that could have been recovered.
 	PreStop *LivePreState `json:"pre_stop,omitempty"`
+	// DataLoss is what this restore discarded, measured at the moment it ran:
+	// from the instance's own position when it was serving, else from the end
+	// of the archive. It is the figure to compare with the one the human
+	// approved, and the one to record against the incident.
+	DataLoss *DataLossEstimate `json:"data_loss,omitempty"`
 	// Stopped says this tool stopped a serving instance (and how). It is left
 	// stopped: restart_container / restart_service starts it, and recovery to
 	// the target runs on startup.
@@ -243,6 +248,8 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 		return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — the plan changed since it was approved (approved %s, now %s: backup %s, timeline %d). Run plan_point_in_time_recovery again and have the new plan approved",
 			args.PlanDigest, plan.PlanDigest, plan.BackupLabel, plan.TargetTimeline)
 	}
+
+	result.DataLoss = estimateDataLoss(target, normalized, plan.WALContinuity, result.PreStop, time.Now())
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string
