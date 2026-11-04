@@ -56,24 +56,25 @@ func (c *RPOComparison) NeedsAttention() bool {
 }
 
 // objectivesFor returns the objectives of the database a tool call targets.
-// target is a server ID, or a connection string as resolveHost also accepts.
-// found is false when infrastructure config is not loaded or names no such
-// database.
+// target is whatever resolveHost accepts: a server ID, a connection string or a
+// container name. It is looked up by lookupServer, the same code that decides
+// which database the restore itself runs on, so the objective checked is always
+// that database's. found is false when infrastructure config is not loaded or
+// names no such database (or more than one: lookupServer refuses to guess).
+//
+// The lookup and the resolution both happen under the lock: register_infra_db
+// can add a database while a plan is being made.
 func objectivesFor(target string) (infra.ResolvedObjectives, bool) {
 	infraConfigMu.RLock()
-	ic := infraConfig
-	infraConfigMu.RUnlock()
-	if ic == nil {
+	defer infraConfigMu.RUnlock()
+	if infraConfig == nil {
 		return infra.ResolvedObjectives{}, false
 	}
-	target = strings.TrimSpace(target)
-	if res, ok := ic.ResolveObjectives(target); ok {
-		return res, true
+	key, _, err := lookupServer(infraConfig, target)
+	if err != nil {
+		return infra.ResolvedObjectives{}, false
 	}
-	if _, key, ok := ic.FindDBByConnStr(target); ok {
-		return ic.ResolveObjectives(key)
-	}
-	return infra.ResolvedObjectives{}, false
+	return infraConfig.ResolveObjectives(key)
 }
 
 // compareToRPO sets est against obj. found is false when obj is not a real

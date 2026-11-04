@@ -98,7 +98,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.Duration.String()) }
+// MarshalJSON refuses an invalid value. Writing it as "0s" would turn a typo
+// into an rpo of zero, which reads as "no data loss tolerated".
+func (d Duration) MarshalJSON() ([]byte, error) {
+	if d.Invalid != "" {
+		return nil, fmt.Errorf("cannot write an invalid duration: %s", d.Invalid)
+	}
+	return json.Marshal(d.Duration.String())
+}
 
 // Percent is a percentage from JSON. A value that is not a number does not
 // fail the file: Invalid says why.
@@ -114,7 +121,13 @@ func (p *Percent) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func (p Percent) MarshalJSON() ([]byte, error) { return json.Marshal(p.Value) }
+// MarshalJSON refuses an invalid value, for the same reason as Duration's.
+func (p Percent) MarshalJSON() ([]byte, error) {
+	if p.Invalid != "" {
+		return nil, fmt.Errorf("cannot write an invalid percentage: %s", p.Invalid)
+	}
+	return json.Marshal(p.Value)
+}
 
 // Objectives are the recovery objectives set at one level. An unset field is
 // nil: it defers to the next level.

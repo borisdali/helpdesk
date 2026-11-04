@@ -352,6 +352,43 @@ func TestConfig_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+// An invalid value must not be written back out as a valid one: "0s" would turn
+// a typo into an rpo of zero, "no data loss tolerated".
+func TestMarshal_RefusesInvalidValues(t *testing.T) {
+	c := load(t, `{"defaults": {"objectives": {"rpo": "soon", "availability_slo": "high"}}}`)
+	if raw, err := json.Marshal(c); err == nil {
+		t.Errorf("an invalid config was written out: %s", raw)
+	}
+	if raw, err := json.Marshal(c.Defaults.Objectives.RPO); err == nil {
+		t.Errorf("an invalid duration was written as %s", raw)
+	}
+	if raw, err := json.Marshal(c.Defaults.Objectives.AvailabilitySLO); err == nil {
+		t.Errorf("an invalid percentage was written as %s", raw)
+	}
+	// Valid values, including zero, are written.
+	zero := Duration{}
+	if raw, err := json.Marshal(zero); err != nil || string(raw) != `"0s"` {
+		t.Errorf("a valid zero duration: %s, %v", raw, err)
+	}
+}
+
+// Without a defaults block, an objective nobody set is simply unset, with no
+// problem to report: "not configured" is not a mistake.
+func TestResolveObjectives_NoDefaultsBlock(t *testing.T) {
+	c := load(t, `{
+	  "environments": {"prod": {"objectives": {"rpo": "5m"}}},
+	  "db_servers": {"a": {"environment": "prod"}, "b": {}}
+	}`)
+	got, _ := c.ResolveObjectives("a")
+	if !got.RPO.Set || got.RPO.Source != "environment:prod" || got.RTO.Set || got.AvailabilitySLO.Set || len(got.Problems) != 0 {
+		t.Errorf("a = %+v", got)
+	}
+	got, _ = c.ResolveObjectives("b")
+	if got.RPO.Set || got.RTO.Set || len(got.Problems) != 0 {
+		t.Errorf("b = %+v", got)
+	}
+}
+
 func TestLogProblems(t *testing.T) {
 	var lines []string
 	log := func(msg string, args ...any) {

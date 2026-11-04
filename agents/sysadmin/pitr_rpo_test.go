@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -102,11 +103,11 @@ func TestObjectivesFor(t *testing.T) {
 	if got, ok := objectivesFor("pgbackrest_db"); !ok || got.RPO.Seconds() != 900 || got.RPO.Source != "environment:prod" {
 		t.Errorf("by server ID: %+v, %v", got, ok)
 	}
-	// resolveHost also accepts a connection string; so must this, or the same
-	// call would be checked against an objective when named one way and not the
-	// other.
-	if got, ok := objectivesFor("host=localhost"); !ok || got.RPO.Seconds() != 900 {
-		t.Errorf("by connection string: %+v, %v", got, ok)
+	// resolveHost also accepts a container name; so must this, or the same call
+	// would be checked against an objective when named one way and not the
+	// other (TestObjectivesFor_IsTheDatabaseTheRestoreRunsOn covers the rest).
+	if got, ok := objectivesFor("helpdesk-test-pg-pgbackrest"); !ok || got.RPO.Seconds() != 900 {
+		t.Errorf("by container name: %+v, %v", got, ok)
 	}
 	if _, ok := objectivesFor("nope"); ok {
 		t.Error("an unknown target resolved")
@@ -115,6 +116,91 @@ func TestObjectivesFor(t *testing.T) {
 	if _, ok := objectivesFor("pgbackrest_db"); ok {
 		t.Error("resolved without infrastructure config")
 	}
+}
+
+func twoDatabases(t *testing.T) {
+	t.Helper()
+	five, day := infra.Duration{Duration: 5 * time.Minute}, infra.Duration{Duration: 24 * time.Hour}
+	infraConfig = &infra.Config{
+		Environments: map[string]infra.Environment{
+			"prod": {Objectives: infra.Objectives{RPO: &five}},
+			"dev":  {Objectives: infra.Objectives{RPO: &day}},
+		},
+		DBServers: map[string]infra.DBServer{
+			"db-a": {ConnectionString: "host=h1 port=5432 dbname=x", VMName: "vm", ContainerName: "c-a", Environment: "prod"},
+			"db-b": {ConnectionString: "host=h2 port=5432 dbname=x", VMName: "vm", ContainerName: "c-b", Environment: "dev"},
+		},
+		VMs: map[string]infra.VM{"vm": {Name: "vm", Address: "localhost", Runtime: "docker"}},
+	}
+	t.Cleanup(func() { infraConfig = nil })
+}
+
+// The objective checked must be the objective of the database the restore
+// itself runs on. Both ask lookupServer, so whichever way a target names a
+// database (its ID, its connection string, its container) they agree; a target
+// that cannot be resolved, or that matches several, has no objective rather
+// than a guessed one.
+func TestObjectivesFor_IsTheDatabaseTheRestoreRunsOn(t *testing.T) {
+	twoDatabases(t)
+
+	for _, c := range []struct {
+		target    string
+		container string
+		rpo       int64
+		source    string
+	}{
+		{"db-a", "c-a", 300, "environment:prod"},
+		{"  db-b  ", "c-b", 86400, "environment:dev"},
+		{"host=h1 port=5432 dbname=x user=postgres", "c-a", 300, "environment:prod"},
+		{"host=h2 port=5432", "c-b", 86400, "environment:dev"},
+		// By container name: resolveHost accepts it, so the objective must too.
+		{"c-a", "c-a", 300, "environment:prod"},
+		{"c-b", "c-b", 86400, "environment:dev"},
+	} {
+		h, err := resolveHost(c.target)
+		if err != nil || h.ContainerName != c.container {
+			t.Fatalf("%q: resolveHost = %+v, %v; want container %s", c.target, h, err, c.container)
+		}
+		got, ok := objectivesFor(c.target)
+		if !ok || got.RPO.Seconds() != c.rpo || got.RPO.Source != c.source {
+			t.Errorf("%q: objectivesFor = %+v, %v; want %ds from %s", c.target, got.RPO, ok, c.rpo, c.source)
+		}
+	}
+
+	// Two databases on the same host and port: resolveHost refuses to guess, and
+	// so does the objective lookup (it used to take whichever the map yielded first).
+	db := infraConfig.DBServers["db-a"]
+	db.ContainerName = "c-a2"
+	infraConfig.DBServers["db-a2"] = db
+	for _, target := range []string{"host=h1 port=5432", "nope"} {
+		if _, err := resolveHost(target); err == nil {
+			t.Fatalf("%q: resolveHost resolved", target)
+		}
+		if got, ok := objectivesFor(target); ok {
+			t.Errorf("%q: objectivesFor guessed %+v", target, got)
+		}
+	}
+}
+
+// register_infra_db adds databases while plans are being made. The lookup and
+// the resolution both hold the lock; run with -race to see it matter.
+func TestObjectivesFor_ConcurrentWithRegistration(t *testing.T) {
+	twoDatabases(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			infraConfigMu.Lock()
+			infraConfig.DBServers[fmt.Sprintf("extra-%d", i)] = infra.DBServer{ConnectionString: fmt.Sprintf("host=x%d port=5432", i), Environment: "prod"}
+			infraConfigMu.Unlock()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if _, ok := objectivesFor("db-a"); !ok {
+			t.Fatal("db-a vanished")
+		}
+	}
+	<-done
 }
 
 // The dry run an operator reads carries the comparison. The simulated serving
