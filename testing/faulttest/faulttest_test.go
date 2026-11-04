@@ -352,6 +352,9 @@ func TestFaultInjection(t *testing.T) {
 			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
 				remediator.SetFaultStart(faultStart)
+				// Gate approvals name the connection string this fault's own
+				// triage used (agent_conn_override), or the gateway refuses them.
+				remediator.SetFault(f)
 				// A point-in-time fault's recovery target is its inject script's
 				// own output; the Remediator approves the gate with it (and with
 				// nothing for any other fault).
@@ -380,6 +383,13 @@ func TestFaultInjection(t *testing.T) {
 					// Gateway already auto-chained remediation inline.
 					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
 					verifyGatewayRemediation(t, faultCtx, remediator, f, "auto_chain")
+				case f.PITR != nil:
+					// A point-in-time fault is only recovered through its gate: a
+					// triage that ended without one (the model never got a plan, or
+					// found none feasible) recovered nothing, however well its text
+					// scored. Found 2026-11-03: a run whose plan tool was never
+					// successfully called passed at 85% with the table still gone.
+					t.Errorf("Remediation: the triage ended with status %q and no gate, so no point-in-time restore ran (run=%s)", resp.Status, resp.RunID)
 				case f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "":
 					t.Log("Running remediation...")
 					remResult := remediator.Remediate(faultCtx, f, resp.RunID)
