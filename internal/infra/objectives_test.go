@@ -1,8 +1,10 @@
 package infra
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -26,21 +28,25 @@ func TestParseDuration(t *testing.T) {
 			t.Errorf("ParseDuration(%q) = %v, %v; want %v", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "  ", "15", "m", "fast", "1x", "d", "99999999d", "-1d"} {
+	for _, bad := range []string{"", "  ", "15", "m", "fast", "1x", "d", "99999999d", "-1d", "1d-5m", "1d+5m", "1d1d"} {
 		if got, err := ParseDuration(bad); err == nil {
 			t.Errorf("ParseDuration(%q) = %v, want an error", bad, got)
 		}
 	}
 }
 
-// load parses a config the way Load does, from text.
-func load(t *testing.T, body string) (*Config, error) {
+// load reads a config the way a service does.
+func load(t *testing.T, body string) *Config {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "infrastructure.json")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return Load(p)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return c
 }
 
 const fleetConfig = `{
@@ -60,8 +66,8 @@ const fleetConfig = `{
 }`
 
 func TestResolveObjectives_FieldByFieldWithSources(t *testing.T) {
-	c, err := load(t, fleetConfig)
-	if err != nil {
+	c := load(t, fleetConfig)
+	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	type want struct {
@@ -94,6 +100,9 @@ func TestResolveObjectives_FieldByFieldWithSources(t *testing.T) {
 		if !got.AvailabilitySLO.Set || got.AvailabilitySLO.Value != w.avail || got.AvailabilitySLO.Source != w.availSrc {
 			t.Errorf("%s availability = %+v, want %v from %s", id, got.AvailabilitySLO, w.avail, w.availSrc)
 		}
+		if len(got.Problems) != 0 {
+			t.Errorf("%s problems = %v", id, got.Problems)
+		}
 	}
 	if got, _ := c.ResolveObjectives("adhoc"); got.Environment != "" {
 		t.Errorf("adhoc environment = %q", got.Environment)
@@ -106,24 +115,17 @@ func TestResolveObjectives_FieldByFieldWithSources(t *testing.T) {
 // RPO 0 means "no data loss tolerated". It is a value, not an absence: it must
 // not fall through to the environment's.
 func TestResolveObjectives_ZeroRPOIsAValue(t *testing.T) {
-	c, err := load(t, fleetConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := c.ResolveObjectives("prod-ledger")
+	got, _ := load(t, fleetConfig).ResolveObjectives("prod-ledger")
 	if !got.RPO.Set || got.RPO.Value != 0 || got.RPO.Source != "database" {
 		t.Errorf("rpo = %+v", got.RPO)
 	}
 }
 
 func TestResolveObjectives_NothingConfigured(t *testing.T) {
-	c, err := load(t, `{"db_servers": {"a": {"name": "a", "connection_string": "host=a"}}}`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := load(t, `{"db_servers": {"a": {"name": "a", "connection_string": "host=a"}}}`)
 	got, ok := c.ResolveObjectives("a")
-	if !ok || got.RPO.Set || got.RTO.Set || got.AvailabilitySLO.Set {
-		t.Errorf("an unconfigured database has objectives: %+v", got)
+	if !ok || got.RPO.Set || got.RTO.Set || got.AvailabilitySLO.Set || len(got.Problems) != 0 {
+		t.Errorf("an unconfigured database has objectives or problems: %+v", got)
 	}
 	if _, ok := c.ResolveObjectives("missing"); ok {
 		t.Error("an unknown database resolved")
@@ -134,7 +136,9 @@ func TestResolveObjectives_NothingConfigured(t *testing.T) {
 	}
 }
 
-func TestLoad_RejectsWhatWouldSilentlyFallBack(t *testing.T) {
+// What Validate reports. Each of these loads fine; the point is that Validate
+// says so, and that a service can log it.
+func TestValidate_ReportsWhatWouldSilentlyFallBack(t *testing.T) {
 	for name, tc := range map[string]struct{ body, want string }{
 		"a typo in the environment": {
 			`{"environments": {"prod": {}}, "db_servers": {"a": {"environment": "prdo"}}}`,
@@ -158,11 +162,11 @@ func TestLoad_RejectsWhatWouldSilentlyFallBack(t *testing.T) {
 		},
 		"availability above 100": {
 			`{"db_servers": {"a": {"objectives": {"availability_slo": 101}}}}`,
-			`db_servers.a.objectives: availability_slo`,
+			`db_servers.a.objectives: availability_slo is a percentage`,
 		},
 		"availability of zero": {
 			`{"db_servers": {"a": {"objectives": {"availability_slo": 0}}}}`,
-			`availability_slo`,
+			`availability_slo is a percentage`,
 		},
 		"a number for a duration": {
 			`{"defaults": {"objectives": {"rpo": 900}}}`,
@@ -172,18 +176,23 @@ func TestLoad_RejectsWhatWouldSilentlyFallBack(t *testing.T) {
 			`{"defaults": {"objectives": {"rto": "soon"}}}`,
 			`invalid duration "soon"`,
 		},
+		"a string for a percentage": {
+			`{"defaults": {"objectives": {"availability_slo": "99.9"}}}`,
+			`a percentage is a number`,
+		},
 	} {
-		if _, err := load(t, tc.body); err == nil || !strings.Contains(err.Error(), tc.want) {
+		err := load(t, tc.body).Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
 		}
 	}
 }
 
-func TestLoad_ReportsEveryProblemAtOnce(t *testing.T) {
-	_, err := load(t, `{
+func TestValidate_ReportsEveryProblemAtOnce(t *testing.T) {
+	err := load(t, `{
 	  "defaults": {"objectives": {"rto": "0s"}},
 	  "db_servers": {"a": {"environment": "nope"}, "b": {"environment": "nada"}}
-	}`)
+	}`).Validate()
 	if err == nil {
 		t.Fatal("no error")
 	}
@@ -194,36 +203,172 @@ func TestLoad_ReportsEveryProblemAtOnce(t *testing.T) {
 	}
 }
 
+// The reason Load is lenient: most services treat a config that fails to load
+// as "no infrastructure config" and carry on, so a mistake in an objective must
+// not cost them every target, tag and approval rule.
+func TestLoad_ABadObjectiveNeverCostsTheInventory(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"rpo": 900, "availability_slo": "high"}},
+	  "environments": {"prod": {"objectives": {"rto": "soon"}}},
+	  "db_servers": {
+	    "orders": {"name": "orders", "connection_string": "host=a port=5432 dbname=o", "environment": "prdo", "tags": ["production"],
+	               "objectives": {"rpo": "-1h"}, "approval_override_roles": ["dba"]}
+	  },
+	  "vms": {"vm1": {"name": "vm1", "address": "10.0.0.1"}}
+	}`)
+	db, key, ok := c.FindDBByConnStr("host=a port=5432 dbname=o")
+	if !ok || key != "orders" || len(db.Tags) != 1 || db.Tags[0] != "production" || len(db.ApprovalOverrideRoles) != 1 {
+		t.Fatalf("the inventory was damaged: %+v %q %v", db, key, ok)
+	}
+	if len(c.VMs) != 1 {
+		t.Errorf("vms = %v", c.VMs)
+	}
+	if c.Validate() == nil {
+		t.Error("Validate found nothing wrong")
+	}
+}
+
+// An invalid value blocks its own objective. It resolves as unset with the
+// reason; it never becomes the next level's value, which would pass a typo off
+// as the fleet default.
+func TestResolveObjectives_AnInvalidValueBlocksItsObjective(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"rpo": "1h", "rto": "4h"}},
+	  "environments": {"prod": {"objectives": {"rpo": "5m", "rto": "30m"}}},
+	  "db_servers": {
+	    "bad-rpo": {"environment": "prod", "objectives": {"rpo": "soon"}},
+	    "neg-rto": {"environment": "prod", "objectives": {"rto": "0s"}}
+	  }
+	}`)
+
+	got, _ := c.ResolveObjectives("bad-rpo")
+	if got.RPO.Set {
+		t.Errorf("an unreadable rpo fell through to %+v", got.RPO)
+	}
+	if len(got.Problems) != 1 || !strings.Contains(got.Problems[0], "db_servers.bad-rpo.objectives") || !strings.Contains(got.Problems[0], `"soon"`) {
+		t.Errorf("problems = %v", got.Problems)
+	}
+	// The other objective is unaffected.
+	if !got.RTO.Set || got.RTO.Value != 30*time.Minute || got.RTO.Source != "environment:prod" {
+		t.Errorf("rto = %+v", got.RTO)
+	}
+
+	got, _ = c.ResolveObjectives("neg-rto")
+	if got.RTO.Set || len(got.Problems) != 1 || !strings.Contains(got.Problems[0], "rto must be greater than zero") {
+		t.Errorf("rto = %+v, problems = %v", got.RTO, got.Problems)
+	}
+	if !got.RPO.Set || got.RPO.Source != "environment:prod" {
+		t.Errorf("rpo = %+v", got.RPO)
+	}
+}
+
+// A database in an environment that is not declared gets only what it sets
+// itself: the environment's values do not exist, and the fleet default is not
+// a substitute for them.
+func TestResolveObjectives_AnUndeclaredEnvironmentGetsOnlyTheDatabasesOwn(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"rpo": "1h", "rto": "4h"}},
+	  "environments": {"prod": {"objectives": {"rpo": "5m"}}},
+	  "db_servers": {
+	    "typo":    {"environment": "prdo"},
+	    "typo-own": {"environment": "prdo", "objectives": {"rto": "15m"}}
+	  }
+	}`)
+	got, ok := c.ResolveObjectives("typo")
+	if !ok || got.RPO.Set || got.RTO.Set || got.AvailabilitySLO.Set {
+		t.Errorf("a typo'd environment fell back: %+v", got)
+	}
+	if len(got.Problems) != 1 || !strings.Contains(got.Problems[0], `environment "prdo" is not declared`) {
+		t.Errorf("problems = %v", got.Problems)
+	}
+	got, _ = c.ResolveObjectives("typo-own")
+	if !got.RTO.Set || got.RTO.Source != "database" || got.RPO.Set {
+		t.Errorf("own objective lost or default leaked: %+v", got)
+	}
+}
+
+// A Config built in code, not loaded, can name an environment it never declared.
+func TestResolveObjectives_ConfigBuiltInCode(t *testing.T) {
+	five := Duration{Duration: 5 * time.Minute}
+	c := &Config{
+		Defaults:  &Defaults{Objectives: Objectives{RPO: &five}},
+		DBServers: map[string]DBServer{"a": {Environment: "ghost"}},
+	}
+	if got, _ := c.ResolveObjectives("a"); got.RPO.Set || len(got.Problems) == 0 {
+		t.Errorf("got %+v", got)
+	}
+}
+
 // Nothing about the objectives constrains a config that predates them.
 func TestLoad_ExistingConfigsAreUnaffected(t *testing.T) {
-	for _, p := range []string{"../../deploy/docker-compose/infrastructure.json.example"} {
-		c, err := Load(p)
-		if err != nil {
-			t.Fatalf("%s: %v", p, err)
-		}
-		for id := range c.DBServers {
-			got, _ := c.ResolveObjectives(id)
-			if got.RPO.Set || got.RTO.Set || got.Environment != "" {
-				t.Errorf("%s/%s: %+v", p, id, got)
-			}
-		}
-	}
-	// Tags are still just tags: an environment name is not implied by one.
-	c, err := load(t, `{"db_servers": {"a": {"tags": ["production"]}}}`)
+	c, err := Load("../../deploy/docker-compose/infrastructure.json.example")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for id := range c.DBServers {
+		got, _ := c.ResolveObjectives(id)
+		if got.RPO.Set || got.RTO.Set || got.Environment != "" || len(got.Problems) != 0 {
+			t.Errorf("%s: %+v", id, got)
+		}
+	}
+	// Tags are still just tags: an environment name is not implied by one.
+	c = load(t, `{"db_servers": {"a": {"tags": ["production"]}}}`)
 	if got, _ := c.ResolveObjectives("a"); got.Environment != "" {
 		t.Errorf("a tag became an environment: %+v", got)
 	}
 }
 
 func TestDuration_ReadsDaysFromJSON(t *testing.T) {
-	c, err := load(t, `{"defaults": {"objectives": {"rpo": "1d12h"}}}`)
+	c := load(t, `{"defaults": {"objectives": {"rpo": "1d12h"}}}`)
+	if got := c.Defaults.Objectives.RPO.Duration; got != 36*time.Hour {
+		t.Errorf("rpo = %v", got)
+	}
+}
+
+// A config that is written back out (some tools re-serialise it) reads back the
+// same.
+func TestConfig_JSONRoundTrip(t *testing.T) {
+	c := load(t, fleetConfig)
+	raw, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := c.Defaults.Objectives.RPO.Duration; got != 36*time.Hour {
-		t.Errorf("rpo = %v", got)
+	var back Config
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	if err := back.Validate(); err != nil {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	for id := range c.DBServers {
+		a, _ := c.ResolveObjectives(id)
+		b, _ := back.ResolveObjectives(id)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%s: %+v became %+v", id, a, b)
+		}
+	}
+}
+
+func TestLogProblems(t *testing.T) {
+	var lines []string
+	log := func(msg string, args ...any) {
+		lines = append(lines, msg+" "+args[1].(string))
+	}
+	if n := load(t, fleetConfig).LogProblems(log); n != 0 || len(lines) != 0 {
+		t.Errorf("a valid config logged %d line(s): %v", n, lines)
+	}
+	c := load(t, `{"defaults": {"objectives": {"rto": "0s"}}, "db_servers": {"a": {"environment": "nope"}}}`)
+	if n := c.LogProblems(log); n != 2 || len(lines) != 2 {
+		t.Errorf("logged %d line(s): %v", n, lines)
+	}
+	if !strings.Contains(lines[0]+lines[1], `environment "nope"`) {
+		t.Errorf("lines = %v", lines)
+	}
+	var nilCfg *Config
+	if nilCfg.LogProblems(log) != 0 {
+		t.Error("a nil config logged")
 	}
 }

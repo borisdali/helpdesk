@@ -53,8 +53,9 @@ availability; `scratch` has no environment and gets the fleet default.
 and nothing checks them. An environment is checked:
 
 - A database names its environment in `environment`.
-- The name must be declared under `environments`. `infrastructure.json` is refused at load otherwise, so a typo
-  (`prdo`) is an error and not a database that quietly falls back to the fleet default.
+- The name must be declared under `environments`. A typo (`prdo`) is an error that is logged at startup, and the
+  database gets only the objectives it sets itself: not its environment's, which do not exist, and not the fleet
+  default as a stand-in.
 - A name is lowercase letters, digits, `-` and `_`, at most 32 characters.
 
 An environment does not imply a tag, and a tag does not imply an environment. A database can have both.
@@ -62,17 +63,31 @@ An environment does not imply a tag, and a tag does not imply an environment. A 
 ## 3. Values
 
 - **Durations** are strings: `"15m"`, `"1h30m"`, `"90s"`, and a days unit, `"1d"` or `"1d12h"`. A bare number is
-  refused: `900` would be seconds to one reader and minutes to another.
+  invalid: `900` would be seconds to one reader and minutes to another. So is a sign after the days (`"1d-5m"`).
 - **`rpo`** may be `"0s"`: no data loss tolerated. It is a value, not an absence, and does not fall through to the
   next level.
 - **`rto`** must be greater than zero.
 - **`availability_slo`** is a percentage greater than 0 and at most 100.
-- Every problem in the file is reported in one error, not only the first.
 
 A config that sets none of these loads exactly as before.
 
-## 4. Reading it in code
+## 4. A mistake never costs the inventory
+
+Most services treat an `infrastructure.json` that fails to load as "no infrastructure config" and carry on: no
+target resolution, no policy tags, no approval rules. So a mistake in an objective must not fail the load, and it
+does not. The file loads, the inventory is intact, and:
+
+- the gateway and the sysadmin agent log every problem at startup, at error level, one line each, naming the
+  setting (`db_servers.orders.objectives: rpo must not be negative`);
+- an **invalid value blocks its own objective**: it resolves as unset, with the reason in `problems`, and does
+  not fall through to the next level, which would pass a typo off as the fleet default;
+- the other objectives of the same database are unaffected.
+
+A caller that finds an objective unset must look at `problems` before treating it as "no objective".
+
+## 5. Reading it in code
 
 `infra.Config.ResolveObjectives(<db_servers key>)` returns the resolved objectives for one database, each with
-`Set` and `Source`. A database that is not configured returns `ok=false`; a configured one with nothing set returns
-`Set=false` for each objective, which a caller must treat as "no objective", not as zero.
+`Set` and `Source`, and `Problems`. A database that is not configured returns `ok=false`; a configured one with
+nothing set returns `Set=false` for each objective and no problems. `Config.Validate()` lists every problem in the
+file, and `Config.LogProblems(slog.Error)` logs them.

@@ -20,9 +20,16 @@ package infra
 // Every resolved value says where it came from.
 //
 // Tags are free-form strings with no meaning to the config. An environment is
-// not: a database names the one it belongs to, the name must be declared under
-// environments, and Load refuses a name that is not. A typo ("prdo") is an
-// error, not a database that quietly falls back to the fleet default.
+// not: a database names the one it belongs to, and the name must be declared
+// under environments.
+//
+// A mistake in any of this must never cost the rest of the inventory. Most
+// services treat a config that fails to load as "no infrastructure config" and
+// carry on, so Load does not fail on a bad objective: the file loads, the bad
+// value is remembered as invalid, and the objective it belongs to resolves as
+// unset with the reason (never as the next level's value, which would be a
+// silent fallback). Validate lists every problem, and LogProblems logs them for
+// a service to call at startup.
 
 import (
 	"encoding/json"
@@ -36,9 +43,14 @@ import (
 )
 
 // Duration is a time.Duration that reads from JSON as a string: "15m",
-// "1h30m", and with a days unit, "1d" or "1d12h". A bare number is refused,
+// "1h30m", and with a days unit, "1d" or "1d12h". A bare number is invalid,
 // because "900" would be seconds to one reader and minutes to another.
-type Duration struct{ time.Duration }
+//
+// A value that cannot be read does not fail the file: Invalid says why.
+type Duration struct {
+	time.Duration
+	Invalid string
+}
 
 var daysRe = regexp.MustCompile(`^(\d+)d(.*)$`)
 
@@ -59,6 +71,10 @@ func ParseDuration(s string) (time.Duration, error) {
 		if s == "" {
 			return days, nil
 		}
+		// "1d-5m" would read as 23h55m: a sign after the days is a mistake.
+		if s[0] == '-' || s[0] == '+' {
+			return 0, fmt.Errorf("invalid duration %q: no sign after the days", m[0])
+		}
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
@@ -70,11 +86,13 @@ func ParseDuration(s string) (time.Duration, error) {
 func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
-		return fmt.Errorf("a duration is a string such as \"15m\" or \"1d\", not %s", strings.TrimSpace(string(b)))
+		d.Invalid = fmt.Sprintf("a duration is a string such as \"15m\" or \"1d\", not %s", strings.TrimSpace(string(b)))
+		return nil
 	}
 	v, err := ParseDuration(s)
 	if err != nil {
-		return err
+		d.Invalid = err.Error()
+		return nil
 	}
 	d.Duration = v
 	return nil
@@ -82,12 +100,28 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.Duration.String()) }
 
+// Percent is a percentage from JSON. A value that is not a number does not
+// fail the file: Invalid says why.
+type Percent struct {
+	Value   float64
+	Invalid string
+}
+
+func (p *Percent) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &p.Value); err != nil {
+		p.Invalid = fmt.Sprintf("a percentage is a number such as 99.9, not %s", strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+func (p Percent) MarshalJSON() ([]byte, error) { return json.Marshal(p.Value) }
+
 // Objectives are the recovery objectives set at one level. An unset field is
 // nil: it defers to the next level.
 type Objectives struct {
 	RPO             *Duration `json:"rpo,omitempty"`
 	RTO             *Duration `json:"rto,omitempty"`
-	AvailabilitySLO *float64  `json:"availability_slo,omitempty"`
+	AvailabilitySLO *Percent  `json:"availability_slo,omitempty"`
 }
 
 // Environment is a named group of databases that share objectives.
@@ -104,22 +138,49 @@ type Defaults struct {
 
 var environmentNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
-// Validate checks the objective settings. A config that sets none of them is
-// always valid: nothing here constrains an existing infrastructure.json.
+// problems returns what is wrong with one level's objectives, keyed by
+// objective ("rpo", "rto", "availability_slo").
+func (o Objectives) problems() map[string]string {
+	out := map[string]string{}
+	if o.RPO != nil {
+		switch {
+		case o.RPO.Invalid != "":
+			out["rpo"] = o.RPO.Invalid
+		case o.RPO.Duration < 0:
+			out["rpo"] = "rpo must not be negative"
+		}
+	}
+	if o.RTO != nil {
+		switch {
+		case o.RTO.Invalid != "":
+			out["rto"] = o.RTO.Invalid
+		case o.RTO.Duration <= 0:
+			out["rto"] = "rto must be greater than zero"
+		}
+	}
+	if o.AvailabilitySLO != nil {
+		switch {
+		case o.AvailabilitySLO.Invalid != "":
+			out["availability_slo"] = o.AvailabilitySLO.Invalid
+		case o.AvailabilitySLO.Value <= 0 || o.AvailabilitySLO.Value > 100:
+			out["availability_slo"] = fmt.Sprintf("availability_slo is a percentage greater than 0 and at most 100, got %v", o.AvailabilitySLO.Value)
+		}
+	}
+	return out
+}
+
+// Validate lists every problem with the objective settings, or returns nil. A
+// config that sets none of them is always valid: nothing here constrains an
+// existing infrastructure.json.
 func (c *Config) Validate() error {
 	if c == nil {
 		return nil
 	}
 	var errs []error
 	check := func(where string, o Objectives) {
-		if o.RPO != nil && o.RPO.Duration < 0 {
-			errs = append(errs, fmt.Errorf("%s: rpo must not be negative", where))
-		}
-		if o.RTO != nil && o.RTO.Duration <= 0 {
-			errs = append(errs, fmt.Errorf("%s: rto must be greater than zero", where))
-		}
-		if o.AvailabilitySLO != nil && (*o.AvailabilitySLO <= 0 || *o.AvailabilitySLO > 100) {
-			errs = append(errs, fmt.Errorf("%s: availability_slo is a percentage greater than 0 and at most 100, got %v", where, *o.AvailabilitySLO))
+		p := o.problems()
+		for _, k := range sortedKeys(p) {
+			errs = append(errs, fmt.Errorf("%s: %s", where, p[k]))
 		}
 	}
 	if c.Defaults != nil {
@@ -192,11 +253,22 @@ type ResolvedObjectives struct {
 	RPO             ResolvedDuration `json:"rpo"`
 	RTO             ResolvedDuration `json:"rto"`
 	AvailabilitySLO ResolvedPercent  `json:"availability_slo"`
+	// Problems says why an objective is unset although the config tried to set
+	// it: a value that cannot be read, or an environment that is not declared.
+	// A caller that finds an objective unset must show these, not treat it as
+	// "no objective".
+	Problems []string `json:"problems,omitempty"`
 }
 
 // ResolveObjectives returns the objectives that apply to the database with
 // this config key: its own, else its environment's, else the fleet default,
 // field by field. ok is false when the key is not a configured database.
+//
+// A value that is invalid blocks its objective: it resolves as unset and says
+// why, it does not fall through to the next level. A database whose
+// environment is not declared gets only its own objectives, for the same
+// reason: the environment's and the fleet default's cannot be told apart from
+// a silent fallback.
 func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 	if c == nil {
 		return ResolvedObjectives{}, false
@@ -208,28 +280,52 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 	type level struct {
 		source string
 		o      Objectives
+		where  string
 	}
+	res := ResolvedObjectives{Environment: db.Environment}
 	var levels []level
 	if db.Objectives != nil {
-		levels = append(levels, level{SourceDatabase, *db.Objectives})
+		levels = append(levels, level{SourceDatabase, *db.Objectives, "db_servers." + dbID + ".objectives"})
 	}
-	if env, ok := c.Environments[db.Environment]; ok && db.Environment != "" {
-		levels = append(levels, level{SourceEnvironment + ":" + db.Environment, env.Objectives})
+	if db.Environment != "" {
+		env, declared := c.Environments[db.Environment]
+		if !declared {
+			res.Problems = append(res.Problems, fmt.Sprintf("environment %q is not declared under environments: only the database's own objectives apply", db.Environment))
+		} else {
+			levels = append(levels, level{SourceEnvironment + ":" + db.Environment, env.Objectives, "environments." + db.Environment + ".objectives"})
+		}
 	}
-	if c.Defaults != nil {
-		levels = append(levels, level{SourceDefault, c.Defaults.Objectives})
+	// The fleet default applies unless the environment is unknown.
+	if _, envDeclared := c.Environments[db.Environment]; c.Defaults != nil && (db.Environment == "" || envDeclared) {
+		levels = append(levels, level{SourceDefault, c.Defaults.Objectives, "defaults.objectives"})
 	}
 
-	res := ResolvedObjectives{Environment: db.Environment}
+	var doneRPO, doneRTO, doneAvail bool
 	for _, l := range levels {
-		if !res.RPO.Set && l.o.RPO != nil {
-			res.RPO = ResolvedDuration{Set: true, Value: l.o.RPO.Duration, Source: l.source}
+		p := l.o.problems()
+		if !doneRPO && l.o.RPO != nil {
+			doneRPO = true
+			if msg, bad := p["rpo"]; bad {
+				res.Problems = append(res.Problems, l.where+": "+msg)
+			} else {
+				res.RPO = ResolvedDuration{Set: true, Value: l.o.RPO.Duration, Source: l.source}
+			}
 		}
-		if !res.RTO.Set && l.o.RTO != nil {
-			res.RTO = ResolvedDuration{Set: true, Value: l.o.RTO.Duration, Source: l.source}
+		if !doneRTO && l.o.RTO != nil {
+			doneRTO = true
+			if msg, bad := p["rto"]; bad {
+				res.Problems = append(res.Problems, l.where+": "+msg)
+			} else {
+				res.RTO = ResolvedDuration{Set: true, Value: l.o.RTO.Duration, Source: l.source}
+			}
 		}
-		if !res.AvailabilitySLO.Set && l.o.AvailabilitySLO != nil {
-			res.AvailabilitySLO = ResolvedPercent{Set: true, Value: *l.o.AvailabilitySLO, Source: l.source}
+		if !doneAvail && l.o.AvailabilitySLO != nil {
+			doneAvail = true
+			if msg, bad := p["availability_slo"]; bad {
+				res.Problems = append(res.Problems, l.where+": "+msg)
+			} else {
+				res.AvailabilitySLO = ResolvedPercent{Set: true, Value: l.o.AvailabilitySLO.Value, Source: l.source}
+			}
 		}
 	}
 	return res, true

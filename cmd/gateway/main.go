@@ -179,6 +179,7 @@ func main() {
 		if err != nil {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
+			infraConfig.LogProblems(slog.Error)
 			gw.SetInfraConfig(infraConfig)
 			slog.Info("infrastructure config loaded",
 				"path", infraPath,

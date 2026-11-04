@@ -41,6 +41,7 @@ func main() {
 		if err != nil {
 			slog.Warn("failed to load infrastructure config", "path", infraPath, "err", err)
 		} else {
+			infraConfig.LogProblems(slog.Error)
 			dbKeys := make([]string, 0, len(infraConfig.DBServers))
 			for k := range infraConfig.DBServers {
 				dbKeys = append(dbKeys, k)

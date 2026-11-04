@@ -108,11 +108,27 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
 	}
-	if err := config.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid infrastructure config: %w", err)
-	}
 
 	return &config, nil
+}
+
+// Load does not fail on a bad recovery objective: a service that cannot load
+// its infrastructure config carries on without one, and an objective typo must
+// not cost it every target, tag and approval rule. LogProblems is how a
+// service that reads objectives makes the typo loud instead.
+//
+// LogProblems logs every problem in the recovery objectives at error level and
+// returns how many lines it logged. Call it right after a successful Load.
+func (c *Config) LogProblems(log func(msg string, args ...any)) int {
+	err := c.Validate()
+	if err == nil {
+		return 0
+	}
+	lines := strings.Split(err.Error(), "\n")
+	for _, l := range lines {
+		log("infrastructure config: recovery objective problem (the affected objective is treated as unset)", "problem", l)
+	}
+	return len(lines)
 }
 
 // DBInfo returns a formatted description of a database server with its hosting info expanded.
