@@ -205,6 +205,13 @@ func TestFormatPITRPlan_SaysWhatApprovingWillDemand(t *testing.T) {
 		}
 	}
 
+	// An objective that could not be read asks for the same acknowledgement, and
+	// is shown as loudly as a breach: the check could not be made.
+	got = formatPITRPlan(plan("objective_invalid", "acknowledge"), goodOpts())
+	if !strings.Contains(got, "RPO CHECK (!)") || !strings.Contains(got, "--acknowledge-objective-breach") {
+		t.Errorf("an unreadable objective under a strict enforcement:\n%s", got)
+	}
+
 	// Nothing demanded: the command is the usual one.
 	got = formatPITRPlan(plan("within", ""), goodOpts())
 	if strings.Contains(got, "objective-breach") || !strings.Contains(got, "--pitr-approve") {

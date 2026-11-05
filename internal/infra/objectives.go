@@ -346,6 +346,12 @@ type ResolvedObjectives struct {
 	// declared and sets none of its own. EffectiveEnforcement then answers
 	// acknowledge, not warn: a typo must not quietly weaken the check.
 	EnforcementInvalid bool `json:"enforcement_invalid,omitempty"`
+	// RPOInvalid says the rpo cannot be trusted: the config set one and got it
+	// wrong, or the database names an environment that is not declared and sets
+	// no rpo of its own. It is not set when there is simply no rpo, and not by a
+	// problem with some other setting: a caller that needs to know whether an
+	// unset rpo is "none" or "unknown" reads this, not Problems.
+	RPOInvalid bool `json:"rpo_invalid,omitempty"`
 	// Problems says why an objective is unset although the config tried to set
 	// it: a value that cannot be read, or an environment that is not declared.
 	// A caller that finds an objective unset must show these, not treat it as
@@ -404,7 +410,8 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 		{"rpo", func(o Objectives) bool { return o.RPO != nil },
 			func(r *ResolvedObjectives, o Objectives, s string) {
 				r.RPO = ResolvedDuration{Set: true, Value: o.RPO.Duration, Source: s}
-			}, nil},
+			},
+			func(r *ResolvedObjectives) { r.RPOInvalid = true }},
 		{"rto", func(o Objectives) bool { return o.RTO != nil },
 			func(r *ResolvedObjectives, o Objectives, s string) {
 				r.RTO = ResolvedDuration{Set: true, Value: o.RTO.Duration, Source: s}
@@ -443,8 +450,15 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 	// enforcement its environment would have set: it may well be a strict one.
 	// Unset would mean warn, so a typo in the environment name would quietly
 	// weaken the check exactly as a typo in the enforcement itself would.
-	if _, known := c.Environments[db.Environment]; db.Environment != "" && !known && !res.Enforcement.Set {
-		res.EnforcementInvalid = true
+	if _, known := c.Environments[db.Environment]; db.Environment != "" && !known {
+		if !res.Enforcement.Set {
+			res.EnforcementInvalid = true
+		}
+		// The same goes for the rpo: with no rpo of its own, this database cannot
+		// tell what its environment would have required of it.
+		if !res.RPO.Set {
+			res.RPOInvalid = true
+		}
 	}
 	return res, true
 }

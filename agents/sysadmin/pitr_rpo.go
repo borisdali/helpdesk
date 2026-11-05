@@ -67,10 +67,18 @@ const (
 // A loss that exceeds the objective is acknowledged or refused as configured.
 // One that only MAY exceed it (an upper bound on a down instance) cannot be
 // proven a breach, so it is never refused: under refuse it needs the
-// acknowledgement. Verdicts with nothing to compare (no objective, an LSN
-// target, an objective that could not be read) are shown, not enforced.
+// acknowledgement. The same goes for an objective that could not be read: the
+// check cannot be made, which is not the same as there being nothing to check,
+// and a typo must not quietly switch off a strict enforcement. It asks, and
+// does not refuse, because nothing is known to be breached. Verdicts with
+// nothing to compare (no objective at all, an LSN target) are shown, not
+// enforced.
 func gateFor(status, enforcement string) string {
 	switch status {
+	case RPOObjectiveInvalid:
+		if enforcement == infra.EnforceAcknowledge || enforcement == infra.EnforceRefuse {
+			return GateAcknowledge
+		}
 	case RPOExceeds:
 		switch enforcement {
 		case infra.EnforceAcknowledge:
@@ -96,12 +104,15 @@ func (c *RPOComparison) objectiveGate(acknowledged bool) error {
 		return fmt.Errorf("the data this restore discards exceeds the recovery objective (%s), and this database's enforcement is %q: the restore is refused. "+
 			"Choose a later target, or change the configured enforcement if the objective is not meant to bind", c.Detail, c.Enforcement)
 	case !acknowledged:
-		verb := "exceeds"
-		if c.Status == RPOMayExceed {
-			verb = "may exceed"
+		what := "exceeds the recovery objective"
+		switch c.Status {
+		case RPOMayExceed:
+			what = "may exceed the recovery objective"
+		case RPOObjectiveInvalid:
+			what = "cannot be checked against the recovery objective, which could not be read"
 		}
-		return fmt.Errorf("the data this restore discards %s the recovery objective (%s), and this database's enforcement is %q: "+
-			"approve the gate again with acknowledge_objective_breach (helpdesk-client --acknowledge-objective-breach) to accept that", verb, c.Detail, c.Enforcement)
+		return fmt.Errorf("the data this restore discards %s (%s), and this database's enforcement is %q: "+
+			"approve the gate again with acknowledge_objective_breach (helpdesk-client --acknowledge-objective-breach) to accept that", what, c.Detail, c.Enforcement)
 	}
 	return nil
 }
@@ -153,7 +164,7 @@ func compareToRPOVerdict(est *DataLossEstimate, obj infra.ResolvedObjectives, fo
 		cmp.Status = RPONoObjective
 		cmp.Detail = "the target is not a configured database, so there is no recovery point objective to compare with"
 		return cmp
-	case !obj.RPO.Set && len(obj.Problems) > 0:
+	case !obj.RPO.Set && obj.RPOInvalid:
 		cmp.Status = RPOObjectiveInvalid
 		cmp.Problems = obj.Problems
 		cmp.Detail = "the recovery point objective could not be used (" + strings.Join(obj.Problems, "; ") + "): fix infrastructure.json, and treat this loss as unchecked"

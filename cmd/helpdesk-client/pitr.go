@@ -211,7 +211,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			// Say it loudly when the loss is, or may be, more than the database
 			// is supposed to lose: a person approving should not miss it.
 			label := "RPO check          "
-			if o.Status == "exceeds" || o.Status == "may_exceed" {
+			if o.Status == "exceeds" || o.Status == "may_exceed" || o.Gate != "" {
 				label = "RPO CHECK (!)      "
 			}
 			fmt.Fprintf(&b, "%s: %s: %s\n", label, o.Status, o.Detail)

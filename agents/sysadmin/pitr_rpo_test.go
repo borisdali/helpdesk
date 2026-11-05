@@ -49,8 +49,12 @@ func TestCompareToRPO(t *testing.T) {
 		{"no objective set", &DataLossEstimate{WindowSeconds: i64(600)}, infra.ResolvedObjectives{}, true, RPONoObjective, false,
 			[]string{"no recovery point objective is set", "unchecked"}},
 		{"an objective that could not be used", &DataLossEstimate{WindowSeconds: i64(600)},
-			infra.ResolvedObjectives{Problems: []string{`db_servers.a.objectives: invalid duration "soon"`}}, true, RPOObjectiveInvalid, false,
+			infra.ResolvedObjectives{RPOInvalid: true, Problems: []string{`db_servers.a.objectives: invalid duration "soon"`}}, true, RPOObjectiveInvalid, false,
 			[]string{`invalid duration "soon"`, "unchecked"}},
+		// A problem with some other setting says nothing about the rpo.
+		{"a problem elsewhere is not an invalid rpo", &DataLossEstimate{WindowSeconds: i64(600)},
+			infra.ResolvedObjectives{Problems: []string{`defaults.objectives: rto must be greater than zero`}}, true, RPONoObjective, false,
+			[]string{"no recovery point objective is set"}},
 		{"not a configured database", &DataLossEstimate{WindowSeconds: i64(600)}, infra.ResolvedObjectives{}, false, RPONoObjective, false,
 			[]string{"not a configured database"}},
 	} {

@@ -188,8 +188,14 @@ refused, is the database's `enforcement` ([OBJECTIVES.md §3](OBJECTIVES.md#3-va
 | `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
 | `refuse` | the restore is refused, whatever is acknowledged | needs `acknowledge_objective_breach` (an upper bound is not proof of a breach, so it asks and does not refuse) | shown |
 
-"Anything else" is `within`, `not_comparable`, `no_objective` and `objective_invalid`: with nothing to compare, the
-restore has nothing to enforce, and says so.
+An `objective_invalid` verdict (the `rpo` is set but cannot be read, or the database names an environment that is
+not declared and has no `rpo` of its own) is not "nothing to check": the check could not be made. Under
+`acknowledge` or `refuse` it needs `acknowledge_objective_breach` as well (it asks and does not refuse, since
+nothing is known to be breached), so a typo cannot quietly switch a strict enforcement off. Under `warn` it is
+shown. A problem with some *other* setting is not an invalid `rpo`.
+
+"Anything else" is `within`, `not_comparable` (an LSN target has no time span) and `no_objective` (nothing is set
+at all): with nothing to compare, the restore has nothing to enforce, and says so.
 
 The plan prints what approving will demand (`Approving needs : --acknowledge-objective-breach`, or `Approving :
 REFUSED`) and adds the flag to the approve command it offers.

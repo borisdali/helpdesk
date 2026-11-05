@@ -30,6 +30,15 @@ func objWith(rpo time.Duration, enforcement string) infra.ResolvedObjectives {
 	return o
 }
 
+// invalidRPO is an rpo the config tried to set and got wrong, under an enforcement.
+func invalidRPO(enforcement string) infra.ResolvedObjectives {
+	o := infra.ResolvedObjectives{RPOInvalid: true, Problems: []string{`db_servers.a.objectives: invalid duration "soon"`}}
+	if enforcement != "" {
+		o.Enforcement = infra.ResolvedChoice{Set: true, Value: enforcement, Source: "database"}
+	}
+	return o
+}
+
 // What each verdict demands of the approver under each enforcement. Verdicts
 // with nothing to compare are shown, not enforced.
 func TestGateFor_VerdictByEnforcement(t *testing.T) {
@@ -57,7 +66,15 @@ func TestGateFor_VerdictByEnforcement(t *testing.T) {
 		{"within, refuse", under, objWith(rpo, "refuse"), "refuse", ""},
 		{"not comparable, refuse", lsn, objWith(rpo, "refuse"), "refuse", ""},
 		{"no objective, refuse", over, infra.ResolvedObjectives{Enforcement: infra.ResolvedChoice{Set: true, Value: "refuse"}}, "refuse", ""},
-		{"objective invalid, refuse", over, infra.ResolvedObjectives{Problems: []string{"bad"}, Enforcement: infra.ResolvedChoice{Set: true, Value: "refuse"}}, "refuse", ""},
+		// An objective that could not be read is not "nothing to check": a typo
+		// must not switch a strict enforcement off. It asks and never refuses,
+		// since nothing is known to be breached.
+		{"objective invalid, warn", over, invalidRPO("warn"), "warn", ""},
+		{"objective invalid, unset enforcement", over, invalidRPO(""), "warn", ""},
+		{"objective invalid, acknowledge", over, invalidRPO("acknowledge"), "acknowledge", GateAcknowledge},
+		{"objective invalid, refuse asks, does not refuse", over, invalidRPO("refuse"), "refuse", GateAcknowledge},
+		// A problem with another setting, and no rpo at all, remain unenforced.
+		{"a problem elsewhere, refuse", over, infra.ResolvedObjectives{Problems: []string{"rto bad"}, Enforcement: infra.ResolvedChoice{Set: true, Value: "refuse"}}, "refuse", ""},
 	} {
 		got := compareToRPO(c.est, c.obj, true)
 		if got.Gate != c.gate || got.Enforcement != c.enf {
@@ -240,6 +257,69 @@ func TestRestoreToPIT_DownInstanceIsEnforcedToo(t *testing.T) {
 	}
 	if sim, err := run("warn", false); err != nil || !sim.did("restore") {
 		t.Errorf("warn: err=%v order=%s", err, sim.order())
+	}
+}
+
+// An objective that could not be read is not "nothing to check". Under a strict
+// enforcement the restore asks for the acknowledgement (it does not refuse: no
+// breach is known), so a typo cannot quietly switch the check off.
+func TestRestoreToPIT_AnObjectiveThatCouldNotBeReadStillAsks(t *testing.T) {
+	restore := func(setup func(db *infra.DBServer, c *infra.Config), ack bool) (*liveSim, RestoreToPITResult, error) {
+		objectiveInfra(t, "", setup)
+		sim, _ := liveEnv(t)
+		plan := approvedLiveDigest(t, liveTarget)
+		args := liveArgs(plan)
+		args.AcknowledgeObjectiveBreach = ack
+		res, err := restoreToPITImpl(context.Background(), args)
+		return sim, res, err
+	}
+	strict := func(enf string) *infra.Objectives {
+		return &infra.Objectives{Enforcement: &infra.Choice{Value: enf}}
+	}
+	badRPO := func(enf string) func(*infra.DBServer, *infra.Config) {
+		return func(db *infra.DBServer, _ *infra.Config) {
+			db.Objectives = strict(enf)
+			db.Objectives.RPO = &infra.Duration{Invalid: `invalid duration "soon"`}
+		}
+	}
+
+	for _, enf := range []string{"acknowledge", "refuse"} {
+		sim, res, err := restore(badRPO(enf), false)
+		if err == nil || !strings.Contains(err.Error(), "cannot be checked against the recovery objective") ||
+			!strings.Contains(err.Error(), "acknowledge_objective_breach") || sim.did("stop") || !sim.up {
+			t.Fatalf("%s, not acknowledged: err=%v order=%s up=%v", enf, err, sim.order(), sim.up)
+		}
+		if res.DataLoss.Objective.Status != RPOObjectiveInvalid || res.DataLoss.Objective.Gate != GateAcknowledge {
+			t.Errorf("%s: objective = %+v", enf, res.DataLoss.Objective)
+		}
+		if sim, _, err := restore(badRPO(enf), true); err != nil || !sim.did("restore") {
+			t.Errorf("%s, acknowledged: err=%v order=%s", enf, err, sim.order())
+		}
+	}
+	// warn says so and goes ahead.
+	if sim, res, err := restore(badRPO("warn"), false); err != nil || !sim.did("restore") || res.DataLoss.Objective.Status != RPOObjectiveInvalid {
+		t.Errorf("warn: err=%v order=%s", err, sim.order())
+	}
+
+	// A misspelt environment is the same: the database cannot tell what its
+	// environment required, and its enforcement falls toward caution on its own.
+	typo := func(db *infra.DBServer, _ *infra.Config) { db.Environment = "prdo" }
+	sim, _, err := restore(typo, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked") || sim.did("stop") {
+		t.Fatalf("a misspelt environment: err=%v order=%s", err, sim.order())
+	}
+	if sim, _, err := restore(typo, true); err != nil || !sim.did("restore") {
+		t.Errorf("a misspelt environment, acknowledged: err=%v order=%s", err, sim.order())
+	}
+
+	// A problem with some other setting, and no rpo anywhere, is not an invalid
+	// rpo: under refuse the restore goes ahead, with nothing to enforce.
+	elsewhere := func(db *infra.DBServer, c *infra.Config) {
+		db.Objectives = strict("refuse")
+		c.Defaults = &infra.Defaults{Objectives: infra.Objectives{RTO: &infra.Duration{}}}
+	}
+	if sim, res, err := restore(elsewhere, false); err != nil || !sim.did("restore") || res.DataLoss.Objective.Status != RPONoObjective {
+		t.Errorf("a problem elsewhere: err=%v order=%s %+v", err, sim.order(), res.DataLoss)
 	}
 }
 

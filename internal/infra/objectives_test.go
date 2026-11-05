@@ -603,6 +603,57 @@ func TestChoice_MarshalAndRoundTrip(t *testing.T) {
 	}
 }
 
+// RPOInvalid separates "there is no rpo" from "there is one and it cannot be
+// read or found": only the second is something a caller must not treat as
+// nothing to check.
+func TestResolveObjectives_RPOInvalid(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"rpo": "soon"}},
+	  "environments": {
+	    "bad-env":  {"objectives": {"rpo": "-5m"}},
+	    "ok-env":   {"objectives": {"rpo": "5m"}},
+	    "rto-typo": {"objectives": {"rto": "0s"}},
+	    "empty":    {}
+	  },
+	  "db_servers": {
+	    "own-bad":      {"environment": "ok-env", "objectives": {"rpo": "later"}},
+	    "env-bad":      {"environment": "bad-env"},
+	    "default-bad":  {"environment": "empty"},
+	    "fine":         {"environment": "ok-env"},
+	    "own-fixes":    {"environment": "bad-env", "objectives": {"rpo": "10m"}},
+	    "unknown-env":  {"environment": "prdo"},
+	    "unknown-own":  {"environment": "prdo", "objectives": {"rpo": "10m"}},
+	    "rto-only-bad": {"environment": "rto-typo", "objectives": {"rpo": "1m"}}
+	  }
+	}`)
+	for id, want := range map[string]bool{
+		"own-bad":      true,  // its own value cannot be read, and does not fall through to ok-env's
+		"env-bad":      true,  // inherited from its environment
+		"default-bad":  true,  // inherited from the fleet default
+		"fine":         false, // 5m from ok-env
+		"own-fixes":    false, // a valid rpo of its own wins over a bad environment's
+		"unknown-env":  true,  // cannot tell what its environment would have required
+		"unknown-own":  false, // but one of its own is enough
+		"rto-only-bad": false, // a problem with another setting is not an rpo problem
+	} {
+		got, _ := c.ResolveObjectives(id)
+		if got.RPOInvalid != want {
+			t.Errorf("%s: RPOInvalid = %v, want %v (rpo %+v, problems %v)", id, got.RPOInvalid, want, got.RPO, got.Problems)
+		}
+		if got.RPOInvalid && got.RPO.Set {
+			t.Errorf("%s: an rpo that cannot be trusted was also resolved: %+v", id, got.RPO)
+		}
+	}
+
+	// No rpo at all is not an invalid one.
+	c = load(t, `{"environments": {"dev": {}}, "db_servers": {"none": {"environment": "dev"}, "bare": {}}}`)
+	for _, id := range []string{"none", "bare"} {
+		if got, _ := c.ResolveObjectives(id); got.RPOInvalid || got.RPO.Set {
+			t.Errorf("%s: %+v", id, got)
+		}
+	}
+}
+
 func TestLogProblems(t *testing.T) {
 	var lines []string
 	log := func(msg string, args ...any) {
