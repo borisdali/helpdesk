@@ -47,6 +47,63 @@ type RPOComparison struct {
 	Detail string `json:"detail"`
 	// Problems says why the objective could not be used (invalid status).
 	Problems []string `json:"problems,omitempty"`
+	// Enforcement is what the database's configuration does about a breach:
+	// warn, acknowledge or refuse.
+	Enforcement string `json:"enforcement,omitempty"`
+	// Gate is what the restore will demand of the person approving, given this
+	// verdict and that enforcement: "" (nothing beyond the usual), "acknowledge"
+	// (acknowledge_objective_breach) or "refuse" (the restore will not run).
+	Gate string `json:"gate,omitempty"`
+}
+
+// What a restore demands of the approver when the loss breaches the objective.
+const (
+	GateAcknowledge = "acknowledge"
+	GateRefuse      = "refuse"
+)
+
+// gateFor is what a verdict demands under an enforcement.
+//
+// A loss that exceeds the objective is acknowledged or refused as configured.
+// One that only MAY exceed it (an upper bound on a down instance) cannot be
+// proven a breach, so it is never refused: under refuse it needs the
+// acknowledgement. Verdicts with nothing to compare (no objective, an LSN
+// target, an objective that could not be read) are shown, not enforced.
+func gateFor(status, enforcement string) string {
+	switch status {
+	case RPOExceeds:
+		switch enforcement {
+		case infra.EnforceAcknowledge:
+			return GateAcknowledge
+		case infra.EnforceRefuse:
+			return GateRefuse
+		}
+	case RPOMayExceed:
+		if enforcement == infra.EnforceAcknowledge || enforcement == infra.EnforceRefuse {
+			return GateAcknowledge
+		}
+	}
+	return ""
+}
+
+// objectiveGate is the check the restore applies, with the approval in hand: nil
+// when it may go ahead, else why not.
+func (c *RPOComparison) objectiveGate(acknowledged bool) error {
+	switch {
+	case c == nil || c.Gate == "":
+		return nil
+	case c.Gate == GateRefuse:
+		return fmt.Errorf("the data this restore discards exceeds the recovery objective (%s), and this database's enforcement is %q: the restore is refused. "+
+			"Choose a later target, or change the configured enforcement if the objective is not meant to bind", c.Detail, c.Enforcement)
+	case !acknowledged:
+		verb := "exceeds"
+		if c.Status == RPOMayExceed {
+			verb = "may exceed"
+		}
+		return fmt.Errorf("the data this restore discards %s the recovery objective (%s), and this database's enforcement is %q: "+
+			"approve the gate again with acknowledge_objective_breach (helpdesk-client --acknowledge-objective-breach) to accept that", verb, c.Detail, c.Enforcement)
+	}
+	return nil
 }
 
 // NeedsAttention says the person approving should be told the loss is, or may
@@ -80,6 +137,16 @@ func objectivesFor(target string) (infra.ResolvedObjectives, bool) {
 // compareToRPO sets est against obj. found is false when obj is not a real
 // database's objectives.
 func compareToRPO(est *DataLossEstimate, obj infra.ResolvedObjectives, found bool) *RPOComparison {
+	cmp := compareToRPOVerdict(est, obj, found)
+	if found {
+		cmp.Enforcement = obj.EffectiveEnforcement()
+		cmp.Gate = gateFor(cmp.Status, cmp.Enforcement)
+	}
+	return cmp
+}
+
+// compareToRPOVerdict is the comparison without what enforcement makes of it.
+func compareToRPOVerdict(est *DataLossEstimate, obj infra.ResolvedObjectives, found bool) *RPOComparison {
 	cmp := &RPOComparison{Environment: obj.Environment}
 	switch {
 	case !found:

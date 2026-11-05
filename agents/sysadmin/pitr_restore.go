@@ -50,6 +50,11 @@ type RestoreToPITArgs struct {
 	// this restore to stop a serving instance. Without it a serving instance
 	// is refused. Not part of the model-facing schema (RestoreToPITModelArgs).
 	AllowStopServing bool `json:"allow_stop_serving,omitempty"`
+	// AcknowledgeObjectiveBreach is the human's acknowledgement, given at the
+	// gate, that the data this restore discards exceeds the database's recovery
+	// objective. Needed only when the loss measured just before the stop does,
+	// under an enforcement of acknowledge. Not part of the model-facing schema.
+	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 }
 
 // RestoreToPITResult is the result of restore_to_point_in_time.
@@ -199,6 +204,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 	// running is checked first, and a failure at any of those steps leaves it
 	// running (pitr_live.go).
 	live := false
+	var probeAt time.Time // when the running instance was asked where it is
 	if up, readyOut := inst.serving(ctx); up {
 		if !args.AllowStopServing {
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — postgres is still accepting connections (pg_isready: %s). "+
@@ -215,6 +221,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. The instance was not stopped", err)
 		}
 		result.PreStop = &pre
+		probeAt = restoreClock()
 		if reason := pre.refusal(target, normalized); reason != "" {
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %s. The instance was not stopped", reason)
 		}
@@ -249,7 +256,27 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 			args.PlanDigest, plan.PlanDigest, plan.BackupLabel, plan.TargetTimeline)
 	}
 
-	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, result.PreStop, time.Now()), args.Target)
+	// What this restore discards, measured now, just before anything is stopped:
+	// the plan the human approved may be minutes or hours old, and on a serving
+	// instance the loss has been growing since. The instance's clock at the probe
+	// is carried forward by the time that has passed since (the archive flush
+	// can take a minute and a half), so the figure is the loss at the stop.
+	stopAt := restoreClock()
+	var measured *LivePreState
+	if result.PreStop != nil {
+		p := projectPreStop(*result.PreStop, probeAt, stopAt)
+		measured = &p
+	}
+	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, measured, stopAt), args.Target)
+	if result.DataLoss != nil {
+		if gerr := result.DataLoss.Objective.objectiveGate(args.AcknowledgeObjectiveBreach); gerr != nil {
+			untouched := "Nothing was changed."
+			if live {
+				untouched = "The instance was not stopped."
+			}
+			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
+		}
+	}
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string
@@ -381,7 +408,8 @@ func restoreToPITTool(ctx agent.ToolContext, margs RestoreToPITModelArgs) (Resto
 		return RestoreToPITResult{}, err
 	}
 	return restoreToPITAudited(ctx, RestoreToPITArgs{Target: margs.Target, Stanza: margs.Stanza,
-		RecoveryTargetType: ap.Type, RecoveryTargetVal: ap.Value, PlanDigest: ap.PlanDigest, AllowStopServing: ap.StopServing})
+		RecoveryTargetType: ap.Type, RecoveryTargetVal: ap.Value, PlanDigest: ap.PlanDigest, AllowStopServing: ap.StopServing,
+		AcknowledgeObjectiveBreach: ap.BreachAcknowledged})
 }
 
 // restoreToPITAudited runs the restore and writes its audit record.
@@ -409,7 +437,7 @@ func recordRestoreToPIT(ctx agent.ToolContext, args RestoreToPITArgs, result Res
 		Name: "restore_to_point_in_time",
 		Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza,
 			"recovery_target_type": args.RecoveryTargetType, "recovery_target_value": args.RecoveryTargetVal, "plan_digest": args.PlanDigest,
-			"allow_stop_serving": args.AllowStopServing},
+			"allow_stop_serving": args.AllowStopServing, "acknowledge_objective_breach": args.AcknowledgeObjectiveBreach},
 	}, audit.ToolResult{
 		Output: string(resultJSON),
 		Error:  errMsg,

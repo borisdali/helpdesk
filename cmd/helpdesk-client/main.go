@@ -61,6 +61,7 @@ func main() {
 		planDigest            = flag.String("plan-digest", "", "plan_digest of the plan you reviewed (from --pitr-plan)")
 		ackDataLoss           = flag.Bool("acknowledge-data-loss", false, "Acknowledge that everything committed after the target is discarded")
 		allowStopServing      = flag.Bool("allow-stop-serving", false, "Allow the restore to stop an instance that is serving")
+		ackObjectiveBreach    = flag.Bool("acknowledge-objective-breach", false, "Acknowledge that the restore discards more data than the database's recovery objective allows (only a database whose enforcement is acknowledge needs it; --pitr-plan says when)")
 		sysadminURL           = flag.String("sysadmin-url", os.Getenv("HELPDESK_SYSADMIN_URL"), "Sysadmin agent `URL` (for --pitr-plan)")
 		sysadminKey           = flag.String("sysadmin-key", os.Getenv("HELPDESK_SYSADMIN_API_KEY"), "Sysadmin agent API key (for --pitr-plan)")
 		pitrServer            = flag.String("pitr-server", "", "Infrastructure alias of the database to restore (for --pitr-plan)")
@@ -100,7 +101,7 @@ func main() {
 	if *pitrPlanFlag || *pitrApprove != "" {
 		o := newPITROpts(pitrFlagValues{
 			ApproveRunID: *pitrApprove, TargetType: *recoveryTargetType, Target: *recoveryTarget,
-			PlanDigest: *planDigest, AckDataLoss: *ackDataLoss, AllowStop: *allowStopServing,
+			PlanDigest: *planDigest, AckDataLoss: *ackDataLoss, AllowStop: *allowStopServing, AckBreach: *ackObjectiveBreach,
 			User: *userID, SysadminURL: *sysadminURL, SysadminKey: *sysadminKey,
 			Server: *pitrServer, Stanza: *pitrStanza,
 		})

@@ -27,6 +27,12 @@ type RecoveryApproval struct {
 	// STOP a running instance (after flushing its WAL to the archive). Without
 	// it a serving instance is refused. Never implied by Approved().
 	StopServing bool `json:"stop_serving,omitempty"`
+	// BreachAcknowledged is the operator's separate acknowledgement that this
+	// restore loses more than the database's recovery objective allows. It is
+	// what a database whose enforcement is "acknowledge" needs to restore when
+	// the measured loss exceeds (or may exceed) its objective. Like StopServing
+	// it is never implied by Approved() or by Acknowledged.
+	BreachAcknowledged bool `json:"breach_acknowledged,omitempty"`
 }
 
 // Approved reports whether a restore may run on this: a target, the digest of
@@ -46,6 +52,7 @@ func parseRecoveryApproval(v any) *RecoveryApproval {
 	a := &RecoveryApproval{Type: str("type"), Value: str("value"), PlanDigest: str("plan_digest"), ApprovedBy: str("approved_by")}
 	a.Acknowledged, _ = m["acknowledged"].(bool)
 	a.StopServing, _ = m["stop_serving"].(bool)
+	a.BreachAcknowledged, _ = m["breach_acknowledged"].(bool)
 	if a.Type == "" || a.Value == "" {
 		return nil
 	}

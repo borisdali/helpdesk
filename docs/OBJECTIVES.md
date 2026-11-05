@@ -123,9 +123,10 @@ it spends.
 |---|---|
 | `rpo`, `rto`, `availability_slo` declared, three-level resolution with sources | Built |
 | Data-loss estimate for PITR, set against the `rpo` | Built ([PITR.md §4](PITR.md#4-operating-it)) |
-| Extra acknowledgement at the gate when the loss exceeds the `rpo`, re-measured when the instance is stopped | Not built |
+| Enforcement of the `rpo` at the PITR gate: `warn`, `acknowledge` (`acknowledge_objective_breach`) or `refuse`, with the loss re-measured just before the instance is stopped ([PITR.md §4](PITR.md#4-operating-it)) | Built |
 | `recovery_preference` and `enforcement` in the config: validated, resolved per database, environment and fleet with sources | Built |
-| Anything that reads them (ranking recommendations, the gate's acknowledge/refuse behaviour) | Not built |
+| `enforcement` read by the PITR restore (above) | Built |
+| `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A budget window on `availability_slo` and the number of worst-case recoveries it absorbs (budget ÷ `rto`) | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |

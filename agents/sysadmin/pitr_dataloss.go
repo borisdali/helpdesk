@@ -68,6 +68,24 @@ type DataLossEstimate struct {
 	Objective *RPOComparison `json:"objective,omitempty"`
 }
 
+// restoreClock is the clock the restore measures its loss against; a variable
+// so a test can let time pass between the probe and the stop.
+var restoreClock = time.Now
+
+// projectPreStop carries a running instance's reading forward to now: its
+// clock at the probe plus the time that has passed since (measured here, not
+// asked again, so the restore's order of operations does not change). Its WAL
+// position is left as it was probed: it can only have grown, so a byte figure
+// from it is at least that much.
+func projectPreStop(pre LivePreState, probeAt, now time.Time) LivePreState {
+	t, err := time.Parse(time.RFC3339, pre.Time)
+	if err != nil || probeAt.IsZero() || now.Before(probeAt) {
+		return pre
+	}
+	pre.Time = t.Add(now.Sub(probeAt)).UTC().Format(time.RFC3339)
+	return pre
+}
+
 // estimateDataLoss measures what restoring to target discards. normalized is
 // the target as PostgreSQL takes it (the LSN for an LSN target). wal is the
 // continuity check of the backup to be restored; live is what the running

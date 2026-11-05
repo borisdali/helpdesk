@@ -125,6 +125,10 @@ func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy s
 		ApprovedBy:   resolvedBy,
 		Acknowledged: true,
 		StopServing:  req.AllowStopServing,
+		// Passed on as given. Whether the loss exceeds the objective is only
+		// known to the agent, at the moment before the instance is stopped, so
+		// the gateway neither requires nor checks it: the restore tool does.
+		BreachAcknowledged: req.AcknowledgeObjectiveBreach,
 	}, 0, ""
 }
 
@@ -139,6 +143,9 @@ func recoveryAuditLines(ap *audit.RecoveryApproval) []string {
 	}
 	if ap.StopServing {
 		lines = append(lines, "operator authorized stopping the running instance for the restore")
+	}
+	if ap.BreachAcknowledged {
+		lines = append(lines, "operator acknowledged that the restore may lose more data than the recovery objective allows")
 	}
 	return lines
 }
@@ -160,6 +167,9 @@ func recoveryApprovalMeta(a *audit.RecoveryApproval) map[string]any {
 	}
 	if a.StopServing {
 		m["stop_serving"] = true
+	}
+	if a.BreachAcknowledged {
+		m["breach_acknowledged"] = true
 	}
 	return m
 }

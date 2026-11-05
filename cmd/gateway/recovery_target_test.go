@@ -747,6 +747,93 @@ func TestResolveDecision_Gate_PITR_StopServing(t *testing.T) {
 	}
 }
 
+// ── acknowledge_objective_breach ─────────────────────────────────────────────
+
+// Acknowledging that the loss exceeds the objective is its own flag. The
+// gateway cannot know whether it does (the loss is measured by the agent just
+// before the stop), so it neither requires nor checks it: it passes it on.
+func TestRecoveryApprovalFromGate_BreachAcknowledgementIsSeparate(t *testing.T) {
+	base := ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
+	}
+	ap, status, msg := recoveryApprovalFromGate(base, "", "alice")
+	if status != 0 || ap.BreachAcknowledged || !ap.Approved() {
+		t.Fatalf("approval without the flag: %+v %d %s", ap, status, msg)
+	}
+	base.AcknowledgeObjectiveBreach = true
+	if ap, status, _ = recoveryApprovalFromGate(base, "", "alice"); status != 0 || !ap.BreachAcknowledged {
+		t.Fatalf("approval with the flag: %+v", ap)
+	}
+	// It stands in for nothing: without the data-loss acknowledgement the
+	// approval is refused however many other flags are set.
+	if _, status, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
+		RecoveryTarget: base.RecoveryTarget, PlanDigest: base.PlanDigest, AcknowledgeObjectiveBreach: true, AllowStopServing: true,
+	}, "", "alice"); status != http.StatusBadRequest {
+		t.Errorf("breach acknowledgement without acknowledge_data_loss: status %d, want 400", status)
+	}
+
+	plain := &audit.RecoveryApproval{Type: "time", Value: "v", PlanDigest: "d", ApprovedBy: "a", Acknowledged: true}
+	if m := recoveryApprovalMeta(plain); m["breach_acknowledged"] != nil {
+		t.Errorf("an approval that does not acknowledge it carries breach_acknowledged: %v", m)
+	}
+	if m := recoveryApprovalMeta(ap); m["breach_acknowledged"] != true {
+		t.Errorf("metadata = %v", m)
+	}
+	if strings.Contains(strings.Join(recoveryAuditLines(plain), "\n"), "objective") {
+		t.Error("an approval that does not acknowledge it says it does")
+	}
+	if !strings.Contains(strings.Join(recoveryAuditLines(ap), "\n"), "more data than the recovery objective allows") {
+		t.Errorf("the gate_acknowledged record does not say the breach was acknowledged: %v", recoveryAuditLines(ap))
+	}
+}
+
+func TestHandleProceedEscalation_PITR_BreachAcknowledgementReachesTheAgentOnlyWhenGiven(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"given", strings.Replace(pitrApprovalBody, `"acknowledge_data_loss":true`, `"acknowledge_data_loss":true,"acknowledge_objective_breach":true`, 1), true},
+		{"not given", pitrApprovalBody, false},
+	} {
+		run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+		auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+			map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+		gw := makePlaybookRunGateway(auditd.URL, nil)
+		agent := addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+		if rec := postProceedEscalation(t, gw, run.RunID, tc.body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d; %s", tc.name, rec.Code, rec.Body.String())
+		}
+		if got := sentRecoveryApproval(t, agent); (got["breach_acknowledged"] == true) != tc.want {
+			t.Errorf("%s: recovery_approval = %v", tc.name, got)
+		}
+	}
+}
+
+// The decision hub is a second way to approve the same gate, and must not drop
+// the acknowledgement on the way through.
+func TestResolveDecision_Gate_PITR_BreachAcknowledgement(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	agent := addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+	mux := http.NewServeMux()
+	gw.RegisterRoutes(mux)
+	body := strings.Replace(pitrApprovalBody, `"acknowledge_data_loss":true`, `"acknowledge_data_loss":true,"acknowledge_objective_breach":true`, 1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/decisions/gate:"+run.RunID+"/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d; %s", rec.Code, rec.Body.String())
+	}
+	if got := sentRecoveryApproval(t, agent); got["breach_acknowledged"] != true {
+		t.Errorf("the hub dropped acknowledge_objective_breach: %v", got)
+	}
+}
+
 // ── the faulttest harness and the gateway agree on the wire ──────────────────
 
 // What the harness sends at the gate is what the gateway reads: the same JSON
@@ -759,6 +846,9 @@ func TestFaultlibGateApproval_IsWhatTheGatewayAccepts(t *testing.T) {
 		PlanDigest:          "0123456789abcdef",
 		AcknowledgeDataLoss: true,
 		AllowStopServing:    true,
+		// The harness acknowledges a breach when the plan says to; the field
+		// must be one the gateway reads, or it would be dropped silently.
+		AcknowledgeObjectiveBreach: true,
 	}
 	raw, err := json.Marshal(sent)
 	if err != nil {
@@ -771,7 +861,7 @@ func TestFaultlibGateApproval_IsWhatTheGatewayAccepts(t *testing.T) {
 		t.Fatalf("the gateway does not read what the harness sends: %v\n%s", err, raw)
 	}
 	ap, status, msg := recoveryApprovalFromGate(got, "time=2026-10-28T17:11:10Z", "faulttest")
-	if status != 0 || !ap.Approved() || !ap.StopServing || ap.Value != "2026-10-28T17:11:10Z" || ap.PlanDigest != "0123456789abcdef" {
+	if status != 0 || !ap.Approved() || !ap.StopServing || !ap.BreachAcknowledged || ap.Value != "2026-10-28T17:11:10Z" || ap.PlanDigest != "0123456789abcdef" {
 		t.Fatalf("approval = %+v, status %d %s", ap, status, msg)
 	}
 

@@ -1876,6 +1876,13 @@ type ProceedEscalationRequest struct {
 	// to stop a RUNNING instance (after flushing its WAL to the archive). Not
 	// implied by anything else here: without it a serving instance is refused.
 	AllowStopServing bool `json:"allow_stop_serving,omitempty"`
+	// AcknowledgeObjectiveBreach is a separate, explicit acknowledgement that
+	// the restore loses more data than the database's recovery objective
+	// allows. Needed only when the database's enforcement is "acknowledge" (or
+	// "refuse", for a loss that only may exceed the objective) and the loss
+	// measured when the instance is about to be stopped does. The restore tool
+	// decides; the gateway passes it on.
+	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.

@@ -75,7 +75,7 @@ flowchart TB
 | `verify_restore_recovery` | After the restart: reads PostgreSQL's own log and checks it stopped at the target | [tools page](tools/sysadmin.md#verify_restore_recovery) |
 | `pbs_pgbackrest_pitr_triage` | Entry-point playbook. Read-only: plans the target, reports the plan, hands on to the restore only if it is feasible | [`playbooks/pgbackrest-pitr-triage.yaml`](../playbooks/pgbackrest-pitr-triage.yaml) |
 | `pbs_pgbackrest_pitr_remediate` | Terminal playbook: restore, restart, check the instance, verify where recovery stopped. Reachable only through the gate | [`playbooks/pgbackrest-pitr-remediate.yaml`](../playbooks/pgbackrest-pitr-remediate.yaml) |
-| Gateway fields | `recovery_target` on the run; `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving` on the gate | [§4](#4-operating-it) |
+| Gateway fields | `recovery_target` on the run; `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving`, `acknowledge_objective_breach` on the gate | [§4](#4-operating-it) |
 | `db-pitr-dropped-table[-k8s]` | The faults that exercise all of the above | [FAULTTEST.md §6.6](FAULTTEST.md#66-point-in-time-recovery-faults-pitr) |
 
 ## 3. The flow
@@ -179,7 +179,30 @@ What it must not do is let them accept it unaware, so every case says something:
 | `objective_invalid` | The config tried to set an `rpo` and got it wrong (`problems` says how): fix `infrastructure.json` and treat the loss as unchecked |
 
 `exceeds` and `may_exceed` print as `RPO CHECK (!)`. The comparison also appears on the restore result's `data_loss`.
-Approving a plan that exceeds the objective does not yet need anything beyond `acknowledge_data_loss`.
+**What approving demands.** Whether a breach only needs showing, or needs a separate acknowledgement, or is
+refused, is the database's `enforcement` ([OBJECTIVES.md §3](OBJECTIVES.md#3-values)):
+
+| `enforcement` | Loss `exceeds` the `rpo` | Loss `may_exceed` it | Anything else |
+|---|---|---|---|
+| `warn` (the default) | shown | shown | shown |
+| `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
+| `refuse` | the restore is refused, whatever is acknowledged | needs `acknowledge_objective_breach` (an upper bound is not proof of a breach, so it asks and does not refuse) | shown |
+
+"Anything else" is `within`, `not_comparable`, `no_objective` and `objective_invalid`: with nothing to compare, the
+restore has nothing to enforce, and says so.
+
+The plan prints what approving will demand (`Approving needs : --acknowledge-objective-breach`, or `Approving :
+REFUSED`) and adds the flag to the approve command it offers.
+
+**The loss is measured again just before the instance is stopped,** not taken from the plan. A plan that said
+`within` can be approved minutes or hours later, and a serving instance has gone on committing since, so the
+restore carries the instance's clock forward by the time that has passed since it last asked (the archive flush
+alone can take a minute and a half) and compares that. If the loss now breaches the objective, it refuses
+**before stopping anything**, and the refusal says so and how to proceed. A down instance is checked too.
+
+`acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
+`acknowledge_data_loss` and does not imply it, and the model has no argument for it. The gateway passes it on and
+records it in the `gate_acknowledged` event; the restore tool decides whether it was needed.
 
 **3. Approve the plan you read.**
 

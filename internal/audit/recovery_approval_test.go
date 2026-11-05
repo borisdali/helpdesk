@@ -159,6 +159,25 @@ func TestPlaybookRunStore_RecoveryTargetColumnMigration(t *testing.T) {
 	}
 }
 
+// breach_acknowledged is read as a real boolean and never implied by an
+// approval or by the other authorizations.
+func TestParseRecoveryApproval_BreachAcknowledged(t *testing.T) {
+	base := map[string]any{"type": "time", "value": "v", "plan_digest": "d", "approved_by": "a", "acknowledged": true, "stop_serving": true}
+	if a := parseRecoveryApproval(base); !a.Approved() || a.BreachAcknowledged {
+		t.Fatalf("an approval that allows a stop does not acknowledge a breach: %+v", a)
+	}
+	base["breach_acknowledged"] = true
+	if a := parseRecoveryApproval(base); !a.BreachAcknowledged {
+		t.Errorf("breach_acknowledged:true not read: %+v", a)
+	}
+	for _, v := range []any{"true", 1, nil} {
+		base["breach_acknowledged"] = v
+		if a := parseRecoveryApproval(base); a.BreachAcknowledged {
+			t.Errorf("breach_acknowledged:%v (%T) counted as the acknowledgement", v, v)
+		}
+	}
+}
+
 // stop_serving is read as a real boolean and never implied by an approval.
 func TestParseRecoveryApproval_StopServing(t *testing.T) {
 	base := map[string]any{"type": "time", "value": "v", "plan_digest": "d", "approved_by": "a", "acknowledged": true}

@@ -91,6 +91,9 @@ type ProceedEscalationRequest struct {
 	PlanDigest          string      `json:"plan_digest,omitempty"`
 	AcknowledgeDataLoss bool        `json:"acknowledge_data_loss,omitempty"`
 	AllowStopServing    bool        `json:"allow_stop_serving,omitempty"`
+	// AcknowledgeObjectiveBreach is set when the plan says approving it needs
+	// the acknowledgement (the database's enforcement is acknowledge).
+	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.

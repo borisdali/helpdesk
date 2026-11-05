@@ -128,6 +128,8 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		PlanDigest          string              `json:"plan_digest,omitempty"`
 		AcknowledgeDataLoss bool                `json:"acknowledge_data_loss,omitempty"`
 		AllowStopServing    bool                `json:"allow_stop_serving,omitempty"`
+		// A separate acknowledgement that the loss exceeds the recovery objective.
+		AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -142,10 +144,11 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 	case strings.HasPrefix(id, "gate:"):
 		runID := strings.TrimPrefix(id, "gate:")
 		g.resolveGate(w, r, runID, req.Resolution, req.ResolvedBy, req.ApprovalMode, req.ApprovalSession, req.VerdictCorrect, req.VerdictNotes, map[string]any{
-			"recovery_target":       req.RecoveryTarget,
-			"plan_digest":           req.PlanDigest,
-			"acknowledge_data_loss": req.AcknowledgeDataLoss,
-			"allow_stop_serving":    req.AllowStopServing,
+			"recovery_target":              req.RecoveryTarget,
+			"plan_digest":                  req.PlanDigest,
+			"acknowledge_data_loss":        req.AcknowledgeDataLoss,
+			"allow_stop_serving":           req.AllowStopServing,
+			"acknowledge_objective_breach": req.AcknowledgeObjectiveBreach,
 		})
 
 	case strings.HasPrefix(id, "fleet:"), strings.HasPrefix(id, "step:"):

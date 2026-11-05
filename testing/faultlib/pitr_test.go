@@ -184,6 +184,8 @@ type pitrFakes struct {
 	planBody, gateBody     map[string]any
 	planAuth, gateAuth     string
 	planStatus, planDigest string
+	// planObjective, when set, is the plan's data_loss_estimate.objective.
+	planObjective map[string]any
 }
 
 func newPITRFakes(t *testing.T) *pitrFakes {
@@ -198,7 +200,11 @@ func newPITRFakes(t *testing.T) *pitrFakes {
 		}
 		raw, _ := io.ReadAll(r.Body)
 		json.Unmarshal(raw, &f.planBody) //nolint:errcheck
-		plan, _ := json.Marshal(map[string]any{"status": f.planStatus, "detail": "because", "plan_digest": f.planDigest, "instance_serving": true, "archive_flush_required": true})
+		body := map[string]any{"status": f.planStatus, "detail": "because", "plan_digest": f.planDigest, "instance_serving": true, "archive_flush_required": true}
+		if f.planObjective != nil {
+			body["data_loss_estimate"] = map[string]any{"summary": "s", "objective": f.planObjective}
+		}
+		plan, _ := json.Marshal(body)
 		json.NewEncoder(w).Encode(map[string]any{"output": string(plan)}) //nolint:errcheck
 	}))
 	f.gateway = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -262,6 +268,53 @@ func TestRemediator_ApprovesTheReviewedPITRPlan(t *testing.T) {
 	if fk.gateBody["resolved_by"] != "faulttest" || fk.gateBody["approval_mode"] != "auto" {
 		t.Errorf("the caller's own fields were lost: %v", fk.gateBody)
 	}
+}
+
+// The harness is the operator at the gate: it acknowledges a breach when the
+// plan says approving needs that, and does not approve around a refusal.
+func TestRemediator_ObjectiveBreachAtTheGate(t *testing.T) {
+	approve := func(fk *pitrFakes) error {
+		r := fk.remediator()
+		if err := r.SetPITR(droppedTable, droppedTableOut); err != nil {
+			t.Fatal(err)
+		}
+		_, err := r.ProceedEscalation(context.Background(), "plr_g", ProceedEscalationRequest{Resolution: "approved"})
+		return err
+	}
+
+	t.Run("the plan says acknowledge: acknowledged", func(t *testing.T) {
+		fk := newPITRFakes(t)
+		fk.planObjective = map[string]any{"status": "exceeds", "gate": "acknowledge", "enforcement": "acknowledge", "detail": "d"}
+		if err := approve(fk); err != nil {
+			t.Fatal(err)
+		}
+		if fk.gateBody["acknowledge_objective_breach"] != true {
+			t.Errorf("approval = %v", fk.gateBody)
+		}
+	})
+	t.Run("the plan demands nothing: not sent", func(t *testing.T) {
+		for _, objective := range []map[string]any{nil, {"status": "within", "gate": ""}, {"status": "exceeds", "gate": "", "enforcement": "warn"}} {
+			fk := newPITRFakes(t)
+			fk.planObjective = objective
+			if err := approve(fk); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := fk.gateBody["acknowledge_objective_breach"]; present {
+				t.Errorf("objective %v: an acknowledgement nobody asked for was sent: %v", objective, fk.gateBody)
+			}
+		}
+	})
+	t.Run("the plan says refuse: the gate is not approved", func(t *testing.T) {
+		fk := newPITRFakes(t)
+		fk.planObjective = map[string]any{"status": "exceeds", "gate": "refuse", "enforcement": "refuse", "detail": "18h over the objective"}
+		err := approve(fk)
+		if err == nil || !strings.Contains(err.Error(), "would be refused") || !strings.Contains(err.Error(), "18h over the objective") {
+			t.Fatalf("err = %v", err)
+		}
+		if fk.gateCalls != 0 {
+			t.Errorf("the gateway was called %d time(s) for an approval the restore would refuse", fk.gateCalls)
+		}
+	})
 }
 
 func TestRemediator_PITRApprovalIsSeparateAndConditional(t *testing.T) {
