@@ -709,6 +709,40 @@ Restores the backup chosen by the plan with `pgbackrest --stanza=<stanza> --delt
 4. Stop it and keep it stopped: Docker/Podman a clean `pg_ctl stop -m fast` then `<runtime> stop`; systemd `sudo systemctl stop <unit>` (the VM's sudoers file needs that grant; `setup-pgbackrest-vm.sh` adds it); Kubernetes a clean stop then scale to 0. A stopped container's restore runs in a throwaway container from its image on its volumes, so the image must carry `/etc/pgbackrest.conf` (or it must be on a volume). Confirm it no longer answers.
 5. Run the restore script. If it refuses before changing anything (standby, live postmaster, no room), the instance is started again. If pgBackRest itself fails, the instance **stays stopped**, the result names `saved_wal`, and the error says so.
 
+The whole sequence as a chart. Everything inside the box can still refuse, and a refusal there changes nothing (at
+most a WAL switch has been requested); the instance is stopped only after the last check, the recovery-objective
+check, has passed:
+
+```mermaid
+flowchart TD
+    S(["restore_to_point_in_time"]) --> V["Validate the target, require plan_digest"]
+    V --> P["Resolve the target, policy check"]
+    P --> Q{"Instance accepting connections?"}
+
+    subgraph SAFE ["Before the stop: a refusal here changes nothing"]
+        direction TB
+        Q -- "yes, and allow_stop_serving was not given" --> X["Refused"]
+        Q -- "yes, allowed" --> L["Ask the instance: standby, replicas,<br/>archive_mode, HA manager, target ahead of it.<br/>Record its clock and WAL position"]
+        L -- "any of those" --> X
+        L --> F["Flush the archive: pg_switch_wal, wait"]
+        F -- "cannot be confirmed" --> X
+        Q -- "no (down)" --> R
+        F --> R["Recompute the plan: feasible, same digest,<br/>no flush still needed"]
+        R -- "not so" --> X
+        R --> M["Measure the loss now, set it against the rpo<br/>(running instance: clock carried forward from the probe)"]
+        M -- "refused, or needs the acknowledgement and has none" --> X
+    end
+
+    M --> T["Stop the instance (running) or quiesce it (down)"]
+    T --> Z["Restore script: standby, live postmaster, room for pg_wal"]
+    Z -- "refuses before changing anything" --> Y["Instance started again"]
+    Z -- "pgBackRest fails" --> Y2["Instance stays stopped; saved_wal named"]
+    Z --> D["Record the prediction, audit the call<br/>(including whether the breach was acknowledged)"]
+
+    classDef stop fill:#f6d0d0,stroke:#b71c1c,color:#000
+    class X stop
+```
+
 The plan of a serving instance reports `instance_serving` and `archive_flush_required`: a target in WAL it has not archived yet is plausible, and the digest is the same before and after the flush. A colocated deployment (no infrastructure config) is refused before anything is probed.
 
 **What it deliberately does differently from `restore_from_backup`**: the saved `pg_wal` is not put back and not pushed to the archive. That WAL is exactly what the target discards, and replaying it would defeat the target. It stays on the host (`saved_wal` in the result) as a forensic copy.

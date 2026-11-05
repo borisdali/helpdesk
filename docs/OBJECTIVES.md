@@ -13,6 +13,23 @@ each database is **supposed** to achieve, so the numbers aiHelpDesk produces (th
 This page describes the configuration and how it resolves. The checks that use it are added one at a time and
 documented where they appear.
 
+---
+
+## Table of Contents
+
+1. [Where an objective is set](#1-where-an-objective-is-set)
+2. [Environments are not tags](#2-environments-are-not-tags)
+3. [Values](#3-values)
+4. [A mistake never costs the inventory](#4-a-mistake-never-costs-the-inventory)
+5. [Reading it in code](#5-reading-it-in-code)
+6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
+   - [6.1 One decision loop](#61-one-decision-loop)
+   - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
+   - [6.3 What this depends on and what could mislead](#63-what-this-depends-on-and-what-could-mislead)
+   - [6.4 Open decisions](#64-open-decisions)
+
+---
+
 ## 1. Where an objective is set
 
 Most specific first:

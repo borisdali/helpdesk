@@ -20,6 +20,26 @@ the instance is down or still serving.
 
 What is verified and where, is in [§8](#8-whats-verified). What it does **not** do is in [§7](#7-limits).
 
+---
+
+## Table of Contents
+
+1. [The safety model](#1-the-safety-model)
+2. [The pieces](#2-the-pieces)
+3. [The flow](#3-the-flow)
+4. [Operating it](#4-operating-it)
+   - [The short way: `helpdesk-client`](#the-short-way-helpdesk-client)
+5. [A running instance](#5-a-running-instance)
+6. [Checking where recovery stopped](#6-checking-where-recovery-stopped)
+7. [Limits](#7-limits)
+8. [What's verified](#8-whats-verified)
+9. [When it refuses](#9-when-it-refuses)
+10. [Why it is built this way](#10-why-it-is-built-this-way)
+
+[Related](#related)
+
+---
+
 ## 1. The safety model
 
 A restore that stops at the wrong moment destroys data silently. So the one input that decides how much is
@@ -196,6 +216,45 @@ shown. A problem with some *other* setting is not an invalid `rpo`.
 
 "Anything else" is `within`, `not_comparable` (an LSN target has no time span) and `no_objective` (nothing is set
 at all): with nothing to compare, the restore has nothing to enforce, and says so.
+
+The same rules as a chart, from the loss measured just before the stop to what approving demands:
+
+```mermaid
+flowchart TD
+    A(["Loss measured just before the stop"]) --> B{"Can it be compared with the rpo?"}
+    B -- "LSN target: no time span yet" --> N1["not_comparable<br/>shown, NOT enforced (known gap)"]
+    B -- "no rpo anywhere" --> N2["no_objective<br/>shown, not enforced"]
+    B -- "rpo unreadable, or environment not declared" --> I["objective_invalid"]
+    B -- "yes" --> C{"Loss against the rpo"}
+    C -- "within" --> W["within<br/>shown"]
+    C -- "over, exact (running instance)" --> E["exceeds"]
+    C -- "over, an upper bound (down instance)" --> M["may_exceed"]
+
+    E --> EN{"enforcement"}
+    EN -- "warn (the default)" --> OK["Proceeds<br/>breach shown"]
+    EN -- "acknowledge" --> ACK["Needs acknowledge_objective_breach"]
+    EN -- "refuse" --> REF["REFUSED<br/>even if acknowledged"]
+
+    M --> MN{"enforcement"}
+    MN -- "warn" --> OK
+    MN -- "acknowledge or refuse" --> ACK
+
+    I --> IN{"enforcement"}
+    IN -- "warn" --> OK
+    IN -- "acknowledge or refuse" --> ACK
+
+    classDef go fill:#d7f0d7,stroke:#2e7d32,color:#000
+    classDef ask fill:#fff0c2,stroke:#b8860b,color:#000
+    classDef stop fill:#f6d0d0,stroke:#b71c1c,color:#000
+    class OK,W,N1,N2 go
+    class ACK ask
+    class REF stop
+```
+
+Two things the chart does not show. A `may_exceed` or `objective_invalid` verdict never reaches `REFUSED`, even under
+`refuse`: nothing is known to be breached, so it asks. And an enforcement that is unset means `warn`, but one that is
+invalid, or inherited by a database whose environment is not declared, means `acknowledge`, so a typo cannot quietly
+weaken the check.
 
 The plan prints what approving will demand (`Approving needs : --acknowledge-objective-breach`, or `Approving :
 REFUSED`) and adds the flag to the approve command it offers.
