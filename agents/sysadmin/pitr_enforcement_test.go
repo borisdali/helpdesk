@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 	"helpdesk/testing/faultlib"
 )
@@ -320,6 +321,69 @@ func TestRestoreToPIT_AnObjectiveThatCouldNotBeReadStillAsks(t *testing.T) {
 	}
 	if sim, res, err := restore(elsewhere, false); err != nil || !sim.did("restore") || res.DataLoss.Objective.Status != RPONoObjective {
 		t.Errorf("a problem elsewhere: err=%v order=%s %+v", err, sim.order(), res.DataLoss)
+	}
+}
+
+// The direct tool endpoint (POST /tool, used by operators and the harness) takes
+// the same arguments, so it must not be a way around an enforcement.
+func TestRestoreToPIT_DirectRegistryDoesNotBypassEnforcement(t *testing.T) {
+	call := func(enforcement string, ack bool) (*liveSim, error) {
+		enforced(t, "15m", enforcement)
+		sim, _ := liveEnv(t)
+		plan := approvedLiveDigest(t, liveTarget)
+		fn, ok := NewSysadminDirectRegistry().Get("restore_to_point_in_time")
+		if !ok {
+			t.Fatal("restore_to_point_in_time is not in the direct registry")
+		}
+		args := map[string]any{"target": "pgbackrest_db", "stanza": "main", "recovery_target_type": "time",
+			"recovery_target_value": liveTarget, "plan_digest": plan.PlanDigest, "allow_stop_serving": true}
+		if ack {
+			args["acknowledge_objective_breach"] = true
+		}
+		_, err := fn(context.Background(), args)
+		return sim, err
+	}
+	if sim, err := call("acknowledge", false); err == nil || !strings.Contains(err.Error(), "acknowledge_objective_breach") || sim.did("stop") {
+		t.Errorf("acknowledge, not acknowledged: err=%v order=%s", err, sim.order())
+	}
+	if sim, err := call("acknowledge", true); err != nil || !sim.did("restore") {
+		t.Errorf("acknowledge, acknowledged: err=%v order=%s", err, sim.order())
+	}
+	// Refuse is refuse on this path too, acknowledgement or not.
+	for _, ack := range []bool{false, true} {
+		if sim, err := call("refuse", ack); err == nil || !strings.Contains(err.Error(), "is refused") || sim.did("stop") {
+			t.Errorf("refuse, ack=%v: err=%v order=%s", ack, err, sim.order())
+		}
+	}
+}
+
+// What a restore did, and whether the breach was acknowledged, is in the audit
+// trail: it is the record that someone accepted the loss knowingly, and the
+// refusal that stopped one is in it too.
+func TestRestoreToPITTool_AuditsTheBreachAcknowledgementAndTheRefusal(t *testing.T) {
+	for _, ack := range []bool{true, false} {
+		enforced(t, "15m", "acknowledge")
+		_, _ = liveEnv(t)
+		store, cleanup := withRealToolAuditor(t)
+		plan := approvedLiveDigest(t, liveTarget)
+		ap := approvalFor(plan, true)
+		ap.BreachAcknowledged = ack
+		_, err := restoreToPITTool(toolCtxWithApproval(ap), RestoreToPITModelArgs{Target: "pgbackrest_db", Stanza: "main"})
+		events, qerr := store.Query(context.Background(), audit.QueryOptions{ToolName: "restore_to_point_in_time", EventType: audit.EventTypeToolExecution})
+		cleanup()
+		if qerr != nil || len(events) != 1 {
+			t.Fatalf("ack=%v: events=%v err=%v", ack, events, qerr)
+		}
+		got := events[0].Tool
+		if got.Parameters["acknowledge_objective_breach"] != ack {
+			t.Errorf("ack=%v: the audited parameters say %v", ack, got.Parameters)
+		}
+		if ack && (err != nil || got.Error != "") {
+			t.Errorf("acknowledged: err=%v audited error=%q", err, got.Error)
+		}
+		if !ack && (err == nil || !strings.Contains(got.Error, "recovery objective")) {
+			t.Errorf("refused: err=%v audited error=%q: the refusal and its reason must be in the trail", err, got.Error)
+		}
 	}
 }
 

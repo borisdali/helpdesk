@@ -86,6 +86,21 @@ func TestTraceMiddleware_CarriesRecoveryApproval(t *testing.T) {
 		t.Errorf("approval in the tool context = %+v", got)
 	}
 
+	// The authorizations that ride along with it reach the tool context too,
+	// each only when the gateway set it.
+	if got.StopServing || got.BreachAcknowledged {
+		t.Errorf("an approval that sets neither carries them: %+v", got)
+	}
+	body = makeA2ABody(t, map[string]any{
+		"trace_id": "tr_z",
+		"recovery_approval": map[string]any{"type": "time", "value": "2026-10-27T14:05:00Z", "plan_digest": "d", "approved_by": "alice",
+			"acknowledged": true, "stop_serving": true, "breach_acknowledged": true},
+	}, "restore")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)))
+	if !got.Approved() || !got.StopServing || !got.BreachAcknowledged {
+		t.Errorf("approval in the tool context = %+v", got)
+	}
+
 	got = &RecoveryApproval{}
 	body = makeA2ABody(t, map[string]any{"trace_id": "tr_y"}, "restore")
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)))

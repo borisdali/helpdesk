@@ -696,15 +696,16 @@ Restores the backup chosen by the plan with `pgbackrest --stanza=<stanza> --delt
 2. Resolve the target; policy pre-check (`CheckTool` with `ActionDestructive`).
 3. **If `pg_isready` reports the instance accepting connections, refuse unless the approval allows stopping it** (below). A down instance goes straight on.
 4. **Recompute the plan; refuse unless it is `feasible` and its digest equals the approved one.** Not feasible means: no backup finished before the target, a gap in the archived WAL, or a target past the archive end (for a down instance).
-5. Quiesce (Kubernetes: scale the StatefulSet to 0).
-6. One maintenance script: refuse a standby (`standby.signal`), a running postmaster, or too little room beside the data directory to keep the `pg_wal` that is there; move the `pg_wal` segments aside; run the restore above.
-7. Record the prediction (target, backup, expected timeline) for `verify_restore_recovery`; audit the call.
+5. **Measure what the restore discards and check it against the database's recovery objective** ([OBJECTIVES.md](OBJECTIVES.md), [PITR.md §4](PITR.md#4-operating-it)). Under `enforcement: acknowledge`, refuse unless the approval carries `acknowledge_objective_breach` when the loss exceeds (or may exceed) the `rpo`, or the `rpo` could not be read. Under `enforcement: refuse`, refuse a loss that exceeds the `rpo` whatever is acknowledged. For a running instance the loss is measured here, at the stop, from the instance's clock carried forward from the step-1 probe below, not taken from the plan. A refusal here leaves the instance running. Under `warn` (the default) nothing is refused.
+6. Quiesce (Kubernetes: scale the StatefulSet to 0).
+7. One maintenance script: refuse a standby (`standby.signal`), a running postmaster, or too little room beside the data directory to keep the `pg_wal` that is there; move the `pg_wal` segments aside; run the restore above.
+8. Record the prediction (target, backup, expected timeline) for `verify_restore_recovery`; audit the call, including whether the breach was acknowledged.
 
 **A running instance** (`allow_stop_serving`, a separate flag the operator sets at the gate; never implied by approving the target). Every step before the stop leaves the instance running, and a failure at any of them says so:
 
 1. Ask the instance about itself (`psql`, local socket): refuse a standby, any replica in `pg_stat_replication`, `archive_mode` other than `on`/`always`, a Patroni/repmgr/pg_auto_failover/Stolon process, an LSN target ahead of its current position, or a time target ahead of its own clock. Its WAL position, timeline and clock are recorded as `pre_stop`.
 2. Flush the archive: `pg_switch_wal()`, then wait until no completed segment is waiting in `archive_status` and the archiver's `failed_count` has not moved. Refuse if that cannot be confirmed.
-3. Recompute the plan from the repository until the flushed WAL is in it (pgBackRest's async archive acknowledges a segment before it is there). It must be `feasible`, no longer need a flush, and carry the approved digest.
+3. Recompute the plan from the repository until the flushed WAL is in it (pgBackRest's async archive acknowledges a segment before it is there). It must be `feasible`, no longer need a flush, and carry the approved digest. Then the recovery-objective check in step 5 above runs, with the loss measured now.
 4. Stop it and keep it stopped: Docker/Podman a clean `pg_ctl stop -m fast` then `<runtime> stop`; systemd `sudo systemctl stop <unit>` (the VM's sudoers file needs that grant; `setup-pgbackrest-vm.sh` adds it); Kubernetes a clean stop then scale to 0. A stopped container's restore runs in a throwaway container from its image on its volumes, so the image must carry `/etc/pgbackrest.conf` (or it must be on a volume). Confirm it no longer answers.
 5. Run the restore script. If it refuses before changing anything (standby, live postmaster, no room), the instance is started again. If pgBackRest itself fails, the instance **stays stopped**, the result names `saved_wal`, and the error says so.
 
