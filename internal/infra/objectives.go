@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,12 +130,64 @@ func (p Percent) MarshalJSON() ([]byte, error) {
 	return json.Marshal(p.Value)
 }
 
-// Objectives are the recovery objectives set at one level. An unset field is
-// nil: it defers to the next level.
+// Recovery preference: what to favour when a recovery has to choose between
+// getting the database back sooner and losing less data. It decides how a
+// recommendation is ranked and how an option that breaches an objective is
+// treated; it never decides to act.
+const (
+	PreferenceAvailabilityFirst = "availability_first"
+	PreferenceDataFirst         = "data_first"
+)
+
+// Enforcement: what happens when a recovery would breach an objective.
+//
+//	warn         say so (the default; nothing is blocked)
+//	acknowledge  the person approving must acknowledge the breach, separately
+//	refuse       the recovery is refused
+const (
+	EnforceWarn        = "warn"
+	EnforceAcknowledge = "acknowledge"
+	EnforceRefuse      = "refuse"
+)
+
+var (
+	validPreferences  = []string{PreferenceAvailabilityFirst, PreferenceDataFirst}
+	validEnforcements = []string{EnforceWarn, EnforceAcknowledge, EnforceRefuse}
+)
+
+// Choice is a string setting restricted to a fixed set of values. A value that
+// is not a string does not fail the file: Invalid says why. Whether the string
+// is one of the allowed values is checked by Validate and ResolveObjectives.
+type Choice struct {
+	Value   string
+	Invalid string
+}
+
+func (c *Choice) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &c.Value); err != nil {
+		c.Invalid = fmt.Sprintf("expected a string, not %s", strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// MarshalJSON refuses an invalid value, for the same reason as Duration's.
+func (c Choice) MarshalJSON() ([]byte, error) {
+	if c.Invalid != "" {
+		return nil, fmt.Errorf("cannot write an invalid setting: %s", c.Invalid)
+	}
+	return json.Marshal(c.Value)
+}
+
+// Objectives are the recovery objectives and recovery policy set at one level.
+// An unset field is nil: it defers to the next level.
 type Objectives struct {
 	RPO             *Duration `json:"rpo,omitempty"`
 	RTO             *Duration `json:"rto,omitempty"`
 	AvailabilitySLO *Percent  `json:"availability_slo,omitempty"`
+	// RecoveryPreference is availability_first or data_first.
+	RecoveryPreference *Choice `json:"recovery_preference,omitempty"`
+	// Enforcement is warn, acknowledge or refuse. Unset means warn.
+	Enforcement *Choice `json:"enforcement,omitempty"`
 }
 
 // Environment is a named group of databases that share objectives.
@@ -179,6 +232,19 @@ func (o Objectives) problems() map[string]string {
 			out["availability_slo"] = fmt.Sprintf("availability_slo is a percentage greater than 0 and at most 100, got %v", o.AvailabilitySLO.Value)
 		}
 	}
+	choice := func(key string, c *Choice, allowed []string) {
+		if c == nil {
+			return
+		}
+		switch {
+		case c.Invalid != "":
+			out[key] = key + ": " + c.Invalid
+		case !slices.Contains(allowed, c.Value):
+			out[key] = fmt.Sprintf("%s must be one of %s, got %q", key, strings.Join(allowed, ", "), c.Value)
+		}
+	}
+	choice("recovery_preference", o.RecoveryPreference, validPreferences)
+	choice("enforcement", o.Enforcement, validEnforcements)
 	return out
 }
 
@@ -259,13 +325,26 @@ type ResolvedPercent struct {
 	Source string  `json:"source,omitempty"`
 }
 
+// ResolvedChoice is one choice setting after resolution.
+type ResolvedChoice struct {
+	Set    bool   `json:"set"`
+	Value  string `json:"value,omitempty"`
+	Source string `json:"source,omitempty"`
+}
+
 // ResolvedObjectives is what applies to one database.
 type ResolvedObjectives struct {
 	// Environment is the database's environment, "" when it has none.
-	Environment     string           `json:"environment,omitempty"`
-	RPO             ResolvedDuration `json:"rpo"`
-	RTO             ResolvedDuration `json:"rto"`
-	AvailabilitySLO ResolvedPercent  `json:"availability_slo"`
+	Environment        string           `json:"environment,omitempty"`
+	RPO                ResolvedDuration `json:"rpo"`
+	RTO                ResolvedDuration `json:"rto"`
+	AvailabilitySLO    ResolvedPercent  `json:"availability_slo"`
+	RecoveryPreference ResolvedChoice   `json:"recovery_preference"`
+	Enforcement        ResolvedChoice   `json:"enforcement"`
+	// EnforcementInvalid says the config set an enforcement and got it wrong.
+	// EffectiveEnforcement then answers acknowledge, not warn: a typo must not
+	// quietly weaken the check.
+	EnforcementInvalid bool `json:"enforcement_invalid,omitempty"`
 	// Problems says why an objective is unset although the config tried to set
 	// it: a value that cannot be read, or an environment that is not declared.
 	// A caller that finds an objective unset must show these, not treat it as
@@ -313,33 +392,65 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 		levels = append(levels, level{SourceDefault, c.Defaults.Objectives, "defaults.objectives"})
 	}
 
-	var doneRPO, doneRTO, doneAvail bool
-	for _, l := range levels {
-		p := l.o.problems()
-		if !doneRPO && l.o.RPO != nil {
-			doneRPO = true
-			if msg, bad := p["rpo"]; bad {
-				res.Problems = append(res.Problems, l.where+": "+msg)
-			} else {
-				res.RPO = ResolvedDuration{Set: true, Value: l.o.RPO.Duration, Source: l.source}
+	// Each setting resolves on its own: the first level that sets it decides,
+	// valid or not. An invalid one is reported and does not fall through.
+	settings := []struct {
+		key     string
+		present func(Objectives) bool
+		apply   func(r *ResolvedObjectives, o Objectives, source string)
+		invalid func(r *ResolvedObjectives)
+	}{
+		{"rpo", func(o Objectives) bool { return o.RPO != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.RPO = ResolvedDuration{Set: true, Value: o.RPO.Duration, Source: s}
+			}, nil},
+		{"rto", func(o Objectives) bool { return o.RTO != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.RTO = ResolvedDuration{Set: true, Value: o.RTO.Duration, Source: s}
+			}, nil},
+		{"availability_slo", func(o Objectives) bool { return o.AvailabilitySLO != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.AvailabilitySLO = ResolvedPercent{Set: true, Value: o.AvailabilitySLO.Value, Source: s}
+			}, nil},
+		{"recovery_preference", func(o Objectives) bool { return o.RecoveryPreference != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.RecoveryPreference = ResolvedChoice{Set: true, Value: o.RecoveryPreference.Value, Source: s}
+			}, nil},
+		{"enforcement", func(o Objectives) bool { return o.Enforcement != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.Enforcement = ResolvedChoice{Set: true, Value: o.Enforcement.Value, Source: s}
+			},
+			func(r *ResolvedObjectives) { r.EnforcementInvalid = true }},
+	}
+	for _, s := range settings {
+		for _, l := range levels {
+			if !s.present(l.o) {
+				continue
 			}
-		}
-		if !doneRTO && l.o.RTO != nil {
-			doneRTO = true
-			if msg, bad := p["rto"]; bad {
+			if msg, bad := l.o.problems()[s.key]; bad {
 				res.Problems = append(res.Problems, l.where+": "+msg)
+				if s.invalid != nil {
+					s.invalid(&res)
+				}
 			} else {
-				res.RTO = ResolvedDuration{Set: true, Value: l.o.RTO.Duration, Source: l.source}
+				s.apply(&res, l.o, l.source)
 			}
-		}
-		if !doneAvail && l.o.AvailabilitySLO != nil {
-			doneAvail = true
-			if msg, bad := p["availability_slo"]; bad {
-				res.Problems = append(res.Problems, l.where+": "+msg)
-			} else {
-				res.AvailabilitySLO = ResolvedPercent{Set: true, Value: l.o.AvailabilitySLO.Value, Source: l.source}
-			}
+			break
 		}
 	}
 	return res, true
+}
+
+// EffectiveEnforcement is what to do when a recovery would breach an
+// objective: the configured enforcement, warn when none is set, and
+// acknowledge when the configured one is invalid (a typo must not quietly
+// weaken the check).
+func (r ResolvedObjectives) EffectiveEnforcement() string {
+	switch {
+	case r.EnforcementInvalid:
+		return EnforceAcknowledge
+	case r.Enforcement.Set:
+		return r.Enforcement.Value
+	}
+	return EnforceWarn
 }

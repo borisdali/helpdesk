@@ -68,6 +68,17 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   next level.
 - **`rto`** must be greater than zero.
 - **`availability_slo`** is a percentage greater than 0 and at most 100.
+- **`recovery_preference`** is `availability_first` or `data_first`: what to favour when a recovery has to choose
+  between getting the database back sooner and losing less data. It will decide how a recommendation is ranked
+  and how an option that breaches an objective is treated. It never decides to act. Unset means no preference.
+- **`enforcement`** is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
+  `warn` says so and blocks nothing; `acknowledge` makes the person approving acknowledge the breach separately;
+  `refuse` refuses the recovery. Unset means `warn`, which is the behaviour from before it existed. An invalid
+  value is treated as `acknowledge`, not `warn`: a typo must not quietly weaken the check.
+- Both are exact lowercase strings. `Refuse` is an error, not a guess.
+
+Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
+production environment can be `data_first` with `acknowledge` while one database in it overrides to `refuse`.
 
 A config that sets none of these loads exactly as before.
 
@@ -110,7 +121,8 @@ it spends.
 | `rpo`, `rto`, `availability_slo` declared, three-level resolution with sources | Built |
 | Data-loss estimate for PITR, set against the `rpo` | Built ([PITR.md §4](PITR.md#4-operating-it)) |
 | Extra acknowledgement at the gate when the loss exceeds the `rpo`, re-measured when the instance is stopped | Not built |
-| `recovery_preference` (`availability_first` or `data_first`) per environment and database | Not built |
+| `recovery_preference` and `enforcement` in the config: validated, resolved per database, environment and fleet with sources | Built |
+| Anything that reads them (ranking recommendations, the gate's acknowledge/refuse behaviour) | Not built |
 | A budget window on `availability_slo` and the number of worst-case recoveries it absorbs (budget ÷ `rto`) | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |

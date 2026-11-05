@@ -389,6 +389,156 @@ func TestResolveObjectives_NoDefaultsBlock(t *testing.T) {
 	}
 }
 
+const policyConfig = `{
+  "defaults": {"objectives": {"rpo": "1h", "enforcement": "warn"}},
+  "environments": {
+    "prod":    {"objectives": {"rpo": "5m", "recovery_preference": "data_first", "enforcement": "acknowledge"}},
+    "staging": {"objectives": {"recovery_preference": "availability_first"}},
+    "dev":     {}
+  },
+  "db_servers": {
+    "prod-orders": {"environment": "prod"},
+    "prod-ledger": {"environment": "prod", "objectives": {"enforcement": "refuse"}},
+    "prod-cache":  {"environment": "prod", "objectives": {"recovery_preference": "availability_first"}},
+    "stage":       {"environment": "staging"},
+    "dev":         {"environment": "dev"},
+    "adhoc":       {}
+  }
+}`
+
+func TestResolveObjectives_PreferenceAndEnforcement(t *testing.T) {
+	c := load(t, policyConfig)
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for id, w := range map[string]struct {
+		pref, prefSrc, enf, enfSrc, effective string
+	}{
+		"prod-orders": {"data_first", "environment:prod", "acknowledge", "environment:prod", "acknowledge"},
+		// The database's own enforcement; the preference still from the environment.
+		"prod-ledger": {"data_first", "environment:prod", "refuse", "database", "refuse"},
+		// Its own preference; the enforcement still from the environment.
+		"prod-cache": {"availability_first", "database", "acknowledge", "environment:prod", "acknowledge"},
+		// The environment sets only a preference; enforcement falls to the fleet default.
+		"stage": {"availability_first", "environment:staging", "warn", "default", "warn"},
+		// Nothing set above the default: no preference at all.
+		"dev":   {"", "", "warn", "default", "warn"},
+		"adhoc": {"", "", "warn", "default", "warn"},
+	} {
+		got, _ := c.ResolveObjectives(id)
+		if got.RecoveryPreference.Value != w.pref || got.RecoveryPreference.Source != w.prefSrc || got.RecoveryPreference.Set != (w.pref != "") {
+			t.Errorf("%s preference = %+v, want %q from %q", id, got.RecoveryPreference, w.pref, w.prefSrc)
+		}
+		if got.Enforcement.Value != w.enf || got.Enforcement.Source != w.enfSrc {
+			t.Errorf("%s enforcement = %+v, want %q from %q", id, got.Enforcement, w.enf, w.enfSrc)
+		}
+		if got.EffectiveEnforcement() != w.effective {
+			t.Errorf("%s effective enforcement = %s, want %s", id, got.EffectiveEnforcement(), w.effective)
+		}
+		if len(got.Problems) != 0 {
+			t.Errorf("%s problems = %v", id, got.Problems)
+		}
+	}
+}
+
+// With nothing configured the behaviour is what it was before enforcement
+// existed: flag, never block.
+func TestEffectiveEnforcement_DefaultsToWarn(t *testing.T) {
+	c := load(t, `{"db_servers": {"a": {}}}`)
+	got, _ := c.ResolveObjectives("a")
+	if got.Enforcement.Set || got.EffectiveEnforcement() != EnforceWarn {
+		t.Errorf("enforcement = %+v, effective %s", got.Enforcement, got.EffectiveEnforcement())
+	}
+}
+
+func TestValidate_PreferenceAndEnforcement(t *testing.T) {
+	for name, tc := range map[string]struct{ body, want string }{
+		"an unknown enforcement": {
+			`{"defaults": {"objectives": {"enforcement": "block"}}}`,
+			`enforcement must be one of warn, acknowledge, refuse, got "block"`,
+		},
+		"an unknown preference": {
+			`{"environments": {"prod": {"objectives": {"recovery_preference": "fast"}}}}`,
+			`recovery_preference must be one of availability_first, data_first, got "fast"`,
+		},
+		// Exact match: "Refuse" is not "refuse". A near miss is an error, not a guess.
+		"a case near miss": {
+			`{"db_servers": {"a": {"objectives": {"enforcement": "Refuse"}}}}`,
+			`got "Refuse"`,
+		},
+		"not a string": {
+			`{"db_servers": {"a": {"objectives": {"recovery_preference": 5}}}}`,
+			`expected a string, not 5`,
+		},
+		"an empty string": {
+			`{"db_servers": {"a": {"objectives": {"enforcement": ""}}}}`,
+			`got ""`,
+		},
+	} {
+		err := load(t, tc.body).Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to contain %q", name, err, tc.want)
+		}
+	}
+}
+
+// A typo in enforcement must not quietly weaken the check to warn.
+func TestResolveObjectives_InvalidEnforcementFailsTowardCaution(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"enforcement": "warn"}},
+	  "db_servers": {"typo": {"objectives": {"enforcement": "refuze"}}, "fine": {}}
+	}`)
+	got, _ := c.ResolveObjectives("typo")
+	if got.Enforcement.Set || !got.EnforcementInvalid {
+		t.Errorf("an invalid enforcement fell through or was accepted: %+v", got)
+	}
+	if got.EffectiveEnforcement() != EnforceAcknowledge {
+		t.Errorf("effective = %s, want acknowledge (not the default's warn)", got.EffectiveEnforcement())
+	}
+	if len(got.Problems) != 1 || !strings.Contains(got.Problems[0], `got "refuze"`) {
+		t.Errorf("problems = %v", got.Problems)
+	}
+	if fine, _ := c.ResolveObjectives("fine"); fine.EnforcementInvalid || fine.EffectiveEnforcement() != EnforceWarn {
+		t.Errorf("a typo elsewhere leaked: %+v", fine)
+	}
+}
+
+// An invalid preference, unlike enforcement, simply resolves as unset: with no
+// preference nothing is ranked, which is the pre-preference behaviour.
+func TestResolveObjectives_InvalidPreferenceBlocksItself(t *testing.T) {
+	c := load(t, `{
+	  "environments": {"prod": {"objectives": {"recovery_preference": "data_first"}}},
+	  "db_servers": {"a": {"environment": "prod", "objectives": {"recovery_preference": "quick"}}}
+	}`)
+	got, _ := c.ResolveObjectives("a")
+	if got.RecoveryPreference.Set || len(got.Problems) != 1 {
+		t.Errorf("an invalid preference fell through to the environment's: %+v", got)
+	}
+}
+
+func TestChoice_MarshalAndRoundTrip(t *testing.T) {
+	c := load(t, policyConfig)
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	for id := range c.DBServers {
+		a, _ := c.ResolveObjectives(id)
+		b, _ := back.ResolveObjectives(id)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%s: %+v became %+v", id, a, b)
+		}
+	}
+	bad := load(t, `{"defaults": {"objectives": {"enforcement": 5}}}`)
+	if raw, err := json.Marshal(bad); err == nil {
+		t.Errorf("an invalid setting was written out: %s", raw)
+	}
+}
+
 func TestLogProblems(t *testing.T) {
 	var lines []string
 	log := func(msg string, args ...any) {
