@@ -503,6 +503,70 @@ func TestResolveObjectives_InvalidEnforcementFailsTowardCaution(t *testing.T) {
 	}
 }
 
+// A misspelt environment name must not weaken a strict environment to warn: the
+// database cannot tell which enforcement its real environment would have set.
+func TestEffectiveEnforcement_UndeclaredEnvironmentFailsTowardCaution(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"enforcement": "warn"}},
+	  "environments": {"prod": {"objectives": {"enforcement": "refuse"}}},
+	  "db_servers": {
+	    "typo":         {"environment": "prdo"},
+	    "typo-own":     {"environment": "prdo", "objectives": {"enforcement": "refuse"}},
+	    "typo-own-warn": {"environment": "prdo", "objectives": {"enforcement": "warn"}},
+	    "prod":         {"environment": "prod"},
+	    "none":         {}
+	  }
+	}`)
+	for id, want := range map[string]string{
+		// The default's warn is deliberately not used for a database whose
+		// environment is unknown, and prod's refuse cannot be known: acknowledge.
+		"typo": EnforceAcknowledge,
+		// What the database says itself is honoured, whatever the environment.
+		"typo-own":      EnforceRefuse,
+		"typo-own-warn": EnforceWarn,
+		// A real environment, and no environment at all, are unaffected.
+		"prod": EnforceRefuse,
+		"none": EnforceWarn,
+	} {
+		got, _ := c.ResolveObjectives(id)
+		if got.EffectiveEnforcement() != want {
+			t.Errorf("%s: effective = %s, want %s (%+v)", id, got.EffectiveEnforcement(), want, got)
+		}
+	}
+	if got, _ := c.ResolveObjectives("typo"); len(got.Problems) == 0 {
+		t.Error("the unknown environment was not reported")
+	}
+}
+
+// An invalid enforcement at the environment or fleet level reaches every
+// database that inherits it, and a database's own valid setting still wins.
+func TestEffectiveEnforcement_InvalidInheritedValue(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"enforcement": "warnn"}},
+	  "environments": {"prod": {"objectives": {"enforcement": "refuze"}}, "dev": {}},
+	  "db_servers": {
+	    "prod-a":   {"environment": "prod"},
+	    "prod-own": {"environment": "prod", "objectives": {"enforcement": "refuse"}},
+	    "dev-a":    {"environment": "dev"},
+	    "bare":     {}
+	  }
+	}`)
+	for id, want := range map[string]string{
+		"prod-a":   EnforceAcknowledge, // the environment's typo
+		"prod-own": EnforceRefuse,      // its own valid setting wins over it
+		"dev-a":    EnforceAcknowledge, // the fleet default's typo
+		"bare":     EnforceAcknowledge,
+	} {
+		got, _ := c.ResolveObjectives(id)
+		if got.EffectiveEnforcement() != want {
+			t.Errorf("%s: effective = %s, want %s (%+v)", id, got.EffectiveEnforcement(), want, got)
+		}
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `got "refuze"`) || !strings.Contains(err.Error(), `got "warnn"`) {
+		t.Errorf("Validate = %v", err)
+	}
+}
+
 // An invalid preference, unlike enforcement, simply resolves as unset: with no
 // preference nothing is ranked, which is the pre-preference behaviour.
 func TestResolveObjectives_InvalidPreferenceBlocksItself(t *testing.T) {

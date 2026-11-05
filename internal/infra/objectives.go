@@ -341,9 +341,10 @@ type ResolvedObjectives struct {
 	AvailabilitySLO    ResolvedPercent  `json:"availability_slo"`
 	RecoveryPreference ResolvedChoice   `json:"recovery_preference"`
 	Enforcement        ResolvedChoice   `json:"enforcement"`
-	// EnforcementInvalid says the config set an enforcement and got it wrong.
-	// EffectiveEnforcement then answers acknowledge, not warn: a typo must not
-	// quietly weaken the check.
+	// EnforcementInvalid says the enforcement cannot be trusted: the config set
+	// one and got it wrong, or the database names an environment that is not
+	// declared and sets none of its own. EffectiveEnforcement then answers
+	// acknowledge, not warn: a typo must not quietly weaken the check.
 	EnforcementInvalid bool `json:"enforcement_invalid,omitempty"`
 	// Problems says why an objective is unset although the config tried to set
 	// it: a value that cannot be read, or an environment that is not declared.
@@ -438,13 +439,21 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 			break
 		}
 	}
+	// A database in an environment that is not declared cannot tell which
+	// enforcement its environment would have set: it may well be a strict one.
+	// Unset would mean warn, so a typo in the environment name would quietly
+	// weaken the check exactly as a typo in the enforcement itself would.
+	if _, known := c.Environments[db.Environment]; db.Environment != "" && !known && !res.Enforcement.Set {
+		res.EnforcementInvalid = true
+	}
 	return res, true
 }
 
 // EffectiveEnforcement is what to do when a recovery would breach an
 // objective: the configured enforcement, warn when none is set, and
-// acknowledge when the configured one is invalid (a typo must not quietly
-// weaken the check).
+// acknowledge when it cannot be trusted: the configured value is invalid, or
+// the database names an environment that is not declared (a typo must not
+// quietly weaken the check).
 func (r ResolvedObjectives) EffectiveEnforcement() string {
 	switch {
 	case r.EnforcementInvalid:

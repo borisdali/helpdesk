@@ -74,7 +74,10 @@ An environment does not imply a tag and a tag does not imply an environment. A d
 - **`enforcement`** is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
   `warn` says so and blocks nothing; `acknowledge` makes the person approving acknowledge the breach separately;
   `refuse` refuses the recovery. Unset means `warn`, which is the behaviour from before it existed. An invalid
-  value is treated as `acknowledge`, not `warn`: a typo must not quietly weaken the check.
+  value, inherited or not, is treated as `acknowledge`, not `warn`. So is a database that names an environment
+  that is not declared and sets no enforcement of its own, because it cannot tell which enforcement its real
+  environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
+  honoured.
 - Both are exact lowercase strings. `Refuse` is an error, not a guess.
 
 Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
