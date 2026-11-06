@@ -37,10 +37,12 @@ func sampleDecision() RecoveryDecision {
 		Options: []DecisionOption{{
 			Name: "point_in_time_restore", Chosen: false,
 			LossBasis: "live_instance", LossSeconds: rdI64(65563), LossBytes: rdU64(16 << 20), LossAsOf: "2026-11-04T19:51:50Z",
-			LossUnmeasured: []string{"the number of transactions"},
-			Verdict:        "exceeds", VerdictDetail: "18h 12m 43s discarded against an RPO of 15m 00s", Gate: "acknowledge",
+			LossUnmeasured:     []string{"the number of transactions"},
+			LossAtLeastSeconds: rdI64(1000), LossAtLeastBasis: "the segment holding the target reached the repository at 2026-11-04T01:40:12Z",
+			Verdict: "exceeds", VerdictDetail: "18h 12m 43s discarded against an RPO of 15m 00s", Gate: "acknowledge",
 		}},
-		Approval: &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true},
+		DurationSeconds: rdI64(2472),
+		Approval:        &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true},
 	}
 }
 
@@ -111,6 +113,10 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the verdict", func(d *RecoveryDecision) { d.Options[0].Verdict = "within" }},
 		{"the loss", func(d *RecoveryDecision) { *d.Options[0].LossSeconds = 1 }},
 		{"the configuration used", func(d *RecoveryDecision) { d.Objectives.ConfigDigest = "0000000000000000" }},
+		{"the recovery duration", func(d *RecoveryDecision) { *d.DurationSeconds = 1 }},
+		{"the lower bound", func(d *RecoveryDecision) { *d.Options[0].LossAtLeastSeconds = 1 }},
+		{"what the lower bound rests on", func(d *RecoveryDecision) { d.Options[0].LossAtLeastBasis = "something else" }},
+		{"who decided", func(d *RecoveryDecision) { d.DecidedBy = "mallory" }},
 	} {
 		ev := NewRecoveryDecisionEvent("trace_1", "sess_1", sampleDecision())
 		ev.EventID, ev.Timestamp = base.EventID, base.Timestamp

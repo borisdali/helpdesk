@@ -87,6 +87,55 @@ func TestEvaluateWALContinuity_KeepsEachArchivedSegmentsTime(t *testing.T) {
 	t.Logf("fixture: %d segments, archive end %s at %s, segment size %d", len(w.segments), w.ArchiveEndWAL, w.ArchiveEndTime, w.SegmentSizeBytes)
 }
 
+// A segment archived on both sides of a fork (segment 5: timeline 1's copy and
+// timeline 2's) is read by replay from the child. The bound must use the copy
+// replay uses, whichever is older, because it is the topology that decides which
+// history was lived, not which file is newer. segListing gives each entry a time
+// that grows with its position in the list, so the order below sets the times.
+func TestEvaluateWAL_ForkSegmentUsesTheCopyReplayReads(t *testing.T) {
+	tl := threeTimelines
+	for name, order := range map[string][]string{
+		// The parent's copy of segment 5 is older than the child's.
+		"parent copy older": {
+			"000000010000000000000003", "000000010000000000000004", "000000010000000000000005",
+			"000000020000000000000005", "000000020000000000000006", "000000020000000000000007",
+			"000000030000000000000008", "000000030000000000000009",
+		},
+		// The parent's copy is the newest file in the listing.
+		"parent copy newest": {
+			"000000010000000000000003", "000000010000000000000004",
+			"000000020000000000000005", "000000020000000000000006", "000000020000000000000007",
+			"000000030000000000000008", "000000030000000000000009", "000000010000000000000005",
+		},
+	} {
+		got := evaluateWALContinuity(tl.in, tl.top, tl.history, segListing(order...))
+		if got.Status != WALContinuous {
+			t.Fatalf("%s: %s: %s", name, got.Status, got.Detail)
+		}
+		// Find the child's time in the listing order: the entry named 2:5.
+		var childTime int64
+		for i, n := range order {
+			if n == "000000020000000000000005" {
+				childTime = 1790000000 + int64(i)
+			}
+		}
+		tli, at, segno, ok := got.archivedAt(5 * got.SegmentSizeBytes)
+		if !ok || tli != 2 || segno != 5 || at.Unix() != childTime {
+			t.Errorf("%s: segment 5 = timeline %d at %d (%v), want timeline 2 at %d", name, tli, at.Unix(), ok, childTime)
+		}
+		// Each timeline's own range is read from that timeline.
+		for seg, wantTLI := range map[uint64]uint32{3: 1, 4: 1, 6: 2, 7: 2, 8: 3, 9: 3} {
+			if tli, _, _, ok := got.archivedAt(seg * got.SegmentSizeBytes); !ok || tli != wantTLI {
+				t.Errorf("%s: segment %d from timeline %d (%v), want %d", name, seg, tli, ok, wantTLI)
+			}
+		}
+		// Before the backup there is nothing on the path.
+		if _, _, _, ok := got.archivedAt(2 * got.SegmentSizeBytes); ok {
+			t.Errorf("%s: a segment before the backup has an archive time", name)
+		}
+	}
+}
+
 func TestLossAtLeast(t *testing.T) {
 	w := lbWAL()
 	lsn := uint64(10*lbSegment + 0x100) // segment 10, archived 12:10:00

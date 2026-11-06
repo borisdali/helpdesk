@@ -580,7 +580,11 @@ func TestHandleGetIncident_RecoveryDecisions_AcrossHopTraces(t *testing.T) {
 		nextRunByPriorID: map[string]*audit.PlaybookRun{"plr_rdx_t1": remediation},
 		recoveryEventsByTraceID: map[string][]audit.Event{
 			"tr_rdx_triage": {rdc("rdc_a", time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStagePlan, Decision: audit.RecoveryDecisionPlanned})},
-			"plr_rdx_t1":    {rdc("rdc_b", 4*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageGate, Decision: audit.RecoveryDecisionApproved, DecidedBy: "alice"})},
+			// The gate and the outcome are both keyed to the incident's entry run.
+			"plr_rdx_t1": {
+				rdc("rdc_b", 4*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageGate, Decision: audit.RecoveryDecisionApproved, DecidedBy: "alice"}),
+				rdc("rdc_d", 47*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageOutcome, Decision: audit.OutcomeResolved, RunID: "plr_rdx_r1"}),
+			},
 			"tr_rdx_remediation": {rdc("rdc_c", 6*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageExecution, Decision: audit.RecoveryDecisionRefused,
 				Reason: "needs acknowledge_objective_breach"})},
 		},
@@ -600,7 +604,7 @@ func TestHandleGetIncident_RecoveryDecisions_AcrossHopTraces(t *testing.T) {
 	for _, d := range n.RecoveryDecisions {
 		got = append(got, d.Decision.Stage+":"+d.Decision.Decision)
 	}
-	want := []string{"plan:planned", "gate:approved", "execution:refused"}
+	want := []string{"plan:planned", "gate:approved", "execution:refused", "outcome:resolved"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("recovery decisions = %v, want %v (journeys %+v)", got, want, n.Journeys)
 	}

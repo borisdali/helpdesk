@@ -230,6 +230,32 @@ func TestFormatRecoveryDecisions_OutcomeAgainstTheRTO(t *testing.T) {
 	}
 }
 
+// A lower bound is said as one: never labelled exact, and never lost.
+func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
+	render := func(opt audit.DecisionOption) string {
+		return formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{
+			Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{opt}}}})
+	}
+	withBytes := render(audit.DecisionOption{Name: "point_in_time_restore", LossBasis: "live_instance", LossBytes: rdU(448 << 20),
+		LossAtLeastSeconds: rdI(16*86400 + 13*3600 + 28*60), Verdict: "exceeds", Gate: "refuse"})
+	for _, want := range []string{"loss 448.0 MiB of WAL (live_instance, exact); at least 16d 13h 28m of history", "→ exceeds", "enforcement refuses it"} {
+		if !strings.Contains(withBytes, want) {
+			t.Errorf("missing %q in:\n%s", want, withBytes)
+		}
+	}
+	if strings.Contains(withBytes, "at least 16d 13h 28m of history (live_instance, exact)") {
+		t.Errorf("the lower bound is labelled exact:\n%s", withBytes)
+	}
+	only := render(audit.DecisionOption{Name: "point_in_time_restore", LossAtLeastSeconds: rdI(600), Verdict: "not_comparable"})
+	if !strings.Contains(only, "point_in_time_restore: loss at least 10m 00s of history → not_comparable") {
+		t.Errorf("a bound on its own:\n%s", only)
+	}
+	upper := render(audit.DecisionOption{Name: "x", LossBasis: "archive_end", LossBytes: rdU(32 << 20), LossUpperBound: true, LossAtLeastSeconds: rdI(600)})
+	if !strings.Contains(upper, "loss 32.0 MiB of WAL (archive_end, at most); at least 10m 00s of history") {
+		t.Errorf("upper-bounded bytes beside a lower bound:\n%s", upper)
+	}
+}
+
 func TestRecoverySummaryLine(t *testing.T) {
 	if got := recoverySummaryLine("refused", "exceeds"); got != "refused (exceeds the recovery objective)" {
 		t.Errorf("got %q", got)

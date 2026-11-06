@@ -121,15 +121,21 @@ func rdOption(opt audit.DecisionOption) string {
 	if opt.LossBytes != nil {
 		loss = append(loss, rdBytes(*opt.LossBytes)+" of WAL")
 	}
-	if opt.LossAtLeastSeconds != nil {
-		loss = append(loss, "at least "+rdSpan(*opt.LossAtLeastSeconds)+" of history")
-	}
 	if len(loss) > 0 {
 		exact := "exact"
 		if opt.LossUpperBound {
 			exact = "at most"
 		}
 		fmt.Fprintf(&b, ": loss %s (%s, %s)", strings.Join(loss, ", "), opt.LossBasis, exact)
+	}
+	// A lower bound is not exact whatever the basis of the other figures is, so
+	// it is said apart from them, in its own words.
+	if opt.LossAtLeastSeconds != nil {
+		sep := "; "
+		if len(loss) == 0 {
+			sep = ": loss "
+		}
+		fmt.Fprintf(&b, "%sat least %s of history", sep, rdSpan(*opt.LossAtLeastSeconds))
 	}
 	if opt.Verdict != "" {
 		fmt.Fprintf(&b, " → %s", opt.Verdict)

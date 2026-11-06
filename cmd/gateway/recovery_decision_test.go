@@ -288,6 +288,59 @@ func TestRecordRecoveryOutcome_EdgeCases(t *testing.T) {
 	gw.recordRecoveryOutcome(context.Background(), run.RunID, audit.OutcomeResolved)
 }
 
+// Through the real approval flow, not a direct call: approving the gate starts
+// the remediation hop, the hop completes, and its outcome is on record, once,
+// under the incident's entry run.
+func TestHandleProceedEscalation_PITR_RecordsTheOutcomeOfTheRemediationHop(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	gated := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	// The fake auditd names the run it creates plr_rec1; give it a history as
+	// auditd would, so the gateway can read it back when it completes.
+	hop := &audit.PlaybookRun{
+		RunID: "plr_rec1", EntryRunID: gated.RunID, SeriesID: pitrRemediateSeries,
+		ConnectionString: gated.ConnectionString, RecoveryTarget: gated.RecoveryTarget,
+		StartedAt: time.Now().UTC().Add(-90 * time.Second), CompletedAt: time.Now().UTC(),
+	}
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{gated.RunID: gated, hop.RunID: hop},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	store, withAuditor := gateDecisionStore(t)
+	gw.auditor = withAuditor.auditor
+	addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+
+	if rec := postProceedEscalation(t, gw, gated.RunID, pitrApprovalBody); rec.Code != http.StatusOK {
+		t.Fatalf("approve: got %d; %s", rec.Code, rec.Body.String())
+	}
+	// A hop's completion is recorded in the background, after the response.
+	var outcomes []audit.RecoveryDecision
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		outcomes = outcomes[:0]
+		for _, d := range gateDecisions(t, store, gated.RunID) {
+			if d.Stage == audit.RecoveryStageOutcome {
+				outcomes = append(outcomes, d)
+			}
+		}
+		if len(outcomes) > 0 {
+			break
+		}
+	}
+	// Give a duplicate time to show itself.
+	time.Sleep(200 * time.Millisecond)
+	outcomes = outcomes[:0]
+	for _, d := range gateDecisions(t, store, gated.RunID) {
+		if d.Stage == audit.RecoveryStageOutcome {
+			outcomes = append(outcomes, d)
+		}
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("outcome events = %d: %+v", len(outcomes), gateDecisions(t, store, gated.RunID))
+	}
+	o := outcomes[0]
+	if o.RunID != hop.RunID || o.RecoveryTarget != gated.RecoveryTarget || o.DurationSeconds == nil || *o.DurationSeconds < 80 || *o.DurationSeconds > 100 {
+		t.Errorf("outcome = %+v (duration %v)", o, o.DurationSeconds)
+	}
+}
+
 // A gate that is not about a recovery target leaves no recovery decision.
 func TestHandleProceedEscalation_OtherGateLeavesNoRecoveryDecision(t *testing.T) {
 	triage, remediate := pitrPlaybooks()
