@@ -182,6 +182,54 @@ func TestPrintIncidentJourney_ShowsTheRecoveryDecisionBetweenRemediationAndEvalu
 	}
 }
 
+// The outcome line sets the recovery duration against the rto that was in force,
+// from the objectives recorded in the same decision.
+func TestFormatRecoveryDecisions_OutcomeAgainstTheRTO(t *testing.T) {
+	outcome := func(secs *int64) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(44), Decision: audit.RecoveryDecision{
+			Stage: "outcome", Decision: "resolved", RunID: "plr_r1", DurationSeconds: secs, RecoveryTarget: "time=2026-11-04T01:39:07Z"}}
+	}
+	exec := narrativeRecoveryDecision{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded", Objectives: rdObjectivesFixture("0123456789abcdef")}} // rto 30m, from "default"
+
+	exceeded := formatRecoveryDecisions([]narrativeRecoveryDecision{exec, outcome(rdI(41*60 + 12))})
+	for _, want := range []string{"resolved", "recovery duration 41m 12s", "(rto 30m 00s [default]: exceeded by 11m 12s)",
+		"it is not the downtime"} {
+		if !strings.Contains(exceeded, want) {
+			t.Errorf("missing %q in:\n%s", want, exceeded)
+		}
+	}
+	within := formatRecoveryDecisions([]narrativeRecoveryDecision{exec, outcome(rdI(20 * 60))})
+	if !strings.Contains(within, "recovery duration 20m 00s (rto 30m 00s [default]: within)") {
+		t.Errorf("within:\n%s", within)
+	}
+	exactly := formatRecoveryDecisions([]narrativeRecoveryDecision{exec, outcome(rdI(1800))})
+	if !strings.Contains(exactly, ": within)") {
+		t.Errorf("exactly at the rto is within it:\n%s", exactly)
+	}
+
+	// No rto in force, no objectives at all, no duration: said plainly, never guessed.
+	noRTO := exec
+	noRTO.Decision.Objectives = &audit.ObjectivesInForce{Enforcement: "warn"}
+	if got := formatRecoveryDecisions([]narrativeRecoveryDecision{noRTO, outcome(rdI(600))}); !strings.Contains(got, "recovery duration 10m 00s (no rto set)") {
+		t.Errorf("no rto:\n%s", got)
+	}
+	got := formatRecoveryDecisions([]narrativeRecoveryDecision{outcome(rdI(600))})
+	if !strings.Contains(got, "recovery duration 10m 00s") || strings.Contains(got, "rto") && !strings.Contains(got, "not the downtime") {
+		t.Errorf("no objectives recorded:\n%s", got)
+	}
+	if strings.Contains(got, "(rto") || strings.Contains(got, "(no rto") {
+		t.Errorf("a verdict without objectives to base it on:\n%s", got)
+	}
+	if got := formatRecoveryDecisions([]narrativeRecoveryDecision{exec, outcome(nil)}); !strings.Contains(got, "recovery duration unknown") {
+		t.Errorf("unknown duration:\n%s", got)
+	}
+	// The caveat appears only when there is an outcome to caveat.
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{exec}), "not the downtime") {
+		t.Error("the downtime caveat appears with no outcome")
+	}
+}
+
 func TestRecoverySummaryLine(t *testing.T) {
 	if got := recoverySummaryLine("refused", "exceeds"); got != "refused (exceeds the recovery objective)" {
 		t.Errorf("got %q", got)

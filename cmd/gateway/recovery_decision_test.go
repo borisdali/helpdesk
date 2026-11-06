@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
 )
@@ -168,6 +169,123 @@ func TestHandleProceedEscalation_PITR_RecordsTheGateDecision(t *testing.T) {
 	if len(got) != 1 || got[0].Decision != audit.RecoveryDecisionDenied || got[0].DecidedBy != "bob" || got[0].Reason != "restore to the wrong moment" {
 		t.Fatalf("denied gate: %+v", got)
 	}
+}
+
+// ── the outcome stage ────────────────────────────────────────────────────────
+
+// outcomeGateway is a gateway whose auditd knows runs, and whose audit store
+// records what the gateway writes.
+func outcomeGateway(t *testing.T, runs map[string]*audit.PlaybookRun) (*Gateway, *audit.Store) {
+	t.Helper()
+	triage, remediate := pitrPlaybooks()
+	auditd := newRecoveryAuditd(t, runs,
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	store, withAuditor := gateDecisionStore(t)
+	gw.auditor = withAuditor.auditor
+	return gw, store
+}
+
+func remediationRun() *audit.PlaybookRun {
+	start := time.Date(2026, 11, 4, 14, 3, 0, 0, time.UTC)
+	return &audit.PlaybookRun{
+		RunID: "plr_out_r1", EntryRunID: "plr_out_t1", SeriesID: pitrRemediateSeries,
+		// A full DSN, as the harness passes: its password must not be recorded.
+		ConnectionString: "host=localhost port=15435 dbname=testdb user=postgres password=testpass",
+		RecoveryTarget:   "time=2026-11-04T01:39:07Z",
+		StartedAt:        start, CompletedAt: start.Add(41*time.Minute + 12*time.Second),
+	}
+}
+
+func TestRecordRecoveryOutcome_RecordsHowItEndedAndHowLong(t *testing.T) {
+	run := remediationRun()
+	gw, store := outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+
+	gw.recordPlaybookRunComplete(context.Background(), run.RunID, audit.OutcomeResolved, "", "", "restored", "", "", nil, false, "")
+
+	// Keyed to the incident's entry run, so the narrative finds it.
+	got := gateDecisions(t, store, "plr_out_t1")
+	if len(got) != 1 {
+		t.Fatalf("outcome decisions = %+v", got)
+	}
+	d := got[0]
+	if d.Stage != audit.RecoveryStageOutcome || d.Decision != audit.OutcomeResolved || d.RunID != run.RunID ||
+		d.RecoveryTarget != "time=2026-11-04T01:39:07Z" {
+		t.Errorf("decision = %+v", d)
+	}
+	if d.DurationSeconds == nil || *d.DurationSeconds != 41*60+12 {
+		t.Errorf("duration = %v, want 2472s", d.DurationSeconds)
+	}
+	raw, _ := json.Marshal(got)
+	if strings.Contains(string(raw), "testpass") {
+		t.Errorf("the password is in the outcome: %s", raw)
+	}
+}
+
+func TestRecordRecoveryOutcome_EveryTerminalOutcomeIsRecordedAsItIs(t *testing.T) {
+	for _, outcome := range []string{audit.OutcomeResolved, audit.OutcomeEscalated, audit.OutcomeAbandoned, audit.OutcomeDiagnosed} {
+		run := remediationRun()
+		gw, store := outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+		gw.recordPlaybookRunComplete(context.Background(), run.RunID, outcome, "", "", "", "", "", nil, false, "")
+		got := gateDecisions(t, store, "plr_out_t1")
+		if len(got) != 1 || got[0].Decision != outcome {
+			t.Errorf("%s: decisions = %+v", outcome, got)
+		}
+	}
+}
+
+// Only the hop that carries out a point-in-time restore, and only when it
+// ends; nothing else leaves a recovery outcome.
+func TestRecordRecoveryOutcome_OnlyForThePITRRemediationWhenItEnds(t *testing.T) {
+	other := remediationRun()
+	other.SeriesID = "pbs_db_restart_action"
+	gw, store := outcomeGateway(t, map[string]*audit.PlaybookRun{other.RunID: other})
+	gw.recordPlaybookRunComplete(context.Background(), other.RunID, audit.OutcomeResolved, "", "", "", "", "", nil, false, "")
+	if got := gateDecisions(t, store, "plr_out_t1"); len(got) != 0 {
+		t.Errorf("another playbook left a recovery outcome: %+v", got)
+	}
+
+	run := remediationRun()
+	gw, store = outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+	gw.recordPlaybookRunComplete(context.Background(), run.RunID, audit.OutcomeGatePending, "", "", "", "", "", nil, false, "")
+	if got := gateDecisions(t, store, "plr_out_t1"); len(got) != 0 {
+		t.Errorf("a run that is not finished left a recovery outcome: %+v", got)
+	}
+}
+
+func TestRecordRecoveryOutcome_EdgeCases(t *testing.T) {
+	// No entry run recorded: keyed to the run itself.
+	run := remediationRun()
+	run.EntryRunID = ""
+	gw, store := outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+	gw.recordPlaybookRunComplete(context.Background(), run.RunID, audit.OutcomeResolved, "", "", "", "", "", nil, false, "")
+	if got := gateDecisions(t, store, run.RunID); len(got) != 1 {
+		t.Errorf("keyed to its own run: %+v", got)
+	}
+
+	// Not completed yet when read back: the duration runs to now, never negative.
+	run = remediationRun()
+	run.CompletedAt = time.Time{}
+	run.StartedAt = time.Now().UTC().Add(-90 * time.Second)
+	gw, store = outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+	gw.recordPlaybookRunComplete(context.Background(), run.RunID, audit.OutcomeResolved, "", "", "", "", "", nil, false, "")
+	if got := gateDecisions(t, store, "plr_out_t1"); len(got) != 1 || got[0].DurationSeconds == nil || *got[0].DurationSeconds < 89 || *got[0].DurationSeconds > 100 {
+		t.Errorf("duration = %+v", got)
+	}
+
+	// A start time after the completion time (clock trouble) records no duration
+	// rather than a negative one.
+	run = remediationRun()
+	run.StartedAt = run.CompletedAt.Add(time.Minute)
+	gw, store = outcomeGateway(t, map[string]*audit.PlaybookRun{run.RunID: run})
+	gw.recordPlaybookRunComplete(context.Background(), run.RunID, audit.OutcomeResolved, "", "", "", "", "", nil, false, "")
+	if got := gateDecisions(t, store, "plr_out_t1"); len(got) != 1 || got[0].DurationSeconds != nil {
+		t.Errorf("a negative duration was recorded: %+v", got)
+	}
+
+	// No audit store: nothing to record and nothing to panic over.
+	gw.auditor = nil
+	gw.recordRecoveryOutcome(context.Background(), run.RunID, audit.OutcomeResolved)
 }
 
 // A gate that is not about a recovery target leaves no recovery decision.

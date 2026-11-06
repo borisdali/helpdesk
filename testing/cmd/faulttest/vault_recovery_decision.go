@@ -121,6 +121,9 @@ func rdOption(opt audit.DecisionOption) string {
 	if opt.LossBytes != nil {
 		loss = append(loss, rdBytes(*opt.LossBytes)+" of WAL")
 	}
+	if opt.LossAtLeastSeconds != nil {
+		loss = append(loss, "at least "+rdSpan(*opt.LossAtLeastSeconds)+" of history")
+	}
 	if len(loss) > 0 {
 		exact := "exact"
 		if opt.LossUpperBound {
@@ -170,6 +173,7 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		b.WriteString("\n")
 	}
 
+	sawOutcome := false
 	for _, d := range ds {
 		rd := d.Decision
 		stamp := "      –"
@@ -204,6 +208,13 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
 				fmt.Fprintf(&b, " on %s's approval", a.ApprovedBy)
 			}
+		case audit.RecoveryStageOutcome:
+			sawOutcome = true
+			if rd.DurationSeconds == nil {
+				b.WriteString(" recovery duration unknown")
+			} else {
+				fmt.Fprintf(&b, " recovery duration %s%s", rdSpan(*rd.DurationSeconds), rdRTOVerdict(*rd.DurationSeconds, latest))
+			}
 		}
 		if rd.RecoveryTarget != "" && rd.Stage != audit.RecoveryStageExecution {
 			fmt.Fprintf(&b, "  [%s]", rd.RecoveryTarget)
@@ -218,5 +229,28 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 			b.WriteString(under + "reason: " + wordWrap(rd.Reason, 60, under+"        ") + "\n")
 		}
 	}
+	if sawOutcome {
+		// Said once, so the figure is not mistaken for downtime.
+		b.WriteString("\n  recovery duration is the remediation hop after the approval (restore, restart, verify);\n" +
+			"  it is not the downtime, which began earlier and also includes the wait for the approval\n")
+	}
 	return b.String()
+}
+
+// rdRTOVerdict sets a recovery duration against the rto that was in force, for
+// the outcome line. The comparison is made here, when it is shown, from the
+// objectives recorded with the decision; the stored outcome is just the facts.
+func rdRTOVerdict(durationSeconds int64, o *audit.ObjectivesInForce) string {
+	if o == nil {
+		return ""
+	}
+	if o.RTOSeconds == nil {
+		return " (no rto set)"
+	}
+	rto := *o.RTOSeconds
+	src := fmt.Sprintf("rto %s [%s]", rdSpan(rto), o.RTOSource)
+	if durationSeconds <= rto {
+		return fmt.Sprintf(" (%s: within)", src)
+	}
+	return fmt.Sprintf(" (%s: exceeded by %s)", src, rdSpan(durationSeconds-rto))
 }

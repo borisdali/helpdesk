@@ -119,6 +119,39 @@ type WALContinuity struct {
 	SegmentSizeBytes uint64   `json:"segment_size_bytes,omitempty"`
 	// SegmentSizeSource is wal_header, backup_lsns or default.
 	SegmentSizeSource string `json:"segment_size_source,omitempty"`
+
+	// segments is, for every segment on the replay path, the timeline it was
+	// read from and when it reached the repository (the repo file's time). Kept
+	// in memory only: it can be thousands of entries, and the plan asks it one
+	// question, when did the segment holding this LSN arrive (archivedAt).
+	segments map[uint64]archivedSegment
+}
+
+// archivedSegment is one archived WAL segment on the replay path.
+type archivedSegment struct {
+	timeline uint32
+	time     int64 // unix seconds the segment reached the repository
+}
+
+// archivedAt says when the segment holding lsn reached the repository, from the
+// copy on the replay path (so the right timeline's, for a segment that was
+// archived on both sides of a fork). ok is false when there is no such
+// segment: the LSN is past the archive, in a gap, or the segment size is
+// unknown.
+//
+// The time is an UPPER bound on when the record at lsn was written: nothing is
+// archived before it is written. That is what makes it usable as a lower bound
+// on how much history a restore to lsn discards.
+func (w *WALContinuity) archivedAt(lsn uint64) (timeline uint32, at time.Time, segno uint64, ok bool) {
+	if w == nil || !validSegmentSize(w.SegmentSizeBytes) || w.segments == nil {
+		return 0, time.Time{}, 0, false
+	}
+	segno = lsn / w.SegmentSizeBytes
+	seg, found := w.segments[segno]
+	if !found || seg.time <= 0 {
+		return 0, time.Time{}, segno, false
+	}
+	return seg.timeline, time.Unix(seg.time, 0).UTC(), segno, true
 }
 
 // walCheckInput is what `pgbackrest info` says about the backup being checked.
@@ -483,11 +516,15 @@ func evaluateWALContinuity(in walCheckInput, topListing, historyText, listingJSO
 		endTime         int64
 		haveEnd         bool
 	)
+	res.segments = map[uint64]archivedSegment{}
 	markPresent := func(tli uint32, seg uint64) {
 		if !broken {
 			recoverableTLI, recoverableSeg, haveRecoverable = tli, seg, true
 		}
 		endTLI, endSeg, endTime, haveEnd = tli, seg, files[tli][seg].time, true
+		// The walk reads each segment from the timeline replay would use, so
+		// the copy kept here is the right one.
+		res.segments[seg] = archivedSegment{timeline: tli, time: files[tli][seg].time}
 	}
 
 	start := plan.startSeg

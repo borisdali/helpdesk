@@ -52,6 +52,17 @@ type DataLossEstimate struct {
 	// WALBytes is the WAL between the target and the end of the history.
 	// Absent for a time target, which has no position without reading WAL.
 	WALBytes *uint64 `json:"wal_bytes,omitempty"`
+	// WindowAtLeastSeconds is, for an LSN target, a lower bound on the history
+	// discarded: the time between the moment the segment holding the target
+	// reached the archive and the end of the history (less an allowance for
+	// clock difference when that end is the running instance's clock). The
+	// record at the target was written before its segment was archived, so the
+	// loss is at least this much, though it may be more. Absent when the target
+	// is not in an archived segment, or the bound is not positive. It can prove
+	// a breach of the rpo; it cannot show there is none.
+	WindowAtLeastSeconds *int64 `json:"window_at_least_seconds,omitempty"`
+	// AtLeastBasis says what that bound rests on.
+	AtLeastBasis string `json:"at_least_basis,omitempty"`
 	// Segments is how many whole WAL segments lie after the target's own.
 	// Only for an LSN target on the archive.
 	Segments *uint64 `json:"segments,omitempty"`
@@ -84,6 +95,44 @@ func projectPreStop(pre LivePreState, probeAt, now time.Time) LivePreState {
 	}
 	pre.Time = t.Add(now.Sub(probeAt)).UTC().Format(time.RFC3339)
 	return pre
+}
+
+// clockSkewMargin is taken off a lower bound that measures from the running
+// instance's clock to a time on the repository's: two machines' clocks agree
+// only so far. A bound measured entirely on the repository's own clock needs no
+// allowance. The bound assumes the clocks agree to within this.
+var clockSkewMargin = 60 * time.Second
+
+// lossAtLeast bounds from below the history a restore to lsn discards, from
+// when the archive segment holding lsn arrived. See WindowAtLeastSeconds.
+func lossAtLeast(wal *WALContinuity, lsn uint64, live *LivePreState) (secs int64, basis string, ok bool) {
+	tli, at, segno, found := wal.archivedAt(lsn)
+	if !found {
+		return 0, "", false
+	}
+	var (
+		end    time.Time
+		margin time.Duration
+		to     string
+	)
+	if live != nil {
+		if t, err := time.Parse(time.RFC3339, live.Time); err == nil {
+			end, margin, to = t, clockSkewMargin, "the running instance's clock, less a "+clockSkewMargin.String()+" allowance for clock difference"
+		}
+	}
+	if end.IsZero() {
+		t, err := time.Parse(time.RFC3339, wal.ArchiveEndTime)
+		if err != nil {
+			return 0, "", false
+		}
+		end, to = t, "the end of the archive"
+	}
+	d := end.Sub(at) - margin
+	if d <= 0 {
+		return 0, "", false
+	}
+	return int64(d / time.Second), fmt.Sprintf("the segment holding the target (%s) reached the repository at %s and nothing is archived before it is written; measured to %s",
+		segmentName(tli, segno, wal.SegmentSizeBytes), at.UTC().Format(time.RFC3339), to), true
 }
 
 // estimateDataLoss measures what restoring to target discards. normalized is
@@ -153,7 +202,12 @@ func estimateDataLoss(target RecoveryTarget, normalized string, wal *WALContinui
 			}
 			est.WALBytes, est.Segments = &n, &segs
 		}
-		est.Unmeasured = append(est.Unmeasured, "the time span (an LSN has no time until the WAL is read)")
+		if secs, basis, ok := lossAtLeast(wal, lsn, live); ok {
+			est.WindowAtLeastSeconds, est.AtLeastBasis = &secs, basis
+			est.Unmeasured = append(est.Unmeasured, "the exact time span (an LSN has no time until the WAL is read: only a lower bound is known)")
+		} else {
+			est.Unmeasured = append(est.Unmeasured, "the time span (an LSN has no time until the WAL is read)")
+		}
 
 	default:
 		return nil
@@ -178,19 +232,30 @@ func lossEndTime(wal *WALContinuity, live *LivePreState) (time.Time, string, boo
 }
 
 func (e *DataLossEstimate) summarize() string {
+	// Each figure says which way it can be wrong: "at most" for an upper bound,
+	// "at least" for a lower bound, nothing for an exact one.
+	atMost := func(s string) string {
+		if e.UpperBound {
+			return "at most " + s
+		}
+		return s
+	}
 	var parts []string
 	if e.WindowSeconds != nil {
-		parts = append(parts, humanSpan(*e.WindowSeconds)+" of history")
+		parts = append(parts, atMost(humanSpan(*e.WindowSeconds)+" of history"))
 	}
 	if e.WALBytes != nil {
-		parts = append(parts, humanBytes(*e.WALBytes)+" of WAL")
+		parts = append(parts, atMost(humanBytes(*e.WALBytes)+" of WAL"))
+	}
+	if e.WindowAtLeastSeconds != nil {
+		parts = append(parts, "at least "+humanSpan(*e.WindowAtLeastSeconds)+" of history")
 	}
 	what := strings.Join(parts, " and ")
 	switch e.Basis {
 	case lossBasisLive:
 		return fmt.Sprintf("%s discarded, up to the running instance's position at %s; it grows until the instance is stopped. Transactions are not counted.", what, e.AsOf)
 	default:
-		return fmt.Sprintf("at most %s discarded, up to the end of the archive; WAL the instance had not archived is not counted. Transactions are not counted.", what)
+		return fmt.Sprintf("%s discarded, up to the end of the archive; WAL the instance had not archived is not counted. Transactions are not counted.", what)
 	}
 }
 

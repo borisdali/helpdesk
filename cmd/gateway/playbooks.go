@@ -2236,7 +2236,43 @@ func (g *Gateway) recordRecoveryGateDecision(ctx context.Context, run *audit.Pla
 		}
 	}
 	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(run.RunID, "", d)); err != nil {
-		slog.Warn("playbook: failed to record recovery_decision (gate) event", "run_id", run.RunID, "err", err)
+		// The approval itself is not held for its record, but a gate decision that is
+		// not in the audit trail must be impossible to miss in the logs.
+		slog.Error("recovery decision (gate) NOT recorded in the audit trail", "run_id", run.RunID, "decision", d.Decision, "decided_by", resolvedBy, "err", err)
+	}
+}
+
+// recordRecoveryOutcome records the outcome stage of a recovery decision when
+// the run that finished is the hop that carries out a point-in-time restore:
+// how it ended and how long it took. It is keyed to the incident's entry run,
+// like the gate stage, so the incident narrative finds it. A run of any other
+// playbook records nothing.
+func (g *Gateway) recordRecoveryOutcome(ctx context.Context, runID, outcome string) {
+	if g.auditor == nil {
+		return
+	}
+	run, err := g.fetchPlaybookRun(ctx, runID)
+	if err != nil || run == nil || !needsRecoveryApproval(run.SeriesID) {
+		return
+	}
+	completed := run.CompletedAt
+	if completed.IsZero() {
+		completed = time.Now().UTC()
+	}
+	d := audit.RecoveryDecision{
+		Stage: audit.RecoveryStageOutcome, Decision: outcome, RunID: run.RunID,
+		Target: run.ConnectionString, RecoveryTarget: run.RecoveryTarget,
+	}
+	if !run.StartedAt.IsZero() && !completed.Before(run.StartedAt) {
+		secs := int64(completed.Sub(run.StartedAt).Round(time.Second) / time.Second)
+		d.DurationSeconds = &secs
+	}
+	entry := run.EntryRunID
+	if entry == "" {
+		entry = run.RunID
+	}
+	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(entry, "", d)); err != nil {
+		slog.Error("recovery outcome NOT recorded in the audit trail", "run_id", run.RunID, "outcome", outcome, "err", err)
 	}
 }
 
@@ -3181,6 +3217,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	// fetchIncidentByEntryRunID lookup no-ops harmlessly.
 	if isTerminalIncidentOutcome(outcome) {
 		g.closeIncidentRecord(ctx, runID, outcome)
+		g.recordRecoveryOutcome(ctx, runID, outcome)
 	}
 	if isAttributableOutcome(outcome) {
 		responseText := agentTranscript

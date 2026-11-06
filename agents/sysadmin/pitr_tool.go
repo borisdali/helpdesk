@@ -70,6 +70,9 @@ type PITRPlan struct {
 	// Not part of the plan digest: on a serving instance it grows while the
 	// plan waits for approval.
 	DataLossEstimate *DataLossEstimate `json:"data_loss_estimate,omitempty"`
+	// DecisionUnrecorded is set when this plan could not be written to the
+	// audit trail. The plan stands; it just is not on record.
+	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
 	// InstanceServing says PostgreSQL was accepting connections when the plan
 	// was made. ArchiveFlushRequired says the target is in WAL the instance
 	// has not archived yet: a restore of a serving instance flushes the
@@ -237,7 +240,7 @@ func planPITRWithEstimate(ctx context.Context, args PlanPITRArgs) (PITRPlan, err
 		// Every plan someone was shown is on record: what it said, against which
 		// objectives. The restore recomputes its own plan with planPITRImpl and
 		// records its own decision, so this is only what was offered.
-		recordPlanDecision(ctx, args.Target, plan)
+		plan.DecisionUnrecorded = unrecordedNote(recordPlanDecision(ctx, args.Target, plan))
 	}
 	return plan, err
 }

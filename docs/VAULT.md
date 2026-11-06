@@ -551,7 +551,9 @@ decision (today, a point-in-time restore) adds this section between REMEDIATION 
 objectives that were in force, each with the level it came from and the digest of the config it was read from,
 then the stages oldest first: every plan that was shown with the loss it measured and its verdict against the
 `rpo`, the gate (approved or denied, by whom, and which acknowledgements it carried), and the restore's own
-decision to proceed or refuse, with the reason. A line warns when the configuration changed between stages.
+decision to proceed or refuse, with the reason, and finally the outcome: how the remediation hop ended and its
+recovery duration, set against the `rto` that was in force (not the downtime, which is longer; the section says so).
+A line warns when the configuration changed between stages.
 `vault journey <trace> --detail` shows the same block for one trace, and its header gains a `Recovery:` line.
 Fields and event: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 

@@ -271,7 +271,10 @@ func TestPlanPITRWithEstimate_DownInstanceIsAnUpperBound(t *testing.T) {
 	}
 }
 
-func TestPlanPITRWithEstimate_LSNTargetIsNotComparable(t *testing.T) {
+// An LSN has no exact time span, but one inside the archive has a lower bound,
+// from when its segment arrived. Here that is days, against an rpo of 15
+// minutes: a proven breach, not "not comparable" (it was, before the bound).
+func TestPlanPITRWithEstimate_LSNInsideTheArchiveIsProvenByItsLowerBound(t *testing.T) {
 	objectiveInfra(t, "15m", nil)
 	_, _ = liveEnv(t)
 	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
@@ -279,7 +282,8 @@ func TestPlanPITRWithEstimate_LSNTargetIsNotComparable(t *testing.T) {
 	if err != nil || plan.Status != PITRFeasible {
 		t.Fatalf("%+v, %v", plan, err)
 	}
-	if o := plan.DataLossEstimate.Objective; o == nil || o.Status != RPONotComparable {
+	o := plan.DataLossEstimate.Objective
+	if o == nil || o.Status != RPOExceeds || !strings.Contains(o.Detail, "at least") {
 		t.Errorf("objective = %+v", o)
 	}
 }

@@ -36,6 +36,10 @@ const (
 	// RecoveryStageExecution: the restore tool decided, just before it stops
 	// anything: proceed or refuse.
 	RecoveryStageExecution = "execution"
+	// RecoveryStageOutcome: the remediation hop that carried out the recovery
+	// finished. Its Decision is the run's outcome (resolved, failed, ...) and
+	// DurationSeconds how long the hop took.
+	RecoveryStageOutcome = "outcome"
 )
 
 // What a stage decided.
@@ -56,6 +60,13 @@ type RecoveryDecision struct {
 	// DecidedBy is the person who made the decision, for the gate stage:
 	// whoever approved or denied it. Empty for the stages a tool decides.
 	DecidedBy string `json:"decided_by,omitempty"`
+	// DurationSeconds is, for the outcome stage, how long the remediation hop
+	// ran: from its start, which is after the gate approval, to its completion.
+	// That covers the restore, the restart and the verification, and not the
+	// time spent waiting for a person. It is the recovery duration, not the
+	// downtime: the instance may have been down before the hop began, and the
+	// hop includes the agent's own reasoning time.
+	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
 	// Tool is the tool the stage belongs to (plan_point_in_time_recovery,
 	// restore_to_point_in_time); empty for the gate.
 	Tool string `json:"tool,omitempty"`
@@ -122,6 +133,11 @@ type DecisionOption struct {
 	LossUpperBound bool     `json:"loss_upper_bound,omitempty"`
 	LossAsOf       string   `json:"loss_as_of,omitempty"`
 	LossUnmeasured []string `json:"loss_unmeasured,omitempty"`
+	// LossAtLeastSeconds is a lower bound on the history discarded, for a target
+	// whose exact time span is not known (an LSN), and LossAtLeastBasis what it
+	// rests on. A breach of the rpo proven by it is recorded as the verdict.
+	LossAtLeastSeconds *int64 `json:"loss_at_least_seconds,omitempty"`
+	LossAtLeastBasis   string `json:"loss_at_least_basis,omitempty"`
 
 	// Verdict is the loss set against the rpo (within, exceeds, may_exceed,
 	// not_comparable, no_objective, objective_invalid); Gate what approving
@@ -183,17 +199,24 @@ func NewRecoveryDecisionEvent(traceID, sessionID string, d RecoveryDecision) *Ev
 }
 
 // RecordRecoveryDecision records one stage of a recovery decision. It does
-// nothing when auditing is off or the stage is unnamed. Failing to write is
-// logged, not returned: the decision itself must not depend on its record
-// being writable (the tool call that made it is audited as well).
-func (ta *ToolAuditor) RecordRecoveryDecision(ctx context.Context, d RecoveryDecision) {
+// nothing, and returns nil, when auditing is off or the stage is unnamed.
+//
+// A failed write is logged at error level and returned. The decision itself
+// does not depend on its record being writable, as for every other tool call
+// (audit is best-effort at runtime; governed modes require it to be configured),
+// but the caller is told, so that it can say in its own result that this
+// decision is not in the audit trail.
+func (ta *ToolAuditor) RecordRecoveryDecision(ctx context.Context, d RecoveryDecision) error {
 	if ta == nil || ta.auditor == nil || d.Stage == "" {
-		return
+		return nil
 	}
 	event := NewRecoveryDecisionEvent(ta.getTraceID(), ta.sessionID, d)
 	if err := ta.auditor.Record(ctx, event); err != nil {
-		slog.Warn("failed to record recovery_decision event", "stage", d.Stage, "decision", d.Decision, "err", err)
+		slog.Error("recovery decision NOT recorded in the audit trail",
+			"stage", d.Stage, "decision", d.Decision, "tool", d.Tool, "err", err)
+		return err
 	}
+	return nil
 }
 
 // FetchRecoveryDecisionEvents returns the recovery_decision events of a trace

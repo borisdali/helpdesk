@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -64,7 +65,9 @@ func TestRecordRecoveryDecision_RoundTripsThroughTheStore(t *testing.T) {
 	store := newRDStore(t)
 	ta := NewToolAuditor(store, "sysadmin_agent", "sess_1", "trace_1")
 	want := sampleDecision()
-	ta.RecordRecoveryDecision(context.Background(), want)
+	if err := ta.RecordRecoveryDecision(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
 
 	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeRecoveryDecision})
 	if err != nil || len(events) != 1 {
@@ -208,7 +211,9 @@ func TestNewRecoveryDecisionEvent_NeverCarriesAPassword(t *testing.T) {
 	}
 	// And through the store: what is written is what was redacted.
 	store := newRDStore(t)
-	NewToolAuditor(store, "a", "s", "t").RecordRecoveryDecision(context.Background(), d)
+	if err := NewToolAuditor(store, "a", "s", "t").RecordRecoveryDecision(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
 	events, _ := store.Query(context.Background(), QueryOptions{EventType: EventTypeRecoveryDecision})
 	stored, _ := json.Marshal(events)
 	if len(events) != 1 || strings.Contains(string(stored), "testpass") {
@@ -222,8 +227,11 @@ func TestVerifyIntegrity_CatchesAnEditedRecoveryDecision(t *testing.T) {
 	store := newRDStore(t)
 	ctx := context.Background()
 	ta := NewToolAuditor(store, "sysadmin_agent", "sess_1", "trace_1")
-	ta.RecordRecoveryDecision(ctx, sampleDecision())
-	ta.RecordRecoveryDecision(ctx, RecoveryDecision{Stage: RecoveryStagePlan, Decision: RecoveryDecisionPlanned})
+	for _, d := range []RecoveryDecision{sampleDecision(), {Stage: RecoveryStagePlan, Decision: RecoveryDecisionPlanned}} {
+		if err := ta.RecordRecoveryDecision(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if status, err := store.VerifyIntegrity(ctx); err != nil || !status.Valid {
 		t.Fatalf("a clean chain does not verify: %+v, %v", status, err)
 	}
@@ -275,15 +283,35 @@ func TestVerifyIntegrity_DoesNotCoverTheOlderTypedPayloads(t *testing.T) {
 	}
 }
 
+// failingAuditor is an audit backend that cannot be written to.
+type failingAuditor struct{ Auditor }
+
+func (failingAuditor) Record(context.Context, *Event) error { return errors.New("auditd unreachable") }
+
+// A write that fails is told to the caller, so it can say so in its own result.
+func TestRecordRecoveryDecision_ReturnsAFailedWrite(t *testing.T) {
+	err := NewToolAuditor(failingAuditor{}, "a", "s", "t").RecordRecoveryDecision(context.Background(), sampleDecision())
+	if err == nil || !strings.Contains(err.Error(), "auditd unreachable") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestRecordRecoveryDecision_DoesNothingWhenItCannot(t *testing.T) {
 	store := newRDStore(t)
 	// Auditing off, an unnamed stage, a nil auditor: no event, no panic.
-	NewToolAuditor(nil, "a", "s", "t").RecordRecoveryDecision(context.Background(), sampleDecision())
+	// None of these is a failure to write, so none is an error.
 	var none *ToolAuditor
-	none.RecordRecoveryDecision(context.Background(), sampleDecision())
 	d := sampleDecision()
 	d.Stage = ""
-	NewToolAuditor(store, "a", "s", "t").RecordRecoveryDecision(context.Background(), d)
+	for name, err := range map[string]error{
+		"auditing off":  NewToolAuditor(nil, "a", "s", "t").RecordRecoveryDecision(context.Background(), sampleDecision()),
+		"nil auditor":   none.RecordRecoveryDecision(context.Background(), sampleDecision()),
+		"unnamed stage": NewToolAuditor(store, "a", "s", "t").RecordRecoveryDecision(context.Background(), d),
+	} {
+		if err != nil {
+			t.Errorf("%s: err = %v, want nil", name, err)
+		}
+	}
 
 	events, err := store.Query(context.Background(), QueryOptions{EventType: EventTypeRecoveryDecision})
 	if err != nil || len(events) != 0 {

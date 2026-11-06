@@ -43,7 +43,7 @@ func TestAuditd_RecoveryDecisionRoundTripsOverHTTP(t *testing.T) {
 	secs, upper := int64(65563), false
 	rpo := int64(900)
 	ta := audit.NewToolAuditor(remote, "sysadmin_agent", "sess_http", trace)
-	ta.RecordRecoveryDecision(ctx, audit.RecoveryDecision{
+	err := ta.RecordRecoveryDecision(ctx, audit.RecoveryDecision{
 		Stage: audit.RecoveryStageExecution, Decision: audit.RecoveryDecisionRefused,
 		Reason: "needs acknowledge_objective_breach", Tool: "restore_to_point_in_time",
 		Target:         "host=localhost port=15435 dbname=testdb user=postgres password=testpass",
@@ -53,6 +53,9 @@ func TestAuditd_RecoveryDecisionRoundTripsOverHTTP(t *testing.T) {
 			Verdict: "exceeds", Gate: "acknowledge"}},
 		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AllowedStopServing: true},
 	})
+	if err != nil {
+		t.Fatalf("the decision was not recorded over HTTP: %v", err)
+	}
 
 	get := func(path string, into any) string {
 		t.Helper()

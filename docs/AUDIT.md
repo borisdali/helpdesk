@@ -335,6 +335,7 @@ restore ([PITR.md](PITR.md)).
 | `plan` | sysadmin agent, each time a plan is made | `planned` | the request's `trace_id` |
 | `gate` | gateway, when a person approves or denies the gate | `approved`, `denied` | the triage run's ID (`plr_…`), like `gate_acknowledged` |
 | `execution` | sysadmin agent, just before it stops anything | `proceeded`, `refused` | the request's `trace_id` |
+| `outcome` | gateway, when the remediation hop that carried out the restore finishes | the run's outcome (`resolved`, `escalated`, `abandoned`, …) | the incident's entry run (`plr_…`) |
 
 The payload (`recovery_decision`):
 
@@ -342,11 +343,19 @@ The payload (`recovery_decision`):
 |-------|---------|
 | `stage`, `decision`, `reason` | the stage, what it decided, and why (a refusal, a denial) |
 | `decided_by` | the person, for the gate stage |
+| `duration_seconds` | for the `outcome` stage, how long the remediation hop ran: from its start, which is after the gate approval, to its completion (restore, restart, verification; not the wait for a person). It is the **recovery duration, not the downtime**: the instance may have been down before the hop began, and the hop includes the agent's own reasoning time |
 | `tool`, `target`, `run_id` | the tool, the database (as the config names it), and the run (gate stage) |
 | `recovery_target`, `plan_digest`, `plan_status` | where the restore stops, the plan approved, and whether it was feasible |
 | `objectives` | what was in force: `rpo_seconds`, `rto_seconds`, `availability_slo`, `recovery_preference` and `enforcement`, each with the level it came from (`*_source`: `database`, `environment:<name>`, `default`), the `environment`, any config `problems`, and the `config_digest` of the `infrastructure.json` they were read from |
-| `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured`), the `verdict` against the `rpo` and the `gate` it demands |
+| `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured`, and for an LSN target `loss_at_least_seconds` with the `loss_at_least_basis` it rests on), the `verdict` against the `rpo` and the `gate` it demands |
 | `approval` | what the approval carried: `approved_by`, `acknowledged_data_loss`, `allowed_stop_serving`, `acknowledged_breach` |
+
+**A decision that could not be written.** Recording is best-effort at runtime, like every other tool's audit write
+(governed modes require auditing to be *configured*; they do not hold a tool for each write). A restore is not held
+up if its decision cannot be recorded, but it is not allowed to look as though it were on record: the failure is
+logged at error level (`recovery decision NOT recorded in the audit trail`), and the plan and the restore result
+carry a `decision_unrecorded` field saying that the decision is not in the audit trail and why, which the model
+reading the result can see. The same failure at the gateway (the gate and outcome stages) is logged at error level.
 
 `target` and `reason` are passed through a redaction before the event is built, for every emitter: the target is
 often a run's own connection string, which carries the real password, and a reason can quote one. Passwords in

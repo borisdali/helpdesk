@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,108 @@ func TestPlanDecision_CarriesTheDigestOfTheLoadedConfig(t *testing.T) {
 	}
 	if objectivesSnapshot("nope") != nil {
 		t.Error("an unknown target has a snapshot")
+	}
+}
+
+// ── a decision that cannot be written ────────────────────────────────────────
+
+// failingAudit is an audit backend that cannot be written to (auditd down).
+type failingAudit struct{ audit.Auditor }
+
+func (failingAudit) Record(context.Context, *audit.Event) error {
+	return errors.New("auditd unreachable")
+}
+
+// withFailingAudit makes every audit write fail for the test.
+func withFailingAudit(t *testing.T) {
+	t.Helper()
+	old := toolAuditor
+	toolAuditor = audit.NewToolAuditor(failingAudit{}, "sysadmin_agent", "sess_down", "trace_down")
+	t.Cleanup(func() { toolAuditor = old })
+}
+
+// The restore is not held for its audit write, as no tool call is. But the
+// result must not look as though the decision were on record when it is not.
+func TestUnrecordedDecision_PlanAndRestoreSaySo(t *testing.T) {
+	enforced(t, "15m", "warn")
+	sim, _ := liveEnv(t)
+	withFailingAudit(t)
+
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("a plan must not be held for its audit write: %+v, %v", plan, err)
+	}
+	if !strings.Contains(plan.DecisionUnrecorded, "not in the audit trail") || !strings.Contains(plan.DecisionUnrecorded, "auditd unreachable") {
+		t.Errorf("plan.DecisionUnrecorded = %q", plan.DecisionUnrecorded)
+	}
+
+	// Proceeding: the instance is stopped and restored all the same.
+	res, err := restoreToPITImpl(context.Background(), liveArgs(plan))
+	if err != nil || !sim.did("stop") || !sim.did("restore") {
+		t.Fatalf("the restore was held up by an audit failure: err=%v order=%s", err, sim.order())
+	}
+	if !strings.Contains(res.DecisionUnrecorded, "not in the audit trail") {
+		t.Errorf("res.DecisionUnrecorded = %q", res.DecisionUnrecorded)
+	}
+	// And the model, which reads the result's JSON, can see it.
+	raw, _ := json.Marshal(res)
+	if !strings.Contains(string(raw), `"decision_unrecorded"`) {
+		t.Errorf("the result JSON does not carry it: %s", raw)
+	}
+}
+
+func TestUnrecordedDecision_RefusalsSaySoToo(t *testing.T) {
+	// A refusal at the objective check.
+	enforced(t, "15m", "acknowledge")
+	_, _ = liveEnv(t)
+	withFailingAudit(t)
+	plan := approvedLiveDigest(t, liveTarget)
+	res, err := restoreToPITImpl(context.Background(), liveArgs(plan))
+	if err == nil || !strings.Contains(err.Error(), "acknowledge_objective_breach") {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(res.DecisionUnrecorded, "not in the audit trail") {
+		t.Errorf("objective refusal: DecisionUnrecorded = %q", res.DecisionUnrecorded)
+	}
+
+	// A refusal for another reason, recorded by the catch-all.
+	args := liveArgs(plan)
+	args.PlanDigest = "ffffffffffffffff"
+	res, err = restoreToPITImpl(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "changed since it was approved") {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(res.DecisionUnrecorded, "not in the audit trail") {
+		t.Errorf("catch-all refusal: DecisionUnrecorded = %q", res.DecisionUnrecorded)
+	}
+}
+
+// Auditing that is off, or that works, is not "unrecorded".
+func TestUnrecordedDecision_NotSetWhenAuditingIsOffOrWorks(t *testing.T) {
+	enforced(t, "15m", "warn")
+	_, _ = liveEnv(t)
+	plan := approvedLiveDigest(t, liveTarget)
+
+	old := toolAuditor
+	toolAuditor = nil // auditing not configured
+	res, err := restoreToPITImpl(context.Background(), liveArgs(plan))
+	toolAuditor = old
+	if err != nil || res.DecisionUnrecorded != "" {
+		t.Errorf("auditing off: err=%v unrecorded=%q", err, res.DecisionUnrecorded)
+	}
+
+	_, _ = liveEnv(t)
+	_, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	plan = approvedLiveDigest(t, liveTarget)
+	res, err = restoreToPITImpl(context.Background(), liveArgs(plan))
+	if err != nil || res.DecisionUnrecorded != "" {
+		t.Errorf("auditing works: err=%v unrecorded=%q", err, res.DecisionUnrecorded)
+	}
+	if p, _ := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: "2026-10-09T00:00:00Z"}); p.DecisionUnrecorded != "" {
+		t.Errorf("plan.DecisionUnrecorded = %q", p.DecisionUnrecorded)
 	}
 }
 

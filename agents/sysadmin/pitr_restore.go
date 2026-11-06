@@ -82,6 +82,12 @@ type RestoreToPITResult struct {
 	// of the archive. It is the figure to compare with the one the human
 	// approved, and the one to record against the incident.
 	DataLoss *DataLossEstimate `json:"data_loss,omitempty"`
+	// DecisionUnrecorded is set when the decision to proceed (or the refusal)
+	// could not be written to the audit trail. The restore is not held for it,
+	// as no tool call is held for its audit write, but the result says so: a
+	// restore that ran without its decision on record must not look as though
+	// it were on record. The tool call's own audit event is separate.
+	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
 	// Stopped says this tool stopped a serving instance (and how). It is left
 	// stopped: restart_container / restart_service starts it, and recovery to
 	// the target runs on startup.
@@ -206,7 +212,10 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 	decided := false
 	defer func() {
 		if retErr != nil && !decided && isRefusal(retErr) {
-			recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, retErr.Error())
+			if werr := recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, retErr.Error()); werr != nil {
+				// The result was already copied into the named result: set it there.
+				namedResult.DecisionUnrecorded = unrecordedNote(werr)
+			}
 		}
 	}()
 
@@ -292,10 +301,12 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 			untouched = "The instance was not stopped."
 		}
 		refusal := fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
-		recordExecutionDecision(ctx, args, plan, result.DataLoss, refusal.Error())
+		result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, refusal.Error()))
 		return result, refusal
 	}
-	recordExecutionDecision(ctx, args, plan, result.DataLoss, "")
+	// Going ahead is not held for the record either; if it cannot be written the
+	// result says so, and the log carries the error.
+	result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, ""))
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string

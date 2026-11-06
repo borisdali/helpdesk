@@ -192,9 +192,9 @@ What it must not do is let them accept it unaware, so every case says something:
 | `status` | Means |
 |---|---|
 | `within` | The loss is within the `rpo` (for an upper-bound estimate, even at that bound) |
-| `exceeds` | The loss is more than the `rpo`; the detail says by how much |
+| `exceeds` | The loss is more than the `rpo`; the detail says by how much. For an LSN target it is a loss proven to be *at least* that much, from a lower bound ([below](#lsn-targets-and-the-lower-bound)) |
 | `may_exceed` | The estimate is an upper bound (a down instance) and the bound is over the `rpo`: the real loss may be less |
-| `not_comparable` | An LSN target has no time span until the WAL is read |
+| `not_comparable` | An LSN target has no exact time span until the WAL is read, and its lower bound (if it has one) does not already exceed the `rpo`: the detail gives what is known |
 | `no_objective` | No `rpo` for this database, its environment or the fleet or the target is not a configured database: the loss is unchecked |
 | `objective_invalid` | The config tried to set an `rpo` and got it wrong (`problems` says how): fix `infrastructure.json` and treat the loss as unchecked |
 
@@ -214,15 +214,35 @@ not declared and has no `rpo` of its own) is not "nothing to check": the check c
 nothing is known to be breached), so a typo cannot quietly switch a strict enforcement off. Under `warn` it is
 shown. A problem with some *other* setting is not an invalid `rpo`.
 
-"Anything else" is `within`, `not_comparable` (an LSN target has no time span) and `no_objective` (nothing is set
-at all): with nothing to compare, the restore has nothing to enforce, and says so.
+"Anything else" is `within`, `not_comparable` (an LSN target whose lower bound proves no breach) and
+`no_objective` (nothing is set at all): with nothing to compare, the restore has nothing to enforce, and says so.
+
+#### LSN targets and the lower bound
+
+An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against
+the `rpo`. It does have a lower bound. The segment of archived WAL that holds the target reached the repository at
+a known time, and nothing is archived before it is written, so the record at the target is at least that old: the
+loss is **at least** the time from then to the end of the history (the instance's clock, for a running instance;
+the end of the archive, for a down one). The plan prints it ("at least 16d 13h of history"), and a lower bound that
+already exceeds the `rpo` proves a breach: the verdict is `exceeds` and the enforcement applies, including `refuse`.
+
+- A lower bound **within** the `rpo` proves nothing, because the real loss may be more. The verdict stays
+  `not_comparable`, and the detail says what is known.
+- Measured to a running instance's clock, the bound has a 60-second allowance taken off for the difference between
+  that clock and the repository's, and assumes the two agree to within a minute. Measured to the end of the
+  archive, both times come from the repository and nothing is taken off.
+- A target in WAL that is **not archived yet** (a running instance, before the flush) has no segment to measure
+  from. It has no bound, and stays `not_comparable` and unenforced. Reading the WAL for the exact commit time
+  would close that; it is not done yet.
 
 The same rules as a chart, from the loss measured just before the stop to what approving demands:
 
 ```mermaid
 flowchart TD
     A(["Loss measured just before the stop"]) --> B{"Can it be compared with the rpo?"}
-    B -- "LSN target: no time span yet" --> N1["not_comparable<br/>shown, NOT enforced (known gap)"]
+    B -- "LSN target: no exact time span" --> L{"Lower bound from the target's archive segment?"}
+    L -- "over the rpo: a breach is proven" --> E
+    L -- "none (not archived yet), or within the rpo" --> N1["not_comparable<br/>shown, NOT enforced"]
     B -- "no rpo anywhere" --> N2["no_objective<br/>shown, not enforced"]
     B -- "rpo unreadable, or environment not declared" --> I["objective_invalid"]
     B -- "yes" --> C{"Loss against the rpo"}
@@ -267,11 +287,16 @@ alone can take a minute and a half) and compares that. If the loss now breaches 
 
 **What is recorded.** Every stage of the decision leaves a typed `recovery_decision` audit event: each plan that
 was shown, the gate approval or denial (who, and which acknowledgements it carried), and the restore's decision to
-proceed or refuse just before it stops anything, with the reason. Each carries a snapshot of the objectives that
+proceed or refuse just before it stops anything, with the reason, and, when the remediation hop finishes, how it
+ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the
+verification; not the downtime). Each carries a snapshot of the objectives that
 were in force, with where each value came from and a digest of the `infrastructure.json` they were read from, and
 the option it was weighing with its measured loss and verdict. Refusals are recorded too, including the ones that
 have nothing to do with the objective (the approved plan no longer matches, a standby, no room). The events are
-covered by the audit hash chain, so editing one afterwards breaks it. They are read back in
+covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
+is down) the restore is not held up for it, but the plan or result says `decision_unrecorded` and the log carries
+an error, so a restore that ran without its decision on record cannot be mistaken for one that has it. They are
+read back in
 `vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail`, and in the incident
 narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 

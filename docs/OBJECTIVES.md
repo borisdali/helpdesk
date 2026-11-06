@@ -144,7 +144,11 @@ it spends.
 | `recovery_preference` and `enforcement` in the config: validated, resolved per database, environment and fleet with sources | Built |
 | `enforcement` read by the PITR restore (above) | Built |
 | Each stage of a recovery decision recorded as a typed, hash-covered `recovery_decision` audit event, with a snapshot of the objectives in force and the config digest, and shown in the incident narrative, `vault incidents` and `vault journey` ([AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields)) | Built |
-| The outcome of the recovery (actual downtime against the `rto`) recorded on that decision | Not built |
+| A lower bound on the loss of an LSN target, from when its archive segment arrived, so a proven breach of the `rpo` is enforced like any other ([PITR.md](PITR.md#lsn-targets-and-the-lower-bound)). An LSN in WAL that is not archived yet is still not enforced | Built |
+| The outcome of the recovery recorded on that decision: how the remediation hop ended and its **recovery duration** (after the approval: restore, restart, verify), shown against the `rto` in `vault incidents`. Not the downtime, which is longer | Built |
+| A decision that cannot be written to the audit trail is logged at error level and says so in the plan or result (`decision_unrecorded`); the restore is not held up for it | Built |
+| An audit spool, so an unwritable record is kept and replayed; fail-closed when auditing is configured but unreachable, with a human break-glass override at the gate | Not built (v0.35) |
+| Actual downtime (not just the recovery hop's duration) recorded against the `rto` | Not built |
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A budget window on `availability_slo` and the number of worst-case recoveries it absorbs (budget ÷ `rto`) | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |

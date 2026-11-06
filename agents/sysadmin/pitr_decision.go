@@ -75,14 +75,25 @@ func pitrOption(est *DataLossEstimate, chosen bool) audit.DecisionOption {
 	}
 	o.LossBasis, o.LossSeconds, o.LossBytes = est.Basis, est.WindowSeconds, est.WALBytes
 	o.LossUpperBound, o.LossAsOf, o.LossUnmeasured = est.UpperBound, est.AsOf, est.Unmeasured
+	o.LossAtLeastSeconds, o.LossAtLeastBasis = est.WindowAtLeastSeconds, est.AtLeastBasis
 	if v := est.Objective; v != nil {
 		o.Verdict, o.VerdictDetail, o.Gate = v.Status, v.Detail, v.Gate
 	}
 	return o
 }
 
+// unrecordedNote is what a result says when its decision could not be written
+// to the audit trail: the decision stands, but it is not on record.
+func unrecordedNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "this decision is not in the audit trail (the audit write failed: " + err.Error() + ")"
+}
+
 // recordPlanDecision records that a plan was made for target, and what it said.
-func recordPlanDecision(ctx context.Context, target string, plan PITRPlan) {
+// It returns the write error, if any.
+func recordPlanDecision(ctx context.Context, target string, plan PITRPlan) error {
 	d := audit.RecoveryDecision{
 		Stage: audit.RecoveryStagePlan, Decision: audit.RecoveryDecisionPlanned,
 		Tool: "plan_point_in_time_recovery", Target: target,
@@ -96,14 +107,14 @@ func recordPlanDecision(ctx context.Context, target string, plan PITRPlan) {
 	if plan.DataLossEstimate != nil {
 		d.Options = []audit.DecisionOption{pitrOption(plan.DataLossEstimate, false)}
 	}
-	toolAuditor.RecordRecoveryDecision(ctx, d)
+	return toolAuditor.RecordRecoveryDecision(ctx, d)
 }
 
 // recordExecutionDecision records what the restore decided just before it
 // stopped anything: to go ahead (reason empty) or to refuse (reason). The
 // approval facts are what the call carried; the approver's name is known only
-// when the approval came through the gateway.
-func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PITRPlan, est *DataLossEstimate, reason string) {
+// when the approval came through the gateway. It returns the write error, if any.
+func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PITRPlan, est *DataLossEstimate, reason string) error {
 	proceeded := reason == ""
 	d := audit.RecoveryDecision{
 		Stage: audit.RecoveryStageExecution, Tool: "restore_to_point_in_time", Target: args.Target,
@@ -123,7 +134,7 @@ func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PI
 		d.Decision, d.Reason = audit.RecoveryDecisionRefused, reason
 	}
 	d.Options = []audit.DecisionOption{pitrOption(est, proceeded)}
-	toolAuditor.RecordRecoveryDecision(ctx, d)
+	return toolAuditor.RecordRecoveryDecision(ctx, d)
 }
 
 // isRefusal says an error from the restore is one of its refusals (every one

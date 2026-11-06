@@ -179,10 +179,28 @@ func compareToRPOVerdict(est *DataLossEstimate, obj infra.ResolvedObjectives, fo
 	against := fmt.Sprintf("an RPO of %s (%s)", humanSpan(rpo), obj.RPO.Source)
 
 	if est == nil || est.WindowSeconds == nil {
+		// An LSN target has no exact time span, but it can have a lower bound
+		// (when its archive segment arrived). A lower bound that already exceeds
+		// the rpo PROVES a breach, so it is one, and enforcement applies to it as
+		// to any exact one. A lower bound within the rpo proves nothing: the real
+		// loss may be more.
+		var atLeast int64 = -1
+		if est != nil && est.WindowAtLeastSeconds != nil {
+			atLeast = *est.WindowAtLeastSeconds
+		}
+		if atLeast > rpo {
+			cmp.Status = RPOExceeds
+			cmp.Detail = fmt.Sprintf("at least %s discarded against %s: exceeds it by at least %s (a lower bound, from when the target's WAL segment reached the archive)",
+				humanSpan(atLeast), against, humanSpan(atLeast-rpo))
+			return cmp
+		}
 		cmp.Status = RPONotComparable
-		cmp.Detail = "the loss has no time span until the WAL is read (the target is an LSN), so it cannot be compared with " + against
+		cmp.Detail = "the loss has no exact time span until the WAL is read (the target is an LSN), so it cannot be compared with " + against
 		if est != nil && est.WALBytes != nil {
 			cmp.Detail += fmt.Sprintf("; %s of WAL would be discarded", humanBytes(*est.WALBytes))
+		}
+		if atLeast >= 0 {
+			cmp.Detail += fmt.Sprintf("; at least %s of history is discarded, which is within the objective, but the real loss may be more", humanSpan(atLeast))
 		}
 		return cmp
 	}
