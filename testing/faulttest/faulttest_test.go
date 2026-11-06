@@ -379,6 +379,9 @@ func TestFaultInjection(t *testing.T) {
 						t.Logf("Gate loop: %v", err)
 					}
 					verifyGatewayRemediation(t, faultCtx, remediator, f, "gate_loop")
+					if f.PITR != nil {
+						verifyRecoveryTrail(t, cfg, faultTraceID, resp.RunID, faultStart)
+					}
 				case resp.ChainedRunID != "":
 					// Gateway already auto-chained remediation inline.
 					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
@@ -431,6 +434,30 @@ func verifyGatewayRemediation(t *testing.T, ctx context.Context, remediator *fau
 		return
 	}
 	t.Logf("Remediation verified: method=%s, recovered_in=%.1fs, score=%.2f", method, res.RecoveryTimeSecs, res.Score)
+}
+
+// verifyRecoveryTrail checks that a point-in-time restore left its whole
+// decision in the audit trail: plan, gate, execution and outcome, the objectives
+// in force, no password, and a chain that still verifies. The outcome is written
+// by the gateway after the run completes, so the trail is given a moment to
+// settle before what is missing is called missing.
+func verifyRecoveryTrail(t *testing.T, cfg *faultlib.HarnessConfig, traceID, runID string, since time.Time) {
+	t.Helper()
+	var problems []string
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		problems = faultlib.CheckRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, []string{traceID, runID}, since)
+		if len(problems) == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if len(problems) == 0 {
+		t.Log("Recovery decision trail: plan, gate, execution and outcome recorded; chain verifies")
+		return
+	}
+	for _, p := range problems {
+		t.Errorf("Recovery decision trail: %s", p)
+	}
 }
 
 // TestDatabaseFailures runs only database category failures.
