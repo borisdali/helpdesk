@@ -1,0 +1,174 @@
+package audit
+
+// recovery_decision: the record of a recovery decision, as a typed event.
+//
+// A restore is a decision made in stages by different parties: the agent plans
+// it (what would be lost, against which objectives), a person approves it at
+// the gate (and acknowledges what they accept), and the restore tool decides
+// again just before it stops anything (re-measuring, enforcing). Each stage
+// leaves a recovery_decision event. Together they answer, long after the fact
+// and without parsing tool-output text: what was required of this database,
+// what was known, what was offered, who accepted what, and what was done.
+//
+// The objectives are recorded as a snapshot of what was in force, with where
+// each value came from and a digest of the configuration it was read from. The
+// configuration itself is not kept, so a later change to infrastructure.json
+// does not rewrite what applied to a decision already made.
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// EventTypeRecoveryDecision is emitted at each stage of a recovery decision.
+const EventTypeRecoveryDecision EventType = "recovery_decision"
+
+// Stages of a recovery decision.
+const (
+	// RecoveryStagePlan: a plan was made (and shown to whoever asked for it).
+	RecoveryStagePlan = "plan"
+	// RecoveryStageGate: a person approved or denied the gate.
+	RecoveryStageGate = "gate"
+	// RecoveryStageExecution: the restore tool decided, just before it stops
+	// anything: proceed or refuse.
+	RecoveryStageExecution = "execution"
+)
+
+// What a stage decided.
+const (
+	RecoveryDecisionPlanned   = "planned"
+	RecoveryDecisionApproved  = "approved"
+	RecoveryDecisionDenied    = "denied"
+	RecoveryDecisionProceeded = "proceeded"
+	RecoveryDecisionRefused   = "refused"
+)
+
+// RecoveryDecision is one stage of a recovery decision.
+type RecoveryDecision struct {
+	Stage    string `json:"stage"`
+	Decision string `json:"decision"`
+	// Reason says why, for a refusal or a denial.
+	Reason string `json:"reason,omitempty"`
+	// DecidedBy is the person who made the decision, for the gate stage:
+	// whoever approved or denied it. Empty for the stages a tool decides.
+	DecidedBy string `json:"decided_by,omitempty"`
+	// Tool is the tool the stage belongs to (plan_point_in_time_recovery,
+	// restore_to_point_in_time); empty for the gate.
+	Tool string `json:"tool,omitempty"`
+	// Target is the database, as the config names it.
+	Target string `json:"target,omitempty"`
+	// RunID is the playbook run the gate belongs to (the gate stage).
+	RunID string `json:"run_id,omitempty"`
+	// RecoveryTarget is where the restore stops, in the form a run stores it
+	// ("time=2026-10-28T14:05:00Z").
+	RecoveryTarget string `json:"recovery_target,omitempty"`
+	PlanDigest     string `json:"plan_digest,omitempty"`
+	// PlanStatus is feasible, not_feasible or unverified.
+	PlanStatus string `json:"plan_status,omitempty"`
+	// Objectives is what was required of this database when the stage ran.
+	Objectives *ObjectivesInForce `json:"objectives,omitempty"`
+	// Options are the courses of action the stage had in front of it, each
+	// with what it would cost and how it stands against the objectives. Today
+	// there is one (a point-in-time restore); the record is shaped for several.
+	Options []DecisionOption `json:"options,omitempty"`
+	// Approval is what the approval carried (the gate and execution stages).
+	Approval *ApprovalFacts `json:"approval,omitempty"`
+}
+
+// ObjectivesInForce is a snapshot of the resolved objectives and policy for one
+// database, each with the level it came from (database, environment:<name>,
+// default).
+type ObjectivesInForce struct {
+	Environment string `json:"environment,omitempty"`
+
+	RPOSeconds *int64 `json:"rpo_seconds,omitempty"`
+	RPOSource  string `json:"rpo_source,omitempty"`
+	RTOSeconds *int64 `json:"rto_seconds,omitempty"`
+	RTOSource  string `json:"rto_source,omitempty"`
+
+	AvailabilitySLO    *float64 `json:"availability_slo,omitempty"`
+	AvailabilitySource string   `json:"availability_source,omitempty"`
+
+	RecoveryPreference string `json:"recovery_preference,omitempty"`
+	PreferenceSource   string `json:"preference_source,omitempty"`
+
+	// Enforcement is the effective enforcement (warn when none is set, and
+	// acknowledge when it could not be trusted); EnforcementSource where the
+	// configured one came from, empty when it was not configured.
+	Enforcement       string `json:"enforcement,omitempty"`
+	EnforcementSource string `json:"enforcement_source,omitempty"`
+
+	// Problems are the configuration problems that affected the resolution.
+	Problems []string `json:"problems,omitempty"`
+	// ConfigDigest identifies the infrastructure config these were read from.
+	ConfigDigest string `json:"config_digest,omitempty"`
+}
+
+// DecisionOption is one course of action and how it stands.
+type DecisionOption struct {
+	Name string `json:"name"`
+	// Chosen marks the option the stage went ahead with (execution stage).
+	Chosen bool `json:"chosen,omitempty"`
+
+	// The measured loss. LossBasis is live_instance or archive_end;
+	// LossUpperBound says the figures are at most that much.
+	LossBasis      string   `json:"loss_basis,omitempty"`
+	LossSeconds    *int64   `json:"loss_seconds,omitempty"`
+	LossBytes      *uint64  `json:"loss_bytes,omitempty"`
+	LossUpperBound bool     `json:"loss_upper_bound,omitempty"`
+	LossAsOf       string   `json:"loss_as_of,omitempty"`
+	LossUnmeasured []string `json:"loss_unmeasured,omitempty"`
+
+	// Verdict is the loss set against the rpo (within, exceeds, may_exceed,
+	// not_comparable, no_objective, objective_invalid); Gate what approving
+	// demands because of it ("", acknowledge, refuse).
+	Verdict       string `json:"verdict,omitempty"`
+	VerdictDetail string `json:"verdict_detail,omitempty"`
+	Gate          string `json:"gate,omitempty"`
+}
+
+// ApprovalFacts is what an approval carried.
+type ApprovalFacts struct {
+	ApprovedBy           string `json:"approved_by,omitempty"`
+	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
+	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
+	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+}
+
+// NewRecoveryDecisionEvent builds the audit event for one stage. traceID is the
+// trace the event belongs to: the request's for the agent's stages, the run's
+// for the gate, as gate_acknowledged does.
+func NewRecoveryDecisionEvent(traceID, sessionID string, d RecoveryDecision) *Event {
+	return &Event{
+		EventID:          "rdc_" + uuid.New().String()[:8],
+		Timestamp:        time.Now().UTC(),
+		EventType:        EventTypeRecoveryDecision,
+		TraceID:          traceID,
+		Session:          Session{ID: sessionID},
+		RecoveryDecision: &d,
+	}
+}
+
+// RecordRecoveryDecision records one stage of a recovery decision. It does
+// nothing when auditing is off or the stage is unnamed. Failing to write is
+// logged, not returned: the decision itself must not depend on its record
+// being writable (the tool call that made it is audited as well).
+func (ta *ToolAuditor) RecordRecoveryDecision(ctx context.Context, d RecoveryDecision) {
+	if ta == nil || ta.auditor == nil || d.Stage == "" {
+		return
+	}
+	event := NewRecoveryDecisionEvent(ta.getTraceID(), ta.sessionID, d)
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Warn("failed to record recovery_decision event", "stage", d.Stage, "decision", d.Decision, "err", err)
+	}
+}
+
+// FetchRecoveryDecisionEvents returns the recovery_decision events of a trace
+// recorded at or after since, oldest first as auditd returns them. Fails open:
+// an unreachable auditd reads as no events.
+func FetchRecoveryDecisionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, string(EventTypeRecoveryDecision), since, true)
+}

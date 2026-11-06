@@ -232,6 +232,18 @@ func planPITRImpl(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 // again and again around its own ordered steps. An instance that cannot be
 // asked gets the archive-based figure.
 func planPITRWithEstimate(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
+	plan, err := measurePITRPlan(ctx, args)
+	if err == nil {
+		// Every plan someone was shown is on record: what it said, against which
+		// objectives. The restore recomputes its own plan with planPITRImpl and
+		// records its own decision, so this is only what was offered.
+		recordPlanDecision(ctx, args.Target, plan)
+	}
+	return plan, err
+}
+
+// measurePITRPlan is planPITRWithEstimate without the record.
+func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 	plan, err := planPITRImpl(ctx, args)
 	if err != nil || plan.Status != PITRFeasible {
 		return plan, err

@@ -654,6 +654,46 @@ func TestResolveObjectives_RPOInvalid(t *testing.T) {
 	}
 }
 
+// A decision records which configuration its objectives were read from.
+func TestLoad_DigestIdentifiesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	a, b := write("a.json", fleetConfig), write("b.json", fleetConfig)
+	c := write("c.json", strings.Replace(fleetConfig, `"rpo": "5m"`, `"rpo": "6m"`, 1))
+
+	load3 := func(p string) *Config {
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	ca, cb, cc := load3(a), load3(b), load3(c)
+	if len(ca.Digest) != 16 || strings.Trim(ca.Digest, "0123456789abcdef") != "" {
+		t.Errorf("digest = %q, want 16 hex characters", ca.Digest)
+	}
+	if ca.Digest != cb.Digest {
+		t.Errorf("the same bytes gave %s and %s", ca.Digest, cb.Digest)
+	}
+	if ca.Digest == cc.Digest {
+		t.Error("a changed objective gave the same digest")
+	}
+	// Not part of the config's own JSON, and empty for one built in code.
+	raw, _ := json.Marshal(ca)
+	if strings.Contains(string(raw), ca.Digest) {
+		t.Errorf("the digest leaked into the config's JSON: %s", raw)
+	}
+	if (&Config{}).Digest != "" {
+		t.Error("a config built in code has a digest")
+	}
+}
+
 func TestLogProblems(t *testing.T) {
 	var lines []string
 	log := func(msg string, args ...any) {

@@ -669,6 +669,27 @@ type JourneySummary struct {
 	// IncidentRunID is the plr_* playbook run ID for journeys associated with an
 	// incident run. Empty for ad-hoc or non-incident journeys.
 	IncidentRunID string `json:"incident_run_id,omitempty"`
+	// RecoveryDecision is what the latest recovery_decision event recorded in
+	// this journey decided (planned, proceeded, refused), and RecoveryVerdict how
+	// the option it chose, or else offered, stood against the recovery point
+	// objective (within, exceeds, may_exceed, ...). Empty for a journey that
+	// made no recovery decision. The detail is in the incident narrative.
+	RecoveryDecision string `json:"recovery_decision,omitempty"`
+	RecoveryVerdict  string `json:"recovery_verdict,omitempty"`
+}
+
+// recoveryVerdictOf is the verdict of the option a decision chose, else of the
+// first it offered.
+func recoveryVerdictOf(d *RecoveryDecision) string {
+	for _, o := range d.Options {
+		if o.Chosen {
+			return o.Verdict
+		}
+	}
+	if len(d.Options) > 0 {
+		return d.Options[0].Verdict
+	}
+	return ""
 }
 
 // QueryJourneys returns journey summaries for traces anchored by a
@@ -1044,6 +1065,40 @@ func (s *Store) QueryJourneys(ctx context.Context, opts JourneyOptions) ([]Journ
 			_ = runRows.Close()
 			for i := range summaries {
 				summaries[i].IncidentRunID = traceToRunID[summaries[i].TraceID]
+			}
+		}
+	}
+
+	// Enrich summaries with the recovery decision a trace recorded, if any. Its
+	// payload lives in the event's raw JSON, not in a column, so it is read here
+	// in one query keyed by trace_id; the latest event of a trace wins.
+	if len(summaries) > 0 {
+		placeholders := make([]string, len(summaries))
+		args := make([]any, len(summaries))
+		for i, js := range summaries {
+			placeholders[i] = "?"
+			args[i] = js.TraceID
+		}
+		q := "SELECT trace_id, raw_json FROM audit_events WHERE event_type = '" + string(EventTypeRecoveryDecision) +
+			"' AND trace_id IN (" + strings.Join(placeholders, ",") + ") ORDER BY timestamp ASC"
+		if rdRows, err := s.db.QueryContext(ctx, q, args...); err == nil {
+			latest := make(map[string]*RecoveryDecision)
+			for rdRows.Next() {
+				var tid, raw string
+				if rdRows.Scan(&tid, &raw) != nil {
+					continue
+				}
+				var ev Event
+				if json.Unmarshal([]byte(raw), &ev) == nil && ev.RecoveryDecision != nil {
+					latest[tid] = ev.RecoveryDecision
+				}
+			}
+			_ = rdRows.Close()
+			for i := range summaries {
+				if d := latest[summaries[i].TraceID]; d != nil {
+					summaries[i].RecoveryDecision = d.Decision
+					summaries[i].RecoveryVerdict = recoveryVerdictOf(d)
+				}
 			}
 		}
 	}

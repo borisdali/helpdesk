@@ -2,6 +2,8 @@
 package infra
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -95,6 +97,12 @@ type Config struct {
 	// objectives its members share. Defaults apply to everything else.
 	Environments map[string]Environment `json:"environments,omitempty"`
 	Defaults     *Defaults              `json:"defaults,omitempty"`
+
+	// Digest identifies the file this config was loaded from: the first 16 hex
+	// characters of the SHA-256 of its bytes. A recovery decision records it
+	// beside the objectives it read, so a later edit to the file cannot be
+	// mistaken for what applied then. Empty for a config built in code.
+	Digest string `json:"-"`
 }
 
 // Load loads infrastructure configuration from a JSON file.
@@ -108,6 +116,8 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
 	}
+	sum := sha256.Sum256(data)
+	config.Digest = hex.EncodeToString(sum[:])[:16]
 
 	return &config, nil
 }

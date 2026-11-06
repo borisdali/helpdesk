@@ -546,6 +546,15 @@ The `Score` line matches the `SCORE` column in `vault incidents <series-id>` —
 
 `Origin`/`Status`/`Attribution` (and, once populated, `Bundle`/`Draft playbook`) come from the same incidents-table row the all-incidents listing above reads — see [docs/INCIDENTS.md § The Incident Receipt](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full field reference. Shown only when a row exists for this run; a pre-v0.29 or never-tracked run omits this block entirely rather than showing empty values.
 
+**`── RECOVERY DECISION`: who decided what, against which objectives.** An incident that involved a recovery
+decision (today, a point-in-time restore) adds this section between REMEDIATION and EVALUATION. It lists the
+objectives that were in force, each with the level it came from and the digest of the config it was read from,
+then the stages oldest first: every plan that was shown with the loss it measured and its verdict against the
+`rpo`, the gate (approved or denied, by whom, and which acknowledgements it carried), and the restore's own
+decision to proceed or refuse, with the reason. A line warns when the configuration changed between stages.
+`vault journey <trace> --detail` shows the same block for one trace, and its header gains a `Recovery:` line.
+Fields and event: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
+
 **`--summary`: one line per hop.** A multi-hop escalation chain's full deep-dive view above can run long — add `--summary` to condense it to one line per hop (triage/escalation/remediation playbook and outcome, truncated findings) plus a final score line, with none of the hypothesis/gate/feedback detail:
 
 ```bash

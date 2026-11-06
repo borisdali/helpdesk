@@ -277,6 +277,12 @@ curl -s "http://localhost:8080/api/v1/incidents?status=resolved&attribution=conn
 curl -s http://localhost:8080/api/v1/incidents/plr_264f28fc \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .incident_record
 
+# The same timeline carries recovery_decisions when the incident involved a
+# recovery decision (a point-in-time restore): the plan(s) shown, the gate
+# approval or denial, and what the restore decided, oldest first. See AUDIT.md §4.6.
+curl -s http://localhost:8080/api/v1/incidents/plr_264f28fc \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .recovery_decisions
+
 # Create an incident bundle directly via the gateway
 curl -s -X POST http://localhost:8080/api/v1/incidents \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \

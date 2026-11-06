@@ -265,6 +265,16 @@ restore carries the instance's clock forward by the time that has passed since i
 alone can take a minute and a half) and compares that. If the loss now breaches the objective, it refuses
 **before stopping anything**, and the refusal says so and how to proceed. A down instance is checked too.
 
+**What is recorded.** Every stage of the decision leaves a typed `recovery_decision` audit event: each plan that
+was shown, the gate approval or denial (who, and which acknowledgements it carried), and the restore's decision to
+proceed or refuse just before it stops anything, with the reason. Each carries a snapshot of the objectives that
+were in force, with where each value came from and a digest of the `infrastructure.json` they were read from, and
+the option it was weighing with its measured loss and verdict. Refusals are recorded too, including the ones that
+have nothing to do with the objective (the approved plan no longer matches, a standby, no room). The events are
+covered by the audit hash chain, so editing one afterwards breaks it. They are read back in
+`vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail`, and in the incident
+narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
+
 `acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
 `acknowledge_data_loss` and does not imply it, and the model has no argument for it. The gateway passes it on and
 records it in the `gate_acknowledged` event; the restore tool decides whether it was needed.

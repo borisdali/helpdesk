@@ -1,0 +1,159 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"helpdesk/internal/audit"
+)
+
+func gateDecisionStore(t *testing.T) (*audit.Store, *Gateway) {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "gate.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store, &Gateway{auditor: audit.NewGatewayAuditor(store)}
+}
+
+func gateDecisions(t *testing.T, store *audit.Store, runID string) []audit.RecoveryDecision {
+	t.Helper()
+	events, err := store.Query(context.Background(), audit.QueryOptions{
+		TraceIDPrefix: runID, EventTypes: []audit.EventType{audit.EventTypeRecoveryDecision}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []audit.RecoveryDecision
+	for _, ev := range events {
+		if ev.RecoveryDecision == nil {
+			t.Fatalf("an event with no payload: %+v", ev)
+		}
+		out = append(out, *ev.RecoveryDecision)
+	}
+	return out
+}
+
+// The gate stage names who decided, what they approved and what they
+// acknowledged, separately.
+func TestRecordRecoveryGateDecision_Approved(t *testing.T) {
+	store, g := gateDecisionStore(t)
+	run := &audit.PlaybookRun{RunID: "plr_gate_rec01", ConnectionString: "pgbackrest-db", RecoveryTarget: "time=2026-10-27T14:05:00Z"}
+	ap, status, msg := recoveryApprovalFromGate(ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef",
+		AcknowledgeDataLoss: true, AllowStopServing: true, AcknowledgeObjectiveBreach: true,
+	}, run.RecoveryTarget, "alice")
+	if status != 0 {
+		t.Fatalf("%d %s", status, msg)
+	}
+	g.recordRecoveryGateDecision(context.Background(), run, ap, "alice", "")
+
+	got := gateDecisions(t, store, run.RunID)
+	if len(got) != 1 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	d := got[0]
+	if d.Stage != audit.RecoveryStageGate || d.Decision != audit.RecoveryDecisionApproved || d.DecidedBy != "alice" ||
+		d.RunID != run.RunID || d.Target != "pgbackrest-db" || d.RecoveryTarget != "time=2026-10-27T14:05:00Z" || d.PlanDigest != "0123456789abcdef" {
+		t.Errorf("decision = %+v", d)
+	}
+	if a := d.Approval; a == nil || a.ApprovedBy != "alice" || !a.AcknowledgedDataLoss || !a.AllowedStopServing || !a.AcknowledgedBreach {
+		t.Errorf("approval = %+v", d.Approval)
+	}
+	// Correlated by the run, like gate_acknowledged, so it is not part of the
+	// triage journey's own timeline.
+	events, _ := store.Query(context.Background(), audit.QueryOptions{TraceIDPrefix: run.RunID, EventTypes: []audit.EventType{audit.EventTypeRecoveryDecision}})
+	if len(events) != 1 || events[0].TraceID != run.RunID {
+		t.Errorf("trace = %+v", events)
+	}
+}
+
+// What an approval did NOT acknowledge is recorded as not acknowledged, not
+// left out: the absence is the fact.
+func TestRecordRecoveryGateDecision_ApprovalThatAcknowledgedLess(t *testing.T) {
+	store, g := gateDecisionStore(t)
+	run := &audit.PlaybookRun{RunID: "plr_gate_rec02", RecoveryTarget: "time=2026-10-27T14:05:00Z"}
+	ap, _, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
+	}, "", "bob")
+	g.recordRecoveryGateDecision(context.Background(), run, ap, "bob", "")
+	d := gateDecisions(t, store, run.RunID)[0]
+	if a := d.Approval; a == nil || !a.AcknowledgedDataLoss || a.AllowedStopServing || a.AcknowledgedBreach {
+		t.Errorf("approval = %+v", d.Approval)
+	}
+}
+
+func TestRecordRecoveryGateDecision_Denied(t *testing.T) {
+	store, g := gateDecisionStore(t)
+	run := &audit.PlaybookRun{RunID: "plr_gate_rec03", RecoveryTarget: "time=2026-10-27T14:05:00Z"}
+	g.recordRecoveryGateDecision(context.Background(), run, nil, "carol", "wrong target")
+	d := gateDecisions(t, store, run.RunID)[0]
+	if d.Decision != audit.RecoveryDecisionDenied || d.DecidedBy != "carol" || d.Reason != "wrong target" ||
+		d.Approval != nil || d.RecoveryTarget != "time=2026-10-27T14:05:00Z" {
+		t.Errorf("decision = %+v", d)
+	}
+}
+
+func TestRecordRecoveryGateDecision_NoAuditorIsNotAPanic(t *testing.T) {
+	(&Gateway{}).recordRecoveryGateDecision(context.Background(), &audit.PlaybookRun{RunID: "plr_x"}, nil, "x", "")
+}
+
+// Through the real handler, for both ways a gate can be resolved.
+func TestHandleProceedEscalation_PITR_RecordsTheGateDecision(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	approved := strings.Replace(pitrApprovalBody, `"acknowledge_data_loss":true`,
+		`"acknowledge_data_loss":true,"allow_stop_serving":true,"acknowledge_objective_breach":true`, 1)
+
+	run := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	store, withAuditor := gateDecisionStore(t)
+	gw.auditor = withAuditor.auditor
+	addCapturingAgent(t, gw, "pitr_sysadmin_agent", "FINDINGS: restored\n")
+	if rec := postProceedEscalation(t, gw, run.RunID, approved); rec.Code != http.StatusOK {
+		t.Fatalf("approve: got %d; %s", rec.Code, rec.Body.String())
+	}
+	got := gateDecisions(t, store, run.RunID)
+	if len(got) != 1 || got[0].Decision != audit.RecoveryDecisionApproved || got[0].DecidedBy != "alice" ||
+		got[0].Approval == nil || !got[0].Approval.AllowedStopServing || !got[0].Approval.AcknowledgedBreach {
+		t.Fatalf("approved gate: %+v", got)
+	}
+
+	// A denial of the same kind of gate is a decision too.
+	run2 := gatedPITRRun("time=2026-10-27T14:05:00Z")
+	run2.RunID = "plr_pitrgate02"
+	auditd2 := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run2.RunID: run2},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw2 := makePlaybookRunGateway(auditd2.URL, nil)
+	store2, withAuditor2 := gateDecisionStore(t)
+	gw2.auditor = withAuditor2.auditor
+	deny := `{"resolution":"denied","resolved_by":"bob","reason":"restore to the wrong moment"}`
+	if rec := postProceedEscalation(t, gw2, run2.RunID, deny); rec.Code != http.StatusOK {
+		t.Fatalf("deny: got %d; %s", rec.Code, rec.Body.String())
+	}
+	got = gateDecisions(t, store2, run2.RunID)
+	if len(got) != 1 || got[0].Decision != audit.RecoveryDecisionDenied || got[0].DecidedBy != "bob" || got[0].Reason != "restore to the wrong moment" {
+		t.Fatalf("denied gate: %+v", got)
+	}
+}
+
+// A gate that is not about a recovery target leaves no recovery decision.
+func TestHandleProceedEscalation_OtherGateLeavesNoRecoveryDecision(t *testing.T) {
+	triage, remediate := pitrPlaybooks()
+	run := gatedPITRRun("") // no recovery target: not a point-in-time run
+	auditd := newRecoveryAuditd(t, map[string]*audit.PlaybookRun{run.RunID: run},
+		map[string]*audit.Playbook{triage.PlaybookID: triage}, map[string]*audit.Playbook{remediate.SeriesID: remediate})
+	gw := makePlaybookRunGateway(auditd.URL, nil)
+	store, withAuditor := gateDecisionStore(t)
+	gw.auditor = withAuditor.auditor
+	if rec := postProceedEscalation(t, gw, run.RunID, `{"resolution":"denied","resolved_by":"bob"}`); rec.Code != http.StatusOK {
+		t.Fatalf("got %d; %s", rec.Code, rec.Body.String())
+	}
+	if got := gateDecisions(t, store, run.RunID); len(got) != 0 {
+		t.Errorf("a gate that is not about a recovery target recorded %+v", got)
+	}
+}

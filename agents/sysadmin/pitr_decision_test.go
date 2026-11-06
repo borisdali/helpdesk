@@ -1,0 +1,299 @@
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
+)
+
+// decisions returns the recovery_decision events in the store, by stage.
+func decisions(t *testing.T, store *audit.Store) map[string][]audit.RecoveryDecision {
+	t.Helper()
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeRecoveryDecision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string][]audit.RecoveryDecision{}
+	for _, ev := range events {
+		if ev.RecoveryDecision == nil {
+			t.Fatalf("a recovery_decision event with no payload: %+v", ev)
+		}
+		out[ev.RecoveryDecision.Stage] = append(out[ev.RecoveryDecision.Stage], *ev.RecoveryDecision)
+	}
+	return out
+}
+
+func TestSnapshotOf_RecordsWhatWasInForceAndWhereItCameFrom(t *testing.T) {
+	res := infra.ResolvedObjectives{
+		Environment:        "prod",
+		RPO:                infra.ResolvedDuration{Set: true, Value: 15 * 60 * 1e9, Source: "environment:prod"},
+		RTO:                infra.ResolvedDuration{Set: true, Value: 30 * 60 * 1e9, Source: "default"},
+		AvailabilitySLO:    infra.ResolvedPercent{Set: true, Value: 99.95, Source: "database"},
+		RecoveryPreference: infra.ResolvedChoice{Set: true, Value: "data_first", Source: "environment:prod"},
+		Enforcement:        infra.ResolvedChoice{Set: true, Value: "refuse", Source: "database"},
+		Problems:           []string{"defaults.objectives: something"},
+	}
+	s := snapshotOf(res, "digest0123456789")
+	if *s.RPOSeconds != 900 || s.RPOSource != "environment:prod" || *s.RTOSeconds != 1800 || s.RTOSource != "default" ||
+		*s.AvailabilitySLO != 99.95 || s.AvailabilitySource != "database" ||
+		s.RecoveryPreference != "data_first" || s.PreferenceSource != "environment:prod" ||
+		s.Enforcement != "refuse" || s.EnforcementSource != "database" ||
+		s.Environment != "prod" || s.ConfigDigest != "digest0123456789" || len(s.Problems) != 1 {
+		t.Errorf("snapshot = %+v", s)
+	}
+
+	// What is not set is absent, not zero: an rpo of 0 means "no loss tolerated".
+	none := snapshotOf(infra.ResolvedObjectives{}, "")
+	if none.RPOSeconds != nil || none.RTOSeconds != nil || none.AvailabilitySLO != nil || none.RecoveryPreference != "" || none.EnforcementSource != "" {
+		t.Errorf("an unset objective was recorded as a value: %+v", none)
+	}
+	if none.Enforcement != "warn" {
+		t.Errorf("enforcement = %q: unset is warn, and the record says what was applied", none.Enforcement)
+	}
+	zero := snapshotOf(infra.ResolvedObjectives{RPO: infra.ResolvedDuration{Set: true, Source: "database"}}, "")
+	if zero.RPOSeconds == nil || *zero.RPOSeconds != 0 {
+		t.Errorf("an rpo of zero must be recorded as zero: %+v", zero)
+	}
+	// An enforcement that could not be trusted is recorded as what was applied.
+	if bad := snapshotOf(infra.ResolvedObjectives{EnforcementInvalid: true}, ""); bad.Enforcement != "acknowledge" {
+		t.Errorf("enforcement = %q", bad.Enforcement)
+	}
+}
+
+func TestPlanDecision_IsRecordedForEveryPlanShown(t *testing.T) {
+	enforced(t, "15m", "acknowledge")
+	infraConfig.Digest = "0123456789abcdef"
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	got := decisions(t, store)[audit.RecoveryStagePlan]
+	if len(got) != 1 {
+		t.Fatalf("plan decisions = %d: %+v", len(got), got)
+	}
+	d := got[0]
+	if d.Decision != audit.RecoveryDecisionPlanned || d.Tool != "plan_point_in_time_recovery" || d.Target != "pgbackrest_db" ||
+		d.RecoveryTarget != "time="+liveTarget || d.PlanDigest != plan.PlanDigest || d.PlanStatus != PITRFeasible {
+		t.Errorf("decision = %+v", d)
+	}
+	// What was required of this database, from where, and which config.
+	o := d.Objectives
+	if o == nil || *o.RPOSeconds != 900 || o.RPOSource != "environment:prod" || o.Enforcement != "acknowledge" || o.Environment != "prod" || o.ConfigDigest != "0123456789abcdef" {
+		t.Errorf("objectives = %+v", o)
+	}
+	// What was offered and how it stood.
+	if len(d.Options) != 1 {
+		t.Fatalf("options = %+v", d.Options)
+	}
+	opt := d.Options[0]
+	if opt.Name != pitrOptionName || opt.Chosen || opt.Verdict != RPOExceeds || opt.Gate != GateAcknowledge ||
+		opt.LossBasis != lossBasisLive || opt.LossSeconds == nil || *opt.LossSeconds != int64(8*86400+10*3600) || opt.LossUpperBound {
+		t.Errorf("option = %+v", opt)
+	}
+	// Nothing was chosen or approved by a plan.
+	if d.Approval != nil {
+		t.Errorf("a plan carries no approval: %+v", d.Approval)
+	}
+	if status, err := store.VerifyIntegrity(context.Background()); err != nil || !status.Valid {
+		t.Errorf("chain = %+v, %v", status, err)
+	}
+}
+
+// A plan that cannot be restored is on record too, with why.
+func TestPlanDecision_RecordsAPlanThatIsNotFeasible(t *testing.T) {
+	withPgBackRestDockerInfra(t)
+	sim, _ := liveEnv(t)
+	sim.up = false // down, and a target past the end of the archive: not feasible
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRNotFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	got := decisions(t, store)[audit.RecoveryStagePlan]
+	if len(got) != 1 || got[0].PlanStatus != PITRNotFeasible || got[0].Reason == "" || len(got[0].Options) != 0 {
+		t.Errorf("decisions = %+v", got)
+	}
+}
+
+// The configuration a decision read is identified by the digest of the file.
+func TestPlanDecision_CarriesTheDigestOfTheLoadedConfig(t *testing.T) {
+	body, err := os.ReadFile("../../testing/testing.infra.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "infrastructure.json")
+	if err := os.WriteFile(p, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := infra.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infraConfig = loaded
+	t.Cleanup(func() { infraConfig = nil })
+	if got := objectivesSnapshot("pgbackrest-db"); got == nil || got.ConfigDigest != loaded.Digest || loaded.Digest == "" {
+		t.Errorf("snapshot = %+v, loaded digest %q", got, loaded.Digest)
+	}
+	if objectivesSnapshot("nope") != nil {
+		t.Error("an unknown target has a snapshot")
+	}
+}
+
+// ── the restore ──────────────────────────────────────────────────────────────
+
+func TestExecutionDecision_RecordsRefusalAndProceedingAtTheObjectiveCheck(t *testing.T) {
+	for _, ack := range []bool{false, true} {
+		enforced(t, "15m", "acknowledge")
+		infraConfig.Digest = "0123456789abcdef"
+		sim, _ := liveEnv(t)
+		store, cleanup := withRealToolAuditor(t)
+		plan := approvedLiveDigest(t, liveTarget)
+		args := liveArgs(plan)
+		args.AcknowledgeObjectiveBreach = ack
+		_, err := restoreToPITImpl(context.Background(), args)
+		got := decisions(t, store)[audit.RecoveryStageExecution]
+		cleanup()
+
+		// Exactly one, however it went: the check records itself and the
+		// catch-all for other refusals must not add a second.
+		if len(got) != 1 {
+			t.Fatalf("ack=%v: %d execution decisions: %+v", ack, len(got), got)
+		}
+		d := got[0]
+		if d.Tool != "restore_to_point_in_time" || d.Target != "pgbackrest_db" || d.PlanDigest != plan.PlanDigest ||
+			d.RecoveryTarget != "time="+liveTarget || d.PlanStatus != PITRFeasible {
+			t.Errorf("ack=%v: decision = %+v", ack, d)
+		}
+		if d.Objectives == nil || *d.Objectives.RPOSeconds != 900 || d.Objectives.ConfigDigest != "0123456789abcdef" {
+			t.Errorf("ack=%v: objectives = %+v", ack, d.Objectives)
+		}
+		if d.Approval == nil || !d.Approval.AllowedStopServing || d.Approval.AcknowledgedBreach != ack {
+			t.Errorf("ack=%v: approval = %+v", ack, d.Approval)
+		}
+		if len(d.Options) != 1 || d.Options[0].Verdict != RPOExceeds || d.Options[0].Gate != GateAcknowledge || d.Options[0].LossSeconds == nil {
+			t.Fatalf("ack=%v: options = %+v", ack, d.Options)
+		}
+		if ack {
+			if err != nil || d.Decision != audit.RecoveryDecisionProceeded || d.Reason != "" || !d.Options[0].Chosen || !sim.did("stop") {
+				t.Errorf("acknowledged: err=%v decision=%+v order=%s", err, d, sim.order())
+			}
+			continue
+		}
+		if err == nil || d.Decision != audit.RecoveryDecisionRefused || d.Options[0].Chosen || sim.did("stop") {
+			t.Errorf("not acknowledged: err=%v decision=%+v order=%s", err, d, sim.order())
+		}
+		if !strings.Contains(d.Reason, "acknowledge_objective_breach") || !strings.Contains(d.Reason, "The instance was not stopped") {
+			t.Errorf("the recorded reason = %q", d.Reason)
+		}
+	}
+}
+
+// A refusal for another reason (here the approved plan no longer matches) is a
+// decision about the recovery too, and is recorded once, with its reason.
+func TestExecutionDecision_RecordsOtherRefusalsOnce(t *testing.T) {
+	enforced(t, "15m", "")
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	plan := approvedLiveDigest(t, liveTarget)
+	args := liveArgs(plan)
+	args.PlanDigest = "ffffffffffffffff" // not the plan that was approved
+
+	_, err := restoreToPITImpl(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "changed since it was approved") {
+		t.Fatalf("err = %v", err)
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 1 || got[0].Decision != audit.RecoveryDecisionRefused || !strings.Contains(got[0].Reason, "changed since it was approved") {
+		t.Fatalf("decisions = %+v", got)
+	}
+	if got[0].PlanDigest != "ffffffffffffffff" {
+		t.Errorf("it should record the digest it was given, not the plan's: %s", got[0].PlanDigest)
+	}
+}
+
+// A failure once the restore has begun is not a refusal and is not recorded as one.
+func TestExecutionDecision_AFailureAfterTheStopIsNotARefusal(t *testing.T) {
+	enforced(t, "15m", "warn")
+	sim, _ := liveEnv(t)
+	sim.restoreErr = context.DeadlineExceeded // the pgBackRest restore itself fails
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	plan := approvedLiveDigest(t, liveTarget)
+
+	_, err := restoreToPITImpl(context.Background(), liveArgs(plan))
+	if err == nil {
+		t.Fatal("the restore should have failed")
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 1 || got[0].Decision != audit.RecoveryDecisionProceeded {
+		t.Errorf("decisions = %+v: it decided to proceed, and then it failed", got)
+	}
+}
+
+// Through the model-facing tool, the approver and what they acknowledged are
+// in the record: the gateway put them in the approval the tool was given.
+func TestExecutionDecision_NamesTheApproverAndWhatTheyAcknowledged(t *testing.T) {
+	enforced(t, "15m", "acknowledge")
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	plan := approvedLiveDigest(t, liveTarget)
+	ap := approvalFor(plan, true)
+	ap.BreachAcknowledged = true
+
+	if _, err := restoreToPITTool(toolCtxWithApproval(ap), RestoreToPITModelArgs{Target: "pgbackrest_db", Stanza: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 1 || got[0].Approval == nil {
+		t.Fatalf("decisions = %+v", got)
+	}
+	a := got[0].Approval
+	if a.ApprovedBy != "alice" || !a.AcknowledgedDataLoss || !a.AllowedStopServing || !a.AcknowledgedBreach {
+		t.Errorf("approval = %+v", a)
+	}
+}
+
+// An objective that could not be read is on the record as such, with why, and
+// the enforcement that was applied.
+func TestExecutionDecision_RecordsAnUnreadableObjective(t *testing.T) {
+	objectiveInfra(t, "", func(db *infra.DBServer, _ *infra.Config) {
+		db.Objectives = &infra.Objectives{
+			RPO:         &infra.Duration{Invalid: `invalid duration "soon"`},
+			Enforcement: &infra.Choice{Value: "acknowledge"},
+		}
+	})
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	plan := approvedLiveDigest(t, liveTarget)
+
+	if _, err := restoreToPITImpl(context.Background(), liveArgs(plan)); err == nil {
+		t.Fatal("it should have asked for the acknowledgement")
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 1 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	d := got[0]
+	if d.Objectives == nil || d.Objectives.RPOSeconds != nil || len(d.Objectives.Problems) == 0 || d.Objectives.Enforcement != "acknowledge" {
+		t.Errorf("objectives = %+v", d.Objectives)
+	}
+	if d.Options[0].Verdict != RPOObjectiveInvalid || d.Options[0].Gate != GateAcknowledge {
+		t.Errorf("option = %+v", d.Options[0])
+	}
+}

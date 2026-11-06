@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,6 +65,50 @@ type IncidentNarrative struct {
 	// not the same value as this struct's IncidentID field above (the
 	// triage run_id) — the two identify different rows in different tables.
 	IncidentRecord *audit.Incident `json:"incident_record,omitempty"`
+	// RecoveryDecisions is the incident's recovery decision, stage by stage and
+	// oldest first: every plan that was shown, the gate approval or denial, and
+	// the restore tool's decision to proceed or refuse. Empty for an incident
+	// that involved no recovery decision. See audit.RecoveryDecision.
+	RecoveryDecisions []RecoveryDecisionRecord `json:"recovery_decisions,omitempty"`
+}
+
+// RecoveryDecisionRecord is one recovery_decision event as the narrative shows
+// it: when, and what was decided.
+type RecoveryDecisionRecord struct {
+	At       time.Time              `json:"at"`
+	EventID  string                 `json:"event_id"`
+	Decision audit.RecoveryDecision `json:"decision"`
+}
+
+// fetchRecoveryDecisions gathers an incident's recovery_decision events. The
+// agent's stages are keyed by the request traces of its journeys; the gate
+// stage, like gate_acknowledged, by the triage run's own ID. Best-effort and
+// fail-open like every other join in the narrative.
+func (g *Gateway) fetchRecoveryDecisions(runID string, journeys []audit.IncidentJourneyRef, since time.Time) []RecoveryDecisionRecord {
+	if g.auditURL == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	traces := []string{runID}
+	for _, j := range journeys {
+		if j.TraceID != "" && !seen[j.TraceID] {
+			seen[j.TraceID] = true
+			traces = append(traces, j.TraceID)
+		}
+	}
+	var out []RecoveryDecisionRecord
+	ids := map[string]bool{}
+	for _, tr := range traces {
+		for _, ev := range audit.FetchRecoveryDecisionEvents(g.auditURL, g.auditAPIKey, tr, since) {
+			if ev.RecoveryDecision == nil || ids[ev.EventID] {
+				continue
+			}
+			ids[ev.EventID] = true
+			out = append(out, RecoveryDecisionRecord{At: ev.Timestamp, EventID: ev.EventID, Decision: *ev.RecoveryDecision})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	return out
 }
 
 // TriageChapter holds the investigative phase of the incident.
@@ -475,6 +520,11 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 		narrative.DurationSec = t.Sub(run.StartedAt).Seconds()
 	}
 	narrative.Journeys = buildJourneyRefs(run, classified, remediationRunID)
+
+	// The recovery decision, if the incident had one: plans shown, the gate,
+	// and what the restore decided. Looked up by the journeys' traces and the
+	// run itself.
+	narrative.RecoveryDecisions = g.fetchRecoveryDecisions(runID, narrative.Journeys, run.StartedAt)
 
 	// 4. Feedback — all operator feedback slots for this incident.
 	narrative.Feedback = g.fetchAllRunFeedback(r.Context(), runID)

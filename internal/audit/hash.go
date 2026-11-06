@@ -33,6 +33,14 @@ func ComputeEventHash(event *Event) string {
 		Approval    *Approval      `json:"approval,omitempty"`
 		Decision    *Decision      `json:"decision,omitempty"`
 		Outcome     *Outcome       `json:"outcome,omitempty"`
+		// RecoveryDecision is the one typed payload the hash covers: it is the
+		// record that someone accepted a loss knowingly, so editing it after the
+		// fact must break the chain. Omitted when nil, so every other event
+		// (and every event recorded before this field existed) hashes exactly as
+		// it always did. The other typed payloads added since the hash was
+		// defined are not covered; adding them now would invalidate the chain
+		// for events already recorded with them.
+		RecoveryDecision *RecoveryDecision `json:"recovery_decision,omitempty"`
 	}{
 		EventID:     event.EventID,
 		Timestamp:   event.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"),
@@ -48,6 +56,8 @@ func ComputeEventHash(event *Event) string {
 		Approval:    event.Approval,
 		Decision:    event.Decision,
 		Outcome:     event.Outcome,
+
+		RecoveryDecision: event.RecoveryDecision,
 	}
 
 	data, err := json.Marshal(hashInput)

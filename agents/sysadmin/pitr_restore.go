@@ -161,7 +161,7 @@ func beginPITRestore(target string) (release func(), ok bool) {
 	}, true
 }
 
-func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITResult, error) {
+func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult RestoreToPITResult, retErr error) {
 	target := RecoveryTarget{Type: args.RecoveryTargetType, Value: args.RecoveryTargetVal}
 	now := time.Now()
 	normalized, err := target.Normalize(now)
@@ -198,6 +198,17 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 	}
 	planArgs := PlanPITRArgs{Target: args.Target, Stanza: stanza, RecoveryTargetType: target.Type, RecoveryTargetVal: target.Value}
 	var result RestoreToPITResult
+
+	// Every refusal from here on is a decision about this recovery, and is
+	// recorded as one (recovery_decision, stage execution), not left to be read
+	// out of the tool call's error text. The refusal at the objective check below
+	// records itself with more to say, and marks the decision made.
+	decided := false
+	defer func() {
+		if retErr != nil && !decided && isRefusal(retErr) {
+			recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, retErr.Error())
+		}
+	}()
 
 	// A serving instance is restored only when the human's gate approval said
 	// the tool may stop it. Everything that can be checked while it is still
@@ -268,15 +279,23 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 		measured = &p
 	}
 	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, measured, stopAt), args.Target)
+	var gerr error
 	if result.DataLoss != nil {
-		if gerr := result.DataLoss.Objective.objectiveGate(args.AcknowledgeObjectiveBreach); gerr != nil {
-			untouched := "Nothing was changed."
-			if live {
-				untouched = "The instance was not stopped."
-			}
-			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
-		}
+		gerr = result.DataLoss.Objective.objectiveGate(args.AcknowledgeObjectiveBreach)
 	}
+	// The decision is recorded here, with what it was made from, whichever way
+	// it goes: this is the last point before anything is stopped.
+	decided = true
+	if gerr != nil {
+		untouched := "Nothing was changed."
+		if live {
+			untouched = "The instance was not stopped."
+		}
+		refusal := fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
+		recordExecutionDecision(ctx, args, plan, result.DataLoss, refusal.Error())
+		return result, refusal
+	}
+	recordExecutionDecision(ctx, args, plan, result.DataLoss, "")
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string

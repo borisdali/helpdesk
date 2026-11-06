@@ -21,6 +21,7 @@ For end-to-end request journeys see [JOURNEYS.md](JOURNEYS.md).
    - [4.3 delegation_decision fields](#43-delegation_decision-fields)
    - [4.4 delegation_verification fields](#44-delegation_verification-fields-orchestrator)
    - [4.5 origin values](#45-origin-values)
+   - [4.6 recovery_decision fields](#46-recovery_decision-fields)
 5. [Action Classification](#5-action-classification)
 6. [auditd API Reference](#6-auditd-api-reference)
    - [6.1 Audit events](#61-audit-events)
@@ -109,6 +110,7 @@ essential for querying and correlating events.
 | `pol_` | `policy_decision` | Agent / auditd — records policy evaluation outcome |
 | `rsn_` | `agent_reasoning` | Agent — LLM deliberation text captured automatically when audit is enabled and the model emits text alongside a tool call |
 | `dv_` | `delegation_verification` | Orchestrator — records what a sub-agent actually executed vs. what it claimed; used to detect LLM fabrication |
+| `rdc_` | `recovery_decision` | Sysadmin agent (plan, execution) and gateway (gate) — one stage of a recovery decision; see [§4.6](#46-recovery_decision-fields) |
 
 ### 2.2 trace_id prefix → request origin
 
@@ -137,8 +139,18 @@ Each event is linked to its predecessor by a SHA-256 hash chain:
 - `event_hash` = SHA-256 of the event's canonical JSON representation
 - `prev_hash` = `event_hash` of the immediately preceding event (`"genesis"` for event 1)
 
-Any modification to a stored event breaks the chain at that point and at every
+Any modification to a **hashed field** of a stored event breaks the chain at that point and at every
 subsequent event. `GET /v1/verify` reports the first broken link.
+
+**What the hash covers.** `event_id`, `timestamp`, `event_type`, `trace_id`, `parent_id`, `action_class`,
+`prev_hash`, `session`, `input`, `output`, `tool`, `approval`, `decision` and `outcome`, and, since v0.34, the
+`recovery_decision` payload. It does **not** cover `principal`, `purpose`, `purpose_note`, `origin`, or the typed
+payloads that were added after the hash was defined (`policy_decision`, `agent_reasoning`,
+`governance_violation`, `delegation_verification`, `rollback_execution`, `objective_evidence`): they are stored
+whole, but editing one afterwards would not break the chain. Adding them to the hash now would invalidate the
+chain for every event already recorded with them, so they stay out until a chain version can be introduced.
+`recovery_decision` is covered because it is the record that someone accepted a loss knowingly; an event without
+one hashes exactly as it always did.
 
 ---
 
@@ -310,6 +322,47 @@ curl "http://localhost:1199/v1/events?event_type=tool_execution&origin=direct_to
 # Direct-tool events for a specific trace
 curl "http://localhost:1199/v1/events?trace_id=dt_abc12345&origin=direct_tool"
 ```
+
+### 4.6 recovery_decision fields
+
+A restore is decided in stages by different parties, and each stage leaves a `recovery_decision` event. Together
+they answer, after the fact and without parsing tool-output text: what was required of this database, what was
+known, what was offered, who accepted what, and what was done. Today they are written for a point-in-time
+restore ([PITR.md](PITR.md)).
+
+| Stage | Recorded by | `decision` | Trace |
+|-------|-------------|-----------|-------|
+| `plan` | sysadmin agent, each time a plan is made | `planned` | the request's `trace_id` |
+| `gate` | gateway, when a person approves or denies the gate | `approved`, `denied` | the triage run's ID (`plr_…`), like `gate_acknowledged` |
+| `execution` | sysadmin agent, just before it stops anything | `proceeded`, `refused` | the request's `trace_id` |
+
+The payload (`recovery_decision`):
+
+| Field | Meaning |
+|-------|---------|
+| `stage`, `decision`, `reason` | the stage, what it decided, and why (a refusal, a denial) |
+| `decided_by` | the person, for the gate stage |
+| `tool`, `target`, `run_id` | the tool, the database (as the config names it), and the run (gate stage) |
+| `recovery_target`, `plan_digest`, `plan_status` | where the restore stops, the plan approved, and whether it was feasible |
+| `objectives` | what was in force: `rpo_seconds`, `rto_seconds`, `availability_slo`, `recovery_preference` and `enforcement`, each with the level it came from (`*_source`: `database`, `environment:<name>`, `default`), the `environment`, any config `problems`, and the `config_digest` of the `infrastructure.json` they were read from |
+| `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured`), the `verdict` against the `rpo` and the `gate` it demands |
+| `approval` | what the approval carried: `approved_by`, `acknowledged_data_loss`, `allowed_stop_serving`, `acknowledged_breach` |
+
+What an approval did **not** acknowledge is recorded as absent, not omitted from the story: the `execution` event
+states what the restore was given. The configuration itself is not kept, only its digest and the resolved values,
+so a later edit to `infrastructure.json` does not rewrite what applied to a decision already made.
+
+```bash
+# Every recovery decision, newest first
+curl "http://localhost:1199/v1/events?event_type=recovery_decision"
+# One incident's: the triage run's gate, and the agent's stages by their traces
+curl "http://localhost:1199/v1/events?event_type=recovery_decision&trace_id=plr_a3f7c1b2"
+```
+
+The same events are read back in three places: the `recovery_decisions` list of the incident narrative
+(`GET /api/v1/incidents/{runID}`, shown by `vault incidents <run>`), the `recovery_decision` and
+`recovery_verdict` fields of a journey summary ([JOURNEYS.md](JOURNEYS.md)), and the RECOVERY DECISION block of
+`vault journey --detail`.
 
 ---
 

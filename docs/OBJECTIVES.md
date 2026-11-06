@@ -143,6 +143,8 @@ it spends.
 | Enforcement of the `rpo` at the PITR gate: `warn`, `acknowledge` (`acknowledge_objective_breach`) or `refuse`, with the loss re-measured just before the instance is stopped ([PITR.md §4](PITR.md#4-operating-it)) | Built |
 | `recovery_preference` and `enforcement` in the config: validated, resolved per database, environment and fleet with sources | Built |
 | `enforcement` read by the PITR restore (above) | Built |
+| Each stage of a recovery decision recorded as a typed, hash-covered `recovery_decision` audit event, with a snapshot of the objectives in force and the config digest, and shown in the incident narrative, `vault incidents` and `vault journey` ([AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields)) | Built |
+| The outcome of the recovery (actual downtime against the `rto`) recorded on that decision | Not built |
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A budget window on `availability_slo` and the number of worst-case recoveries it absorbs (budget ÷ `rto`) | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
@@ -185,6 +187,16 @@ Here's the visual of how we think about relationship between the inner/flywheel 
 
 ### 6.3 What this depends on and what could mislead
 
+- **`pg_waldump` for the exact loss (Tier B).** Checked 2026-11-05 on the local fixtures. It is in the server
+  package, so any image or host that runs PostgreSQL has it: present at the server's own version in the Docker
+  and Kubernetes fixture image (Debian, `postgresql-16`, on `PATH`), in `postgres:16-alpine`
+  (`/usr/local/bin`) and in AlloyDB Omni 17 (`/usr/lib/postgresql/17/bin`). Fetching an archived segment with
+  `pgbackrest archive-get` into a temp directory and reading it with `pg_waldump` worked on the fixture: it
+  prints every `COMMIT` with its LSN, transaction id and an exact timestamp, so an LSN maps to a time and commits
+  can be counted. Not yet verified: a real systemd host (a Debian/Ubuntu PGDG install keeps it in
+  `/usr/lib/postgresql/N/bin`, which is not on `PATH` for most users, so it must be found by path and its major
+  version matched to the server's) and a managed or operator-run database, where the binary may be absent. Tier B
+  must therefore degrade to the archive-based estimate and record why it could not run.
 - **Real versus injected incidents.** Faulttest databases are tiny, so injected recovery times flatter any
   estimate. The incidents table already records an `origin` (`real` or `faulttest`), faulttest sets it on every
   run it triggers and `vault incidents --origin` filters on it, so the estimate can read real incidents only.

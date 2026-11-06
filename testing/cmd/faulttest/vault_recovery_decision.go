@@ -1,0 +1,222 @@
+package main
+
+// The RECOVERY DECISION section of `vault incidents <run>`: the incident's
+// recovery decision read back from its recovery_decision audit events, stage by
+// stage. Pure formatting, so it can be checked without a gateway.
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"helpdesk/internal/audit"
+)
+
+// narrativeRecoveryDecision mirrors the gateway's RecoveryDecisionRecord.
+type narrativeRecoveryDecision struct {
+	At       time.Time              `json:"at"`
+	EventID  string                 `json:"event_id"`
+	Decision audit.RecoveryDecision `json:"decision"`
+}
+
+func rdSpan(s int64) string {
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm %02ds", s/60, s%60)
+	case s < 86400:
+		return fmt.Sprintf("%dh %02dm", s/3600, s%3600/60)
+	}
+	return fmt.Sprintf("%dd %02dh %02dm", s/86400, s%86400/3600, s%3600/60)
+}
+
+func rdBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// recoverySummaryLine is the journey header's one-line form: what the trace
+// decided and how that stood against the objective.
+func recoverySummaryLine(decision, verdict string) string {
+	if verdict == "" {
+		return decision
+	}
+	return decision + " (" + verdict + " the recovery objective)"
+}
+
+// recoveryDecisionsFromEvents picks the recovery_decision events out of a run's
+// events, in order, for formatRecoveryDecisions.
+func recoveryDecisionsFromEvents(events []journeyEvent) []narrativeRecoveryDecision {
+	var out []narrativeRecoveryDecision
+	for _, ev := range events {
+		if ev.EventType != string(audit.EventTypeRecoveryDecision) || ev.RecoveryDecision == nil {
+			continue
+		}
+		at, _ := time.Parse(time.RFC3339Nano, ev.Timestamp)
+		out = append(out, narrativeRecoveryDecision{At: at, EventID: ev.EventID, Decision: *ev.RecoveryDecision})
+	}
+	return out
+}
+
+// rdObjectives renders the objectives that were in force, with where each came
+// from. Nothing is shown for an objective that was not set.
+func rdObjectives(o *audit.ObjectivesInForce) []string {
+	var lines []string
+	head := "Objectives in force"
+	if o.Environment != "" {
+		head += " (environment " + o.Environment + ")"
+	}
+	if o.ConfigDigest != "" {
+		head += ", config " + o.ConfigDigest
+	}
+	lines = append(lines, head+":")
+	var parts []string
+	if o.RPOSeconds != nil {
+		parts = append(parts, fmt.Sprintf("rpo %s [%s]", rdSpan(*o.RPOSeconds), o.RPOSource))
+	}
+	if o.RTOSeconds != nil {
+		parts = append(parts, fmt.Sprintf("rto %s [%s]", rdSpan(*o.RTOSeconds), o.RTOSource))
+	}
+	if o.AvailabilitySLO != nil {
+		parts = append(parts, fmt.Sprintf("availability %v%% [%s]", *o.AvailabilitySLO, o.AvailabilitySource))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "no objective set")
+	}
+	lines = append(lines, "  "+strings.Join(parts, "   "))
+	policy := []string{}
+	if o.RecoveryPreference != "" {
+		policy = append(policy, fmt.Sprintf("preference %s [%s]", o.RecoveryPreference, o.PreferenceSource))
+	}
+	enf := "enforcement " + o.Enforcement
+	if o.EnforcementSource != "" {
+		enf += " [" + o.EnforcementSource + "]"
+	}
+	lines = append(lines, "  "+strings.Join(append(policy, enf), "   "))
+	for _, p := range o.Problems {
+		lines = append(lines, "  ⚠ config problem: "+p)
+	}
+	return lines
+}
+
+func rdOption(opt audit.DecisionOption) string {
+	var b strings.Builder
+	b.WriteString(opt.Name)
+	if opt.Chosen {
+		b.WriteString(" (chosen)")
+	}
+	var loss []string
+	if opt.LossSeconds != nil {
+		loss = append(loss, rdSpan(*opt.LossSeconds))
+	}
+	if opt.LossBytes != nil {
+		loss = append(loss, rdBytes(*opt.LossBytes)+" of WAL")
+	}
+	if len(loss) > 0 {
+		exact := "exact"
+		if opt.LossUpperBound {
+			exact = "at most"
+		}
+		fmt.Fprintf(&b, ": loss %s (%s, %s)", strings.Join(loss, ", "), opt.LossBasis, exact)
+	}
+	if opt.Verdict != "" {
+		fmt.Fprintf(&b, " → %s", opt.Verdict)
+	}
+	switch opt.Gate {
+	case "acknowledge":
+		b.WriteString("; needed the breach acknowledged")
+	case "refuse":
+		b.WriteString("; enforcement refuses it")
+	}
+	return b.String()
+}
+
+// formatRecoveryDecisions renders the section's body, oldest stage first.
+func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
+	if len(ds) == 0 {
+		return ""
+	}
+	var b strings.Builder
+
+	// The objectives, once: from the latest stage that recorded them. If the
+	// configuration changed between stages, say so: the stages were not all
+	// made against the same requirements.
+	var latest *audit.ObjectivesInForce
+	digests := map[string]bool{}
+	for _, d := range ds {
+		if o := d.Decision.Objectives; o != nil {
+			latest = o
+			if o.ConfigDigest != "" {
+				digests[o.ConfigDigest] = true
+			}
+		}
+	}
+	if latest != nil {
+		for _, l := range rdObjectives(latest) {
+			b.WriteString(l + "\n")
+		}
+		if len(digests) > 1 {
+			b.WriteString("  ⚠ the configuration changed between stages: they were not all made against the same objectives\n")
+		}
+		b.WriteString("\n")
+	}
+
+	for _, d := range ds {
+		rd := d.Decision
+		stamp := "      –"
+		if !d.At.IsZero() {
+			stamp = d.At.UTC().Format("15:04:05")
+		}
+		fmt.Fprintf(&b, "%s  %-9s %-9s", stamp, rd.Stage, rd.Decision)
+		switch rd.Stage {
+		case audit.RecoveryStageGate:
+			who := rd.DecidedBy
+			if who == "" {
+				who = "unknown"
+			}
+			fmt.Fprintf(&b, " by %s", who)
+			if a := rd.Approval; a != nil {
+				var acks []string
+				if a.AcknowledgedDataLoss {
+					acks = append(acks, "data loss")
+				}
+				if a.AllowedStopServing {
+					acks = append(acks, "stopping the instance")
+				}
+				if a.AcknowledgedBreach {
+					acks = append(acks, "exceeding the objective")
+				}
+				if len(acks) == 0 {
+					acks = append(acks, "nothing beyond approving")
+				}
+				fmt.Fprintf(&b, "; acknowledged: %s", strings.Join(acks, ", "))
+			}
+		case audit.RecoveryStageExecution:
+			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
+				fmt.Fprintf(&b, " on %s's approval", a.ApprovedBy)
+			}
+		}
+		if rd.RecoveryTarget != "" && rd.Stage != audit.RecoveryStageExecution {
+			fmt.Fprintf(&b, "  [%s]", rd.RecoveryTarget)
+		}
+		b.WriteString("\n")
+		// Detail lines sit under the decision column (stamp, stage, decision).
+		const under = "                    "
+		for _, opt := range rd.Options {
+			b.WriteString(under + rdOption(opt) + "\n")
+		}
+		if rd.Reason != "" {
+			b.WriteString(under + "reason: " + wordWrap(rd.Reason, 60, under+"        ") + "\n")
+		}
+	}
+	return b.String()
+}

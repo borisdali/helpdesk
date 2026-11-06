@@ -35,6 +35,8 @@ type mockIncidentAuditd struct {
 	// event_type=objective_evidence — a separate map since it's a separate
 	// server-side query (fetchEventsByType), same as the real gateway/auditd.
 	oevEventsByTraceID map[string][]audit.Event
+	// recoveryEventsByTraceID is the same for recovery_decision events.
+	recoveryEventsByTraceID map[string][]audit.Event
 	// eventsRequestCount counts GET /v1/events?event_type=delegation_verification
 	// requests per trace_id — used to assert the dedup cache in
 	// handleGetIncident actually works.
@@ -97,6 +99,11 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 		case strings.Contains(path, "/events") && r.URL.Query().Get("event_type") == "objective_evidence":
 			traceID := r.URL.Query().Get("trace_id")
 			json.NewEncoder(w).Encode(m.oevEventsByTraceID[traceID]) //nolint:errcheck
+
+		// Recovery-decision events: same bare-array shape.
+		case strings.Contains(path, "/events") && r.URL.Query().Get("event_type") == "recovery_decision":
+			traceID := r.URL.Query().Get("trace_id")
+			json.NewEncoder(w).Encode(m.recoveryEventsByTraceID[traceID]) //nolint:errcheck
 
 		// Gate event lookup (and any other event_type).
 		case strings.Contains(path, "/events"):
@@ -500,6 +507,69 @@ func TestHandleGetIncident_ObjectiveEvidence_SurfaceOnChapter(t *testing.T) {
 	if !reflect.DeepEqual(n.Triage.ObjectiveEvidenceUnconfirmed, []string{"idle_in_transaction_stuck"}) {
 		t.Errorf("Triage.ObjectiveEvidenceUnconfirmed = %v, want [idle_in_transaction_stuck] — never quoted anywhere in the response",
 			n.Triage.ObjectiveEvidenceUnconfirmed)
+	}
+}
+
+// The narrative carries the recovery decision, stage by stage and in time
+// order, gathered from the agent's request trace (plan, execution) and from the
+// run's own ID (the gate).
+func TestHandleGetIncident_RecoveryDecisions_PlanGateAndExecution(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Hour)
+	run := &audit.PlaybookRun{
+		RunID: "plr_rd01", SeriesID: "pbs_pgbackrest_pitr_triage", Outcome: audit.OutcomeResolved,
+		StartedAt: start, TraceID: "tr_rd01", RecoveryTarget: "time=2026-11-04T01:39:07Z",
+	}
+	rdc := func(id string, at time.Duration, d audit.RecoveryDecision) audit.Event {
+		return audit.Event{EventID: id, Timestamp: start.Add(at), EventType: audit.EventTypeRecoveryDecision, RecoveryDecision: &d}
+	}
+	plan := rdc("rdc_plan0001", time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStagePlan, Decision: audit.RecoveryDecisionPlanned, PlanStatus: "feasible"})
+	gate := rdc("rdc_gate0001", 2*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageGate, Decision: audit.RecoveryDecisionApproved, DecidedBy: "alice"})
+	exec := rdc("rdc_exec0001", 3*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageExecution, Decision: audit.RecoveryDecisionProceeded,
+		Options: []audit.DecisionOption{{Name: "point_in_time_restore", Chosen: true, Verdict: "exceeds", Gate: "acknowledge"}}})
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		recoveryEventsByTraceID: map[string][]audit.Event{
+			// Deliberately out of order, and the plan under two traces: the
+			// narrative orders them and shows each event once.
+			"tr_rd01":  {exec, plan},
+			"plr_rd01": {gate, plan},
+		},
+	}
+	gw := &Gateway{auditURL: mock.server(t).URL}
+
+	rec := getIncident(t, gw, "plr_rd01")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	var stages []string
+	for _, d := range n.RecoveryDecisions {
+		stages = append(stages, d.Decision.Stage+":"+d.Decision.Decision)
+	}
+	want := []string{"plan:planned", "gate:approved", "execution:proceeded"}
+	if !reflect.DeepEqual(stages, want) {
+		t.Fatalf("recovery decisions = %v, want %v", stages, want)
+	}
+	if n.RecoveryDecisions[1].Decision.DecidedBy != "alice" || n.RecoveryDecisions[2].Decision.Options[0].Verdict != "exceeds" ||
+		n.RecoveryDecisions[0].EventID != "rdc_plan0001" {
+		t.Errorf("decisions lost detail: %+v", n.RecoveryDecisions)
+	}
+}
+
+// An incident with no recovery decision has none in its narrative, and the
+// request is unaffected.
+func TestHandleGetIncident_NoRecoveryDecisions_OmitsTheField(t *testing.T) {
+	run := &audit.PlaybookRun{RunID: "plr_rd02", SeriesID: "pbs_replication_lag", Outcome: audit.OutcomeResolved, StartedAt: time.Now().UTC(), TraceID: "tr_rd02"}
+	gw := &Gateway{auditURL: (&mockIncidentAuditd{triageRun: run}).server(t).URL}
+	rec := getIncident(t, gw, "plr_rd02")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "recovery_decisions") {
+		t.Errorf("an incident with no recovery decision has the field: %s", rec.Body.String())
 	}
 }
 
