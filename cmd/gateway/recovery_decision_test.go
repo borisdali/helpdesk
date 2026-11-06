@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,34 @@ func TestRecordRecoveryGateDecision_Denied(t *testing.T) {
 	if d.Decision != audit.RecoveryDecisionDenied || d.DecidedBy != "carol" || d.Reason != "wrong target" ||
 		d.Approval != nil || d.RecoveryTarget != "time=2026-10-27T14:05:00Z" {
 		t.Errorf("decision = %+v", d)
+	}
+}
+
+// The run's own connection string carries the real password (the faulttest
+// harness passes a full DSN), and it must not reach the audit trail.
+func TestRecordRecoveryGateDecision_NeverRecordsAPassword(t *testing.T) {
+	store, g := gateDecisionStore(t)
+	run := &audit.PlaybookRun{
+		RunID:            "plr_gate_rec04",
+		ConnectionString: "host=localhost port=15435 dbname=testdb user=postgres password=testpass",
+		RecoveryTarget:   "time=2026-10-27T14:05:00Z",
+	}
+	ap, _, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
+		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
+	}, "", "alice")
+	g.recordRecoveryGateDecision(context.Background(), run, ap, "alice", "")
+	g.recordRecoveryGateDecision(context.Background(), run, nil, "alice", "could not reach password=testpass")
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{TraceIDPrefix: run.RunID})
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events = %d, %v", len(events), err)
+	}
+	raw, _ := json.Marshal(events)
+	if strings.Contains(string(raw), "testpass") {
+		t.Errorf("the password is in the audit trail: %s", raw)
+	}
+	if got := gateDecisions(t, store, run.RunID); len(got) != 2 || !strings.Contains(got[0].Target+got[1].Target, "user=postgres password=***") {
+		t.Errorf("the target should keep what is not secret: %+v", got)
 	}
 }
 

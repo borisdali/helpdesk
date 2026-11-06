@@ -164,6 +164,117 @@ func TestComputeEventHash_UnchangedForEventsWithoutARecoveryDecision(t *testing.
 	}
 }
 
+func TestRedactConnString(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"host=localhost port=15435 dbname=testdb user=postgres password=testpass", "host=localhost port=15435 dbname=testdb user=postgres password=***"},
+		{"host=h password=testpass dbname=d", "host=h password=*** dbname=d"},
+		{"host=h PASSWORD = s3cret user=u", "host=h PASSWORD = *** user=u"},
+		// Quoted values, with the quote escaped either way.
+		{"host=h password='it''s a secret' user=u", "host=h password=*** user=u"},
+		{`host=h password='it\'s a secret' user=u`, "host=h password=*** user=u"},
+		{`host=h password="two words" user=u`, "host=h password=*** user=u"},
+		{`host=h password="say \"hi\" now" user=u`, "host=h password=*** user=u"},
+		{"postgres://app:hunter2@db.example.com:5432/orders", "postgres://app:***@db.example.com:5432/orders"},
+		{"postgres://db.example.com/orders?user=app&password=hunter2&sslmode=disable", "postgres://db.example.com/orders?user=app&password=***&sslmode=disable"},
+		// Nothing to redact: unchanged, whitespace and all.
+		{"pgbackrest-db", "pgbackrest-db"},
+		{"", ""},
+		{"the restore failed: no password was supplied, check the password policy", "the restore failed: no password was supplied, check the password policy"},
+		{"line one\nline two with  two  spaces", "line one\nline two with  two  spaces"},
+	} {
+		if got := RedactConnString(c.in); got != c.want {
+			t.Errorf("RedactConnString(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Whoever emits a decision, a password cannot reach the audit trail: the
+// target is often the run's own connection string, and a reason can quote one.
+func TestNewRecoveryDecisionEvent_NeverCarriesAPassword(t *testing.T) {
+	d := sampleDecision()
+	d.Target = "host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+	d.Reason = "could not connect with host=localhost user=postgres password=testpass sslmode=disable"
+	raw, err := json.Marshal(NewRecoveryDecisionEvent("trace_1", "sess_1", d))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "testpass") {
+		t.Errorf("the password is in the event: %s", raw)
+	}
+	for _, keep := range []string{"host=localhost", "user=postgres", "password=***", "dbname=testdb"} {
+		if !strings.Contains(string(raw), keep) {
+			t.Errorf("redaction removed %q: %s", keep, raw)
+		}
+	}
+	// And through the store: what is written is what was redacted.
+	store := newRDStore(t)
+	NewToolAuditor(store, "a", "s", "t").RecordRecoveryDecision(context.Background(), d)
+	events, _ := store.Query(context.Background(), QueryOptions{EventType: EventTypeRecoveryDecision})
+	stored, _ := json.Marshal(events)
+	if len(events) != 1 || strings.Contains(string(stored), "testpass") {
+		t.Errorf("stored events: %s", stored)
+	}
+}
+
+// Tamper evidence, against a real edited row: the verifier replays what is in
+// the database, so this is the proof, not the hash function on its own.
+func TestVerifyIntegrity_CatchesAnEditedRecoveryDecision(t *testing.T) {
+	store := newRDStore(t)
+	ctx := context.Background()
+	ta := NewToolAuditor(store, "sysadmin_agent", "sess_1", "trace_1")
+	ta.RecordRecoveryDecision(ctx, sampleDecision())
+	ta.RecordRecoveryDecision(ctx, RecoveryDecision{Stage: RecoveryStagePlan, Decision: RecoveryDecisionPlanned})
+	if status, err := store.VerifyIntegrity(ctx); err != nil || !status.Valid {
+		t.Fatalf("a clean chain does not verify: %+v, %v", status, err)
+	}
+
+	var id, raw string
+	if err := store.db.QueryRowContext(ctx, `SELECT event_id, raw_json FROM audit_events WHERE raw_json LIKE '%"refused"%' LIMIT 1`).Scan(&id, &raw); err != nil {
+		t.Fatal(err)
+	}
+	// The classic edit: a refusal rewritten as a decision to proceed.
+	edited := strings.Replace(raw, `"decision":"refused"`, `"decision":"proceeded"`, 1)
+	if edited == raw {
+		t.Fatalf("the edit did not apply to %s", raw)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE audit_events SET raw_json = ? WHERE event_id = ?`, edited, id); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.VerifyIntegrity(ctx)
+	if err != nil || status.Valid {
+		t.Errorf("an edited recovery decision verified: %+v, %v", status, err)
+	}
+}
+
+// What the hash does not cover is documented (AUDIT.md §3) and pinned here, so
+// that extending the hash, and the document, is a deliberate change.
+func TestVerifyIntegrity_DoesNotCoverTheOlderTypedPayloads(t *testing.T) {
+	store := newRDStore(t)
+	ctx := context.Background()
+	ev := &Event{
+		EventID: "oev_pinned01", Timestamp: time.Now().UTC(), EventType: EventTypeObjectiveEvidence, TraceID: "trace_x",
+		Session:           Session{ID: "s"},
+		ObjectiveEvidence: &ObjectiveEvidence{Tool: "get_pods", Signal: "oom_killed", Detail: "container was OOMKilled"},
+	}
+	if err := store.Record(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := store.db.QueryRowContext(ctx, `SELECT raw_json FROM audit_events WHERE event_id = ?`, ev.EventID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(raw, "oom_killed", "all_clear", 1)
+	if edited == raw {
+		t.Fatal("the edit did not apply")
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE audit_events SET raw_json = ? WHERE event_id = ?`, edited, ev.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := store.VerifyIntegrity(ctx); err != nil || !status.Valid {
+		t.Errorf("if this now fails, the hash was extended: update AUDIT.md §3 with it. %+v, %v", status, err)
+	}
+}
+
 func TestRecordRecoveryDecision_DoesNothingWhenItCannot(t *testing.T) {
 	store := newRDStore(t)
 	// Auditing off, an unnamed stage, a nil auditor: no event, no panic.

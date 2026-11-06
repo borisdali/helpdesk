@@ -18,6 +18,7 @@ package audit
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -138,10 +139,39 @@ type ApprovalFacts struct {
 	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
 }
 
+var (
+	// password=<value> in a key=value connection string (or a URL query): a
+	// bare word, or one in single or double quotes.
+	// A quoted value may contain a backslash-escaped quote (libpq) or a doubled
+	// one (SQL style); both are consumed so no part of the password is left.
+	passwordKVRe = regexp.MustCompile(`(?i)(\bpassword\s*=\s*)('(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|[^\s&]+)`)
+	// user:<password>@ in a URL's authority.
+	urlUserinfoRe = regexp.MustCompile(`(?i)(://[^:/@\s]+:)[^@\s]+(@)`)
+)
+
+// RedactConnString masks the password in a connection string, in either the
+// key=value form or the URL form, wherever it appears in s. Text without one
+// comes back unchanged. A run's stored connection string carries the real
+// password, and an audit record is read by far more people than a database
+// is.
+func RedactConnString(s string) string {
+	if s == "" {
+		return s
+	}
+	s = passwordKVRe.ReplaceAllString(s, "${1}***")
+	return urlUserinfoRe.ReplaceAllString(s, "${1}***${2}")
+}
+
 // NewRecoveryDecisionEvent builds the audit event for one stage. traceID is the
 // trace the event belongs to: the request's for the agent's stages, the run's
 // for the gate, as gate_acknowledged does.
+//
+// The target and the reason are redacted here, for every emitter: a target can
+// be a connection string (the run's own, or one a caller passed as the
+// target), and a reason can quote one.
 func NewRecoveryDecisionEvent(traceID, sessionID string, d RecoveryDecision) *Event {
+	d.Target = RedactConnString(d.Target)
+	d.Reason = RedactConnString(d.Reason)
 	return &Event{
 		EventID:          "rdc_" + uuid.New().String()[:8],
 		Timestamp:        time.Now().UTC(),

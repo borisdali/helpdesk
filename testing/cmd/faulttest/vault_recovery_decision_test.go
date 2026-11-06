@@ -139,6 +139,49 @@ func TestFormatRecoveryDecisions_UnsetAndUnreadableObjectives(t *testing.T) {
 	}
 }
 
+// Through the whole `vault incidents <run>` printer, from a gateway's JSON: the
+// section appears between REMEDIATION and EVALUATION, an incident without a
+// recovery decision shows no section, and a password in a target cannot be
+// printed because it was never stored.
+func TestPrintIncidentJourney_ShowsTheRecoveryDecisionBetweenRemediationAndEvaluation(t *testing.T) {
+	serve := func(extra map[string]any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := map[string]any{
+				"incident_id": "plr_rd", "started_at": "2026-11-04T14:00:00Z", "operator": "alice",
+				"triage":      map[string]any{"run_id": "plr_rd", "playbook": "pbs_pgbackrest_pitr_triage", "findings": "plan feasible"},
+				"remediation": map[string]any{"run_id": "plr_rd2", "playbook": "pbs_pgbackrest_pitr_remediate", "outcome": "resolved"},
+				"evaluation":  map[string]any{"overall_score": 0.9},
+			}
+			for k, v := range extra {
+				n[k] = v
+			}
+			json.NewEncoder(w).Encode(n) //nolint:errcheck
+		}))
+	}
+	with := serve(map[string]any{"recovery_decisions": []map[string]any{{
+		"at": "2026-11-04T14:03:00Z", "event_id": "rdc_1",
+		"decision": map[string]any{"stage": "execution", "decision": "refused", "reason": "needs acknowledge_objective_breach",
+			"options": []map[string]any{{"name": "point_in_time_restore", "verdict": "exceeds", "gate": "acknowledge"}}},
+	}}})
+	defer with.Close()
+	out := captureStdout(func() { printIncidentJourney(with.URL, "", "plr_rd", false) })
+
+	iRem, iDec, iEval := strings.Index(out, "REMEDIATION"), strings.Index(out, "RECOVERY DECISION"), strings.Index(out, "EVALUATION")
+	if iRem < 0 || iDec < 0 || iEval < 0 || !(iRem < iDec && iDec < iEval) {
+		t.Fatalf("section order wrong (remediation %d, recovery decision %d, evaluation %d):\n%s", iRem, iDec, iEval, out)
+	}
+	if !strings.Contains(out, "refused") || !strings.Contains(out, "needs acknowledge_objective_breach") {
+		t.Errorf("the decision is not shown:\n%s", out)
+	}
+
+	without := serve(nil)
+	defer without.Close()
+	out = captureStdout(func() { printIncidentJourney(without.URL, "", "plr_rd", false) })
+	if strings.Contains(out, "RECOVERY DECISION") {
+		t.Errorf("an incident with no recovery decision has the section:\n%s", out)
+	}
+}
+
 func TestRecoverySummaryLine(t *testing.T) {
 	if got := recoverySummaryLine("refused", "exceeds"); got != "refused (exceeds the recovery objective)" {
 		t.Errorf("got %q", got)

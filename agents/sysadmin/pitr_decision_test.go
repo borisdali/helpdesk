@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,26 @@ func TestPlanDecision_CarriesTheDigestOfTheLoadedConfig(t *testing.T) {
 	}
 	if objectivesSnapshot("nope") != nil {
 		t.Error("an unknown target has a snapshot")
+	}
+}
+
+// A caller can pass a connection string as the target (the tools accept one), and
+// the model is not stopped from doing so: a password in it must not be recorded.
+func TestDecisionRecords_NeverCarryAPasswordInTheTarget(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	dsn := "host=localhost port=15435 dbname=testdb user=postgres password=testpass"
+
+	recordPlanDecision(context.Background(), dsn, PITRPlan{Status: PITRNotFeasible, Detail: "could not connect: " + dsn})
+	recordExecutionDecision(context.Background(), RestoreToPITArgs{Target: dsn, PlanDigest: "0123456789abcdef"}, PITRPlan{}, nil, "refusing to restore — "+dsn)
+
+	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeRecoveryDecision})
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events = %d, %v", len(events), err)
+	}
+	raw, _ := json.Marshal(events)
+	if strings.Contains(string(raw), "testpass") {
+		t.Errorf("the password is in the audit trail: %s", raw)
 	}
 }
 

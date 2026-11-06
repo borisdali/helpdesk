@@ -348,6 +348,10 @@ The payload (`recovery_decision`):
 | `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured`), the `verdict` against the `rpo` and the `gate` it demands |
 | `approval` | what the approval carried: `approved_by`, `acknowledged_data_loss`, `allowed_stop_serving`, `acknowledged_breach` |
 
+`target` and `reason` are passed through a redaction before the event is built, for every emitter: the target is
+often a run's own connection string, which carries the real password, and a reason can quote one. Passwords in
+`key=value` and URL forms are replaced with `***` and the rest is kept.
+
 What an approval did **not** acknowledge is recorded as absent, not omitted from the story: the `execution` event
 states what the restore was given. The configuration itself is not kept, only its digest and the resolved values,
 so a later edit to `infrastructure.json` does not rewrite what applied to a decision already made.

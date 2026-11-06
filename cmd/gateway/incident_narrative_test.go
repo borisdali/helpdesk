@@ -559,6 +559,56 @@ func TestHandleGetIncident_RecoveryDecisions_PlanGateAndExecution(t *testing.T) 
 	}
 }
 
+// The realistic shape: the plan is made on the triage run's trace, the restore
+// decides on the remediation hop's own, different trace, and the gate is keyed
+// to the triage run. The narrative must gather all three.
+func TestHandleGetIncident_RecoveryDecisions_AcrossHopTraces(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Hour)
+	triage := &audit.PlaybookRun{
+		RunID: "plr_rdx_t1", SeriesID: "pbs_pgbackrest_pitr_triage", Outcome: audit.OutcomeTransitioned,
+		TransitionedTo: "pbs_pgbackrest_pitr_remediate", StartedAt: start, TraceID: "tr_rdx_triage",
+	}
+	remediation := &audit.PlaybookRun{
+		RunID: "plr_rdx_r1", SeriesID: "pbs_pgbackrest_pitr_remediate", Outcome: audit.OutcomeResolved,
+		PriorRunID: "plr_rdx_t1", TraceID: "tr_rdx_remediation", StartedAt: start.Add(5 * time.Minute),
+	}
+	rdc := func(id string, at time.Duration, d audit.RecoveryDecision) audit.Event {
+		return audit.Event{EventID: id, Timestamp: start.Add(at), EventType: audit.EventTypeRecoveryDecision, RecoveryDecision: &d}
+	}
+	mock := &mockIncidentAuditd{
+		triageRun:        triage,
+		nextRunByPriorID: map[string]*audit.PlaybookRun{"plr_rdx_t1": remediation},
+		recoveryEventsByTraceID: map[string][]audit.Event{
+			"tr_rdx_triage": {rdc("rdc_a", time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStagePlan, Decision: audit.RecoveryDecisionPlanned})},
+			"plr_rdx_t1":    {rdc("rdc_b", 4*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageGate, Decision: audit.RecoveryDecisionApproved, DecidedBy: "alice"})},
+			"tr_rdx_remediation": {rdc("rdc_c", 6*time.Minute, audit.RecoveryDecision{Stage: audit.RecoveryStageExecution, Decision: audit.RecoveryDecisionRefused,
+				Reason: "needs acknowledge_objective_breach"})},
+		},
+		playbookTypeBySeriesID: map[string]string{"pbs_pgbackrest_pitr_remediate": "remediation"},
+	}
+	gw := &Gateway{auditURL: mock.server(t).URL}
+
+	rec := getIncident(t, gw, "plr_rdx_t1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range n.RecoveryDecisions {
+		got = append(got, d.Decision.Stage+":"+d.Decision.Decision)
+	}
+	want := []string{"plan:planned", "gate:approved", "execution:refused"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recovery decisions = %v, want %v (journeys %+v)", got, want, n.Journeys)
+	}
+	if n.RecoveryDecisions[2].Decision.Reason != "needs acknowledge_objective_breach" {
+		t.Errorf("the refusal lost its reason: %+v", n.RecoveryDecisions[2])
+	}
+}
+
 // An incident with no recovery decision has none in its narrative, and the
 // request is unaffected.
 func TestHandleGetIncident_NoRecoveryDecisions_OmitsTheField(t *testing.T) {
