@@ -87,7 +87,7 @@ injection mechanism was considered and rejected for exactly this reason — it w
 only have been correct for a condition that exists nowhere except this test.) What
 *does* exist now is a real SysAdmin-domain investigation that can tell a genuinely
 crashed replica (safe to restart) apart from a healthy one being correctly rejected
-(restarting wouldn't help) — see [§3](#3-sysadmin-domain-escalation-telling-a-crashed-replica-from-a-rejected-one).
+(restarting wouldn't help) — see [§4](#4-sysadmin-domain-escalation-telling-a-crashed-rejected-and-frozen-replica-apart).
 
 **Verified, not just claimed**: the fault durably disconnects a real replica (blocks
 reconnection via `max_wal_senders = 0` before terminating the existing connection —

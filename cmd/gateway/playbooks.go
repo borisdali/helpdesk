@@ -1876,6 +1876,13 @@ type ProceedEscalationRequest struct {
 	// to stop a RUNNING instance (after flushing its WAL to the archive). Not
 	// implied by anything else here: without it a serving instance is refused.
 	AllowStopServing bool `json:"allow_stop_serving,omitempty"`
+	// AcknowledgeObjectiveBreach is a separate, explicit acknowledgement that
+	// the restore loses more data than the database's recovery objective
+	// allows. Needed only when the database's enforcement is "acknowledge" (or
+	// "refuse", for a loss that only may exceed the objective) and the loss
+	// measured when the instance is about to be stopped does. The restore tool
+	// decides; the gateway passes it on.
+	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 }
 
 // handleProceedEscalation handles POST /api/v1/fleet/playbook-runs/{runID}/proceed-escalation.
@@ -1952,6 +1959,9 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	// Denied: record acknowledgment, abandon the triage run, and return.
 	if req.Resolution == "denied" {
 		g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason)
+		if run.RecoveryTarget != "" {
+			g.recordRecoveryGateDecision(r.Context(), run, nil, resolvedBy, req.Reason)
+		}
 		// gate_reason passed through from run (not ""): Update's SQL sets the
 		// column unconditionally, so passing "" here would wipe the reason
 		// recorded when the run first entered gate_pending, right at the
@@ -2045,6 +2055,9 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
 	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason, recoveryAudit...)
+	if needsRecoveryApproval(nextSeriesID) {
+		g.recordRecoveryGateDecision(r.Context(), run, recoveryApproval, resolvedBy, req.Reason)
+	}
 	// gate_reason passed through from run — see the denied branch above for why.
 	g.recordPlaybookRunComplete(r.Context(), runID, primaryOutcome, run.EscalatedTo, run.TransitionedTo, run.FindingsSummary, "", "", run.DiagnosticReport, false, run.GateReason)
 
@@ -2195,6 +2208,71 @@ func (g *Gateway) recordGateAcknowledged(ctx context.Context, run *audit.Playboo
 	}
 	if err := g.auditor.RecordEvent(ctx, event); err != nil {
 		slog.Warn("playbook: failed to record gate_acknowledged event", "run_id", run.RunID, "err", err)
+	}
+}
+
+// recordRecoveryGateDecision records the gate stage of a recovery decision:
+// who approved or denied the restore, and what they acknowledged. ap is the
+// approval the gate built (nil for a denial). Like gate_acknowledged, the event
+// is correlated by the run's ID, not a request trace, so it does not become
+// part of the triage journey's own timeline.
+func (g *Gateway) recordRecoveryGateDecision(ctx context.Context, run *audit.PlaybookRun, ap *audit.RecoveryApproval, resolvedBy, reason string) {
+	if g.auditor == nil {
+		return
+	}
+	d := audit.RecoveryDecision{
+		Stage: audit.RecoveryStageGate, DecidedBy: resolvedBy, RunID: run.RunID, Target: run.ConnectionString,
+		RecoveryTarget: run.RecoveryTarget,
+	}
+	if ap == nil {
+		d.Decision, d.Reason = audit.RecoveryDecisionDenied, reason
+	} else {
+		d.Decision = audit.RecoveryDecisionApproved
+		d.RecoveryTarget = audit.FormatRecoveryTarget(ap.Type, ap.Value)
+		d.PlanDigest = ap.PlanDigest
+		d.Approval = &audit.ApprovalFacts{
+			ApprovedBy: ap.ApprovedBy, AcknowledgedDataLoss: ap.Acknowledged,
+			AllowedStopServing: ap.StopServing, AcknowledgedBreach: ap.BreachAcknowledged,
+		}
+	}
+	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(run.RunID, "", d)); err != nil {
+		// The approval itself is not held for its record, but a gate decision that is
+		// not in the audit trail must be impossible to miss in the logs.
+		slog.Error("recovery decision (gate) NOT recorded in the audit trail", "run_id", run.RunID, "decision", d.Decision, "decided_by", resolvedBy, "err", err)
+	}
+}
+
+// recordRecoveryOutcome records the outcome stage of a recovery decision when
+// the run that finished is the hop that carries out a point-in-time restore:
+// how it ended and how long it took. It is keyed to the incident's entry run,
+// like the gate stage, so the incident narrative finds it. A run of any other
+// playbook records nothing.
+func (g *Gateway) recordRecoveryOutcome(ctx context.Context, runID, outcome string) {
+	if g.auditor == nil {
+		return
+	}
+	run, err := g.fetchPlaybookRun(ctx, runID)
+	if err != nil || run == nil || !needsRecoveryApproval(run.SeriesID) {
+		return
+	}
+	completed := run.CompletedAt
+	if completed.IsZero() {
+		completed = time.Now().UTC()
+	}
+	d := audit.RecoveryDecision{
+		Stage: audit.RecoveryStageOutcome, Decision: outcome, RunID: run.RunID,
+		Target: run.ConnectionString, RecoveryTarget: run.RecoveryTarget,
+	}
+	if !run.StartedAt.IsZero() && !completed.Before(run.StartedAt) {
+		secs := int64(completed.Sub(run.StartedAt).Round(time.Second) / time.Second)
+		d.DurationSeconds = &secs
+	}
+	entry := run.EntryRunID
+	if entry == "" {
+		entry = run.RunID
+	}
+	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(entry, "", d)); err != nil {
+		slog.Error("recovery outcome NOT recorded in the audit trail", "run_id", run.RunID, "outcome", outcome, "err", err)
 	}
 }
 
@@ -3139,6 +3217,7 @@ func (g *Gateway) recordPlaybookRunComplete(ctx context.Context, runID, outcome,
 	// fetchIncidentByEntryRunID lookup no-ops harmlessly.
 	if isTerminalIncidentOutcome(outcome) {
 		g.closeIncidentRecord(ctx, runID, outcome)
+		g.recordRecoveryOutcome(ctx, runID, outcome)
 	}
 	if isAttributableOutcome(outcome) {
 		responseText := agentTranscript

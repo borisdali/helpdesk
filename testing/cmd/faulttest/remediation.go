@@ -62,6 +62,12 @@ func (r *Remediator) SetFaultStart(t time.Time) {
 	r.inner.SetFaultStart(t)
 }
 
+// SetFault names the current fault so gate approvals use its resolved agent
+// connection string; see faultlib.Remediator.SetFault.
+func (r *Remediator) SetFault(f Failure) {
+	r.inner.SetFault(f)
+}
+
 // SetPITR gives the current fault's recovery target (from its inject output) to
 // the Remediator that approves its gate; see faultlib.Remediator.SetPITR.
 func (r *Remediator) SetPITR(f Failure, injectOutput string) error {
@@ -721,10 +727,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 		remVerdictNotes = strings.TrimSpace(remNotes)
 	}
 
-	connStr := r.cfg.ConnStr
-	if r.cfg.AgentConnStr != "" {
-		connStr = r.cfg.AgentConnStr
-	}
+	connStr := r.inner.AgentConnStr()
 	resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
 		Resolution:       "approved",
 		ResolvedBy:       r.cfg.OperatorID,
@@ -790,10 +793,7 @@ func (r *Remediator) waitForGateEmitAndWait(ctx context.Context, gate faultlib.A
 		if err := validateOperatorInUsersFile(r.cfg.UsersFile, r.cfg.OperatorID); err != nil {
 			return err
 		}
-		connStr := r.cfg.ConnStr
-		if r.cfg.AgentConnStr != "" {
-			connStr = r.cfg.AgentConnStr
-		}
+		connStr := r.inner.AgentConnStr()
 		slog.Info("emit-and-wait: auto-approving gate with force mode", "run_id", gate.RunID, "operator", r.cfg.OperatorID)
 		resp, err := r.inner.ProceedEscalation(ctx, gate.RunID, faultlib.ProceedEscalationRequest{
 			Resolution:       "approved",

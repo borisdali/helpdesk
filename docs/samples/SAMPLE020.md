@@ -22,7 +22,7 @@ As [a reviewer pointed out](https://www.linkedin.com/feed/update/urn:li:activity
 
 This question prompted us to institute a new mechanism that we refer to as the "evidence-content gate". This is how it's defined in the docs:
 
->  Evidence-content gate (`evidence_required_but_unconfirmed`) — when a fault declares `expected_diagnosis.objective_evidence_signal` that signal must also appear in the run's `objective_evidence_confirmed` list. Not just have fired, but have been demonstrably cited in the model's own hypothesis text (see [OBJECTIVE_EVIDENCE.md §4](OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)).
+>  Evidence-content gate (`evidence_required_but_unconfirmed`) — when a fault declares `expected_diagnosis.objective_evidence_signal` that signal must also appear in the run's `objective_evidence_confirmed` list. Not just have fired, but have been demonstrably cited in the model's own hypothesis text (see [OBJECTIVE_EVIDENCE.md §4](../OBJECTIVE_EVIDENCE.md#4-confirming-a-signal-the-confirmation-registry)).
 
 >  If declared and unconfirmed, aiHelpDesk force-sets the passed to false... regardless of score.
 

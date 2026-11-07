@@ -189,6 +189,21 @@ func resolveHost(serverID string) (resolvedHost, error) {
 		infraConfigMu.RUnlock()
 		return resolvedHost{}, fmt.Errorf("no infrastructure config loaded; set HELPDESK_INFRA_CONFIG")
 	}
+	serverID, db, err := lookupServer(ic, serverID)
+	infraConfigMu.RUnlock()
+	if err != nil {
+		return resolvedHost{}, err
+	}
+	return resolveHostFor(ic, serverID, db)
+}
+
+// lookupServer finds the db_servers entry a target names, and its key: by
+// server ID, else by the host and port of a connection string, else by
+// container name. The caller holds infraConfigMu. It is the one place that
+// decides which database a target means; anything that needs "the database
+// this call is about" (the recovery objectives, for one) must use it, not
+// match on its own.
+func lookupServer(ic *infra.Config, serverID string) (string, infra.DBServer, error) {
 	serverID = strings.TrimSpace(serverID)
 	db, ok := ic.DBServers[serverID]
 	if !ok {
@@ -235,9 +250,8 @@ func resolveHost(serverID string) (resolvedHost, error) {
 				serverID = matches[0]
 				ok = true
 			default:
-				infraConfigMu.RUnlock()
 				sort.Strings(matches)
-				return resolvedHost{}, fmt.Errorf(
+				return "", infra.DBServer{}, fmt.Errorf(
 					"target %q matches multiple registered servers by host+port (%s) — refusing to guess which one; use the exact server ID instead",
 					serverID, strings.Join(matches, ", "))
 			}
@@ -257,16 +271,20 @@ func resolveHost(serverID string) (resolvedHost, error) {
 			}
 		}
 	}
-	infraConfigMu.RUnlock()
 	if !ok {
 		known := make([]string, 0, len(ic.DBServers))
 		for id := range ic.DBServers {
 			known = append(known, id)
 		}
 		sort.Strings(known)
-		return resolvedHost{}, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
+		return "", infra.DBServer{}, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
 			serverID, strings.Join(known, ", "))
 	}
+	return serverID, db, nil
+}
+
+// resolveHostFor turns a found db_servers entry into the host it runs on.
+func resolveHostFor(ic *infra.Config, serverID string, db infra.DBServer) (resolvedHost, error) {
 
 	// ── Kubernetes path ──────────────────────────────────────────────────────
 	if db.K8sCluster != "" {
@@ -2380,7 +2398,7 @@ func NewSysadminDirectRegistry() *agentutil.DirectToolRegistry {
 		if err != nil {
 			return "", err
 		}
-		result, err := planPITRImpl(ctx, a)
+		result, err := planPITRWithEstimate(ctx, a)
 		if err != nil {
 			return "", err
 		}

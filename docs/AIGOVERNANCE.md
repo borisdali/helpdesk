@@ -598,7 +598,7 @@ if err := decision.MustAllow(); err != nil {
 }
 ```
 
-See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
+See [`policies.example.yaml`](../policies.example.yaml) for a complete policy configuration example.
 
 ### 3.5 Agent Integration
 
@@ -783,7 +783,7 @@ export HELPDESK_APPROVAL_BASE_URL="http://auditd.internal:1199"
 ```
 
 Email notifications use the same SMTP settings as the auditor (see
-[Environment Variables](#environment-variables) below).
+[Environment Variables](#33-environment-variables) below).
 
 ### 4.6 Approval States
 
@@ -830,7 +830,7 @@ rules:
         timezone: America/New_York
 ```
 
-See [`policies.example.yaml`](policies.example.yaml) for a complete policy configuration example.
+See [`policies.example.yaml`](../policies.example.yaml) for a complete policy configuration example.
 
 ### 5.1 DB Blast Radius (`max_rows_affected`)
 

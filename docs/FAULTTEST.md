@@ -415,7 +415,7 @@ When running with `--gate-escalation` and an interactive terminal is available, 
 
 The reason is sent as `"reason"` in the `proceed-escalation` request and is stored in the `gate_acknowledged` audit event. It appears as `extra.resolved_reason` in `GET /api/v1/decisions/gate:{runID}`. In `--emit-and-wait` mode the prompt is skipped (no terminal).
 
-**Post-recovery feedback prompt:**
+#### Post-recovery feedback prompt
 
 After a successful recovery (verification SQL returns true), `faulttest` optionally prompts for two feedback questions when an interactive terminal is available and `--gateway` is set:
 
@@ -945,6 +945,10 @@ Only `shell_exec` injections keep their output, and the newest `PITR_TARGET` lin
 **It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset), and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
 
 The `go test` sweeps (`make faulttest`, `faulttest-gateway`) skip a PITR fault unless they run through the gateway with remediation, the gate and `FAULTTEST_SYSADMIN_AGENT_URL`, so they never inject a fault they cannot recover. `make faulttest-pitr FAULTTEST_GATEWAY_URL=… FAULTTEST_API_KEY=… FAULTTEST_SYSADMIN_AGENT_URL=…` runs the Docker one (`PITR_FAULT_IDS` picks another) against the pgBackRest fixture.
+
+**What it checks in the audit trail (v0.34).** After the gate loop the run reads the `recovery_decision` events the restore left, under the fault's trace and the triage run's ID, and fails the fault if any of these is wrong: a stage is missing (plan, gate `approved`, execution `proceeded`, outcome with a duration); a stage that decides does not name the objectives in force; a restore that went past an exceeded objective under `enforcement: acknowledge` has no acknowledgement on record; a connection password appears in the clear; or `GET /v1/verify` on auditd says the hash chain no longer verifies. The gateway writes the outcome after the run completes, so the check retries for up to 30 s before calling a stage missing. It needs `FAULTTEST_AUDIT_URL` (`make faulttest-pitr` requires it); without it the check reports that it could not read the trail rather than skipping. Setting it also makes the harness verify, after a gate resolves with no pending step approval, that a child remediation run really started (an auditd query on `prior_run_id`; without the URL it assumes one did). If auditd cannot be reached or answers an error it logs a warning and lets the run through. The `faulttest` CLI's audit-backed tool evidence (`--audit-url`) is a different path and is not used by `make faulttest-pitr`.
+
+**An LSN target and an objective.** `db-pitr-dropped-table-lsn` is the same fault with `target_type: lsn`. `make pitr-objectives-infra` writes a copy of `testing/testing.infra.json` in which `pgbackrest-db` has `rpo: 1s` and `enforcement: acknowledge`; start the sysadmin agent and the gateway with `HELPDESK_INFRA_CONFIG` pointing at it, and the plan will show the objective exceeded, the harness acknowledges it as the operator would, and the trail has to say so. Without that file the same fault runs with no objective, and the plan shows the loss and compares nothing ([OBJECTIVES.md](OBJECTIVES.md)).
 
 To prove a PITR fault's script and recovery without a model, `TestIntegration_PITRFault_DroppedTable_Catalog` (`agents/sysadmin`, `go test -tags integration`) loads it from the catalog and runs its real inject, plan, live restore, restart and `verify_sql` on the Docker fixture.
 

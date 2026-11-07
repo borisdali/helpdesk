@@ -19,7 +19,7 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on Docker, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE017.md) for VM/Bare Metal, the source and K8s respectively (although not the exact commands shown on this page).
 
-In this transcript we look at three headline features of the aiHelpDesk [v0.27 release](https://github.com/borisdali/helpdesk/releases/tag/v0.27.0) release: the brand new [objective evidence framework](../OBJECTIVE_EVIDENCE.md), how it allowed us to institute the new [layer 3 model fabrication detection guard](../AIGOVERNANCE.md#layer-3--objective-evidence-content-verification) and the three new [replication failure injection scenarios](../HA_DR.md#4-sysadmin-domain-escalation-telling-a-crashed-rejected-and-frozen-replica-apart).
+In this transcript we look at three headline features of the aiHelpDesk [v0.27 release](https://github.com/borisdali/helpdesk/releases/tag/v0.27.0) release: the brand new [objective evidence framework](../OBJECTIVE_EVIDENCE.md), how it allowed us to institute the new [layer 3 model fabrication detection guard](../AIGOVERNANCE.md#layer-3--content-provenance-verification) and the three new [replication failure injection scenarios](../HA_DR.md#4-sysadmin-domain-escalation-telling-a-crashed-rejected-and-frozen-replica-apart).
 
 
 ## 0. Back to the Basics

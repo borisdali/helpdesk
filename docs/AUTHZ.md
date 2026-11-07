@@ -264,8 +264,8 @@ This endpoint returns the live authorization table the running Gateway is enforc
 
 **Reading the output:**
 - `roles[].grants` — the list of routes that role unlocks. If a route requires multiple roles, each role will list that route independently.
-- `admin_role` — the role name that bypasses all checks. `admin` by default; can be overridden per deployment (see [§5](#5-admin-role)).
-- `aliases` — maps your organization's IdP group names to canonical role names (see [§6](#6-role-aliases)).
+- `admin_role` — the role name that bypasses all checks. `admin` by default; can be overridden per deployment (see [§6](#6-admin-role)).
+- `aliases` — maps your organization's IdP group names to canonical role names (see [§7](#7-role-aliases)).
 - `enforcing` — `true` means authorization is active; `false` means the system is in non-enforcing (development) mode.
 
 **Routes NOT listed under any role** in the `GET /api/v1/roles` response are open to any authenticated user — you only need a valid identity, not a specific role.

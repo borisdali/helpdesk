@@ -132,8 +132,20 @@ func growTo(listing string, epoch int64) string {
 	if err := json.Unmarshal([]byte(listing), &files); err != nil {
 		return listing
 	}
+	// Only the newest segment of the newest timeline: the older ones reached the
+	// archive when they did, and a restore's lower bound is measured from them.
+	newest := ""
 	for k, v := range files {
-		if v["type"] == "file" && strings.HasPrefix(k, "0000001E") {
+		if v["type"] != "file" || !strings.HasPrefix(k, "0000001E") {
+			continue
+		}
+		base := k[strings.LastIndexByte(k, '/')+1:]
+		if walSegmentNameRe.MatchString(base) && base > newest {
+			newest = base
+		}
+	}
+	for k, v := range files {
+		if v["type"] == "file" && newest != "" && strings.HasSuffix(k, "/"+newest) {
 			v["time"] = epoch
 		}
 	}

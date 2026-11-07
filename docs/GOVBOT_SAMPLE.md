@@ -3,9 +3,9 @@
 In the sample run below the `govbot` is invoked manually on-demand
 from the source code, but please see [this](AIGOVERNANCE.md#84-running-govbot)
 for options and as well as the platform specific instructions on how to run it
-[directly on a host/VM](deploy/host#77-running-the-compliance-reporter-govbot),
-in [a Docker container](deploy/docker-compose#37-running-the-compliance-reporter-govbot)
-or [on K8s](deploy/helm#97-running-the-compliance-reporter-govbot):
+[directly on a host/VM](../deploy/host/README.md#78-running-the-compliance-reporter-govbot),
+in [a Docker container](../deploy/docker-compose/README.md#37-running-the-compliance-reporter-govbot)
+or [on K8s](../deploy/helm/README.md#98-running-the-compliance-reporter-govbot):
 
 ```
 [boris@ ~/helpdesk]$ go run ./cmd/govbot/ -gateway http://localhost:8080

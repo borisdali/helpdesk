@@ -1051,7 +1051,7 @@ func TestPlaybookRunHandlers_VersionStats_EscalatedCount(t *testing.T) {
 	now := time.Now().UTC()
 	for i, outcome := range []string{"escalated", "escalated", "resolved"} {
 		if err := prs.Record(ctx, &audit.PlaybookRun{
-			RunID: "plr_esc_" + strconv.Itoa(i),
+			RunID:      "plr_esc_" + strconv.Itoa(i),
 			PlaybookID: pb.PlaybookID, SeriesID: sid,
 			Outcome: outcome, StartedAt: now, CompletedAt: now.Add(5 * time.Second),
 		}); err != nil {
@@ -1280,7 +1280,9 @@ func TestPlaybookRunHandlers_FaultRunHistory(t *testing.T) {
 		t.Fatalf("filtered status = %d", rec2.Code)
 	}
 	var result2 struct {
-		Entries []struct{ FailureID string `json:"failure_id"` } `json:"entries"`
+		Entries []struct {
+			FailureID string `json:"failure_id"`
+		} `json:"entries"`
 	}
 	if err := json.NewDecoder(rec2.Body).Decode(&result2); err != nil {
 		t.Fatalf("decode filtered: %v", err)

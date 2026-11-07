@@ -28,12 +28,16 @@ import (
 
 // pitrOpts are the flag values of both commands.
 type pitrOpts struct {
-	RunID        string // approve: the triage run holding the gate
-	TargetType   string // "time" or "lsn"
-	Target       string
-	PlanDigest   string
-	AckDataLoss  bool
-	AllowStop    bool
+	RunID       string // approve: the triage run holding the gate
+	TargetType  string // "time" or "lsn"
+	Target      string
+	PlanDigest  string
+	AckDataLoss bool
+	AllowStop   bool
+	// AckBreach acknowledges that the loss exceeds the database's recovery
+	// objective. Only a database whose enforcement is acknowledge needs it, and
+	// only when the loss measured at the stop does.
+	AckBreach    bool
 	ResolvedBy   string
 	ApprovalMode string
 
@@ -49,6 +53,7 @@ type pitrFlagValues struct {
 	ApproveRunID                   string
 	TargetType, Target, PlanDigest string
 	AckDataLoss, AllowStop         bool
+	AckBreach                      bool
 	User, SysadminURL, SysadminKey string
 	Server, Stanza                 string
 }
@@ -60,7 +65,7 @@ type pitrFlagValues struct {
 func newPITROpts(f pitrFlagValues) pitrOpts {
 	return pitrOpts{
 		RunID: f.ApproveRunID, TargetType: f.TargetType, Target: f.Target,
-		PlanDigest: f.PlanDigest, AckDataLoss: f.AckDataLoss, AllowStop: f.AllowStop,
+		PlanDigest: f.PlanDigest, AckDataLoss: f.AckDataLoss, AllowStop: f.AllowStop, AckBreach: f.AckBreach,
 		ResolvedBy: f.User, ApprovalMode: "auto",
 		SysadminURL: f.SysadminURL, SysadminKey: f.SysadminKey, Server: f.Server, Stanza: f.Stanza,
 	}
@@ -100,6 +105,11 @@ func (o pitrOpts) approvalBody(purpose string) ([]byte, error) {
 		"plan_digest":           o.PlanDigest,
 		"acknowledge_data_loss": true,
 		"allow_stop_serving":    o.AllowStop,
+		// Sent only when given: it is a separate acknowledgement, and most
+		// approvals have nothing to acknowledge.
+	}
+	if o.AckBreach {
+		body["acknowledge_objective_breach"] = true
 	}
 	if o.ResolvedBy != "" {
 		body["resolved_by"] = o.ResolvedBy
@@ -153,6 +163,23 @@ type pitrPlan struct {
 	InstanceServing      bool   `json:"instance_serving"`
 	ArchiveFlushRequired bool   `json:"archive_flush_required"`
 	PlanDigest           string `json:"plan_digest"`
+	// DataLossEstimate is how much the restore discards, as far as it is
+	// measured without reading WAL.
+	DataLossEstimate *struct {
+		Summary    string   `json:"summary"`
+		AsOf       string   `json:"as_of"`
+		Unmeasured []string `json:"unmeasured"`
+		// Objective sets the estimate against the database's recovery point
+		// objective.
+		Objective *struct {
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+			// Gate is what approving will demand given this verdict and the
+			// database's enforcement: "", "acknowledge" or "refuse".
+			Gate        string `json:"gate"`
+			Enforcement string `json:"enforcement"`
+		} `json:"objective"`
+	} `json:"data_loss_estimate"`
 }
 
 // formatPITRPlan renders the plan for a person, ending with the exact command
@@ -175,6 +202,27 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	if p.DataLoss != "" {
 		fmt.Fprintf(&b, "Will be discarded  : %s\n", p.DataLoss)
 	}
+	if e := p.DataLossEstimate; e != nil && e.Summary != "" {
+		fmt.Fprintf(&b, "Estimated loss     : %s\n", e.Summary)
+		if len(e.Unmeasured) > 0 {
+			fmt.Fprintf(&b, "Not counted        : %s\n", strings.Join(e.Unmeasured, "; "))
+		}
+		if o := e.Objective; o != nil {
+			// Say it loudly when the loss is, or may be, more than the database
+			// is supposed to lose: a person approving should not miss it.
+			label := "RPO check          "
+			if o.Status == "exceeds" || o.Status == "may_exceed" || o.Gate != "" {
+				label = "RPO CHECK (!)      "
+			}
+			fmt.Fprintf(&b, "%s: %s: %s\n", label, o.Status, o.Detail)
+			switch o.Gate {
+			case "acknowledge":
+				fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's enforcement is %s)\n", o.Enforcement)
+			case "refuse":
+				fmt.Fprintf(&b, "Approving          : REFUSED (this database's enforcement is refuse)\n")
+			}
+		}
+	}
 	state := "down"
 	if p.InstanceServing {
 		state = "SERVING (the restore must stop it: --allow-stop-serving)"
@@ -188,9 +236,24 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "Plan digest        : %s\n\n", p.PlanDigest)
+	gate, enforcement := "", ""
+	if e := p.DataLossEstimate; e != nil && e.Objective != nil {
+		gate, enforcement = e.Objective.Gate, e.Objective.Enforcement
+	}
+	if gate == "refuse" {
+		// The restore measures the loss again just before it stops anything and
+		// would refuse this one. Offering a command that is known to fail would
+		// invite approving around the refusal.
+		fmt.Fprintf(&b, "Not approvable as it stands: the loss exceeds the recovery objective and enforcement is %s. "+
+			"Plan a later target (less to discard), or change the configured enforcement if the objective is not meant to bind.\n", enforcement)
+		return b.String()
+	}
 	stop := ""
 	if p.InstanceServing {
 		stop = " --allow-stop-serving"
+	}
+	if gate == "acknowledge" {
+		stop += " --acknowledge-objective-breach"
 	}
 	fmt.Fprintf(&b, "To approve exactly this plan:\n  helpdesk-client --pitr-approve <run_id> --recovery-target-type %s --recovery-target %q \\\n    --plan-digest %s --acknowledge-data-loss%s\n",
 		o.TargetType, o.Target, p.PlanDigest, stop)

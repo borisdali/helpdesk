@@ -97,7 +97,7 @@ func TestExtractText_ToolCallSummary(t *testing.T) {
 				Parts: a2a.ContentParts{
 					a2a.TextPart{Text: "agent response"},
 					a2a.DataPart{
-						Data: map[string]any{"tool_calls": []any{"check_connection", "get_database_info"}},
+						Data:     map[string]any{"tool_calls": []any{"check_connection", "get_database_info"}},
 						Metadata: map[string]any{"helpdesk_type": "tool_call_summary"},
 					},
 				},

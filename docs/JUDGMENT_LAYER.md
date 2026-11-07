@@ -128,7 +128,7 @@ someone who understands why the error is tempting and wants to foreclose it.
 
 ## 3. The Canonical Case
 
-See [here](BENCHMARKING_SAMPLE9.md) for the actual commands and their output used to generate section.
+See [here](samples/SAMPLE009.md) for the actual commands and their output used to generate section.
 
 **Fault:** `db-max-connections`. PostgreSQL connection pool at 95%. Cause:
 `idle_session_timeout=0`, 200+ idle connections accumulating. Correct immediate

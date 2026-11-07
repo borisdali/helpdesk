@@ -34,12 +34,12 @@ type mockExecutorContext struct {
 	context.Context
 }
 
-func (m mockExecutorContext) SessionID() string                     { return "" }
-func (m mockExecutorContext) UserID() string                        { return "" }
-func (m mockExecutorContext) AgentName() string                     { return "" }
-func (m mockExecutorContext) ReadonlyState() session.ReadonlyState  { return nil }
-func (m mockExecutorContext) Events() session.Events                { return nil }
-func (m mockExecutorContext) UserContent() *genai.Content           { return nil }
+func (m mockExecutorContext) SessionID() string                      { return "" }
+func (m mockExecutorContext) UserID() string                         { return "" }
+func (m mockExecutorContext) AgentName() string                      { return "" }
+func (m mockExecutorContext) ReadonlyState() session.ReadonlyState   { return nil }
+func (m mockExecutorContext) Events() session.Events                 { return nil }
+func (m mockExecutorContext) UserContent() *genai.Content            { return nil }
 func (m mockExecutorContext) RequestContext() *a2asrv.RequestContext { return nil }
 
 var _ adka2a.ExecutorContext = mockExecutorContext{}

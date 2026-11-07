@@ -765,7 +765,7 @@ following changes should trigger a re-certification run:
 | **Taxonomy major bump** | Classes in `root_cause_classes` were split, merged, or renamed (version bumped from 1.x to 2.0). Attribution from prior certs is non-comparable under the new taxonomy. Re-run the cert suite under the new taxonomy before using attribution columns for model gating. |
 | **Cert regression alert fired** | A recertification detected the fault+model transitioning from earning trust to not — see [Cert history and regression alerts](#73-cert-history-and-regression-alerts). Not a "should I" — this is the flywheel's own signal that something already changed for the worse; investigate before the next real incident hits this playbook unattended. |
 
-The recommended cadence for established deployments is a weekly CronJob (see [Kubernetes](#54-kubernetes-job--cronjob))
+The recommended cadence for established deployments is a weekly CronJob (see [Kubernetes](#54-kubernetes-helm))
 covering all external-compatible faults. This is approximately 85 LLM calls against 17 faults
 at 5 runs each, typically completing in 30–40 minutes overnight.
 

@@ -1650,15 +1650,36 @@ func TestToolsErrorHandling(t *testing.T) {
 		toolName string
 	}{
 		{"getServerInfoTool", func() (string, error) { r, err := getServerInfoTool(ctx, GetServerInfoArgs{}); return r.Output, err }, "get_server_info"},
-		{"getDatabaseInfoTool", func() (string, error) { r, err := getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{}); return r.Output, err }, "get_database_info"},
-		{"getActiveConnectionsTool", func() (string, error) { r, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{}); return r.Output, err }, "get_active_connections"},
-		{"getConnectionStatsTool", func() (string, error) { r, err := getConnectionStatsTool(ctx, GetConnectionStatsArgs{}); return r.Output, err }, "get_connection_stats"},
-		{"getDatabaseStatsTool", func() (string, error) { r, err := getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{}); return r.Output, err }, "get_database_stats"},
-		{"getConfigParameterTool", func() (string, error) { r, err := getConfigParameterTool(ctx, GetConfigParameterArgs{}); return r.Output, err }, "get_config_parameter"},
-		{"getReplicationStatusTool", func() (string, error) { r, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{}); return r.Output, err }, "get_replication_status"},
+		{"getDatabaseInfoTool", func() (string, error) {
+			r, err := getDatabaseInfoTool(ctx, GetDatabaseInfoArgs{})
+			return r.Output, err
+		}, "get_database_info"},
+		{"getActiveConnectionsTool", func() (string, error) {
+			r, err := getActiveConnectionsTool(ctx, GetActiveConnectionsArgs{})
+			return r.Output, err
+		}, "get_active_connections"},
+		{"getConnectionStatsTool", func() (string, error) {
+			r, err := getConnectionStatsTool(ctx, GetConnectionStatsArgs{})
+			return r.Output, err
+		}, "get_connection_stats"},
+		{"getDatabaseStatsTool", func() (string, error) {
+			r, err := getDatabaseStatsTool(ctx, GetDatabaseStatsArgs{})
+			return r.Output, err
+		}, "get_database_stats"},
+		{"getConfigParameterTool", func() (string, error) {
+			r, err := getConfigParameterTool(ctx, GetConfigParameterArgs{})
+			return r.Output, err
+		}, "get_config_parameter"},
+		{"getReplicationStatusTool", func() (string, error) {
+			r, err := getReplicationStatusTool(ctx, GetReplicationStatusArgs{})
+			return r.Output, err
+		}, "get_replication_status"},
 		{"getLockInfoTool", func() (string, error) { r, err := getLockInfoTool(ctx, GetLockInfoArgs{}); return r.Output, err }, "get_lock_info"},
 		{"getTableStatsTool", func() (string, error) { r, err := getTableStatsTool(ctx, GetTableStatsArgs{}); return r.Output, err }, "get_table_stats"},
-		{"getBgwriterStatsTool", func() (string, error) { r, err := getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{}); return r.Output, err }, "get_bgwriter_stats"},
+		{"getBgwriterStatsTool", func() (string, error) {
+			r, err := getBgwriterStatsTool(ctx, GetBgwriterStatsArgs{})
+			return r.Output, err
+		}, "get_bgwriter_stats"},
 	}
 
 	for _, tt := range tests {

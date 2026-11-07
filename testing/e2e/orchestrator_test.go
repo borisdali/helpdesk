@@ -27,9 +27,9 @@ func TestOrchestratorDelegation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		prompt          string
-		expectedAgent   string
+		name             string
+		prompt           string
+		expectedAgent    string
 		expectedKeywords []string
 	}{
 		{
@@ -149,18 +149,18 @@ func TestDirectAgentCall(t *testing.T) {
 		skip     func() bool
 	}{
 		{
-			name:   "database_agent_direct",
-			url:    cfg.DBAgentURL,
-			prompt: "Check the database version. The connection_string is `" + cfg.ConnStr + "`.",
+			name:     "database_agent_direct",
+			url:      cfg.DBAgentURL,
+			prompt:   "Check the database version. The connection_string is `" + cfg.ConnStr + "`.",
 			keywords: []string{"PostgreSQL", "version", "database", "connection", "error", "failed"},
-			skip:   func() bool { return cfg.DBAgentURL == "" },
+			skip:     func() bool { return cfg.DBAgentURL == "" },
 		},
 		{
-			name:   "k8s_agent_direct",
-			url:    cfg.K8sAgentURL,
-			prompt: "List pods in the default namespace.",
+			name:     "k8s_agent_direct",
+			url:      cfg.K8sAgentURL,
+			prompt:   "List pods in the default namespace.",
 			keywords: []string{"pod", "namespace", "status", "error", "kubectl"},
-			skip:   func() bool { return cfg.K8sAgentURL == "" || cfg.KubeContext == "" },
+			skip:     func() bool { return cfg.K8sAgentURL == "" || cfg.KubeContext == "" },
 		},
 	}
 

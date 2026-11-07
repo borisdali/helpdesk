@@ -22,7 +22,7 @@ of this in action.
 3. [Pre-mutation state capture](#3-pre-mutation-state-capture)
    - [Kubernetes](#31-kubernetes)
    - [Database (Tier 1 — row-capture)](#32-database-tier-1--row-capture)
-   - [Database (Tier 2 — WAL decode)](#33-database-tier-2--wal-decode)
+   - [Database (Tier 2 — WAL decode)](#33-database-tier-2--lsn-bracketing--wal-decoding)
    - [Capability detection](#34-capability-detection)
 4. [HTTP API](#4-http-api)
 5. [CLI](#5-cli)

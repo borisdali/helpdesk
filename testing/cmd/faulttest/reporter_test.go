@@ -47,14 +47,14 @@ func TestPrintSummary_PassFail(t *testing.T) {
 func TestPrintSummary_FailDetails(t *testing.T) {
 	report := BuildReport("run-1", []EvalResult{
 		{
-			FailureID:   "fault-x",
-			FailureName: "Fault X",
-			Category:    "database",
-			Score:       0.2,
-			Passed:      false,
-			KeywordPass: false,
+			FailureID:    "fault-x",
+			FailureName:  "Fault X",
+			Category:     "database",
+			Score:        0.2,
+			Passed:       false,
+			KeywordPass:  false,
 			ToolEvidence: false,
-			Error:       "agent timeout",
+			Error:        "agent timeout",
 		},
 	})
 

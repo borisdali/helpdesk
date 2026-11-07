@@ -50,6 +50,11 @@ type RestoreToPITArgs struct {
 	// this restore to stop a serving instance. Without it a serving instance
 	// is refused. Not part of the model-facing schema (RestoreToPITModelArgs).
 	AllowStopServing bool `json:"allow_stop_serving,omitempty"`
+	// AcknowledgeObjectiveBreach is the human's acknowledgement, given at the
+	// gate, that the data this restore discards exceeds the database's recovery
+	// objective. Needed only when the loss measured just before the stop does,
+	// under an enforcement of acknowledge. Not part of the model-facing schema.
+	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
 }
 
 // RestoreToPITResult is the result of restore_to_point_in_time.
@@ -72,6 +77,17 @@ type RestoreToPITResult struct {
 	// PreStop is what a serving instance reported just before it was stopped:
 	// its WAL position and clock, the most that could have been recovered.
 	PreStop *LivePreState `json:"pre_stop,omitempty"`
+	// DataLoss is what this restore discarded, measured at the moment it ran:
+	// from the instance's own position when it was serving, else from the end
+	// of the archive. It is the figure to compare with the one the human
+	// approved, and the one to record against the incident.
+	DataLoss *DataLossEstimate `json:"data_loss,omitempty"`
+	// DecisionUnrecorded is set when the decision to proceed (or the refusal)
+	// could not be written to the audit trail. The restore is not held for it,
+	// as no tool call is held for its audit write, but the result says so: a
+	// restore that ran without its decision on record must not look as though
+	// it were on record. The tool call's own audit event is separate.
+	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
 	// Stopped says this tool stopped a serving instance (and how). It is left
 	// stopped: restart_container / restart_service starts it, and recovery to
 	// the target runs on startup.
@@ -151,7 +167,7 @@ func beginPITRestore(target string) (release func(), ok bool) {
 	}, true
 }
 
-func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITResult, error) {
+func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult RestoreToPITResult, retErr error) {
 	target := RecoveryTarget{Type: args.RecoveryTargetType, Value: args.RecoveryTargetVal}
 	now := time.Now()
 	normalized, err := target.Normalize(now)
@@ -189,11 +205,26 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 	planArgs := PlanPITRArgs{Target: args.Target, Stanza: stanza, RecoveryTargetType: target.Type, RecoveryTargetVal: target.Value}
 	var result RestoreToPITResult
 
+	// Every refusal from here on is a decision about this recovery, and is
+	// recorded as one (recovery_decision, stage execution), not left to be read
+	// out of the tool call's error text. The refusal at the objective check below
+	// records itself with more to say, and marks the decision made.
+	decided := false
+	defer func() {
+		if retErr != nil && !decided && isRefusal(retErr) {
+			if werr := recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, retErr.Error()); werr != nil {
+				// The result was already copied into the named result: set it there.
+				namedResult.DecisionUnrecorded = unrecordedNote(werr)
+			}
+		}
+	}()
+
 	// A serving instance is restored only when the human's gate approval said
 	// the tool may stop it. Everything that can be checked while it is still
 	// running is checked first, and a failure at any of those steps leaves it
 	// running (pitr_live.go).
 	live := false
+	var probeAt time.Time // when the running instance was asked where it is
 	if up, readyOut := inst.serving(ctx); up {
 		if !args.AllowStopServing {
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — postgres is still accepting connections (pg_isready: %s). "+
@@ -210,6 +241,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. The instance was not stopped", err)
 		}
 		result.PreStop = &pre
+		probeAt = restoreClock()
 		if reason := pre.refusal(target, normalized); reason != "" {
 			return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — %s. The instance was not stopped", reason)
 		}
@@ -243,6 +275,38 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (RestoreToPITR
 		return result, fmt.Errorf("restore_to_point_in_time: refusing to restore — the plan changed since it was approved (approved %s, now %s: backup %s, timeline %d). Run plan_point_in_time_recovery again and have the new plan approved",
 			args.PlanDigest, plan.PlanDigest, plan.BackupLabel, plan.TargetTimeline)
 	}
+
+	// What this restore discards, measured now, just before anything is stopped:
+	// the plan the human approved may be minutes or hours old, and on a serving
+	// instance the loss has been growing since. The instance's clock at the probe
+	// is carried forward by the time that has passed since (the archive flush
+	// can take a minute and a half), so the figure is the loss at the stop.
+	stopAt := restoreClock()
+	var measured *LivePreState
+	if result.PreStop != nil {
+		p := projectPreStop(*result.PreStop, probeAt, stopAt)
+		measured = &p
+	}
+	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, measured, stopAt), args.Target)
+	var gerr error
+	if result.DataLoss != nil {
+		gerr = result.DataLoss.Objective.objectiveGate(args.AcknowledgeObjectiveBreach)
+	}
+	// The decision is recorded here, with what it was made from, whichever way
+	// it goes: this is the last point before anything is stopped.
+	decided = true
+	if gerr != nil {
+		untouched := "Nothing was changed."
+		if live {
+			untouched = "The instance was not stopped."
+		}
+		refusal := fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
+		result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, refusal.Error()))
+		return result, refusal
+	}
+	// Going ahead is not held for the record either; if it cannot be written the
+	// result says so, and the log carries the error.
+	result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, ""))
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string
@@ -374,7 +438,8 @@ func restoreToPITTool(ctx agent.ToolContext, margs RestoreToPITModelArgs) (Resto
 		return RestoreToPITResult{}, err
 	}
 	return restoreToPITAudited(ctx, RestoreToPITArgs{Target: margs.Target, Stanza: margs.Stanza,
-		RecoveryTargetType: ap.Type, RecoveryTargetVal: ap.Value, PlanDigest: ap.PlanDigest, AllowStopServing: ap.StopServing})
+		RecoveryTargetType: ap.Type, RecoveryTargetVal: ap.Value, PlanDigest: ap.PlanDigest, AllowStopServing: ap.StopServing,
+		AcknowledgeObjectiveBreach: ap.BreachAcknowledged})
 }
 
 // restoreToPITAudited runs the restore and writes its audit record.
@@ -402,7 +467,7 @@ func recordRestoreToPIT(ctx agent.ToolContext, args RestoreToPITArgs, result Res
 		Name: "restore_to_point_in_time",
 		Parameters: map[string]any{"target": args.Target, "stanza": args.Stanza,
 			"recovery_target_type": args.RecoveryTargetType, "recovery_target_value": args.RecoveryTargetVal, "plan_digest": args.PlanDigest,
-			"allow_stop_serving": args.AllowStopServing},
+			"allow_stop_serving": args.AllowStopServing, "acknowledge_objective_breach": args.AcknowledgeObjectiveBreach},
 	}, audit.ToolResult{
 		Output: string(resultJSON),
 		Error:  errMsg,

@@ -17,8 +17,8 @@ func TestBuildRollbackJobDef_StepsReversed(t *testing.T) {
 	orig := &fleet.JobDef{
 		Name: "deploy-v2",
 		Change: fleet.Change{Steps: []fleet.Step{
-			makeStep("database", "exec_update"),  // step 0
-			makeStep("k8s", "scale_deployment"),  // step 1
+			makeStep("database", "exec_update"), // step 0
+			makeStep("k8s", "scale_deployment"), // step 1
 		}},
 		Strategy: fleet.Strategy{CanaryCount: 1},
 	}
@@ -59,8 +59,8 @@ func TestBuildRollbackJobDef_StepsReversed(t *testing.T) {
 // (first in original order) is moved to last in the rollback target list.
 func TestBuildRollbackJobDef_CanaryLast(t *testing.T) {
 	orig := &fleet.JobDef{
-		Name:   "deploy",
-		Change: fleet.Change{Steps: []fleet.Step{makeStep("k8s", "scale_deployment")}},
+		Name:     "deploy",
+		Change:   fleet.Change{Steps: []fleet.Step{makeStep("k8s", "scale_deployment")}},
 		Strategy: fleet.Strategy{CanaryCount: 1},
 	}
 
@@ -91,8 +91,8 @@ func TestBuildRollbackJobDef_CanaryLast(t *testing.T) {
 // of using the inverse op.
 func TestBuildRollbackJobDef_NonReversibleStep(t *testing.T) {
 	orig := &fleet.JobDef{
-		Name:   "mixed",
-		Change: fleet.Change{Steps: []fleet.Step{makeStep("k8s", "restart_deployment")}},
+		Name:     "mixed",
+		Change:   fleet.Change{Steps: []fleet.Step{makeStep("k8s", "restart_deployment")}},
 		Strategy: fleet.Strategy{CanaryCount: 0},
 	}
 

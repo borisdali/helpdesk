@@ -80,7 +80,7 @@ func TestCheckPlanDivergence_Identical(t *testing.T) {
 
 func TestCheckPlanDivergence_SameToolsMoreSteps(t *testing.T) {
 	// Same tool set but step count grew 50% — not significant (equal to threshold, not over)
-	orig := makeJobDef("tool_a", "tool_a")  // 2 steps
+	orig := makeJobDef("tool_a", "tool_a")            // 2 steps
 	fresh := makeJobDef("tool_a", "tool_a", "tool_a") // 3 steps: delta=1, 1*2=2 == orig=2, not >
 	d := checkPlanDivergence(orig, fresh)
 	if d.Significant() {
@@ -89,7 +89,7 @@ func TestCheckPlanDivergence_SameToolsMoreSteps(t *testing.T) {
 }
 
 func TestCheckPlanDivergence_StepCountOver50Pct(t *testing.T) {
-	orig := makeJobDef("tool_a", "tool_a")           // 2 steps
+	orig := makeJobDef("tool_a", "tool_a")                                // 2 steps
 	fresh := makeJobDef("tool_a", "tool_a", "tool_a", "tool_a", "tool_a") // 5 steps: delta=3, 3*2=6 > 2
 	d := checkPlanDivergence(orig, fresh)
 	if !d.Significant() {
@@ -139,7 +139,7 @@ func TestCheckPlanDivergence_ToolReplaced(t *testing.T) {
 func TestCheckPlanDivergence_DuplicateToolsNotCounted(t *testing.T) {
 	// Same tool used multiple times in both — tool set is identical
 	orig := makeJobDef("tool_a", "tool_a", "tool_a") // 3 steps
-	fresh := makeJobDef("tool_a", "tool_a")           // 2 steps: delta=1, 1*2=2 == orig=3? no: 2 < 3
+	fresh := makeJobDef("tool_a", "tool_a")          // 2 steps: delta=1, 1*2=2 == orig=3? no: 2 < 3
 	d := checkPlanDivergence(orig, fresh)
 	if len(d.AddedTools) != 0 || len(d.RemovedTools) != 0 {
 		t.Errorf("same tool set, no adds/removes expected: %+v", d)

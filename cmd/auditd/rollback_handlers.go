@@ -398,8 +398,8 @@ func (s *rollbackServer) handleInitiateFleetRollback(w http.ResponseWriter, r *h
 	}
 
 	var req struct {
-		Scope string `json:"scope"` // "all" | "canary_only" | "failed_only"
-		DryRun bool  `json:"dry_run,omitempty"`
+		Scope  string `json:"scope"` // "all" | "canary_only" | "failed_only"
+		DryRun bool   `json:"dry_run,omitempty"`
 	}
 	if body, bodyErr := io.ReadAll(r.Body); bodyErr == nil && len(body) > 0 {
 		json.Unmarshal(body, &req) //nolint:errcheck
@@ -413,11 +413,11 @@ func (s *rollbackServer) handleInitiateFleetRollback(w http.ResponseWriter, r *h
 	if req.DryRun {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"dry_run":      true,
-			"job_id":       jobID,
-			"scope":        scope,
-			"job_status":   job.Status,
-			"job_name":     job.Name,
+			"dry_run":    true,
+			"job_id":     jobID,
+			"scope":      scope,
+			"job_status": job.Status,
+			"job_name":   job.Name,
 		})
 		return
 	}

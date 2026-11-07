@@ -58,6 +58,32 @@ func TestLoadInfraConfig_Valid(t *testing.T) {
 	}
 }
 
+// The orchestrator keeps its own, prompt-only copy of the inventory types. A
+// config that uses the recovery-objective fields (environments, defaults, a
+// per-database environment and objectives, malformed or not) must load for it
+// unchanged: those fields are none of its business.
+func TestLoadInfraConfig_IgnoresRecoveryObjectives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "infra.json")
+	data := `{
+		"defaults": {"objectives": {"rpo": 900, "availability_slo": "high"}},
+		"environments": {"prod": {"objectives": {"rto": "30m"}}},
+		"db_servers": {
+			"prod-db": {"name": "Production DB", "connection_string": "host=db port=5432 dbname=prod",
+			            "environment": "prdo", "objectives": {"rpo": "soon"}}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config, err := loadInfraConfig(path)
+	if err != nil {
+		t.Fatalf("loadInfraConfig: %v", err)
+	}
+	if db := config.DBServers["prod-db"]; db.Name != "Production DB" {
+		t.Errorf("db = %+v", db)
+	}
+}
+
 func TestLoadInfraConfig_MissingFile(t *testing.T) {
 	_, err := loadInfraConfig("/nonexistent/path/infra.json")
 	if err == nil {

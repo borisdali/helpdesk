@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools
+.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr pitr-objectives-infra recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools fmt-check docs-links
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -55,6 +55,15 @@ fleet-runner:
 # ---------------------------------------------------------------------------
 
 # Target for standard cached tests
+# Fails if any tracked Go file is not gofmt-clean (same check CI runs via golangci-lint).
+fmt-check:
+	@out=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$out" ]; then echo "not gofmt-clean (run: gofmt -w <file>):"; echo "$$out"; exit 1; fi
+
+# Fails on broken relative links / #anchors in docs/*.md, README.md and deploy READMEs.
+docs-links:
+	@python3 -I scripts/check-doc-anchors.py
+
 test:
 	-go test -v $(TESTARGS) ./... 2>&1 | tee $(TEST_LOG) | grep -E "^(ok |FAIL)"
 	@$(SUMMARY_CMD) $(TEST_LOG)
@@ -127,6 +136,19 @@ TEST_LOG         = /tmp/helpdesk-test.log
 INTEGRATION_LOG  = /tmp/helpdesk-integration.log
 E2E_LOG          = /tmp/helpdesk-e2e.log
 FAULTTEST_LOG    = /tmp/helpdesk-faulttest.log
+
+# Each faulttest target writes its own log, so running one never overwrites the
+# output of another (they used to share FAULTTEST_LOG; found 2026-11-06 when a
+# later run replaced the log of a fast sweep). A FAULTTEST_LOG given on the
+# command line still wins: make faulttest-pitr FAULTTEST_LOG=/tmp/mine.log
+faulttest-nocache:                  FAULTTEST_LOG = /tmp/helpdesk-faulttest-nocache.log
+faulttest-fast:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-fast.log
+faulttest-fast-nocache:             FAULTTEST_LOG = /tmp/helpdesk-faulttest-fast-nocache.log
+faulttest-memory-pressure:          FAULTTEST_LOG = /tmp/helpdesk-faulttest-memory-pressure.log
+faulttest-gateway:                  FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway.log
+faulttest-gateway-nocache:          FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway-nocache.log
+faulttest-gateway-pgbackrest:       FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway-pgbackrest.log
+faulttest-pitr:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-pitr.log
 
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
 SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
@@ -473,6 +495,17 @@ faulttest-gateway-pgbackrest:
 	go test --count=1 -tags faulttest -timeout 1200s -v -run TestFaultInjection ./testing/faulttest/... 2>&1 | tee -a $(FAULTTEST_LOG)
 	@$(SUMMARY_CMD) $(FAULTTEST_LOG)
 
+# A copy of testing/testing.infra.json in which pgbackrest-db has an rpo of one
+# second and enforcement=acknowledge, so a point-in-time restore of the fixture
+# always exceeds its objective and needs the acknowledgement. Start the sysadmin
+# agent and the gateway with HELPDESK_INFRA_CONFIG pointing at it, then
+# `make faulttest-pitr` (PITR_FAULT_IDS=db-pitr-dropped-table-lsn for an LSN
+# target). The fixture itself never changes.
+PITR_OBJECTIVES_INFRA ?= /tmp/helpdesk-pitr-objectives.infra.json
+pitr-objectives-infra:
+	jq '.db_servers["pgbackrest-db"].objectives = {"rpo": "1s", "enforcement": "acknowledge"}' testing/testing.infra.json > $(PITR_OBJECTIVES_INFRA)
+	@echo "wrote $(PITR_OBJECTIVES_INFRA): export HELPDESK_INFRA_CONFIG=$(PITR_OBJECTIVES_INFRA) for the sysadmin agent and the gateway, then restart them"
+
 # Point-in-time recovery fault on the Docker pgBackRest fixture, through the
 # gateway, with a live model. Restores (and stops) the running fixture, so run
 # it alone. The agents must reach the fixture: use the host-process stack
@@ -481,10 +514,14 @@ faulttest-gateway-pgbackrest:
 #   FAULTTEST_API_KEY            gateway key
 #   FAULTTEST_SYSADMIN_AGENT_URL e.g. http://localhost:1103
 #   FAULTTEST_SYSADMIN_API_KEY   the agent's /tool key (defaults to FAULTTEST_API_KEY)
+#   FAULTTEST_AUDIT_URL          auditd, e.g. http://localhost:7070: the run then
+#                                asserts the restore left its whole recovery
+#                                decision (plan, gate, execution, outcome) in the
+#                                audit trail and that the chain verifies
 #   PITR_FAULT_IDS               default db-pitr-dropped-table
 faulttest-pitr:
-	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ] || [ -z "$(FAULTTEST_API_KEY)" ] || [ -z "$(FAULTTEST_SYSADMIN_AGENT_URL)" ]; then \
-		echo "Error: FAULTTEST_GATEWAY_URL, FAULTTEST_API_KEY and FAULTTEST_SYSADMIN_AGENT_URL must be set"; \
+	@if [ -z "$(FAULTTEST_GATEWAY_URL)" ] || [ -z "$(FAULTTEST_API_KEY)" ] || [ -z "$(FAULTTEST_SYSADMIN_AGENT_URL)" ] || [ -z "$(FAULTTEST_AUDIT_URL)" ]; then \
+		echo "Error: FAULTTEST_GATEWAY_URL, FAULTTEST_API_KEY, FAULTTEST_SYSADMIN_AGENT_URL and FAULTTEST_AUDIT_URL must be set"; \
 		exit 1; \
 	fi
 	@if ! curl -sf -H "Authorization: Bearer $(FAULTTEST_API_KEY)" "$(FAULTTEST_GATEWAY_URL)/api/v1/agents" >/dev/null 2>&1; then \
@@ -501,6 +538,7 @@ faulttest-pitr:
 	FAULTTEST_GATE_ESCALATION=true \
 	FAULTTEST_APPROVAL_MODE=force \
 	FAULTTEST_SYSADMIN_AGENT_URL="$(FAULTTEST_SYSADMIN_AGENT_URL)" \
+	FAULTTEST_AUDIT_URL="$(FAULTTEST_AUDIT_URL)" \
 	FAULTTEST_SYSADMIN_API_KEY="$(if $(FAULTTEST_SYSADMIN_API_KEY),$(FAULTTEST_SYSADMIN_API_KEY),$(FAULTTEST_API_KEY))" \
 	FAULTTEST_IDS=$(if $(PITR_FAULT_IDS),$(PITR_FAULT_IDS),db-pitr-dropped-table) \
 	FAULTTEST_CONN_STR="$(PGBACKREST_CONN_STR)" \

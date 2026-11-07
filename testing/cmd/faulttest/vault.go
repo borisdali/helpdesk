@@ -2963,6 +2963,9 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 		fmt.Printf("  %-18s %s\n", "Origin:", j.Origin)
 	}
 	fmt.Printf("  %-18s %s\n", "Outcome:", j.Outcome)
+	if j.RecoveryDecision != "" {
+		fmt.Printf("  %-18s %s\n", "Recovery:", recoverySummaryLine(j.RecoveryDecision, j.RecoveryVerdict))
+	}
 	fmt.Printf("  %-18s %d\n", "Events:", j.EventCount)
 	if j.RetryCount > 0 {
 		fmt.Printf("  %-18s %d\n", "Retries:", j.RetryCount)
@@ -3003,6 +3006,10 @@ func printJourneyDetail(gatewayURL, apiKey, traceID string, detail bool) {
 			sectionJ("EXECUTION TRACE")
 			printReasoningTrace(filterJourneyEventTypes(events, "agent_reasoning", "tool_execution"))
 			printToolCallIntegrity(events, sectionJ)
+			if rd := recoveryDecisionsFromEvents(events); len(rd) > 0 {
+				sectionJ("RECOVERY DECISION")
+				fmt.Print(formatRecoveryDecisions(rd))
+			}
 		}
 		// Show the structured FINDINGS from the playbook run's diagnostic_report.
 		// This is the agent's final conclusion that often falls after the last tool
@@ -3148,6 +3155,8 @@ type journeyEvent struct {
 	ToolExecution  *journeyToolExec       `json:"tool,omitempty"`
 	AgentReasoning *journeyReasoning      `json:"agent_reasoning,omitempty"`
 	PolicyDecision *journeyPolicyDecision `json:"policy_decision,omitempty"`
+	// RecoveryDecision is set on a recovery_decision event (vault_recovery_decision.go).
+	RecoveryDecision *audit.RecoveryDecision `json:"recovery_decision,omitempty"`
 }
 
 type journeyToolExec struct {
@@ -3212,7 +3221,7 @@ func fetchRunFindings(gatewayURL, apiKey, runID string) string {
 func fetchRunEvents(gatewayURL, apiKey, runID string) ([]journeyEvent, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") +
 		"/api/v1/fleet/playbook-runs/" + runID +
-		"/events?types=agent_reasoning,tool_invoked,policy_decision,tool_execution&limit=500"
+		"/events?types=agent_reasoning,tool_invoked,policy_decision,tool_execution,recovery_decision&limit=500"
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -5115,6 +5124,9 @@ type incidentNarrative struct {
 	Feedback   []narrativeFeedback   `json:"feedback,omitempty"`
 	Evaluation *narrativeEval        `json:"evaluation,omitempty"`
 	Journeys   []narrativeJourneyRef `json:"journeys,omitempty"`
+	// RecoveryDecisions is the incident's recovery decision, stage by stage
+	// (vault_recovery_decision.go), when it had one.
+	RecoveryDecisions []narrativeRecoveryDecision `json:"recovery_decisions,omitempty"`
 	// IncidentRecord is the v0.29 incidents-table row for this run, when one
 	// exists — reuses audit.Incident directly (same as fetchIncidentsList
 	// already does for list mode) rather than a mirrored struct, since
@@ -5549,6 +5561,12 @@ func printIncidentJourney(gatewayURL, apiKey, runID string, summary bool) {
 			}
 			fmt.Printf("Steps:     %s\n", strings.Join(stepNames, "  "))
 		}
+	}
+
+	// ── RECOVERY DECISION ────────────────────────────────────
+	if len(n.RecoveryDecisions) > 0 {
+		section("RECOVERY DECISION")
+		fmt.Print(formatRecoveryDecisions(n.RecoveryDecisions))
 	}
 
 	// ── EVALUATION ───────────────────────────────────────────

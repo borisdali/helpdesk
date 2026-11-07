@@ -75,12 +75,12 @@ To run aiHelpDesk in Docker containers, download the "-deploy.tar.gz" platform a
   cp .env.example .env
   cp infrastructure.json.example infrastructure.json
   cp policies.example.yaml policies.yaml
-  cp users.example.yaml. users.yaml
+  cp users.example.yaml users.yaml
   # edit the above files as needed
   docker compose up -d
 ```
 
-For interactive aiHelpDesk session see [section 2.4 below](docker-compose#24-using-helpdesk-client)
+For interactive aiHelpDesk session see [section 2.4 below](#24-using-helpdesk-client)
 
 **Docker Networking Note:** When running in Docker containers, `localhost` in a connection string refers to the container itself, not the host machine. To connect to a database on the host:
 - **Docker Desktop (Mac/Windows):** Use `host.docker.internal` as the hostname
@@ -203,7 +203,7 @@ Next, as a human operator, run the interactive session by invoking the Orchestat
 See the [sample log](INSTALL_from_source_sample_interactive_log.md)  of running the above commands.
 
 
-  ### 2.4 Using helpdesk-client
+### 2.4 Using helpdesk-client
 
 `helpdesk-client` is an authenticated operator CLI that connects to the Gateway over HTTP — every query carries a verified identity and declared purpose in the audit trail, replacing ad-hoc `docker compose run orchestrator` sessions.
 

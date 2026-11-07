@@ -15,8 +15,8 @@ import (
 
 // approvalServer handles approval-related HTTP endpoints.
 type approvalServer struct {
-	store     *audit.ApprovalStore
-	notifier  *ApprovalNotifier
+	store      *audit.ApprovalStore
+	notifier   *ApprovalNotifier
 	authorizer *authz.Authorizer
 }
 
@@ -44,9 +44,9 @@ type CreateApprovalRequest struct {
 
 // ApproveRequest is the JSON body for approving a request.
 type ApproveRequest struct {
-	ApprovedBy    string `json:"approved_by"`
-	Reason        string `json:"reason,omitempty"`
-	ValidForMin   int    `json:"valid_for_minutes,omitempty"`
+	ApprovedBy  string `json:"approved_by"`
+	Reason      string `json:"reason,omitempty"`
+	ValidForMin int    `json:"valid_for_minutes,omitempty"`
 }
 
 // DenyRequest is the JSON body for denying a request.

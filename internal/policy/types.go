@@ -32,7 +32,7 @@ type Config struct {
 type Policy struct {
 	Name        string      `yaml:"name"`
 	Description string      `yaml:"description"`
-	Enabled     *bool       `yaml:"enabled,omitempty"` // Default true
+	Enabled     *bool       `yaml:"enabled,omitempty"`  // Default true
 	Priority    int         `yaml:"priority,omitempty"` // Higher = evaluated first
 	Principals  []Principal `yaml:"principals,omitempty"`
 	Resources   []Resource  `yaml:"resources"`
@@ -258,13 +258,13 @@ type RequestContext struct {
 
 // Decision is the result of policy evaluation.
 type Decision struct {
-	Effect      Effect   `json:"effect"`        // allow, deny, require_approval
-	PolicyName  string   `json:"policy_name"`
-	RuleIndex   int      `json:"rule_index"`
-	Message     string   `json:"message,omitempty"`
-	Conditions  []string `json:"conditions,omitempty"`
-	RequiresApproval bool `json:"requires_approval,omitempty"`
-	ApprovalQuorum   int  `json:"approval_quorum,omitempty"`
+	Effect           Effect   `json:"effect"` // allow, deny, require_approval
+	PolicyName       string   `json:"policy_name"`
+	RuleIndex        int      `json:"rule_index"`
+	Message          string   `json:"message,omitempty"`
+	Conditions       []string `json:"conditions,omitempty"`
+	RequiresApproval bool     `json:"requires_approval,omitempty"`
+	ApprovalQuorum   int      `json:"approval_quorum,omitempty"`
 }
 
 // DecisionTrace is the full evaluation record for a single request.
@@ -279,27 +279,27 @@ type DecisionTrace struct {
 
 // PolicyTrace records what happened for a single policy during evaluation.
 type PolicyTrace struct {
-	PolicyName string      `json:"policy_name"`
-	Matched    bool        `json:"matched"`
+	PolicyName string `json:"policy_name"`
+	Matched    bool   `json:"matched"`
 	// SkipReason is set when Matched == false: "disabled", "principal_mismatch", "resource_mismatch".
-	SkipReason string      `json:"skip_reason,omitempty"`
+	SkipReason string `json:"skip_reason,omitempty"`
 	// RequiredTags is populated for resource_mismatch skips.
 	// Each element is a set of tags required by one of the policy's resource specs
 	// that matches the requested resource type. Only non-empty tag sets are included.
 	// Use this to explain to operators which tags would unlock the policy.
 	RequiredTags [][]string `json:"required_tags,omitempty"`
 	// Rules is populated only when Matched == true.
-	Rules        []RuleTrace `json:"rules,omitempty"`
+	Rules []RuleTrace `json:"rules,omitempty"`
 }
 
 // RuleTrace records what happened for a single rule within a matched policy.
 type RuleTrace struct {
-	Index   int    `json:"index"`
+	Index   int      `json:"index"`
 	Actions []string `json:"actions"`
-	Effect  string `json:"effect"`
-	Matched bool   `json:"matched"`
+	Effect  string   `json:"effect"`
+	Matched bool     `json:"matched"`
 	// SkipReason is set when Matched == false: "action_mismatch", "schedule_inactive".
-	SkipReason string           `json:"skip_reason,omitempty"`
+	SkipReason string `json:"skip_reason,omitempty"`
 	// Conditions is populated only for the matching rule.
 	Conditions []ConditionTrace `json:"conditions,omitempty"`
 }

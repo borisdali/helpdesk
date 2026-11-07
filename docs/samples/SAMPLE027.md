@@ -2,7 +2,7 @@
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
-- **[AI-Driven Restore That Stops Before the Mistake](...)**  
+- **[AI-Driven Restore That Stops Before the Mistake](https://levelup.gitconnected.com/ai-driven-restore-that-stops-before-the-mistake-8e7ff9ca8064)**  
   Don't let AI choose where a PITR stops. Here's a story of a 2am rogue batch job that messes up production data and the restore where losing data was the deliberate plan
   
   

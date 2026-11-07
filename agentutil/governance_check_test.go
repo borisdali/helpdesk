@@ -107,7 +107,7 @@ func TestCheckFixModeViolations_PolicyEnabledNoFile(t *testing.T) {
 func TestCheckFixModeViolations_PolicyEnabledRemoteMode_NoFileNeeded(t *testing.T) {
 	setFixModeEnv(t)
 	cfg := fullFixModeConfig(t)
-	cfg.PolicyFile = ""               // no local file
+	cfg.PolicyFile = ""                       // no local file
 	cfg.PolicyCheckURL = "http://auditd:1199" // remote check mode satisfies requirement
 
 	violations := CheckFixModeViolations(cfg)

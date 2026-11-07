@@ -647,12 +647,12 @@ func TestLogStepVerification_NoPanic(t *testing.T) {
 		write []string
 		destr []string
 	}{
-		{"cancel_query", []string{"cancel_query"}, nil},         // write confirmed
+		{"cancel_query", []string{"cancel_query"}, nil},                 // write confirmed
 		{"terminate_connection", nil, []string{"terminate_connection"}}, // destructive confirmed
-		{"cancel_query", nil, nil},                              // write expected, nothing confirmed → mismatch
-		{"terminate_connection", nil, nil},                      // destructive expected, nothing confirmed → mismatch
-		{"check_connection", nil, nil},                          // read expected, nothing confirmed → no mismatch
-		{"check_connection", []string{"cancel_query"}, nil},     // read expected, write confirmed → clean
+		{"cancel_query", nil, nil},                                      // write expected, nothing confirmed → mismatch
+		{"terminate_connection", nil, nil},                              // destructive expected, nothing confirmed → mismatch
+		{"check_connection", nil, nil},                                  // read expected, nothing confirmed → no mismatch
+		{"check_connection", []string{"cancel_query"}, nil},             // read expected, write confirmed → clean
 	}
 	for _, tc := range cases {
 		v := &client.TraceVerification{

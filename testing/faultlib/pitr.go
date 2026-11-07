@@ -155,6 +155,26 @@ type PITRPlanView struct {
 	PlanDigest           string `json:"plan_digest"`
 	InstanceServing      bool   `json:"instance_serving"`
 	ArchiveFlushRequired bool   `json:"archive_flush_required"`
+	// DataLossEstimate carries the verdict against the database's recovery
+	// objective, and what approving will demand because of it.
+	DataLossEstimate *struct {
+		Objective *struct {
+			Status      string `json:"status"`
+			Gate        string `json:"gate"`
+			Enforcement string `json:"enforcement"`
+			Detail      string `json:"detail"`
+		} `json:"objective"`
+	} `json:"data_loss_estimate"`
+}
+
+// objectiveGate is what approving this plan will demand: "", "acknowledge" or
+// "refuse". An agent that does not report it demands nothing.
+func (p PITRPlanView) objectiveGate() (gate, detail string) {
+	if p.DataLossEstimate == nil || p.DataLossEstimate.Objective == nil {
+		return "", ""
+	}
+	o := p.DataLossEstimate.Objective
+	return o.Gate, o.Detail
 }
 
 // fetchPITRPlan asks the sysadmin agent for the plan of the current target, as
@@ -224,14 +244,23 @@ func (r *Remediator) approvePITR(ctx context.Context, req *ProceedEscalationRequ
 	if plan.Status != "feasible" || plan.PlanDigest == "" {
 		return fmt.Errorf("the point-in-time plan is %q, not feasible, so the gate is not approved: %s", plan.Status, plan.Detail)
 	}
+	// An operator who reads that the loss exceeds the database's objective, and
+	// that its enforcement is refuse, does not approve around it. One whose
+	// enforcement is acknowledge acknowledges it, as the plan says to.
+	gate, gateDetail := plan.objectiveGate()
+	if gate == "refuse" {
+		return fmt.Errorf("the point-in-time plan would be refused by the restore (%s), so the gate is not approved", gateDetail)
+	}
 	target := r.pitr.target
 	req.RecoveryTarget = &target
 	req.PlanDigest = plan.PlanDigest
 	req.AcknowledgeDataLoss = true
 	req.AllowStopServing = r.pitr.allowStop
+	req.AcknowledgeObjectiveBreach = gate == "acknowledge"
 	slog.Info("point-in-time gate: approving the reviewed plan",
 		"target_type", target.Type, "target", target.Value, "plan_digest", plan.PlanDigest,
-		"instance_serving", plan.InstanceServing, "archive_flush_required", plan.ArchiveFlushRequired, "allow_stop_serving", req.AllowStopServing)
+		"instance_serving", plan.InstanceServing, "archive_flush_required", plan.ArchiveFlushRequired, "allow_stop_serving", req.AllowStopServing,
+		"acknowledge_objective_breach", req.AcknowledgeObjectiveBreach)
 	return nil
 }
 

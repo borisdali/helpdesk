@@ -16,7 +16,7 @@ Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this 
 
 As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This one happened to be running on K8s, but see [here](SAMPLE010.md), [here](SAMPLE011.md) and [here](SAMPLE013.md) for VM/Bare Metal, the source and Docker/Podman respectively (although not the exact commands shown on this page).
 
-In this transcript we pick five areas from the aiHelpDesk [v0.25 release](https://github.com/borisdali/helpdesk/releases/tag/v0.25.0) release: adding [`AttributionConsistent`](VAULT.md#vault-accuracy) to the trust gate, objective evidence for `get_events` tool and predictable/varies annotation, cert history diff and the new cert history section in `vault accuracy`.
+In this transcript we pick five areas from the aiHelpDesk [v0.25 release](https://github.com/borisdali/helpdesk/releases/tag/v0.25.0) release: adding [`AttributionConsistent`](../VAULT.md#vault-accuracy) to the trust gate, objective evidence for `get_events` tool and predictable/varies annotation, cert history diff and the new cert history section in `vault accuracy`.
 
 Here we go:
 
@@ -314,7 +314,7 @@ Oh and a bonus, unplanned confirmation: `mismatch: true` / `narrated_not_confirm
 
 ## 4. Predictable vs. inconsistent annotation
 
-See [here](ATTRIBUTION_CERTS.md#9-the-clean-axis) for the background for `predictable` vs. `varies` (`varies` is the name we chose for inconsistent, changing from one run to the next... or the next after that). Now assuming the certs from `custom-target-drift-nudge` and `custom-k8s-oomkill-signal` posted earlier are still in auditd, just re-query them... by creating a Pod that runs `vault accuracy` for the custom/private catalog: 
+See [here](../ATTRIBUTION_CERTS.md#9-the-clean-axis) for the background for `predictable` vs. `varies` (`varies` is the name we chose for inconsistent, changing from one run to the next... or the next after that). Now assuming the certs from `custom-target-drift-nudge` and `custom-k8s-oomkill-signal` posted earlier are still in auditd, just re-query them... by creating a Pod that runs `vault accuracy` for the custom/private catalog: 
 
 
 ```

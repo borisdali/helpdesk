@@ -114,6 +114,117 @@ func TestFormatPITRPlan_FeasibleShowsTheApproveCommand(t *testing.T) {
 	}
 }
 
+func TestFormatPITRPlan_ShowsTheMeasuredLossAndWhatIsNotCounted(t *testing.T) {
+	var p pitrPlan
+	raw := `{"status":"feasible","plan_digest":"d1","data_loss_estimate":{"summary":"at most 21m 00s of history discarded","as_of":"2026-11-03T02:30:00Z","unmeasured":["the number of transactions","which writes were wanted"]}}`
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatal(err)
+	}
+	got := formatPITRPlan(p, goodOpts())
+	for _, want := range []string{"Estimated loss     : at most 21m 00s of history discarded", "Not counted        : the number of transactions; which writes were wanted"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(formatPITRPlan(pitrPlan{Status: "feasible", PlanDigest: "d1"}, goodOpts()), "Estimated loss") {
+		t.Error("a plan without an estimate printed one")
+	}
+}
+
+func TestFormatPITRPlan_ShowsTheRPOCheck_LoudWhenItMayBeExceeded(t *testing.T) {
+	plan := func(status, detail string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"d1","data_loss_estimate":{"summary":"s","objective":{"status":"` + status + `","detail":"` + detail + `"}}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, status := range []string{"exceeds", "may_exceed"} {
+		got := formatPITRPlan(plan(status, "1h 18m 07s discarded against an RPO of 15m 00s"), goodOpts())
+		if !strings.Contains(got, "RPO CHECK (!)") || !strings.Contains(got, status+": 1h 18m 07s discarded against an RPO of 15m 00s") {
+			t.Errorf("%s is not shown loudly:\n%s", status, got)
+		}
+	}
+	for _, status := range []string{"within", "not_comparable", "no_objective", "objective_invalid"} {
+		got := formatPITRPlan(plan(status, "detail text"), goodOpts())
+		if strings.Contains(got, "(!)") || !strings.Contains(got, "RPO check") || !strings.Contains(got, status+": detail text") {
+			t.Errorf("%s:\n%s", status, got)
+		}
+	}
+	// An agent without the check (an older one) prints no RPO line.
+	if got := formatPITRPlan(pitrPlan{Status: "feasible", PlanDigest: "d1"}, goodOpts()); strings.Contains(got, "RPO") {
+		t.Errorf("a plan with no comparison printed one:\n%s", got)
+	}
+}
+
+// The breach acknowledgement is its own flag and its own request field, sent
+// only when given.
+func TestPITRApprovalBody_BreachAcknowledgementIsSeparateAndOptional(t *testing.T) {
+	read := func(o pitrOpts) map[string]any {
+		raw, err := o.approvalBody("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if _, present := read(goodOpts())["acknowledge_objective_breach"]; present {
+		t.Error("an approval with nothing to acknowledge sent acknowledge_objective_breach")
+	}
+	o := goodOpts()
+	o.AckBreach = true
+	if got := read(o)["acknowledge_objective_breach"]; got != true {
+		t.Errorf("acknowledge_objective_breach = %v", got)
+	}
+	// It is not implied by, and does not imply, the data-loss acknowledgement.
+	o.AckDataLoss = false
+	if _, err := o.approvalBody(""); err == nil {
+		t.Error("the breach acknowledgement stood in for acknowledge-data-loss")
+	}
+}
+
+func TestFormatPITRPlan_SaysWhatApprovingWillDemand(t *testing.T) {
+	plan := func(status, gate string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,"data_loss_estimate":{"summary":"s","objective":{"status":"` +
+			status + `","detail":"d","gate":"` + gate + `","enforcement":"acknowledge"}}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	got := formatPITRPlan(plan("exceeds", "acknowledge"), goodOpts())
+	for _, want := range []string{"Approving needs    : --acknowledge-objective-breach", "--acknowledge-data-loss --allow-stop-serving --acknowledge-objective-breach"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+
+	// An objective that could not be read asks for the same acknowledgement, and
+	// is shown as loudly as a breach: the check could not be made.
+	got = formatPITRPlan(plan("objective_invalid", "acknowledge"), goodOpts())
+	if !strings.Contains(got, "RPO CHECK (!)") || !strings.Contains(got, "--acknowledge-objective-breach") {
+		t.Errorf("an unreadable objective under a strict enforcement:\n%s", got)
+	}
+
+	// Nothing demanded: the command is the usual one.
+	got = formatPITRPlan(plan("within", ""), goodOpts())
+	if strings.Contains(got, "objective-breach") || !strings.Contains(got, "--pitr-approve") {
+		t.Errorf("a plan that demands nothing:\n%s", got)
+	}
+
+	// Refused: no command to approve it with, and it says why.
+	got = formatPITRPlan(plan("exceeds", "refuse"), pitrOpts{TargetType: "time", Target: "2026-10-28T14:05:00Z"})
+	if strings.Contains(got, "--pitr-approve") || !strings.Contains(got, "Approving          : REFUSED") || !strings.Contains(got, "Not approvable as it stands") {
+		t.Errorf("a plan the restore would refuse still offers a command:\n%s", got)
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {
@@ -171,12 +282,12 @@ func TestRunPITRPlan_AgentErrorSurfaces(t *testing.T) {
 func TestNewPITROpts_MapsEveryFlag(t *testing.T) {
 	got := newPITROpts(pitrFlagValues{
 		ApproveRunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, User: "ops@example.com",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, User: "ops@example.com",
 		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	})
 	want := pitrOpts{
 		RunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, ResolvedBy: "ops@example.com", ApprovalMode: "auto",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, ResolvedBy: "ops@example.com", ApprovalMode: "auto",
 		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	}
 	if got != want {
@@ -184,7 +295,7 @@ func TestNewPITROpts_MapsEveryFlag(t *testing.T) {
 	}
 	// The acknowledgements are never implied by anything else.
 	z := newPITROpts(pitrFlagValues{ApproveRunID: "plr_9"})
-	if z.AckDataLoss || z.AllowStop {
+	if z.AckDataLoss || z.AllowStop || z.AckBreach {
 		t.Errorf("acknowledgements must default to false: %+v", z)
 	}
 }

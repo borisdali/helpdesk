@@ -22,23 +22,23 @@ import (
 
 // runSnapshot captures the key metrics from one govbot run for persistence.
 type runSnapshot struct {
-	RunAt                time.Time
-	Window               string
-	Gateway              string
-	Status               string // "healthy" | "warnings" | "alerts"
-	AlertCount           int
-	WarningCount         int
-	AlertsJSON           string // JSON array of strings
-	WarningsJSON         string // JSON array of strings
-	ChainValid           bool
-	PolicyDenies         int
-	PolicyNoMatch        int
-	MutationsTotal       int
-	MutationsDestructive int
-	PendingApprovals     int
-	StaleApprovals       int
-	DecisionsByResource    string // JSON object: resource → {allow,deny,...}
-	InvocationsByResource  string // JSON object: "resource:action" → {invoked,checked}
+	RunAt                 time.Time
+	Window                string
+	Gateway               string
+	Status                string // "healthy" | "warnings" | "alerts"
+	AlertCount            int
+	WarningCount          int
+	AlertsJSON            string // JSON array of strings
+	WarningsJSON          string // JSON array of strings
+	ChainValid            bool
+	PolicyDenies          int
+	PolicyNoMatch         int
+	MutationsTotal        int
+	MutationsDestructive  int
+	PendingApprovals      int
+	StaleApprovals        int
+	DecisionsByResource   string // JSON object: resource → {allow,deny,...}
+	InvocationsByResource string // JSON object: "resource:action" → {invoked,checked}
 }
 
 // historyClient abstracts compliance-run persistence.
@@ -427,25 +427,25 @@ func printSnapsTable(snaps []runSnapshot) error {
 // snapToRun converts a local runSnapshot to an audit.GovbotRun for HTTP transport.
 func snapToRun(s runSnapshot) audit.GovbotRun {
 	var alerts []string
-	json.Unmarshal([]byte(s.AlertsJSON), &alerts)   //nolint:errcheck
+	json.Unmarshal([]byte(s.AlertsJSON), &alerts) //nolint:errcheck
 	var warnings []string
 	json.Unmarshal([]byte(s.WarningsJSON), &warnings) //nolint:errcheck
 	return audit.GovbotRun{
-		RunAt:                s.RunAt,
-		Window:               s.Window,
-		Gateway:              s.Gateway,
-		Status:               s.Status,
-		AlertCount:           s.AlertCount,
-		WarningCount:         s.WarningCount,
-		Alerts:               alerts,
-		Warnings:             warnings,
-		ChainValid:           s.ChainValid,
-		PolicyDenies:         s.PolicyDenies,
-		PolicyNoMatch:        s.PolicyNoMatch,
-		MutationsTotal:       s.MutationsTotal,
-		MutationsDestructive: s.MutationsDestructive,
-		PendingApprovals:     s.PendingApprovals,
-		StaleApprovals:       s.StaleApprovals,
+		RunAt:                 s.RunAt,
+		Window:                s.Window,
+		Gateway:               s.Gateway,
+		Status:                s.Status,
+		AlertCount:            s.AlertCount,
+		WarningCount:          s.WarningCount,
+		Alerts:                alerts,
+		Warnings:              warnings,
+		ChainValid:            s.ChainValid,
+		PolicyDenies:          s.PolicyDenies,
+		PolicyNoMatch:         s.PolicyNoMatch,
+		MutationsTotal:        s.MutationsTotal,
+		MutationsDestructive:  s.MutationsDestructive,
+		PendingApprovals:      s.PendingApprovals,
+		StaleApprovals:        s.StaleApprovals,
 		DecisionsByResource:   s.DecisionsByResource,
 		InvocationsByResource: s.InvocationsByResource,
 	}
@@ -454,21 +454,21 @@ func snapToRun(s runSnapshot) audit.GovbotRun {
 // runToSnap converts an audit.GovbotRun retrieved from auditd back to runSnapshot.
 func runToSnap(r audit.GovbotRun) runSnapshot {
 	return runSnapshot{
-		RunAt:                r.RunAt,
-		Window:               r.Window,
-		Gateway:              r.Gateway,
-		Status:               r.Status,
-		AlertCount:           r.AlertCount,
-		WarningCount:         r.WarningCount,
-		AlertsJSON:           marshalJSON(r.Alerts),
-		WarningsJSON:         marshalJSON(r.Warnings),
-		ChainValid:           r.ChainValid,
-		PolicyDenies:         r.PolicyDenies,
-		PolicyNoMatch:        r.PolicyNoMatch,
-		MutationsTotal:       r.MutationsTotal,
-		MutationsDestructive: r.MutationsDestructive,
-		PendingApprovals:     r.PendingApprovals,
-		StaleApprovals:       r.StaleApprovals,
+		RunAt:                 r.RunAt,
+		Window:                r.Window,
+		Gateway:               r.Gateway,
+		Status:                r.Status,
+		AlertCount:            r.AlertCount,
+		WarningCount:          r.WarningCount,
+		AlertsJSON:            marshalJSON(r.Alerts),
+		WarningsJSON:          marshalJSON(r.Warnings),
+		ChainValid:            r.ChainValid,
+		PolicyDenies:          r.PolicyDenies,
+		PolicyNoMatch:         r.PolicyNoMatch,
+		MutationsTotal:        r.MutationsTotal,
+		MutationsDestructive:  r.MutationsDestructive,
+		PendingApprovals:      r.PendingApprovals,
+		StaleApprovals:        r.StaleApprovals,
 		DecisionsByResource:   r.DecisionsByResource,
 		InvocationsByResource: r.InvocationsByResource,
 	}

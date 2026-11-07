@@ -68,7 +68,7 @@ The right to refuse also applies to individual steps in `agent_approve` mode: an
 
 | Informed Consent part | Where it happens | How to operate it |
 |-----------------------|-----------------|-------------------|
-| Informed: triage result | Triage gate (`pending_gate` decision) | [PLAYBOOK_OPS.md §2.3](PLAYBOOK_OPS.md#23-step-3-understand-the-triage-result) |
+| Informed: triage result | Triage gate (`pending_gate` decision) | [PLAYBOOK_OPS.md §2.3](PLAYBOOK_OPS.md#23-step-3-follow-the-escalation-if-needed) |
 | Informed: proposed steps | Same gate — remediation plan preview | [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) |
 | Informed: accuracy verified | `vault accuracy`, `vault calibration` | [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md#vault-command-reference) |
 | Consent: approval mode | `approval_mode` field on playbook | [PLAYBOOKS.md](PLAYBOOKS.md) |
@@ -104,5 +104,5 @@ See also the [Operational Guide](VAULT_FEEDBACK_FLOW.md) on how we turn Informed
 - [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md) — how feedback enters the flywheel and what each `vault` command measures
 - [DECISIONS.md](DECISIONS.md) — Decision Hub reference
 - [MUTATION_TOOLS.md §2](MUTATION_TOOLS.md#2-two-step-review-and-confirm-process) — two-step review-and-confirm for mutation tools
-- [BENCHMARKING_SAMPLE6.md](BENCHMARKING_SAMPLE6.md) — end-to-end walkthrough on Docker/Podman
+- [SAMPLE006.md](samples/SAMPLE006.md) — end-to-end walkthrough on Docker/Podman
 - [DEMO.md](../deploy/docker-compose/DEMO.md) — the 10-minute demo surfaces the INFORMED CONSENT GATE interactively, followed by a Right IV calibration record and Bill of Rights summary

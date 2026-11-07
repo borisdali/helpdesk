@@ -4,3 +4,5 @@ audit.db-wal
 audit.db-shm
 audit.sock
 .DS_Store
+.env
+**/.env

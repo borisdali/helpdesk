@@ -1,0 +1,227 @@
+package audit
+
+// recovery_decision: the record of a recovery decision, as a typed event.
+//
+// A restore is a decision made in stages by different parties: the agent plans
+// it (what would be lost, against which objectives), a person approves it at
+// the gate (and acknowledges what they accept), and the restore tool decides
+// again just before it stops anything (re-measuring, enforcing). Each stage
+// leaves a recovery_decision event. Together they answer, long after the fact
+// and without parsing tool-output text: what was required of this database,
+// what was known, what was offered, who accepted what, and what was done.
+//
+// The objectives are recorded as a snapshot of what was in force, with where
+// each value came from and a digest of the configuration it was read from. The
+// configuration itself is not kept, so a later change to infrastructure.json
+// does not rewrite what applied to a decision already made.
+
+import (
+	"context"
+	"log/slog"
+	"regexp"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// EventTypeRecoveryDecision is emitted at each stage of a recovery decision.
+const EventTypeRecoveryDecision EventType = "recovery_decision"
+
+// Stages of a recovery decision.
+const (
+	// RecoveryStagePlan: a plan was made (and shown to whoever asked for it).
+	RecoveryStagePlan = "plan"
+	// RecoveryStageGate: a person approved or denied the gate.
+	RecoveryStageGate = "gate"
+	// RecoveryStageExecution: the restore tool decided, just before it stops
+	// anything: proceed or refuse.
+	RecoveryStageExecution = "execution"
+	// RecoveryStageOutcome: the remediation hop that carried out the recovery
+	// finished. Its Decision is the run's outcome (resolved, failed, ...) and
+	// DurationSeconds how long the hop took.
+	RecoveryStageOutcome = "outcome"
+)
+
+// What a stage decided.
+const (
+	RecoveryDecisionPlanned   = "planned"
+	RecoveryDecisionApproved  = "approved"
+	RecoveryDecisionDenied    = "denied"
+	RecoveryDecisionProceeded = "proceeded"
+	RecoveryDecisionRefused   = "refused"
+)
+
+// RecoveryDecision is one stage of a recovery decision.
+type RecoveryDecision struct {
+	Stage    string `json:"stage"`
+	Decision string `json:"decision"`
+	// Reason says why, for a refusal or a denial.
+	Reason string `json:"reason,omitempty"`
+	// DecidedBy is the person who made the decision, for the gate stage:
+	// whoever approved or denied it. Empty for the stages a tool decides.
+	DecidedBy string `json:"decided_by,omitempty"`
+	// DurationSeconds is, for the outcome stage, how long the remediation hop
+	// ran: from its start, which is after the gate approval, to its completion.
+	// That covers the restore, the restart and the verification, and not the
+	// time spent waiting for a person. It is the recovery duration, not the
+	// downtime: the instance may have been down before the hop began, and the
+	// hop includes the agent's own reasoning time.
+	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
+	// Tool is the tool the stage belongs to (plan_point_in_time_recovery,
+	// restore_to_point_in_time); empty for the gate.
+	Tool string `json:"tool,omitempty"`
+	// Target is the database, as the config names it.
+	Target string `json:"target,omitempty"`
+	// RunID is the playbook run the gate belongs to (the gate stage).
+	RunID string `json:"run_id,omitempty"`
+	// RecoveryTarget is where the restore stops, in the form a run stores it
+	// ("time=2026-10-28T14:05:00Z").
+	RecoveryTarget string `json:"recovery_target,omitempty"`
+	PlanDigest     string `json:"plan_digest,omitempty"`
+	// PlanStatus is feasible, not_feasible or unverified.
+	PlanStatus string `json:"plan_status,omitempty"`
+	// Objectives is what was required of this database when the stage ran.
+	Objectives *ObjectivesInForce `json:"objectives,omitempty"`
+	// Options are the courses of action the stage had in front of it, each
+	// with what it would cost and how it stands against the objectives. Today
+	// there is one (a point-in-time restore); the record is shaped for several.
+	Options []DecisionOption `json:"options,omitempty"`
+	// Approval is what the approval carried (the gate and execution stages).
+	Approval *ApprovalFacts `json:"approval,omitempty"`
+}
+
+// ObjectivesInForce is a snapshot of the resolved objectives and policy for one
+// database, each with the level it came from (database, environment:<name>,
+// default).
+type ObjectivesInForce struct {
+	Environment string `json:"environment,omitempty"`
+
+	RPOSeconds *int64 `json:"rpo_seconds,omitempty"`
+	RPOSource  string `json:"rpo_source,omitempty"`
+	RTOSeconds *int64 `json:"rto_seconds,omitempty"`
+	RTOSource  string `json:"rto_source,omitempty"`
+
+	AvailabilitySLO    *float64 `json:"availability_slo,omitempty"`
+	AvailabilitySource string   `json:"availability_source,omitempty"`
+
+	RecoveryPreference string `json:"recovery_preference,omitempty"`
+	PreferenceSource   string `json:"preference_source,omitempty"`
+
+	// Enforcement is the effective enforcement (warn when none is set, and
+	// acknowledge when it could not be trusted); EnforcementSource where the
+	// configured one came from, empty when it was not configured.
+	Enforcement       string `json:"enforcement,omitempty"`
+	EnforcementSource string `json:"enforcement_source,omitempty"`
+
+	// Problems are the configuration problems that affected the resolution.
+	Problems []string `json:"problems,omitempty"`
+	// ConfigDigest identifies the infrastructure config these were read from.
+	ConfigDigest string `json:"config_digest,omitempty"`
+}
+
+// DecisionOption is one course of action and how it stands.
+type DecisionOption struct {
+	Name string `json:"name"`
+	// Chosen marks the option the stage went ahead with (execution stage).
+	Chosen bool `json:"chosen,omitempty"`
+
+	// The measured loss. LossBasis is live_instance or archive_end;
+	// LossUpperBound says the figures are at most that much.
+	LossBasis      string   `json:"loss_basis,omitempty"`
+	LossSeconds    *int64   `json:"loss_seconds,omitempty"`
+	LossBytes      *uint64  `json:"loss_bytes,omitempty"`
+	LossUpperBound bool     `json:"loss_upper_bound,omitempty"`
+	LossAsOf       string   `json:"loss_as_of,omitempty"`
+	LossUnmeasured []string `json:"loss_unmeasured,omitempty"`
+	// LossAtLeastSeconds is a lower bound on the history discarded, for a target
+	// whose exact time span is not known (an LSN), and LossAtLeastBasis what it
+	// rests on. A breach of the rpo proven by it is recorded as the verdict.
+	LossAtLeastSeconds *int64 `json:"loss_at_least_seconds,omitempty"`
+	LossAtLeastBasis   string `json:"loss_at_least_basis,omitempty"`
+
+	// Verdict is the loss set against the rpo (within, exceeds, may_exceed,
+	// not_comparable, no_objective, objective_invalid); Gate what approving
+	// demands because of it ("", acknowledge, refuse).
+	Verdict       string `json:"verdict,omitempty"`
+	VerdictDetail string `json:"verdict_detail,omitempty"`
+	Gate          string `json:"gate,omitempty"`
+}
+
+// ApprovalFacts is what an approval carried.
+type ApprovalFacts struct {
+	ApprovedBy           string `json:"approved_by,omitempty"`
+	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
+	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
+	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+}
+
+var (
+	// password=<value> in a key=value connection string (or a URL query): a
+	// bare word, or one in single or double quotes.
+	// A quoted value may contain a backslash-escaped quote (libpq) or a doubled
+	// one (SQL style); both are consumed so no part of the password is left.
+	passwordKVRe = regexp.MustCompile(`(?i)(\bpassword\s*=\s*)('(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|[^\s&]+)`)
+	// user:<password>@ in a URL's authority.
+	urlUserinfoRe = regexp.MustCompile(`(?i)(://[^:/@\s]+:)[^@\s]+(@)`)
+)
+
+// RedactConnString masks the password in a connection string, in either the
+// key=value form or the URL form, wherever it appears in s. Text without one
+// comes back unchanged. A run's stored connection string carries the real
+// password, and an audit record is read by far more people than a database
+// is.
+func RedactConnString(s string) string {
+	if s == "" {
+		return s
+	}
+	s = passwordKVRe.ReplaceAllString(s, "${1}***")
+	return urlUserinfoRe.ReplaceAllString(s, "${1}***${2}")
+}
+
+// NewRecoveryDecisionEvent builds the audit event for one stage. traceID is the
+// trace the event belongs to: the request's for the agent's stages, the run's
+// for the gate, as gate_acknowledged does.
+//
+// The target and the reason are redacted here, for every emitter: a target can
+// be a connection string (the run's own, or one a caller passed as the
+// target), and a reason can quote one.
+func NewRecoveryDecisionEvent(traceID, sessionID string, d RecoveryDecision) *Event {
+	d.Target = RedactConnString(d.Target)
+	d.Reason = RedactConnString(d.Reason)
+	return &Event{
+		EventID:          "rdc_" + uuid.New().String()[:8],
+		Timestamp:        time.Now().UTC(),
+		EventType:        EventTypeRecoveryDecision,
+		TraceID:          traceID,
+		Session:          Session{ID: sessionID},
+		RecoveryDecision: &d,
+	}
+}
+
+// RecordRecoveryDecision records one stage of a recovery decision. It does
+// nothing, and returns nil, when auditing is off or the stage is unnamed.
+//
+// A failed write is logged at error level and returned. The decision itself
+// does not depend on its record being writable, as for every other tool call
+// (audit is best-effort at runtime; governed modes require it to be configured),
+// but the caller is told, so that it can say in its own result that this
+// decision is not in the audit trail.
+func (ta *ToolAuditor) RecordRecoveryDecision(ctx context.Context, d RecoveryDecision) error {
+	if ta == nil || ta.auditor == nil || d.Stage == "" {
+		return nil
+	}
+	event := NewRecoveryDecisionEvent(ta.getTraceID(), ta.sessionID, d)
+	if err := ta.auditor.Record(ctx, event); err != nil {
+		slog.Error("recovery decision NOT recorded in the audit trail",
+			"stage", d.Stage, "decision", d.Decision, "tool", d.Tool, "err", err)
+		return err
+	}
+	return nil
+}
+
+// FetchRecoveryDecisionEvents returns the recovery_decision events of a trace
+// recorded at or after since, oldest first as auditd returns them. Fails open:
+// an unreachable auditd reads as no events.
+func FetchRecoveryDecisionEvents(auditURL, apiKey, traceID string, since time.Time) []Event {
+	return fetchEventsByType(auditURL, apiKey, traceID, string(EventTypeRecoveryDecision), since, true)
+}

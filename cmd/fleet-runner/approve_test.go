@@ -42,9 +42,9 @@ func TestJobActionClass_DestructiveStep(t *testing.T) {
 
 func TestJobActionClass_Mixed(t *testing.T) {
 	steps := []fleet.Step{
-		{Tool: "check_connection"},  // read
-		{Tool: "cancel_query"},      // write
-		{Tool: "delete_pod"},        // destructive
+		{Tool: "check_connection"}, // read
+		{Tool: "cancel_query"},     // write
+		{Tool: "delete_pod"},       // destructive
 	}
 	got := jobActionClass(steps)
 	if got != audit.ActionDestructive {

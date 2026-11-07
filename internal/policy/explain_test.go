@@ -188,9 +188,9 @@ func TestBuildExplanation_DeniedExplicitRule(t *testing.T) {
 				PolicyName: "prod-protection",
 				Matched:    true,
 				Rules: []RuleTrace{
-					{Index: 0, Actions: []string{"read"},        Effect: "allow", Matched: false, SkipReason: "action_mismatch"},
-					{Index: 1, Actions: []string{"write"},       Effect: "allow", Matched: false, SkipReason: "action_mismatch"},
-					{Index: 2, Actions: []string{"destructive"}, Effect: "deny",  Matched: true},
+					{Index: 0, Actions: []string{"read"}, Effect: "allow", Matched: false, SkipReason: "action_mismatch"},
+					{Index: 1, Actions: []string{"write"}, Effect: "allow", Matched: false, SkipReason: "action_mismatch"},
+					{Index: 2, Actions: []string{"destructive"}, Effect: "deny", Matched: true},
 				},
 			},
 		},
@@ -309,9 +309,9 @@ func TestBuildExplanation_PolicySkipped_Various(t *testing.T) {
 	trace := DecisionTrace{
 		Decision: Decision{Effect: EffectAllow, PolicyName: "write-policy"},
 		PoliciesEvaluated: []PolicyTrace{
-			{PolicyName: "dba-only",    Matched: false, SkipReason: "principal_mismatch"},
-			{PolicyName: "turned-off",  Matched: false, SkipReason: "disabled"},
-			{PolicyName: "k8s-only",    Matched: false, SkipReason: "resource_mismatch"},
+			{PolicyName: "dba-only", Matched: false, SkipReason: "principal_mismatch"},
+			{PolicyName: "turned-off", Matched: false, SkipReason: "disabled"},
+			{PolicyName: "k8s-only", Matched: false, SkipReason: "resource_mismatch"},
 			{
 				PolicyName: "write-policy",
 				Matched:    true,
@@ -480,8 +480,8 @@ func TestExplain_PolicySkipped_Disabled(t *testing.T) {
 	cfg := &Config{
 		Policies: []Policy{
 			{
-				Name:    "disabled-pol",
-				Enabled: &disabled,
+				Name:      "disabled-pol",
+				Enabled:   &disabled,
 				Resources: []Resource{{Type: "database"}},
 				Rules:     []Rule{{Action: ActionMatcher{ActionWrite}, Effect: EffectAllow}},
 			},

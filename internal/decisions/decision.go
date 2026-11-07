@@ -32,7 +32,7 @@ type Decision struct {
 	ExpiresAt   time.Time    `json:"expires_at,omitempty"`
 	// ResolveURL is the canonical absolute URL to act on this decision.
 	// For gate decisions this is POST /api/v1/decisions/gate:{runID}/resolve.
-	ResolveURL string         `json:"resolve_url"`
+	ResolveURL string `json:"resolve_url"`
 	// Extra holds type-specific context passed through to webhook payloads
 	// (e.g. findings, escalation_target, confidence_warning, tool name, args).
 	Extra map[string]any `json:"extra,omitempty"`

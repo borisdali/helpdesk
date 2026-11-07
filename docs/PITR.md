@@ -20,6 +20,26 @@ the instance is down or still serving.
 
 What is verified and where, is in [§8](#8-whats-verified). What it does **not** do is in [§7](#7-limits).
 
+---
+
+## Table of Contents
+
+1. [The safety model](#1-the-safety-model)
+2. [The pieces](#2-the-pieces)
+3. [The flow](#3-the-flow)
+4. [Operating it](#4-operating-it)
+   - [The short way: `helpdesk-client`](#the-short-way-helpdesk-client)
+5. [A running instance](#5-a-running-instance)
+6. [Checking where recovery stopped](#6-checking-where-recovery-stopped)
+7. [Limits](#7-limits)
+8. [What's verified](#8-whats-verified)
+9. [When it refuses](#9-when-it-refuses)
+10. [Why it is built this way](#10-why-it-is-built-this-way)
+
+[Related](#related)
+
+---
+
 ## 1. The safety model
 
 A restore that stops at the wrong moment destroys data silently. So the one input that decides how much is
@@ -75,7 +95,7 @@ flowchart TB
 | `verify_restore_recovery` | After the restart: reads PostgreSQL's own log and checks it stopped at the target | [tools page](tools/sysadmin.md#verify_restore_recovery) |
 | `pbs_pgbackrest_pitr_triage` | Entry-point playbook. Read-only: plans the target, reports the plan, hands on to the restore only if it is feasible | [`playbooks/pgbackrest-pitr-triage.yaml`](../playbooks/pgbackrest-pitr-triage.yaml) |
 | `pbs_pgbackrest_pitr_remediate` | Terminal playbook: restore, restart, check the instance, verify where recovery stopped. Reachable only through the gate | [`playbooks/pgbackrest-pitr-remediate.yaml`](../playbooks/pgbackrest-pitr-remediate.yaml) |
-| Gateway fields | `recovery_target` on the run; `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving` on the gate | [§4](#4-operating-it) |
+| Gateway fields | `recovery_target` on the run; `recovery_target`, `plan_digest`, `acknowledge_data_loss`, `allow_stop_serving`, `acknowledge_objective_breach` on the gate | [§4](#4-operating-it) |
 | `db-pitr-dropped-table[-k8s]` | The faults that exercise all of the above | [FAULTTEST.md §6.6](FAULTTEST.md#66-point-in-time-recovery-faults-pitr) |
 
 ## 3. The flow
@@ -106,7 +126,7 @@ For a **running** instance the restore step expands ([§5](#5-a-running-instance
 ## 4. Operating it
 
 Steps 2 and 3 can be done with `helpdesk-client` ([the short way](#the-short-way-helpdesk-client)), with the
-API as below, or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
+API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
 approve gates.
 
 **1. Start the triage with the target.** Find the playbook, then run it:
@@ -133,7 +153,7 @@ SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"
 Use the database's own clock when you note the moment: `SELECT clock_timestamp()`.
 
 **2. Read the plan.** The response is `pending_gate` with `transition_target` `pbs_pgbackrest_pitr_remediate`
-(`gate_reason` is reported only when the request did not set `gate_escalation`; the gate holds either way, and an
+(`gate_reason` is reported only when the request did not set `gate_escalation`; the gate holds either way and an
 approval without a target is refused) and the triage's `escalation_findings` carry `plan_status`, `plan_digest`, `backup_label`, `timeline`,
 `archive_end_time`, `data_loss`, `instance` (down or serving) and `archive_flush_required`. The digest in
 those findings was reported by a model. To review the plan itself, ask the sysadmin agent, as the harness
@@ -146,8 +166,143 @@ curl -s -X POST "$SYSADMIN/tool/plan_point_in_time_recovery" \
        "recovery_target_type":"time","recovery_target_value":"2026-10-28T14:05:00Z"}}' | jq -r .output | jq .
 ```
 
-Read `status`, `backup_label`, `data_loss`, `instance_serving`, `archive_flush_required` and `plan_digest`. A
-plan that is not `feasible` has a `detail` saying why; do not approve around it.
+Read `status`, `backup_label`, `data_loss`, `data_loss_estimate`, `instance_serving`, `archive_flush_required` and
+`plan_digest`. A plan that is not `feasible` has a `detail` saying why; do not approve around it.
+
+`data_loss_estimate` says how much the restore throws away, as far as it can be measured without reading WAL:
+
+| Target | Instance | You get | Precision |
+|---|---|---|---|
+| time | serving | the span from the target to the database's own clock now | exact and growing until the instance is stopped |
+| time | down | the span from the target to when the newest archived segment reached the repo | an upper bound |
+| LSN | serving | WAL bytes from the target to the instance's current position | exact |
+| LSN | down | WAL bytes and whole segments from the target to the end of the newest archived segment | an upper bound |
+
+It does not count transactions (that needs the WAL decoded), it cannot tell the bad writes from the good ones
+(everything after the target is counted) and on a down instance it cannot see WAL that was never archived. Each
+estimate lists these under `unmeasured`. It is not part of the plan digest, so it can move while the plan waits
+for approval; `as_of` says when it was made. The result of the restore carries a `data_loss` figure measured when
+the restore ran, to compare with the one that was approved.
+
+**Against the objective.** The estimate is set against the database's `rpo` ([OBJECTIVES.md](OBJECTIVES.md)) in
+`data_loss_estimate.objective` and `helpdesk-client --pitr-plan` prints it as `RPO check`. It is a flag, not a
+refusal: a point-in-time restore loses data by choice and the person at the gate may accept more than the objective.
+What it must not do is let them accept it unaware, so every case says something:
+
+| `status` | Means |
+|---|---|
+| `within` | The loss is within the `rpo` (for an upper-bound estimate, even at that bound) |
+| `exceeds` | The loss is more than the `rpo`; the detail says by how much. For an LSN target it is a loss proven to be *at least* that much, from a lower bound ([below](#lsn-targets-and-the-lower-bound)) |
+| `may_exceed` | The estimate is an upper bound (a down instance) and the bound is over the `rpo`: the real loss may be less |
+| `not_comparable` | An LSN target has no exact time span until the WAL is read, and its lower bound (if it has one) does not already exceed the `rpo`: the detail gives what is known |
+| `no_objective` | No `rpo` for this database, its environment or the fleet or the target is not a configured database: the loss is unchecked |
+| `objective_invalid` | The config tried to set an `rpo` and got it wrong (`problems` says how): fix `infrastructure.json` and treat the loss as unchecked |
+
+`exceeds` and `may_exceed` print as `RPO CHECK (!)`. The comparison also appears on the restore result's `data_loss`.
+**What approving demands.** Whether a breach only needs showing, or needs a separate acknowledgement, or is
+refused, is the database's `enforcement` ([OBJECTIVES.md §3](OBJECTIVES.md#3-values)):
+
+| `enforcement` | Loss `exceeds` the `rpo` | Loss `may_exceed` it | Anything else |
+|---|---|---|---|
+| `warn` (the default) | shown | shown | shown |
+| `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
+| `refuse` | the restore is refused, whatever is acknowledged | needs `acknowledge_objective_breach` (an upper bound is not proof of a breach, so it asks and does not refuse) | shown |
+
+An `objective_invalid` verdict (the `rpo` is set but cannot be read, or the database names an environment that is
+not declared and has no `rpo` of its own) is not "nothing to check": the check could not be made. Under
+`acknowledge` or `refuse` it needs `acknowledge_objective_breach` as well (it asks and does not refuse, since
+nothing is known to be breached), so a typo cannot quietly switch a strict enforcement off. Under `warn` it is
+shown. A problem with some *other* setting is not an invalid `rpo`.
+
+"Anything else" is `within`, `not_comparable` (an LSN target whose lower bound proves no breach) and
+`no_objective` (nothing is set at all): with nothing to compare, the restore has nothing to enforce, and says so.
+
+#### LSN targets and the lower bound
+
+An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against
+the `rpo`. It does have a lower bound. The segment of archived WAL that holds the target reached the repository at
+a known time, and nothing is archived before it is written, so the record at the target is at least that old: the
+loss is **at least** the time from then to the end of the history (the instance's clock, for a running instance;
+the end of the archive, for a down one). The plan prints it ("at least 16d 13h of history"), and a lower bound that
+already exceeds the `rpo` proves a breach: the verdict is `exceeds` and the enforcement applies, including `refuse`.
+
+- A lower bound **within** the `rpo` proves nothing, because the real loss may be more. The verdict stays
+  `not_comparable`, and the detail says what is known.
+- Measured to a running instance's clock, the bound has a 60-second allowance taken off for the difference between
+  that clock and the repository's, and assumes the two agree to within a minute. Measured to the end of the
+  archive, both times come from the repository and nothing is taken off.
+- A target in WAL that is **not archived yet** (a running instance, before the flush) has no segment to measure
+  from. It has no bound, and stays `not_comparable` and unenforced. Reading the WAL for the exact commit time
+  would close that; it is not done yet.
+
+The same rules as a chart, from the loss measured just before the stop to what approving demands:
+
+```mermaid
+flowchart TD
+    A(["Loss measured just before the stop"]) --> B{"Can it be compared with the rpo?"}
+    B -- "LSN target: no exact time span" --> L{"Lower bound from the target's archive segment?"}
+    L -- "over the rpo: a breach is proven" --> E
+    L -- "none (not archived yet), or within the rpo" --> N1["not_comparable<br/>shown, NOT enforced"]
+    B -- "no rpo anywhere" --> N2["no_objective<br/>shown, not enforced"]
+    B -- "rpo unreadable, or environment not declared" --> I["objective_invalid"]
+    B -- "yes" --> C{"Loss against the rpo"}
+    C -- "within" --> W["within<br/>shown"]
+    C -- "over, exact (running instance)" --> E["exceeds"]
+    C -- "over, an upper bound (down instance)" --> M["may_exceed"]
+
+    E --> EN{"enforcement"}
+    EN -- "warn (the default)" --> OK["Proceeds<br/>breach shown"]
+    EN -- "acknowledge" --> ACK["Needs acknowledge_objective_breach"]
+    EN -- "refuse" --> REF["REFUSED<br/>even if acknowledged"]
+
+    M --> MN{"enforcement"}
+    MN -- "warn" --> OK
+    MN -- "acknowledge or refuse" --> ACK
+
+    I --> IN{"enforcement"}
+    IN -- "warn" --> OK
+    IN -- "acknowledge or refuse" --> ACK
+
+    classDef go fill:#d7f0d7,stroke:#2e7d32,color:#000
+    classDef ask fill:#fff0c2,stroke:#b8860b,color:#000
+    classDef stop fill:#f6d0d0,stroke:#b71c1c,color:#000
+    class OK,W,N1,N2 go
+    class ACK ask
+    class REF stop
+```
+
+Two things the chart does not show. A `may_exceed` or `objective_invalid` verdict never reaches `REFUSED`, even under
+`refuse`: nothing is known to be breached, so it asks. And an enforcement that is unset means `warn`, but one that is
+invalid, or inherited by a database whose environment is not declared, means `acknowledge`, so a typo cannot quietly
+weaken the check.
+
+The plan prints what approving will demand (`Approving needs : --acknowledge-objective-breach`, or `Approving :
+REFUSED`) and adds the flag to the approve command it offers.
+
+**The loss is measured again just before the instance is stopped,** not taken from the plan. A plan that said
+`within` can be approved minutes or hours later, and a serving instance has gone on committing since, so the
+restore carries the instance's clock forward by the time that has passed since it last asked (the archive flush
+alone can take a minute and a half) and compares that. If the loss now breaches the objective, it refuses
+**before stopping anything**, and the refusal says so and how to proceed. A down instance is checked too.
+
+**What is recorded.** Every stage of the decision leaves a typed `recovery_decision` audit event: each plan that
+was shown, the gate approval or denial (who, and which acknowledgements it carried), and the restore's decision to
+proceed or refuse just before it stops anything, with the reason, and, when the remediation hop finishes, how it
+ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the
+verification; not the downtime). Each carries a snapshot of the objectives that
+were in force, with where each value came from and a digest of the `infrastructure.json` they were read from, and
+the option it was weighing with its measured loss and verdict. Refusals are recorded too, including the ones that
+have nothing to do with the objective (the approved plan no longer matches, a standby, no room). The events are
+covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
+is down) the restore is not held up for it, but the plan or result says `decision_unrecorded` and the log carries
+an error, so a restore that ran without its decision on record cannot be mistaken for one that has it. They are
+read back in
+`vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail`, and in the incident
+narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
+
+`acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
+`acknowledge_data_loss` and does not imply it, and the model has no argument for it. The gateway passes it on and
+records it in the `gate_acknowledged` event; the restore tool decides whether it was needed.
 
 **3. Approve the plan you read.**
 
@@ -208,8 +363,8 @@ helpdesk-client --user ops@example.com --pitr-approve plr_a3f7c1b2 \
   --plan-digest 3c7ae8cf0d79ffd9 --acknowledge-data-loss --allow-stop-serving
 ```
 
-Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters, or no
-`--acknowledge-data-loss` is refused before anything is sent, and the gateway's own refusals are printed as
+Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters or no
+`--acknowledge-data-loss` is refused before anything is sent and the gateway's own refusals are printed as
 they come ([§4 table](#4-operating-it)). `--pitr-plan` prints no approve command for a plan that is not
 feasible. Denying a gate does not need any of this.
 
@@ -311,7 +466,7 @@ manual, not a catalog fault: there is no `db-pitr-dropped-table-vm` yet. A table
 incremental backup taken, the target noted from the database's clock, a later table created and the first dropped;
 the triage was started with `curl`, the plan read with `helpdesk-client --pitr-plan` and the gate approved with
 `--pitr-approve ... --allow-stop-serving`. Checked by hand afterwards: the dropped table was back with its 5 rows,
-the table created after the target was gone, the cluster was on timeline 45, and the log showed `recovery stopping
+the table created after the target was gone, the cluster was on timeline 45 and the log showed `recovery stopping
 before commit`, `redo done`, `selected new timeline ID: 45`, `archive recovery complete`.
 
 **Tests:**

@@ -352,6 +352,9 @@ func TestFaultInjection(t *testing.T) {
 			if cfg.RemediateEnabled {
 				remediator := faultlib.NewRemediator(cfg)
 				remediator.SetFaultStart(faultStart)
+				// Gate approvals name the connection string this fault's own
+				// triage used (agent_conn_override), or the gateway refuses them.
+				remediator.SetFault(f)
 				// A point-in-time fault's recovery target is its inject script's
 				// own output; the Remediator approves the gate with it (and with
 				// nothing for any other fault).
@@ -376,10 +379,20 @@ func TestFaultInjection(t *testing.T) {
 						t.Logf("Gate loop: %v", err)
 					}
 					verifyGatewayRemediation(t, faultCtx, remediator, f, "gate_loop")
+					if f.PITR != nil {
+						verifyRecoveryTrail(t, cfg, faultTraceID, resp.RunID, faultStart)
+					}
 				case resp.ChainedRunID != "":
 					// Gateway already auto-chained remediation inline.
 					t.Logf("Remediation auto-chained by gateway (run=%s)", resp.ChainedRunID)
 					verifyGatewayRemediation(t, faultCtx, remediator, f, "auto_chain")
+				case f.PITR != nil:
+					// A point-in-time fault is only recovered through its gate: a
+					// triage that ended without one (the model never got a plan, or
+					// found none feasible) recovered nothing, however well its text
+					// scored. Found 2026-11-03: a run whose plan tool was never
+					// successfully called passed at 85% with the table still gone.
+					t.Errorf("Remediation: the triage ended with status %q and no gate, so no point-in-time restore ran (run=%s)", resp.Status, resp.RunID)
 				case f.Remediation.PlaybookID != "" || f.Remediation.AgentPrompt != "":
 					t.Log("Running remediation...")
 					remResult := remediator.Remediate(faultCtx, f, resp.RunID)
@@ -421,6 +434,30 @@ func verifyGatewayRemediation(t *testing.T, ctx context.Context, remediator *fau
 		return
 	}
 	t.Logf("Remediation verified: method=%s, recovered_in=%.1fs, score=%.2f", method, res.RecoveryTimeSecs, res.Score)
+}
+
+// verifyRecoveryTrail checks that a point-in-time restore left its whole
+// decision in the audit trail: plan, gate, execution and outcome, the objectives
+// in force, no password, and a chain that still verifies. The outcome is written
+// by the gateway after the run completes, so the trail is given a moment to
+// settle before what is missing is called missing.
+func verifyRecoveryTrail(t *testing.T, cfg *faultlib.HarnessConfig, traceID, runID string, since time.Time) {
+	t.Helper()
+	var problems []string
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		problems = faultlib.CheckRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, []string{traceID, runID}, since)
+		if len(problems) == 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if len(problems) == 0 {
+		t.Log("Recovery decision trail: plan, gate, execution and outcome recorded; chain verifies")
+		return
+	}
+	for _, p := range problems {
+		t.Errorf("Recovery decision trail: %s", p)
+	}
 }
 
 // TestDatabaseFailures runs only database category failures.

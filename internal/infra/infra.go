@@ -2,6 +2,8 @@
 package infra
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,6 +34,12 @@ type DBServer struct {
 	Tags                  []string `json:"tags,omitempty"`                    // Tags for policy matching (e.g., "production", "staging")
 	Sensitivity           []string `json:"sensitivity,omitempty"`             // Sensitivity classes (e.g., "pii", "critical")
 	ApprovalOverrideRoles []string `json:"approval_override_roles,omitempty"` // Roles allowed to request a less restrictive approval_mode than the playbook declares. Empty = unrestricted.
+	// Environment names the group this database belongs to (prod, staging,
+	// dev). Unlike a tag it must be declared under Config.Environments.
+	Environment string `json:"environment,omitempty"`
+	// Objectives override the environment's and the fleet default's, field by
+	// field. See objectives.go.
+	Objectives *Objectives `json:"objectives,omitempty"`
 }
 
 // ResolvedConnectionString returns ConnectionString with the password appended when
@@ -85,6 +93,16 @@ type Config struct {
 	DBServers   map[string]DBServer   `json:"db_servers"`
 	K8sClusters map[string]K8sCluster `json:"k8s_clusters"`
 	VMs         map[string]VM         `json:"vms"`
+	// Environments declares the groups a database may name, each with the
+	// objectives its members share. Defaults apply to everything else.
+	Environments map[string]Environment `json:"environments,omitempty"`
+	Defaults     *Defaults              `json:"defaults,omitempty"`
+
+	// Digest identifies the file this config was loaded from: the first 16 hex
+	// characters of the SHA-256 of its bytes. A recovery decision records it
+	// beside the objectives it read, so a later edit to the file cannot be
+	// mistaken for what applied then. Empty for a config built in code.
+	Digest string `json:"-"`
 }
 
 // Load loads infrastructure configuration from a JSON file.
@@ -98,8 +116,29 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse infrastructure config: %v", err)
 	}
+	sum := sha256.Sum256(data)
+	config.Digest = hex.EncodeToString(sum[:])[:16]
 
 	return &config, nil
+}
+
+// Load does not fail on a bad recovery objective: a service that cannot load
+// its infrastructure config carries on without one, and an objective typo must
+// not cost it every target, tag and approval rule. LogProblems is how a
+// service that reads objectives makes the typo loud instead.
+//
+// LogProblems logs every problem in the recovery objectives at error level and
+// returns how many lines it logged. Call it right after a successful Load.
+func (c *Config) LogProblems(log func(msg string, args ...any)) int {
+	err := c.Validate()
+	if err == nil {
+		return 0
+	}
+	lines := strings.Split(err.Error(), "\n")
+	for _, l := range lines {
+		log("infrastructure config: recovery objective problem (the affected objective is treated as unset)", "problem", l)
+	}
+	return len(lines)
 }
 
 // DBInfo returns a formatted description of a database server with its hosting info expanded.
