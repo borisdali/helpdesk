@@ -137,6 +137,19 @@ INTEGRATION_LOG  = /tmp/helpdesk-integration.log
 E2E_LOG          = /tmp/helpdesk-e2e.log
 FAULTTEST_LOG    = /tmp/helpdesk-faulttest.log
 
+# Each faulttest target writes its own log, so running one never overwrites the
+# output of another (they used to share FAULTTEST_LOG; found 2026-11-06 when a
+# later run replaced the log of a fast sweep). A FAULTTEST_LOG given on the
+# command line still wins: make faulttest-pitr FAULTTEST_LOG=/tmp/mine.log
+faulttest-nocache:                  FAULTTEST_LOG = /tmp/helpdesk-faulttest-nocache.log
+faulttest-fast:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-fast.log
+faulttest-fast-nocache:             FAULTTEST_LOG = /tmp/helpdesk-faulttest-fast-nocache.log
+faulttest-memory-pressure:          FAULTTEST_LOG = /tmp/helpdesk-faulttest-memory-pressure.log
+faulttest-gateway:                  FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway.log
+faulttest-gateway-nocache:          FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway-nocache.log
+faulttest-gateway-pgbackrest:       FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway-pgbackrest.log
+faulttest-pitr:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-pitr.log
+
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
 SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
 
