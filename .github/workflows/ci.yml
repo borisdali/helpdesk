@@ -14,6 +14,17 @@ jobs:
       - name: Broken doc links and anchors
         run: make docs-links
 
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt-clean tree
+        run: make fmt-check
+
   test:
     runs-on: ubuntu-latest
 
