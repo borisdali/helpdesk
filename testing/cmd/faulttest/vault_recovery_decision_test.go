@@ -167,7 +167,7 @@ func TestPrintIncidentJourney_ShowsTheRecoveryDecisionBetweenRemediationAndEvalu
 	out := captureStdout(func() { printIncidentJourney(with.URL, "", "plr_rd", false) })
 
 	iRem, iDec, iEval := strings.Index(out, "REMEDIATION"), strings.Index(out, "RECOVERY DECISION"), strings.Index(out, "EVALUATION")
-	if iRem < 0 || iDec < 0 || iEval < 0 || !(iRem < iDec && iDec < iEval) {
+	if iRem < 0 || iDec < 0 || iEval < 0 || iRem >= iDec || iDec >= iEval {
 		t.Fatalf("section order wrong (remediation %d, recovery decision %d, evaluation %d):\n%s", iRem, iDec, iEval, out)
 	}
 	if !strings.Contains(out, "refused") || !strings.Contains(out, "needs acknowledge_objective_breach") {

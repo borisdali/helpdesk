@@ -105,7 +105,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	if d.Invalid != "" {
 		return nil, fmt.Errorf("cannot write an invalid duration: %s", d.Invalid)
 	}
-	return json.Marshal(d.Duration.String())
+	return json.Marshal(d.String())
 }
 
 // Percent is a percentage from JSON. A value that is not a number does not
