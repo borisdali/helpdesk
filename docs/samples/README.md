@@ -1,6 +1,8 @@
 
 # aiHelpDesk samples directory
 
+New to the series? [Start with the reading path](READING_PATH.md), which groups the posts by the question each one answers.
+
 The samples presented here can be used standalone or as the complementary material to our blog posts. The table below helps establish the correspondence between the samples and the posts (for a complete list of all aiHelpDesk blog post, please visit [aiHelpdEsk.biz](https://aiHelpdEsk.biz)):
 
 
