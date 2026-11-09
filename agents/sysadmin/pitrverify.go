@@ -126,11 +126,22 @@ func comparePITRRecovery(pred *RestorePrediction, rec recoveryLog, pl pitrLog) (
 		if err != nil || err2 != nil || pl.StopLSN == "" {
 			return RestoreUnverified, fmt.Sprintf("recovery stopped (%s) but the stop LSN could not be compared with the target %s", pl.StopLine, pred.TargetValue)
 		}
-		if stop != target {
-			return RestoreMismatch, fmt.Sprintf("recovery stopped at LSN %s, not the target %s", pl.StopLSN, pred.TargetValue)
+		// PostgreSQL stops at the first record that STARTS at or after the
+		// target, and logs that record's start. That is the target itself only
+		// when a record starts there. An LSN read at a segment boundary (right
+		// after a WAL switch, before anything is written) is the segment's
+		// start, and the first record begins after the page header, 40 bytes on:
+		// stopping there is correct, not a miss. Only a stop before the target
+		// is wrong, because PostgreSQL does not stop early on an LSN.
+		if stop < target {
+			return RestoreMismatch, fmt.Sprintf("recovery stopped at LSN %s, before the target %s: it stopped earlier than asked", pl.StopLSN, pred.TargetValue)
 		}
 		if redo, err := parseLSN(rec.RedoDoneLSN); err == nil && redo < target {
 			return RestoreMismatch, fmt.Sprintf("redo done at %s, before the target %s", rec.RedoDoneLSN, pred.TargetValue)
+		}
+		if stop > target {
+			return RestoreVerified, fmt.Sprintf("recovery stopped at the lsn target %s (%s; redo done at %s) and selected timeline %d, as predicted: the first record at or after the target starts %d bytes past it",
+				pred.TargetValue, pl.StopLine, orNone(rec.RedoDoneLSN), rec.NewTimeline, stop-target)
 		}
 	default:
 		return RestoreUnverified, fmt.Sprintf("unknown recovery target type %q in the prediction", pred.TargetType)

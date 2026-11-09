@@ -75,7 +75,7 @@ func TestComparePITRRecovery_Fixtures(t *testing.T) {
 		want    string
 	}{
 		{"stop is not after the time target", &RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 19:37:30+00", ExpectedTimeline: 12}, "time_stop_before_promote.log", "earlier than asked"},
-		{"wrong lsn", &RestorePrediction{TargetType: TargetLSN, TargetValue: "0/19000400", ExpectedTimeline: 13}, "lsn_stop_after_promote.log", "not the target"},
+		{"lsn stop is before the target", &RestorePrediction{TargetType: TargetLSN, TargetValue: "0/19000400", ExpectedTimeline: 13}, "lsn_stop_after_promote.log", "earlier than asked"},
 		{"wrong timeline", &RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 19:37:21+00", ExpectedTimeline: 11}, "time_stop_before_promote.log", "another recovery"},
 	}
 	for _, m := range mismatches {
@@ -85,6 +85,41 @@ func TestComparePITRRecovery_Fixtures(t *testing.T) {
 	}
 	if st, _ := run(&RestorePrediction{TargetType: TargetTime, TargetValue: "2026-10-27 19:37:21+00", ExpectedTimeline: 13}, "time_stop_before_promote.log"); st != RestoreNotFound {
 		t.Errorf("a log older than the prediction should be not_found, got %s", st)
+	}
+}
+
+// A target read at a WAL segment boundary (found live on a VM: the fault read
+// pg_current_wal_lsn() right after a switch and got 0/3C000000) is not where a
+// record starts. PostgreSQL stops after the first record at or after it, whose
+// start is 40 bytes on, the segment's page header. That is a correct stop.
+func TestComparePITRRecovery_LSNAtSegmentBoundary(t *testing.T) {
+	logFor := func(stop string) string {
+		return "LOG: starting point-in-time recovery to WAL location (LSN) \"0/3C000000\"\n" +
+			"LOG: recovery stopping after WAL location (LSN) \"" + stop + "\"\n" +
+			"LOG: redo done at 0/3C000060 system usage: CPU: user: 0.00 s\nLOG: selected new timeline ID: 49\n"
+	}
+	pred := &RestorePrediction{TargetType: TargetLSN, TargetValue: "0/3C000000", ExpectedTimeline: 49}
+	cases := []struct {
+		name, stop, want, detail string
+	}{
+		{"a record starts exactly at the target", "0/3C000000", RestoreVerified, "stopped at the lsn target"},
+		{"the first record is past the page header", "0/3C000028", RestoreVerified, "40 bytes past it"},
+		{"the first record is past a page boundary", "0/3C000018", RestoreVerified, "24 bytes past it"},
+		{"stopped before the target", "0/3BFFFFF0", RestoreMismatch, "earlier than asked"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			log := logFor(c.stop)
+			st, d := comparePITRRecovery(pred, parseRecoveryLog(log), parsePITRLog(log))
+			if st != c.want || !strings.Contains(d, c.detail) {
+				t.Errorf("got %s: %s; want %s containing %q", st, d, c.want, c.detail)
+			}
+		})
+	}
+	// Redo that finished before the target is still wrong, whatever the stop line says.
+	log := strings.Replace(logFor("0/3C000028"), "redo done at 0/3C000060", "redo done at 0/3BFFFF00", 1)
+	if st, d := comparePITRRecovery(pred, parseRecoveryLog(log), parsePITRLog(log)); st != RestoreMismatch || !strings.Contains(d, "redo done at") {
+		t.Errorf("got %s: %s", st, d)
 	}
 }
 

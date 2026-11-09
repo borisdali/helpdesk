@@ -420,6 +420,8 @@ target cannot overlap: a second call (a model retrying a slow one) is refused wh
 | `not_found` | no completed recovery in the log yet | call it again once the instance is up |
 | `unverified` | no prediction on record (the agent restarted since the restore) | the recovery point is unconfirmed, not wrong |
 
+For an LSN target, `verified` means PostgreSQL stopped at the first record that starts at or after the target, which is the target itself only when a record starts there. An LSN read right after a WAL switch (`pg_current_wal_lsn()` before anything is written) is the start of the segment, and the first record begins after its page header, so the stop line reads `0/3C000028` for a target of `0/3C000000`; the result says how many bytes past the target the stop was. A stop *before* the target, or redo that finished before it, is a `mismatch`.
+
 `target_not_reached` and `mismatch` also raise objective-evidence signals
 (`restore_target_not_reached`, `restore_recovery_mismatch`, [OBJECTIVE_EVIDENCE.md](OBJECTIVE_EVIDENCE.md)).
 A feasible plan only says the target is *plausible*: a time target can only be placed by the repository's
