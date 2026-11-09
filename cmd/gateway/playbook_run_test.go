@@ -980,6 +980,78 @@ func TestParseAgentEscalation_TransitionTo(t *testing.T) {
 	}
 }
 
+// A model that wraps a whole signal line in markdown (found live on a VM
+// point-in-time run: **TRANSITION_TO: pbs_pgbackrest_pitr_remediate**) has not
+// omitted the signal. A parser that misses it routes the run as signal-less,
+// and the chain stops with no gate and no remediation.
+func TestParseAgentEscalation_MarkdownWrappedSignalLines(t *testing.T) {
+	cases := []struct {
+		name           string
+		text           string
+		wantTransition string
+		wantEscalate   string
+		wantFindings   string
+		wantSaw        bool
+	}{
+		{"whole line in bold", "FINDINGS: a; b.\n**TRANSITION_TO: pbs_x_remediate**\n", "pbs_x_remediate", "", "a; b.", true},
+		{"findings and transition both in bold", "**FINDINGS: plan_status=feasible; instance=serving.**\n\n**TRANSITION_TO: pbs_x_remediate**", "pbs_x_remediate", "", "plan_status=feasible; instance=serving.", true},
+		{"bold label", "**FINDINGS:** disk full.\n**TRANSITION_TO:** pbs_x_remediate\n", "pbs_x_remediate", "", "disk full.", true},
+		{"in code ticks", "`FINDINGS: x`\n`ESCALATE_TO: pbs_y_triage`\n", "", "pbs_y_triage", "x", true},
+		{"in italics", "*TRANSITION_TO: pbs_x_remediate*\n", "pbs_x_remediate", "", "", true},
+		{"indented", "   **ESCALATE_TO: pbs_y_triage**  \n", "", "pbs_y_triage", "", true},
+		{"an explicit none is still the signal", "FINDINGS: fine.\n**ESCALATE_TO: none**\n", "", "", "fine.", true},
+		{"plain lines are unchanged", "FINDINGS: x\nTRANSITION_TO: pbs_x_remediate\n", "pbs_x_remediate", "", "x", true},
+		{"no signal at all", "Everything looks fine.\n", "", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			esc := parseAgentEscalation(c.text)
+			if esc.TransitionTo != c.wantTransition || esc.EscalateTo != c.wantEscalate || esc.Findings != c.wantFindings || esc.SawSignalLine != c.wantSaw {
+				t.Errorf("got transition=%q escalate=%q findings=%q saw=%v; want %q %q %q %v",
+					esc.TransitionTo, esc.EscalateTo, esc.Findings, esc.SawSignalLine, c.wantTransition, c.wantEscalate, c.wantFindings, c.wantSaw)
+			}
+			// Signal lines never reach the visible text, wrapped or not.
+			for _, l := range directiveLabels {
+				if strings.Contains(esc.CleanText, l) {
+					t.Errorf("CleanText still holds a %s line: %q", l, esc.CleanText)
+				}
+			}
+		})
+	}
+}
+
+// Only a line that IS a signal line is recognised: prose that mentions one, and
+// bold prose that merely looks like one, must pass through untouched.
+func TestParseAgentEscalation_MarkdownProseIsNotASignal(t *testing.T) {
+	text := "**Audit Trail Entry 1:** I will call the plan tool.\n" +
+		"I will end with TRANSITION_TO: pbs_x_remediate once the plan is read.\n" +
+		"**Note:** the line `TRANSITION_TO: pbs_x_remediate` is the signal.\n" +
+		"**HYPOTHESIS_1: the target is reachable** | CONFIDENCE: 0.9\n"
+	esc := parseAgentEscalation(text)
+	if esc.SawSignalLine || esc.TransitionTo != "" || esc.EscalateTo != "" {
+		t.Errorf("prose was read as a signal: %+v", esc)
+	}
+	if esc.CleanText != strings.TrimRight(text, "\n") {
+		t.Errorf("prose was altered:\n got %q\nwant %q", esc.CleanText, strings.TrimRight(text, "\n"))
+	}
+}
+
+// The answer a model gave on the VM point-in-time fault, as it came back.
+func TestParseAgentEscalation_TheVMPITRAnswer(t *testing.T) {
+	text := "**Audit Trail Entry 3:** check_host confirms the PostgreSQL instance is running.\n\n---\n\n" +
+		"**HYPOTHESIS_1: The recovery target is reachable** | CONFIDENCE: 0.95 | EVIDENCE: \"status\":\"feasible\"\n\n" +
+		"**ROOT_CAUSE: HYPOTHESIS_1**\n\n" +
+		"**FINDINGS: plan_status=feasible; plan_digest=8b69879381a7a07b; instance=serving; archive_flush_required=true. IMPORTANT: the gate approval must include allow_stop_serving=true.**\n\n" +
+		"**TRANSITION_TO: pbs_pgbackrest_pitr_remediate**"
+	esc := parseAgentEscalation(text)
+	if esc.TransitionTo != "pbs_pgbackrest_pitr_remediate" || !esc.SawSignalLine {
+		t.Fatalf("TransitionTo=%q saw=%v: the signal was missed", esc.TransitionTo, esc.SawSignalLine)
+	}
+	if !strings.Contains(esc.Findings, "plan_digest=8b69879381a7a07b") || strings.HasSuffix(esc.Findings, "*") {
+		t.Errorf("Findings = %q", esc.Findings)
+	}
+}
+
 // --- findingsRecommendMonitor ---
 
 func TestFindingsRecommendMonitor(t *testing.T) {

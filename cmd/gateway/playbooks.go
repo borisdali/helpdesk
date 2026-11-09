@@ -3750,6 +3750,49 @@ type agentEscalation struct {
 	// EscalateTo/TransitionTo otherwise).
 }
 
+// directiveLabels are the signal lines the response protocol defines.
+var directiveLabels = []string{"TRANSITION_TO:", "ESCALATE_TO:", "FINDINGS:", "TARGET:"}
+
+// directiveLabelBold turns a bold label (**FINDINGS:** text) into a plain one.
+var directiveLabelBold = func() *strings.Replacer {
+	var pairs []string
+	for _, l := range directiveLabels {
+		pairs = append(pairs, "**"+l+"**", l)
+	}
+	return strings.NewReplacer(pairs...)
+}()
+
+// normalizeDirectiveLine returns line trimmed, with the markdown a model wraps
+// around a signal line removed so the line can be recognised: a bold label
+// (**FINDINGS:** text), a whole line in bold, italics or code
+// (**TRANSITION_TO: pbs_x**, `ESCALATE_TO: none`). A line that is not a signal
+// line once that is stripped comes back as it was (trimmed), so ordinary prose
+// is never altered.
+//
+// A model that bolds the whole TRANSITION_TO line is not breaking the protocol
+// in any way that matters, and a parser that does not see it routes the run as
+// if the signal were omitted: no hand-off, and so no gate and no remediation.
+func normalizeDirectiveLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	t := directiveLabelBold.Replace(trimmed)
+	if hasDirectivePrefix(t) {
+		return t
+	}
+	if w := strings.Trim(t, "*_` \t"); hasDirectivePrefix(w) {
+		return w
+	}
+	return t
+}
+
+func hasDirectivePrefix(s string) bool {
+	for _, l := range directiveLabels {
+		if strings.HasPrefix(s, l) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseAgentEscalation scans the agent's response text for structured signal
 // lines injected by the response protocol section of the triage prompt:
 //
@@ -3763,9 +3806,7 @@ func parseAgentEscalation(text string) agentEscalation {
 	var result agentEscalation
 	var cleaned strings.Builder
 	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		// Normalise markdown bold: **FINDINGS:** → FINDINGS:
-		trimmed = strings.NewReplacer("**FINDINGS:**", "FINDINGS:", "**ESCALATE_TO:**", "ESCALATE_TO:").Replace(trimmed)
+		trimmed := normalizeDirectiveLine(line)
 		if strings.HasPrefix(trimmed, "TRANSITION_TO:") {
 			result.SawSignalLine = true
 			v := strings.TrimSpace(strings.TrimPrefix(trimmed, "TRANSITION_TO:"))
