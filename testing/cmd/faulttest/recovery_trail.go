@@ -24,7 +24,13 @@ func checkRecoveryTrail(cfg *HarnessConfig, f Failure, traceID, runID string, si
 		fmt.Printf("Recovery trail:      not checked for %s (set --audit-url to verify the recovery_decision events)\n", f.ID)
 		return
 	}
-	problems := faultlib.AwaitRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, []string{traceID, runID}, since, recoveryTrailWait, recoveryTrailInterval)
+	// Every key the stages are filed under: the fault's trace (the plan stage),
+	// the remediation hop's trace, which this CLI gives a -remed suffix (the
+	// execution stage, written by the remediation agent), and the triage run's
+	// ID (the gateway's gate and outcome stages). The go test harness names no
+	// suffix, so its remediation shares the fault's trace.
+	ids := []string{traceID, traceID + remedTraceSuffix, runID}
+	problems := faultlib.AwaitRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, ids, since, recoveryTrailWait, recoveryTrailInterval)
 	if len(problems) == 0 {
 		fmt.Println("Recovery trail:      plan, gate, execution and outcome recorded; chain verifies")
 		return

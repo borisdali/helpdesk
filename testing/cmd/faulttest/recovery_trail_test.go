@@ -4,9 +4,45 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// The execution stage is written by the remediation agent under the hop's own
+// trace, which this CLI suffixes with -remed. Found live on a VM run: the check
+// looked only under the fault's trace and the run ID, so it reported "no
+// execution stage" for a restore whose execution stage was on record.
+func TestCheckRecoveryTrail_QueriesTheRemediationHopsTrace(t *testing.T) {
+	old1, old2 := recoveryTrailWait, recoveryTrailInterval
+	recoveryTrailWait, recoveryTrailInterval = 10*time.Millisecond, 5*time.Millisecond
+	defer func() { recoveryTrailWait, recoveryTrailInterval = old1, old2 }()
+
+	var mu sync.Mutex
+	asked := map[string]bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := r.URL.Query().Get("trace_id"); id != "" {
+			mu.Lock()
+			asked[id] = true
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	cfg := &HarnessConfig{}
+	cfg.AuditURL = srv.URL
+	res := EvalResult{Passed: true}
+	checkRecoveryTrail(cfg, Failure{ID: "f"}, "faulttest-r-f", "plr_1", time.Now(), &res)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range []string{"faulttest-r-f", "faulttest-r-f" + remedTraceSuffix, "plr_1"} {
+		if !asked[want] {
+			t.Errorf("the trail was never read under %q (asked: %v)", want, asked)
+		}
+	}
+}
 
 func TestCheckRecoveryTrail(t *testing.T) {
 	f := Failure{ID: "db-pitr-dropped-table-vm"}

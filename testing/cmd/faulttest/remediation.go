@@ -227,12 +227,18 @@ func (r *Remediator) Remediate(ctx context.Context, f Failure, priorRunID string
 // triggerPlaybook calls RunPlaybook via faultlib and drives an interactive
 // approval loop when the run returns pending_approval. Returns the remediation
 // run_id so the caller can fetch steps for the remediation judge.
+// remedTraceSuffix is added to a fault's trace ID for the remediation hop's own
+// trace. Whatever the remediation agent files under its request trace (the
+// recovery_decision execution stage, its tool calls) is under this ID, not the
+// fault's.
+const remedTraceSuffix = "-remed"
+
 func (r *Remediator) triggerPlaybook(ctx context.Context, seriesID, priorRunID, namespace string) (string, error) {
 	// Give the remediation run a distinct faulttest-* trace so it stays
 	// recognisable as injected (not a real tr_* incident) while remaining a
 	// separate journey from the triage trace (WHY vs WHAT).
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
+		ctx = faultlib.WithFaultTraceID(ctx, id+remedTraceSuffix)
 	}
 	runResp, err := r.inner.RunPlaybook(ctx, seriesID, priorRunID, namespace)
 	if err != nil {
@@ -524,7 +530,7 @@ func (r *Remediator) runGateLoop(ctx context.Context, gate faultlib.ApproveRunRe
 	// the gateway-triggered remediation run gets a faulttest-*-remed trace rather
 	// than a gateway-generated tr_* one.
 	if id, _ := ctx.Value(ctxKeyFaultTraceID{}).(string); id != "" {
-		ctx = faultlib.WithFaultTraceID(ctx, id+"-remed")
+		ctx = faultlib.WithFaultTraceID(ctx, id+remedTraceSuffix)
 	}
 
 	const width = 64
