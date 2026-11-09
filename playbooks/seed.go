@@ -36,8 +36,9 @@ type systemPlaybookYAML struct {
 
 // rootCauseClassesYAML is the YAML representation of a root-cause taxonomy block.
 type rootCauseClassesYAML struct {
-	Version string   `yaml:"version"`
-	Classes []string `yaml:"classes"`
+	Version      string            `yaml:"version"`
+	Classes      []string          `yaml:"classes"`
+	Descriptions map[string]string `yaml:"descriptions"`
 }
 
 // SeedSystemPlaybooks reads all embedded *.yaml files and inserts them into the
@@ -137,8 +138,9 @@ func SeedSystemPlaybooks(ctx context.Context, store *audit.PlaybookStore) error 
 			var rcc *audit.RootCauseClassification
 			if y.RootCauseClasses != nil {
 				rcc = &audit.RootCauseClassification{
-					Version: y.RootCauseClasses.Version,
-					Classes: y.RootCauseClasses.Classes,
+					Version:      y.RootCauseClasses.Version,
+					Classes:      y.RootCauseClasses.Classes,
+					Descriptions: y.RootCauseClasses.Descriptions,
 				}
 			}
 			pb := &audit.Playbook{

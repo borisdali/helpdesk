@@ -86,6 +86,13 @@ type Playbook struct {
 type RootCauseClassification struct {
 	Version string   `json:"version"`
 	Classes []string `json:"classes"`
+	// Descriptions optionally says what each class means (keyed by class
+	// name), for the classifier that maps a diagnosis to one of them. A class
+	// name alone can be read two ways (pitr-plan-not-feasible, for a plan that
+	// is feasible but needs an acknowledgement), and a description settles
+	// what the name leaves open. Adding or editing one does not change the
+	// set of classes, so it is a minor version bump at most.
+	Descriptions map[string]string `json:"descriptions,omitempty"`
 }
 
 // PlaybookStore persists fleet playbooks.

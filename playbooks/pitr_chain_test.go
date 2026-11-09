@@ -40,6 +40,54 @@ func loadPITR(t *testing.T, file string) pitrPB {
 	return pb
 }
 
+// The triage's root-cause classes are what a run is filed under. Their names
+// alone let a plan that was feasible but exceeded the recovery objective be
+// filed as not-feasible, so each class carries a description, and the one for
+// "feasible" says that an exceeded objective does not change it.
+func TestPITRTriage_RootCauseClassesAreDescribed(t *testing.T) {
+	b, err := playbooks.FS.ReadFile("pgbackrest-pitr-triage.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pb struct {
+		RootCauseClasses struct {
+			Version      string            `yaml:"version"`
+			Classes      []string          `yaml:"classes"`
+			Descriptions map[string]string `yaml:"descriptions"`
+		} `yaml:"root_cause_classes"`
+	}
+	if err := yaml.Unmarshal(b, &pb); err != nil {
+		t.Fatal(err)
+	}
+	rcc := pb.RootCauseClasses
+	if len(rcc.Classes) == 0 {
+		t.Fatal("no root-cause classes")
+	}
+	for _, c := range rcc.Classes {
+		if flat(rcc.Descriptions[c]) == "" {
+			t.Errorf("class %q has no description", c)
+		}
+	}
+	for c := range rcc.Descriptions {
+		known := false
+		for _, k := range rcc.Classes {
+			known = known || k == c
+		}
+		if !known {
+			t.Errorf("a description for %q, which is not a class", c)
+		}
+	}
+	feasible := flat(rcc.Descriptions["pitr-plan-feasible"])
+	for _, want := range []string{"status=feasible", "exceeds", "acknowledgement", "not reasons it cannot"} {
+		if !strings.Contains(feasible, want) {
+			t.Errorf("the description of pitr-plan-feasible lacks %q: %s", want, feasible)
+		}
+	}
+	if d := flat(rcc.Descriptions["pitr-plan-not-feasible"]); !strings.Contains(d, "status=not_feasible") {
+		t.Errorf("the description of pitr-plan-not-feasible does not say what it is: %s", d)
+	}
+}
+
 // flat collapses the YAML's line wrapping, so a phrase is matched wherever the
 // text happens to break.
 func flat(s string) string { return strings.Join(strings.Fields(s), " ") }

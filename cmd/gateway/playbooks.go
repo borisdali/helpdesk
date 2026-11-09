@@ -3093,7 +3093,7 @@ func (g *Gateway) classifyIncidentAttribution(ctx context.Context, runID, respon
 	if err != nil || pb.RootCauseClasses == nil || len(pb.RootCauseClasses.Classes) == 0 {
 		return
 	}
-	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, pb.RootCauseClasses.Classes)
+	label := agentutil.ClassifyAttributionDescribed(ctx, g.plannerLLM, responseText, pb.RootCauseClasses.Classes, pb.RootCauseClasses.Descriptions)
 	// The entry hop of a chain is often only a hand-off with no diagnosis in
 	// it (pbs_db_data_loss_triage front-loads facts and escalates), so its
 	// label is UNKNOWN. A later hop may already have set a real one; do not
@@ -3146,7 +3146,7 @@ func (g *Gateway) classifyChainAttribution(ctx context.Context, runID, responseT
 	if err != nil || entry.RootCauseClasses == nil || len(entry.RootCauseClasses.Classes) == 0 {
 		return
 	}
-	label := agentutil.ClassifyAttribution(ctx, g.plannerLLM, responseText, entry.RootCauseClasses.Classes)
+	label := agentutil.ClassifyAttributionDescribed(ctx, g.plannerLLM, responseText, entry.RootCauseClasses.Classes, entry.RootCauseClasses.Descriptions)
 	if label == agentutil.AttributionUnknown {
 		return
 	}

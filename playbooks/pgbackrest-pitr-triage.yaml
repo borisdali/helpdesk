@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_pitr_triage
 name: "pgBackRest — Point-in-Time Recovery Triage"
-version: "1.4"
+version: "1.5"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -27,11 +27,32 @@ description: |
   be discarded, and a plan digest the operator quotes when approving the
   restore at the gate.
 root_cause_classes:
-  version: "1.0"
+  # 1.1: descriptions added (the classes are unchanged, so results stay
+  # comparable with 1.0). A run whose plan was feasible but whose data loss
+  # exceeded the recovery objective was filed as not-feasible, because the
+  # names alone left room to read "needs an acknowledgement" as "cannot run".
+  version: "1.1"
   classes:
     - pitr-plan-feasible
     - pitr-plan-not-feasible
     - pitr-plan-unverified
+  descriptions:
+    pitr-plan-feasible: >
+      The plan tool returned status=feasible: a backup before the target
+      exists, the archived WAL is continuous and the target is reachable. It
+      stays feasible when the plan also reports that the data loss exceeds the
+      recovery objective (rpo_check exceeds or may_exceed), that approving it
+      needs an acknowledgement, that the running instance has to be stopped, or
+      that the archive has to be flushed first. Those are conditions of
+      approving a restore that can run, not reasons it cannot.
+    pitr-plan-not-feasible: >
+      The plan tool returned status=not_feasible: there is no backup before the
+      target, the archived WAL has a gap, or the target is past the end of the
+      archive. The restore cannot reach the target as asked.
+    pitr-plan-unverified: >
+      The plan could not be checked (status=unverified, for instance because the
+      WAL continuity check could not run), or no recovery target was supplied
+      with the request.
 symptoms:
   - "an operator wants the database as it was at a given time or LSN (a dropped table, a bad deploy, logical corruption)"
   - "data loss that restoring to the latest backup would not undo, because the damage is in the latest data"
