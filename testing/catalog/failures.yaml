@@ -1599,14 +1599,14 @@ failures:
         # A backup that finishes after the rows, so a restore can start from it.
         pgbackrest --stanza="$STANZA" --type=incr backup >/dev/null
         sleep 3
-        # The backup switched the WAL, and until something is written the
-        # position reads as the new segment's start (0/3C000000), where no record
-        # starts: the first begins after the page header, 40 bytes on. A
-        # committed transaction writes one, so the position read below is where
-        # a record starts, and the recovery stops exactly there.
-        Q "SELECT txid_current()" >/dev/null
         T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
-        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        # The INSERT position, not pg_current_wal_lsn(): that is the write
+        # position, and after the backup's WAL switch it reads as the new
+        # segment's bare start (0/3F000000, seen on every run, even after a
+        # committed write), where no record starts; the first begins after the
+        # 40-byte page header. The insert position is where the next record will
+        # start, so recovery stops exactly at the target.
+        LSN=$(Q "SELECT pg_current_wal_insert_lsn()")
         sleep 2
         # The damage, after the target: another table, and the drop.
         Q "CREATE TABLE pitr_after_drop (id int)"
@@ -1723,14 +1723,14 @@ failures:
         # A backup that finishes after the rows, so a restore can start from it.
         pgbackrest --stanza="$STANZA" --type=incr backup >/dev/null
         sleep 3
-        # The backup switched the WAL, and until something is written the
-        # position reads as the new segment's start (0/3C000000), where no record
-        # starts: the first begins after the page header, 40 bytes on. A
-        # committed transaction writes one, so the position read below is where
-        # a record starts, and the recovery stops exactly there.
-        Q "SELECT txid_current()" >/dev/null
         T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
-        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        # The INSERT position, not pg_current_wal_lsn(): that is the write
+        # position, and after the backup's WAL switch it reads as the new
+        # segment's bare start (0/3F000000, seen on every run, even after a
+        # committed write), where no record starts; the first begins after the
+        # 40-byte page header. The insert position is where the next record will
+        # start, so recovery stops exactly at the target.
+        LSN=$(Q "SELECT pg_current_wal_insert_lsn()")
         sleep 2
         # The damage, after the target: another table, and the drop.
         Q "CREATE TABLE pitr_after_drop (id int)"

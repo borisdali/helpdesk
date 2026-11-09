@@ -30,7 +30,8 @@ echo "SQL: $sql" >> "$STUB_LOG"
 case "$sql" in
   *"NOT pg_is_in_recovery"*) echo t;;
   *"to_char(clock_timestamp()"*) echo "2026-11-09T10:11:12Z";;
-  *"pg_current_wal_lsn"*) echo "0/4000028";;
+  *"pg_current_wal_insert_lsn"*) echo "0/4000028";;
+  *"pg_current_wal_lsn"*) echo "0/4000000";;
   *"SHOW data_directory"*) echo "$STUB_PGDATA";;
 esac
 exit 0
@@ -109,11 +110,9 @@ func TestDroppedTableVMInject_RealBash(t *testing.T) {
 			if lsn, err := ParsePITRMarker(out, "lsn"); err != nil || lsn.Value != "0/4000028" {
 				t.Errorf("lsn = %+v, %v", lsn, err)
 			}
-			// The order the fault depends on: rows, backup, a write (so the LSN
-			// read next is where a record starts, not a segment's bare start),
-			// target, then the damage.
+			// The order the fault depends on: rows, backup, target, then the damage.
 			pos := func(needle string) int { return strings.Index(log, needle) }
-			order := []string{"INSERT INTO pitr_orders", "pgbackrest --stanza=main --type=incr backup", "SQL: SELECT txid_current()", "to_char(clock_timestamp()", "pg_current_wal_lsn", "CREATE TABLE pitr_after_drop", "DROP TABLE pitr_orders"}
+			order := []string{"INSERT INTO pitr_orders", "pgbackrest --stanza=main --type=incr backup", "to_char(clock_timestamp()", "pg_current_wal_insert_lsn", "CREATE TABLE pitr_after_drop", "DROP TABLE pitr_orders"}
 			for i, n := range order {
 				if pos(n) < 0 {
 					t.Fatalf("the script never ran %q:\n%s", n, log)
