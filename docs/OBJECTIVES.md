@@ -22,6 +22,7 @@ documented where they appear.
 3. [Values](#3-values)
 4. [A mistake never costs the inventory](#4-a-mistake-never-costs-the-inventory)
 5. [Reading it in code](#5-reading-it-in-code)
+   - [5.1 Which incidents spend the availability budget](#51-which-incidents-spend-the-availability-budget)
 6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
@@ -122,6 +123,31 @@ A caller that finds an objective unset must look at `problems` before treating i
 `Set` and `Source` and `Problems`. A database that is not configured returns `ok=false`; a configured one with
 nothing set returns `Set=false` for each objective and no problems. `Config.Validate()` lists every problem in the
 file and `Config.LogProblems(slog.Error)` logs them.
+
+### 5.1 Which incidents spend the availability budget
+
+An availability budget (what `availability_slo` allows a database to be down in a window) must be charged only for
+incidents that make the database unavailable. A vacuum or a cache fix is an incident but not downtime, and a restore is
+both. So every playbook series declares an **availability impact**, in `playbooks/availability_impact.go`:
+
+| Impact | Meaning | Examples |
+|---|---|---|
+| `outage` | The database is not serving: down, restarting, being restored, unreachable, or without a running pod. | restore from backup, point-in-time restore, database restart, pod crash, StatefulSet scaled to zero, WAL disk full |
+| `degraded` | Serving, but some clients or queries fail or are slow. | lock chains, rejected logins, exhausted connections, replication lag, a replica restart |
+| `none` | No client-visible effect. | backup health, vacuum, cache and checkpoint tuning, stale slots, disk growth |
+
+Only `outage` is charged to the budget. The others are listed beside it, uncharged, so nothing is hidden.
+
+- The declaration is per series, not per playbook version, and lives in one table rather than in each playbook's YAML:
+  the seeder skips a `(series, version)` it already holds, so a YAML field would need a version bump of every playbook
+  to reach an existing store, which would also split each playbook's per-version statistics.
+- An incident spans several runs, so its impact is the **worst** of its hops (`playbooks.WorstImpact`): a triage that
+  only read the database (`none`) does not hide the restore (`outage`) that followed it. A PITR triage that never
+  reached the restore stays `none`.
+- A series with no declaration (a draft, an imported or a hand-made playbook) is **unclassified**: it is never charged
+  and never guessed, and the ledger reports it as unclassified.
+- The values are judgements, made so that a restore counts as the outage it is and a vacuum does not. Review them
+  against how an incident of that kind looks to your clients. A test fails when a system playbook is added without one.
 
 ## 6. Design: how objectives will be used (not built yet)
 
