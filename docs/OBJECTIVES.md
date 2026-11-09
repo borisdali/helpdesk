@@ -127,25 +127,25 @@ file and `Config.LogProblems(slog.Error)` logs them.
 ### 5.1 Which incidents spend the availability budget
 
 An availability budget (what `availability_slo` allows a database to be down in a window) must be charged only for
-incidents that make the database unavailable. A vacuum or a cache fix is an incident but not downtime, and a restore is
+incidents that make the database unavailable. A vacuum or a cache fix is an incident, but not downtime and a restore is
 both. So every playbook series declares an **availability impact**, in `playbooks/availability_impact.go`:
 
 | Impact | Meaning | Examples |
 |---|---|---|
-| `outage` | The database is not serving: down, restarting, being restored, unreachable, or without a running pod. | restore from backup, point-in-time restore, database restart, pod crash, StatefulSet scaled to zero, WAL disk full |
+| `outage` | The database is not serving: down, restarting, being restored, unreachable or without a running pod. | restore from backup, point-in-time restore, database restart, pod crash, StatefulSet scaled to zero, WAL disk full |
 | `degraded` | Serving, but some clients or queries fail or are slow. | lock chains, rejected logins, exhausted connections, replication lag, a replica restart |
 | `none` | No client-visible effect. | backup health, vacuum, cache and checkpoint tuning, stale slots, disk growth |
 
 Only `outage` is charged to the budget. The others are listed beside it, uncharged, so nothing is hidden.
 
-- The declaration is per series, not per playbook version, and lives in one table rather than in each playbook's YAML:
+- The declaration is per series, not per playbook version and lives in one table rather than in each playbook's YAML:
   the seeder skips a `(series, version)` it already holds, so a YAML field would need a version bump of every playbook
   to reach an existing store, which would also split each playbook's per-version statistics.
 - An incident spans several runs, so its impact is the **worst** of its hops (`playbooks.WorstImpact`): a triage that
   only read the database (`none`) does not hide the restore (`outage`) that followed it. A PITR triage that never
   reached the restore stays `none`.
 - A series with no declaration (a draft, an imported or a hand-made playbook) is **unclassified**: it is never charged
-  and never guessed, and the ledger reports it as unclassified.
+  and never guessed and the ledger reports it as unclassified.
 - The values are judgements, made so that a restore counts as the outage it is and a vacuum does not. Review them
   against how an incident of that kind looks to your clients. A test fails when a system playbook is added without one.
 
@@ -169,7 +169,7 @@ it spends.
 | Enforcement of the `rpo` at the PITR gate: `warn`, `acknowledge` (`acknowledge_objective_breach`) or `refuse`, with the loss re-measured just before the instance is stopped ([PITR.md §4](PITR.md#4-operating-it)) | Built |
 | `recovery_preference` and `enforcement` in the config: validated, resolved per database, environment and fleet with sources | Built |
 | `enforcement` read by the PITR restore (above) | Built |
-| Each stage of a recovery decision recorded as a typed, hash-covered `recovery_decision` audit event, with a snapshot of the objectives in force and the config digest, and shown in the incident narrative, `vault incidents` and `vault journey` ([AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields)) | Built |
+| Each stage of a recovery decision recorded as a typed, hash-covered `recovery_decision` audit event, with a snapshot of the objectives in force and the config digest and shown in the incident narrative, `vault incidents` and `vault journey` ([AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields)) | Built |
 | A lower bound on the loss of an LSN target, from when its archive segment arrived, so a proven breach of the `rpo` is enforced like any other ([PITR.md](PITR.md#lsn-targets-and-the-lower-bound)). An LSN in WAL that is not archived yet is still not enforced | Built |
 | The outcome of the recovery recorded on that decision: how the remediation hop ended and its **recovery duration** (after the approval: restore, restart, verify), shown against the `rto` in `vault incidents`. Not the downtime, which is longer | Built |
 | A decision that cannot be written to the audit trail is logged at error level and says so in the plan or result (`decision_unrecorded`); the restore is not held up for it | Built |

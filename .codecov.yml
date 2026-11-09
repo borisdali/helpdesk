@@ -14,8 +14,22 @@ coverage:
         threshold: 0%
 
 ignore:
-  # Binary entrypoints — glue code, not library logic
-  - "cmd/**"
+  # Binary entrypoints — glue code, not library logic. cmd/gateway and
+  # cmd/auditd are deliberately NOT listed: they hold real logic (the recovery
+  # gate, the incident and decision records, objective enforcement, the audit
+  # HTTP handlers), so their patches are measured. Add a new cmd/ directory
+  # here if it is only wiring.
+  - "cmd/approvals/**"
+  - "cmd/auditor/**"
+  - "cmd/fleet-runner/**"
+  - "cmd/govbot/**"
+  - "cmd/govexplain/**"
+  - "cmd/hashapikey/**"
+  - "cmd/helpdesk-client/**"
+  - "cmd/helpdesk/**"
+  - "cmd/jwttest/**"
+  - "cmd/secbot/**"
+  - "cmd/srebot/**"
   # Agent startup/wiring code — same category as cmd/
   - "agents/database/main.go"
   - "agents/k8s/main.go"
@@ -30,6 +44,7 @@ ignore:
   - "internal/audit/remote_store.go"
   # Test infrastructure and helpers — not self-tested by design
   - "testing/**"
-  # Embedded assets with no executable statements
-  - "playbooks/**"
+  # Embedded assets with no executable statements. (playbooks/ is NOT listed:
+  # its YAML never appears in a Go profile, and seed.go and
+  # availability_impact.go are real logic.)
   - "prompts/**"
