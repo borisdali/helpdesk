@@ -11,6 +11,27 @@ import (
 	"helpdesk/internal/audit"
 )
 
+// RecoveryTrailWait is how long a run waits for the trail to complete: the
+// gateway writes the outcome stage after the remediation run finishes.
+const RecoveryTrailWait = 30 * time.Second
+
+// AwaitRecoveryTrail is CheckRecoveryTrail, retried every interval for up to
+// wait while it still finds problems, because the outcome stage lands after
+// the run completes. It returns the problems of the last attempt: none once
+// the trail is complete. The one function both harnesses (`go test` and the
+// faulttest CLI) call, so what a good trail is has one definition and one
+// timing.
+func AwaitRecoveryTrail(auditURL, apiKey string, ids []string, since time.Time, wait, interval time.Duration) []string {
+	var problems []string
+	for deadline := time.Now().Add(wait); ; {
+		problems = CheckRecoveryTrail(auditURL, apiKey, ids, since)
+		if len(problems) == 0 || !time.Now().Add(interval).Before(deadline) {
+			return problems
+		}
+		time.Sleep(interval)
+	}
+}
+
 // CheckRecoveryTrail reads the recovery_decision events a point-in-time
 // restore left in the audit trail and returns what is wrong with them, nothing
 // when the trail is as a completed, approved restore should leave it.

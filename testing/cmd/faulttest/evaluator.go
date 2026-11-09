@@ -175,6 +175,11 @@ type EvalResult struct {
 	RecoveryTimeSecs     float64 `json:"recovery_time_seconds,omitempty"`
 	RemediationError     string  `json:"remediation_error,omitempty"`
 
+	// RecoveryTrailProblems is what is wrong with the recovery_decision events
+	// a point-in-time restore left (faultlib.CheckRecoveryTrail). Set only for a
+	// PITR fault that recovered, with --audit-url; a non-empty list fails the fault.
+	RecoveryTrailProblems []string `json:"recovery_trail_problems,omitempty"`
+
 	// Phase 2 scoring fields.
 	// RemediationScore is 0.0-1.0: 1.0 if recovered within half the verify timeout,
 	// 0.75 if recovered within the full timeout, 0.0 if timed out or not attempted.

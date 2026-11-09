@@ -732,6 +732,11 @@ func cmdRun(args []string) {
 				if remResult.Passed {
 					fmt.Printf("Remediation: RECOVERED %.1fs after injection (score: %.0f%%)\n", remResult.RecoveryTimeSecs, remResult.Score*100)
 					printIncidentSummary(resp, remResult.RecoveryTimeSecs, remResult.Playbook, remResult.Outcome, cfg.GatewayURL)
+					// A restore that was approved and ran must have left its decision
+					// trail; the same check `go test` makes (make faulttest-pitr).
+					if f.PITR != nil {
+						checkRecoveryTrail(cfg, f, faultTraceID, resp.RunID, callStart, &evalResult)
+					}
 					if cfg.GatewayURL != "" {
 						if pbID, vaultErr := requestVaultDraft(faultCtx, cfg, faultTraceID, "resolved", f.DiagnosisPlaybookSeriesID); vaultErr != nil {
 							slog.Warn("vault: could not generate playbook draft", "fault", f.ID, "err", vaultErr)

@@ -443,14 +443,7 @@ func verifyGatewayRemediation(t *testing.T, ctx context.Context, remediator *fau
 // settle before what is missing is called missing.
 func verifyRecoveryTrail(t *testing.T, cfg *faultlib.HarnessConfig, traceID, runID string, since time.Time) {
 	t.Helper()
-	var problems []string
-	for deadline := time.Now().Add(30 * time.Second); ; {
-		problems = faultlib.CheckRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, []string{traceID, runID}, since)
-		if len(problems) == 0 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
+	problems := faultlib.AwaitRecoveryTrail(cfg.AuditURL, cfg.GatewayAPIKey, []string{traceID, runID}, since, faultlib.RecoveryTrailWait, 2*time.Second)
 	if len(problems) == 0 {
 		t.Log("Recovery decision trail: plan, gate, execution and outcome recorded; chain verifies")
 		return
