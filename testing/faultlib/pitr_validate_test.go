@@ -33,7 +33,7 @@ func TestLoadCatalog_ValidatesPITRFaults(t *testing.T) {
 		name, from, to, want string
 	}{
 		{"a target type the gateway does not take", "pitr: {target_type: time}", "pitr: {target_type: xid}", "not time or lsn"},
-		{"an inject that keeps no output", "type: shell_exec", "type: docker_exec", "must be shell_exec"},
+		{"an inject that keeps no output", "type: shell_exec", "type: docker_exec", "must be shell_exec or ssh_exec"},
 		{"an inject that never prints the target", `echo "PITR_TARGET time=$T"`, `echo hello`, "never prints a PITR_TARGET line"},
 		{"no diagnosis playbook, so no triage request to carry the target", "    diagnosis_playbook_series_id: pbs_pgbackrest_pitr_triage\n", "", "needs diagnosis_playbook_series_id"},
 	} {

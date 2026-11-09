@@ -919,7 +919,7 @@ When writing customer catalog entries, prefer specific queries that directly ver
 
 ### 6.6 Point-in-time recovery faults (`pitr:`)
 
-A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected, and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block, and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database; Docker fixture only so far).
+A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected, and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block, and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database, on the Docker fixture). The same fault exists for a Kubernetes pod (`db-pitr-dropped-table-k8s`) and, since v0.34, for a real host/VM, with a time target (`db-pitr-dropped-table-vm`) and an LSN target (`db-pitr-dropped-table-vm-lsn`); see [the VM faults](#point-in-time-faults-on-a-vm) below.
 
 ```yaml
 pitr:
@@ -933,7 +933,7 @@ pitr:
 PITR_TARGET time=2026-10-28T17:11:10Z lsn=0/3000028
 ```
 
-Only `shell_exec` injections keep their output, and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
+Only `shell_exec` and `ssh_exec` injections keep their output (`ssh_exec` since v0.34, for the VM faults), and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
 
 **What the harness does with it**, in order:
 
@@ -949,6 +949,29 @@ The `go test` sweeps (`make faulttest`, `faulttest-gateway`) skip a PITR fault u
 **What it checks in the audit trail (v0.34).** After the gate loop the run reads the `recovery_decision` events the restore left, under the fault's trace and the triage run's ID, and fails the fault if any of these is wrong: a stage is missing (plan, gate `approved`, execution `proceeded`, outcome with a duration); a stage that decides does not name the objectives in force; a restore that went past an exceeded objective under `enforcement: acknowledge` has no acknowledgement on record; a connection password appears in the clear; or `GET /v1/verify` on auditd says the hash chain no longer verifies. The gateway writes the outcome after the run completes, so the check retries for up to 30 s before calling a stage missing. It needs `FAULTTEST_AUDIT_URL` (`make faulttest-pitr` requires it); without it the check reports that it could not read the trail rather than skipping. Setting it also makes the harness verify, after a gate resolves with no pending step approval, that a child remediation run really started (an auditd query on `prior_run_id`; without the URL it assumes one did). If auditd cannot be reached or answers an error it logs a warning and lets the run through. The `faulttest` CLI's audit-backed tool evidence (`--audit-url`) is a different path and is not used by `make faulttest-pitr`.
 
 **An LSN target and an objective.** `db-pitr-dropped-table-lsn` is the same fault with `target_type: lsn`. `make pitr-objectives-infra` writes a copy of `testing/testing.infra.json` in which `pgbackrest-db` has `rpo: 1s` and `enforcement: acknowledge`; start the sysadmin agent and the gateway with `HELPDESK_INFRA_CONFIG` pointing at it, and the plan will show the objective exceeded, the harness acknowledges it as the operator would, and the trail has to say so. Without that file the same fault runs with no objective, and the plan shows the loss and compares nothing ([OBJECTIVES.md](OBJECTIVES.md)).
+
+#### Point-in-time faults on a VM
+
+`db-pitr-dropped-table-vm` and `db-pitr-dropped-table-vm-lsn` run the same scenario against a real Linux VM whose PostgreSQL is a systemd service: the instance is serving, a table is dropped, and the restore flushes the archive, stops the unit with `sudo systemctl stop`, restores in place and starts it again. They inject over SSH (`ssh_exec`), so they run from the `faulttest` binary with `--external=false`, not from the `go test` sweeps:
+
+```bash
+go run ./testing/cmd/faulttest run --ids db-pitr-dropped-table-vm --external=false \
+  --remediate --gate-escalation --approval-mode force --operator <user> \
+  --via-gateway --gateway $GW --api-key <key> \
+  --sysadmin-agent $SYSADMIN --sysadmin-api-key <key> \
+  --ssh-host=postgres@<vm-host> --ssh-port=<port> --ssh-key=<absolute path> \
+  --conn=<the VM entry's connection_string> --agent-conn=<the VM entry's key> \
+  --infra-config=<absolute path>
+```
+
+What they need, beyond the Docker fault:
+
+- The SSH user is `postgres`: the scripts run `psql` and `pgbackrest` directly, and only the repair branch of the teardown uses `sudo systemctl restart`. `testing/docker/setup-pgbackrest-vm.sh` adds that grant and the `systemctl stop` one the restore needs.
+- Three values in each script are the VM's own, edited in the catalog (or a custom catalog copy) as for `db-pgdata-corrupted-vm`: `PG_UNIT`, `STANZA` and `DB` (the database named in the entry's `connection_string`). The harness reads the plan for the stanza `main`, so the VM's stanza must be called that.
+- `--agent-conn` names the VM's infra entry; it is the target the plan is read for (the VM faults have no `agent_conn_override`). `--conn` is where `verify_sql` connects from the harness machine, so that machine needs a route to the database.
+- To see an objective compared and acknowledged, give the VM's entry an `rpo` and `enforcement: acknowledge` in the infra config the sysadmin agent and the gateway read.
+
+The inject and teardown scripts are held to their behaviour by tests that run them in a real bash against stub `psql`, `pgbackrest`, `systemctl` and `sudo` (`testing/faultlib/pitr_vm_script_test.go`): the order of rows, backup, target and damage; the SQL arriving intact; the teardown's two branches (unit up: drop the tables and remove the saved WAL; unit down: restore, restart, then drop); and the LSN fault staying a copy of the time fault. They have not yet run against a real VM.
 
 To prove a PITR fault's script and recovery without a model, `TestIntegration_PITRFault_DroppedTable_Catalog` (`agents/sysadmin`, `go test -tags integration`) loads it from the catalog and runs its real inject, plan, live restore, restart and `verify_sql` on the Docker fixture.
 

@@ -1528,6 +1528,259 @@ failures:
         narrative: "Same as db-pitr-dropped-table over a Kubernetes pod: the triage plans the supplied target with plan_point_in_time_recovery and reports it feasible with the plan digest, without choosing a target or calling a restore tool; the chain holds at a gate (recovery_target_required) for the harness to approve; the restore flushes the running pod's WAL, stops it, scales the StatefulSet to 0, restores in a one-off pod and the remediation playbook resumes it with restart_container and verifies where recovery stopped."
     timeout: 420s
 
+  - id: db-pitr-dropped-table-vm
+    name: "A table was dropped on a live database — point-in-time restore to just before (real host/VM)"
+    category: database
+    severity: high
+    description: >
+      db-pitr-dropped-table against a real, SSH-reachable Linux host/VM running
+      PostgreSQL as a systemd service: the instance is up and serving when
+      pitr_orders (five rows) is dropped and pitr_after_drop is created.
+      Restoring to the latest backup would replay the DROP, so the recovery is a
+      point-in-time restore to the moment before it. The inject script commits
+      the rows, takes an incremental backup after them, notes the database's own
+      clock and prints it as PITR_TARGET (ssh_exec keeps its output, as
+      shell_exec does); the harness supplies it on the triage run and, at the
+      gate, with the digest of the plan it read from the sysadmin agent. The
+      approval allows stopping the running instance: the restore flushes its WAL
+      to the archive, stops the unit with sudo systemctl stop, restores in place
+      and the playbook starts it again with restart_service. verify_sql then
+      checks the rows themselves. Added v0.34.
+    # No agent_conn_override: the target is the real VM supplied by --ssh-host,
+    # as for db-pgdata-corrupted-vm. --agent-conn names its infra entry, which is
+    # also the target the plan is read for.
+    direct_agent: sysadmin
+    pitr:
+      target_type: time
+      allow_stop_serving: true
+    prerequisites: |
+      A real Linux VM with PostgreSQL as a systemd service, pgBackRest with the
+      stanza `main` (the harness reads the plan for that stanza) and a recent full
+      backup with WAL archiving on and no replicas: see
+      testing/docker/setup-pgbackrest-vm.sh, which also adds the sudoers grants
+      (`systemctl restart`, `systemctl stop`) the restore needs. The VM's entry in
+      the infra config must carry systemd_unit, pg_log_dir and the SSH settings
+      the sysadmin agent dispatches with. The scripts below run as the SSH user,
+      which must be `postgres` (psql and pgbackrest run directly, without sudo).
+      Three values in each script are the VM's own and must be edited to match
+      it, as in db-pgdata-corrupted-vm: PG_UNIT, STANZA and DB (the database
+      named in the entry's connection_string).
+      Run with:
+        go run ./testing/cmd/faulttest run --ids db-pitr-dropped-table-vm --external=false \
+          --remediate --gate-escalation --approval-mode force --operator <user> \
+          --via-gateway --gateway $GW --api-key <key> \
+          --sysadmin-agent $SYSADMIN --sysadmin-api-key <key> \
+          --ssh-host=postgres@<vm-host> --ssh-port=<port> --ssh-key=<absolute path> \
+          --conn=<vm db_server's connection_string> --agent-conn=<vm db_server's key> \
+          --infra-config=<absolute path>
+      The harness machine needs a route to the database (verify_sql connects
+      from there). Give the VM's entry an `rpo` and `enforcement: acknowledge` in
+      the infrastructure config the sysadmin agent and the gateway read to see the
+      objective compared and acknowledged on this fault. Destructive: the live
+      restore stops the VM's PostgreSQL. Not run alongside other faults against
+      the same VM.
+    inject_timeout: 180s
+    inject:
+      type: ssh_exec
+      exec_via: "" # filled by --ssh-host at runtime
+      script_inline: |
+        #!/bin/bash
+        set -e
+        STANZA="main" # EDIT to match your real VM's pgBackRest stanza
+        DB="postgres" # EDIT to the database named in the VM entry's connection_string
+        Q() { psql -d "$DB" -v ON_ERROR_STOP=1 -Atqc "$1"; }
+        # A fault before this one can hand over a server still recovering.
+        for i in $(seq 1 60); do [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ]
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "CREATE TABLE pitr_orders (id int PRIMARY KEY, item text)"
+        Q "INSERT INTO pitr_orders SELECT g, 'order-' || g FROM generate_series(1, 5) g"
+        # A backup that finishes after the rows, so a restore can start from it.
+        pgbackrest --stanza="$STANZA" --type=incr backup >/dev/null
+        sleep 3
+        T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        sleep 2
+        # The damage, after the target: another table, and the drop.
+        Q "CREATE TABLE pitr_after_drop (id int)"
+        Q "INSERT INTO pitr_after_drop VALUES (1)"
+        Q "DROP TABLE pitr_orders"
+        echo "PITR_TARGET time=$T lsn=$LSN"
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      # Puts the VM back without any agent tool, as the Docker and Kubernetes
+      # versions do. A live restore that died after the stop leaves the unit
+      # down: restore the latest backup by hand and start it (the same repair
+      # as db-pgdata-corrupted-vm). Either way, drop this fault's tables, remove
+      # the pg_wal.saved-* copies a restore leaves beside the data directory,
+      # and switch the WAL so the drop reaches the archive. The unit is checked
+      # with is-active (no sudo) and the repair branch is skipped while it is up,
+      # so a good recovery is never restored over.
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
+        STANZA="main" # EDIT to match your real VM's pgBackRest stanza
+        DB="postgres" # EDIT to the database named in the VM entry's connection_string
+        Q() { psql -d "$DB" -v ON_ERROR_STOP=1 -Atqc "$1"; }
+        if ! systemctl is-active --quiet "$PG_UNIT"; then
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza="$STANZA" --delta restore
+          sudo systemctl restart "$PG_UNIT"
+        fi
+        for i in $(seq 1 90); do
+          [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break
+          sleep 2
+        done
+        [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] || { echo "$PG_UNIT did not finish recovery" >&2; exit 1; }
+        PGDATA=$(psql -Atqc 'SHOW data_directory')
+        [ -n "$PGDATA" ] && rm -rf "$(dirname "$PGDATA")"/pg_wal.saved-*
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "SELECT pg_switch_wal()" >/dev/null
+        echo "$PG_UNIT is up: dropped this fault's tables"
+    diagnosis_playbook_series_id: pbs_pgbackrest_pitr_triage
+    remediation:
+      # The rows themselves, from the harness over the network: the instance has
+      # finished recovery, the dropped table is back with all five rows and the
+      # table made after the drop is gone.
+      verify_sql: >
+        SELECT NOT pg_is_in_recovery()
+           AND to_regclass('public.pitr_after_drop') IS NULL
+           AND (SELECT count(*) FROM public.pitr_orders) = 5
+      verify_timeout: "240s"
+    prompt: >
+      An operator reports that the table pitr_orders on this database was
+      dropped by mistake a few minutes ago, and wants the database back as it
+      was just before. The connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. The recovery target comes with this request;
+      do not choose or change one. Plan the point-in-time restore and report
+      whether it is feasible.
+    evaluation:
+      expected_tools:
+        - plan_point_in_time_recovery
+      expected_keywords:
+        any_of:
+          - "plan_digest"
+          - "feasible"
+          - "point-in-time"
+          - "pitr_orders"
+      expected_diagnosis:
+        category: "plan_feasible"
+        narrative: "Same as db-pitr-dropped-table over a real systemd VM: the triage plans the supplied target with plan_point_in_time_recovery and reports it feasible with the plan digest, without choosing a target or calling a restore tool; the chain holds at a gate (recovery_target_required) for the harness to approve; the restore flushes the running instance's WAL, stops the unit with sudo systemctl stop, restores in place, and the remediation playbook starts it with restart_service and verifies where recovery stopped."
+    timeout: 420s
+
+  - id: db-pitr-dropped-table-vm-lsn
+    name: "A table was dropped on a live database — point-in-time restore to an LSN just before (real host/VM)"
+    category: database
+    severity: high
+    description: >
+      db-pitr-dropped-table-vm with an LSN as the recovery target instead of a
+      time. The inject script is the same: it prints both the database's clock
+      and pg_current_wal_lsn() right after the rows are committed and backed up,
+      and the harness supplies the LSN. The plan cannot say when an LSN was
+      written, so the data-loss estimate comes from the instance (bytes of WAL
+      discarded, and a lower bound on the history from the archive segment's own
+      time when the repository holds one). With an rpo and
+      enforcement=acknowledge on the VM's entry, that lower bound proves the
+      breach, the harness acknowledges it as the operator would, and the audit
+      trail then has to say so; without one the plan shows the loss and compares
+      nothing. Added v0.34.
+    direct_agent: sysadmin
+    pitr:
+      target_type: lsn
+      allow_stop_serving: true
+    prerequisites: |
+      As db-pitr-dropped-table-vm (same VM, same edits to PG_UNIT, STANZA and DB
+      in both scripts, same command with --ids db-pitr-dropped-table-vm-lsn).
+      Not run alongside other faults against the same VM.
+    inject_timeout: 180s
+    inject:
+      type: ssh_exec
+      exec_via: "" # filled by --ssh-host at runtime
+      script_inline: |
+        #!/bin/bash
+        set -e
+        STANZA="main" # EDIT to match your real VM's pgBackRest stanza
+        DB="postgres" # EDIT to the database named in the VM entry's connection_string
+        Q() { psql -d "$DB" -v ON_ERROR_STOP=1 -Atqc "$1"; }
+        # A fault before this one can hand over a server still recovering.
+        for i in $(seq 1 60); do [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break; sleep 2; done
+        [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ]
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "CREATE TABLE pitr_orders (id int PRIMARY KEY, item text)"
+        Q "INSERT INTO pitr_orders SELECT g, 'order-' || g FROM generate_series(1, 5) g"
+        # A backup that finishes after the rows, so a restore can start from it.
+        pgbackrest --stanza="$STANZA" --type=incr backup >/dev/null
+        sleep 3
+        T=$(Q "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
+        LSN=$(Q "SELECT pg_current_wal_lsn()")
+        sleep 2
+        # The damage, after the target: another table, and the drop.
+        Q "CREATE TABLE pitr_after_drop (id int)"
+        Q "INSERT INTO pitr_after_drop VALUES (1)"
+        Q "DROP TABLE pitr_orders"
+        echo "PITR_TARGET time=$T lsn=$LSN"
+    teardown:
+      type: ssh_exec
+      exec_via: ""
+      # Identical to db-pitr-dropped-table-vm's (a test holds the two together).
+      script_inline: |
+        #!/bin/bash
+        set -e
+        PG_UNIT="postgresql@16-main" # EDIT to match your real VM's unit name
+        STANZA="main" # EDIT to match your real VM's pgBackRest stanza
+        DB="postgres" # EDIT to the database named in the VM entry's connection_string
+        Q() { psql -d "$DB" -v ON_ERROR_STOP=1 -Atqc "$1"; }
+        if ! systemctl is-active --quiet "$PG_UNIT"; then
+          PGDATA=$(grep "^pg1-path=" /etc/pgbackrest.conf | cut -d= -f2)
+          rm -f "$PGDATA/postmaster.pid"
+          pgbackrest --stanza="$STANZA" --delta restore
+          sudo systemctl restart "$PG_UNIT"
+        fi
+        for i in $(seq 1 90); do
+          [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] && break
+          sleep 2
+        done
+        [ "$(psql -Atqc 'SELECT NOT pg_is_in_recovery()' 2>/dev/null)" = t ] || { echo "$PG_UNIT did not finish recovery" >&2; exit 1; }
+        PGDATA=$(psql -Atqc 'SHOW data_directory')
+        [ -n "$PGDATA" ] && rm -rf "$(dirname "$PGDATA")"/pg_wal.saved-*
+        Q "DROP TABLE IF EXISTS pitr_orders"
+        Q "DROP TABLE IF EXISTS pitr_after_drop"
+        Q "SELECT pg_switch_wal()" >/dev/null
+        echo "$PG_UNIT is up: dropped this fault's tables"
+    diagnosis_playbook_series_id: pbs_pgbackrest_pitr_triage
+    remediation:
+      verify_sql: >
+        SELECT NOT pg_is_in_recovery()
+           AND to_regclass('public.pitr_after_drop') IS NULL
+           AND (SELECT count(*) FROM public.pitr_orders) = 5
+      verify_timeout: "240s"
+    prompt: >
+      An operator reports that the table pitr_orders on this database was
+      dropped by mistake a few minutes ago, and wants the database back as it
+      was just before. The connection_string is "{{connection_string}}" — use it
+      verbatim for all tool calls. The recovery target comes with this request;
+      do not choose or change one. Plan the point-in-time restore and report
+      whether it is feasible.
+    evaluation:
+      expected_tools:
+        - plan_point_in_time_recovery
+      expected_keywords:
+        any_of:
+          - "plan_digest"
+          - "feasible"
+          - "point-in-time"
+          - "pitr_orders"
+      expected_diagnosis:
+        category: "plan_feasible"
+        narrative: "As db-pitr-dropped-table-vm, with an LSN target: the triage plans it and reports it feasible with the plan digest, the data-loss estimate is the instance's WAL position rather than a time span, and the objective check is a lower bound (or not comparable); the restore then runs as for the time target."
+    timeout: 420s
+
   - id: db-pgdata-corrupted-vm
     name: "Data directory corrupted — restore from latest backup (real host/VM)"
     category: database

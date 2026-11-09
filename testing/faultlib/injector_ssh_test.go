@@ -46,7 +46,7 @@ func TestExecSSH_PassesPortFlag(t *testing.T) {
 	t.Run("port set", func(t *testing.T) {
 		capturePath := writeFakeSSHOnPath(t)
 		inj := NewInjector(&HarnessConfig{SSHPort: 2222})
-		if err := inj.execSSH(context.Background(), InjectSpec{ExecVia: "testuser@example.com", ScriptInline: "echo hi"}); err != nil {
+		if err := inj.execSSH(context.Background(), InjectSpec{ExecVia: "testuser@example.com", ScriptInline: "echo hi"}, "inject"); err != nil {
 			t.Fatalf("execSSH: %v", err)
 		}
 		data, err := os.ReadFile(capturePath)
@@ -61,7 +61,7 @@ func TestExecSSH_PassesPortFlag(t *testing.T) {
 	t.Run("port unset falls back to ssh's own default", func(t *testing.T) {
 		capturePath := writeFakeSSHOnPath(t)
 		inj := NewInjector(&HarnessConfig{})
-		if err := inj.execSSH(context.Background(), InjectSpec{ExecVia: "testuser@example.com", ScriptInline: "echo hi"}); err != nil {
+		if err := inj.execSSH(context.Background(), InjectSpec{ExecVia: "testuser@example.com", ScriptInline: "echo hi"}, "inject"); err != nil {
 			t.Fatalf("execSSH: %v", err)
 		}
 		data, err := os.ReadFile(capturePath)

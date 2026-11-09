@@ -1,4 +1,4 @@
-# aiHelpDesk Sample#27 (on K8s): PITR
+# aiHelpDesk Sample#27 (K8s): PITR
 
 The raw transcript of the sample commands and deliberations presented below complements this blog post:
 
@@ -26,15 +26,15 @@ Before we start with the manual tests it's worth mentioning that we have an auto
 
 ## TL;DR
 
-We use our standard aiHelpDesk built-in failure injection testing system to run the three tests below. Summary first:
+We use our standard aiHelpDesk [built-in failure injection testing system](../FAULTTEST.md) to run the three tests below. Here's the summary:
 
-| Platform | Fault | Run | Result |
-|---|---|---|---|
-| Docker container | `db-pitr-dropped-table` | `plr_245be7fb` (remediation `plr_52c37957`) | plan, gate held, running container flushed, stopped and restored in a throwaway container, restarted, rows checked; 106.1s after injection |
-| K8s Pod | `db-pitr-dropped-table-k8s` | `plr_5e4dba37` (remediation `plr_bcbb05cf`) | same, with scale-to-zero and a one-off restore Pod; 121.9s after injection |
-| Linux VM over SSH | none yet (no VM fault) | `plr_2577a3bc` (remediation `plr_1516145c`) | live `sudo systemctl stop`, pgBackRest 2.60.0; dropped table back with its 5 rows, the later table gone, timeline 44 to 45 |
+| Run | Platform | Fault | Run | Result |
+|---|---|---|---|---|
+| [run#1](SAMPLE027.md#run-1-k8s-pod) | Docker container | `db-pitr-dropped-table` | `plr_245be7fb` (remediation `plr_52c37957`) | plan, gate held, running container flushed, stopped and restored in a throwaway container, restarted, rows checked; 106.1s after injection |
+| [run#2](SAMPLE027.md#run-2-docker-container) | K8s Pod | `db-pitr-dropped-table-k8s` | `plr_5e4dba37` (remediation `plr_bcbb05cf`) | same, with scale-to-zero and a one-off restore Pod; 121.9s after injection |
+| [run#3](SAMPLE027.md#run-3-vm--a-cli-helpdesk-client-planapprove) | Linux VM over SSH | none yet (no VM fault) | `plr_2577a3bc` (remediation `plr_1516145c`) | live `sudo systemctl stop`, pgBackRest 2.60.0; dropped table back with its 5 rows, the later table gone, timeline 44 to 45 |
 
-Let's actually kick this off with the K8 Pod:
+Let's kick the tests off against a target database hosted in-cluster, inside a K8s Pod:
 
 ## Run 1: K8s Pod
 
@@ -636,7 +636,7 @@ playbook: pb_3a5cf5c9
 Good, now let's kick off the actual triage (it's strictly R/O, so that nothing gets restored yet):
 
 ```
-[boris@ ~/helpdesk]$  RESP=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$PB/run" \
+[boris@ ~/helpdesk]$ RESP=$(curl -s -X POST "$GW/api/v1/fleet/playbooks/$PB/run" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -H "X-Purpose: diagnostic" \
   -d "{\"connection_string\":\"$SERVER\",\"gate_escalation\":true,
 	\"recovery_target\":{\"type\":\"time\",\"value\":\"$T\"}}")
@@ -755,6 +755,7 @@ Bingo, that's the 409 we were shooting for, the refusal is the right one. The Ga
 
 Now before running it for real, let's do a few more sanity checks:
 
+```
 [boris@ ~/helpdesk]$ ssh -i $VMKEY postgres@$VM 'date -u; timedatectl show -p NTPSynchronized --value; systemctl is-active postgresql@16-main'
 Thu Oct 29 09:18:52 PM UTC 2026
 yes
@@ -770,6 +771,7 @@ active
 [boris@ ~/helpdesk]$ ssh -i $VMKEY postgres@$VM 'pgbackrest --stanza=main check'
 [boris@ ~/helpdesk]$ echo $?
 0
+```
 
 Cool, all checks out:
 

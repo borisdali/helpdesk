@@ -41,8 +41,8 @@ func (i *Injector) Inject(ctx context.Context, f Failure) error {
 }
 
 // InjectOutput is the output of the last Inject, for a script that reports
-// something back (a PITR fault's PITR_TARGET line). Only shell_exec injections
-// keep their output; teardown's is not kept.
+// something back (a PITR fault's PITR_TARGET line). Only shell_exec and
+// ssh_exec injections keep their output; teardown's is not kept.
 func (i *Injector) InjectOutput() string {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -85,7 +85,7 @@ func (i *Injector) exec(ctx context.Context, spec InjectSpec, phase string) erro
 	case "config":
 		err = i.execConfig(ctx, spec)
 	case "ssh_exec":
-		err = i.execSSH(ctx, spec)
+		err = i.execSSH(ctx, spec, phase)
 	case "shell_exec":
 		err = i.execShell(ctx, spec, phase)
 	default:
@@ -301,7 +301,10 @@ func (i *Injector) resolvedContainerName() string {
 // spec.ExecVia is the target in "user@host" or "host" form; cfg.SSHHost is used
 // as fallback when ExecVia is empty. The SSH user from HarnessConfig is prepended
 // when no "@" is present. Script content is streamed via stdin.
-func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
+//
+// An inject script's output is kept (see InjectOutput), as for shell_exec: a
+// point-in-time fault on a VM prints its recovery target over SSH.
+func (i *Injector) execSSH(ctx context.Context, spec InjectSpec, phase string) error {
 	target := spec.ExecVia
 	if target == "" {
 		target = i.cfg.SSHHost
@@ -362,6 +365,9 @@ func (i *Injector) execSSH(ctx context.Context, spec InjectSpec) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ssh_exec on %s: %v\n%s", target, err, output)
+	}
+	if phase == "inject" {
+		i.setOutput(string(output))
 	}
 	slog.Info("ssh_exec completed", "target", target, "output", strings.TrimSpace(string(output)))
 	return nil

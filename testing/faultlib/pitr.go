@@ -281,8 +281,8 @@ func validatePITR(f Failure) error {
 		if what == "external_inject" && spec.Type == "" {
 			continue // unset: the inject is used
 		}
-		if spec.Type != "shell_exec" {
-			return fmt.Errorf("fault %q: a pitr fault's %s must be shell_exec (only its output is kept, and it must print %s), not %q", f.ID, what, PITRMarker, spec.Type)
+		if spec.Type != "shell_exec" && spec.Type != "ssh_exec" {
+			return fmt.Errorf("fault %q: a pitr fault's %s must be shell_exec or ssh_exec (only their output is kept, and it must print %s), not %q", f.ID, what, PITRMarker, spec.Type)
 		}
 		if !strings.Contains(spec.ScriptInline+spec.Script, PITRMarker) {
 			return fmt.Errorf("fault %q: the %s script never prints a %s line", f.ID, what, PITRMarker)

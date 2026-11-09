@@ -422,7 +422,7 @@ func TestCatalog_DroppedTableFaults_AreWellFormed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"db-pitr-dropped-table", "db-pitr-dropped-table-k8s"} {
+	for _, id := range []string{"db-pitr-dropped-table", "db-pitr-dropped-table-k8s", "db-pitr-dropped-table-vm"} {
 		var f Failure
 		for _, c := range cat.Failures {
 			if c.ID == id {
@@ -441,7 +441,8 @@ func checkDroppedTableFault(t *testing.T, f Failure) {
 	if f.PITR == nil || f.PITR.Type() != "time" || !f.PITR.AllowStopServing {
 		t.Errorf("pitr spec = %+v: the dropped table leaves the database serving, so the approval must allow stopping it", f.PITR)
 	}
-	wantConn := map[string]string{"db-pitr-dropped-table": "pgbackrest-db", "db-pitr-dropped-table-k8s": "pgbackrest-k8s-destruct"}[f.ID]
+	// The VM faults name no override: their target is the one --agent-conn gives.
+	wantConn := map[string]string{"db-pitr-dropped-table": "pgbackrest-db", "db-pitr-dropped-table-k8s": "pgbackrest-k8s-destruct", "db-pitr-dropped-table-vm": ""}[f.ID]
 	if f.DiagnosisPlaybookSeriesID != "pbs_pgbackrest_pitr_triage" || f.AgentConnOverride != wantConn || f.DirectAgent != "sysadmin" {
 		t.Errorf("routing = %q %q %q, want conn %q", f.DiagnosisPlaybookSeriesID, f.AgentConnOverride, f.DirectAgent, wantConn)
 	}
