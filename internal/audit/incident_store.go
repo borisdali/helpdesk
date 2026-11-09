@@ -47,6 +47,17 @@ type Incident struct {
 	ResolvedAt            time.Time `json:"resolved_at,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+
+	// TargetKey is the infrastructure.json db_servers key of the database the
+	// incident is about, resolved once when the incident is created (by
+	// infra.ResolveTarget, the same rules the agents use). Empty when the
+	// target was missing, unknown or ambiguous: TargetInput then says what was
+	// sent, so an unresolved incident can be found and is never silently
+	// attributed to a database it may not be about.
+	TargetKey string `json:"target_key,omitempty"`
+	// TargetInput is the target as the caller sent it (a key, alias or
+	// connection string), credentials masked.
+	TargetInput string `json:"target_input,omitempty"`
 }
 
 // IncidentUpdate carries the mutable subset of Incident fields for a partial
@@ -138,6 +149,10 @@ func (s *IncidentStore) migrate() error {
 		// populated by whichever /from-trace call succeeds for this
 		// incident's trace_id (see handlePlaybookFromTrace).
 		{"draft_playbook_id", `ALTER TABLE incidents ADD COLUMN draft_playbook_id TEXT NOT NULL DEFAULT ''`},
+		// v0.35: which database the incident is about, resolved at creation
+		// (see Incident.TargetKey). Incidents from before this column have ''.
+		{"target_key", `ALTER TABLE incidents ADD COLUMN target_key TEXT NOT NULL DEFAULT ''`},
+		{"target_input", `ALTER TABLE incidents ADD COLUMN target_input TEXT NOT NULL DEFAULT ''`},
 	} {
 		if _, err := s.db.Exec(col.ddl); err != nil {
 			// SQLite says "duplicate column name: X"; Postgres says
@@ -174,10 +189,12 @@ func (s *IncidentStore) Create(ctx context.Context, inc *Incident) error {
 		INSERT INTO incidents
 		    (incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		     attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		     target_key, target_input,
 		     detected_at, resolved_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		inc.IncidentID, inc.TraceID, inc.EntryRunID, inc.SeriesID, inc.Origin, inc.Severity, inc.Status,
 		inc.Attribution, inc.ExternalCorrelationID, inc.BundlePath, inc.DraftPlaybookID,
+		inc.TargetKey, inc.TargetInput,
 		inc.DetectedAt.Format("2006-01-02 15:04:05"),
 		formatNullableTime(inc.ResolvedAt),
 		inc.CreatedAt.Format("2006-01-02 15:04:05"),
@@ -263,6 +280,7 @@ func (s *IncidentStore) GetByID(ctx context.Context, incidentID string) (*Incide
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		       target_key, target_input,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE incident_id = ?`), incidentID)
@@ -277,6 +295,7 @@ func (s *IncidentStore) GetByEntryRunID(ctx context.Context, runID string) (*Inc
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		       target_key, target_input,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE entry_run_id = ?`), runID)
@@ -292,6 +311,7 @@ func (s *IncidentStore) GetByTraceID(ctx context.Context, traceID string) (*Inci
 	row := s.db.QueryRowContext(ctx, rebind(s.isPostgres, `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		       target_key, target_input,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE trace_id = ?`), traceID)
@@ -310,7 +330,9 @@ type IncidentListFilter struct {
 	// series) fetch the matching incidents-table rows (origin/status/
 	// bundle_path/draft_playbook_id) in one call instead of one per run.
 	SeriesID string
-	Limit    int
+	// TargetKey filters to incidents about one database (its db_servers key).
+	TargetKey string
+	Limit     int
 }
 
 // List returns incidents matching filter, most recently detected first.
@@ -322,6 +344,7 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 	query := `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
+		       target_key, target_input,
 		       detected_at, resolved_at, created_at, updated_at
 		FROM incidents
 		WHERE 1=1`
@@ -341,6 +364,10 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 	if filter.SeriesID != "" {
 		query += " AND series_id = ?"
 		args = append(args, filter.SeriesID)
+	}
+	if filter.TargetKey != "" {
+		query += " AND target_key = ?"
+		args = append(args, filter.TargetKey)
 	}
 	query += fmt.Sprintf(" ORDER BY detected_at DESC LIMIT %d", limit)
 
@@ -371,6 +398,7 @@ func scanIncident(s incidentScanner) (*Incident, error) {
 	if err := s.Scan(
 		&inc.IncidentID, &inc.TraceID, &inc.EntryRunID, &inc.SeriesID, &inc.Origin, &inc.Severity, &inc.Status,
 		&inc.Attribution, &inc.ExternalCorrelationID, &inc.BundlePath, &inc.DraftPlaybookID,
+		&inc.TargetKey, &inc.TargetInput,
 		&detectedStr, &resolvedStr, &createdStr, &updatedStr,
 	); err != nil {
 		return nil, err

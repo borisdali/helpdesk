@@ -362,6 +362,53 @@ func TestIncidentStore_List_SeriesIDFilter(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_TargetKey_RoundTripsAndFilters(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	seed := []*Incident{
+		{EntryRunID: "plr_a", TargetKey: "prod-main", TargetInput: "host=db1 port=5432 password=***"},
+		{EntryRunID: "plr_b", TargetKey: "prod-main", TargetInput: "prod-main"},
+		{EntryRunID: "plr_c", TargetKey: "vm-pg", TargetInput: "vm-pg"},
+		{EntryRunID: "plr_d", TargetInput: "no-such-server"}, // unresolved
+	}
+	for _, inc := range seed {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	got, err := s.GetByEntryRunID(ctx, "plr_a")
+	if err != nil {
+		t.Fatalf("GetByEntryRunID: %v", err)
+	}
+	if got.TargetKey != "prod-main" || got.TargetInput != "host=db1 port=5432 password=***" {
+		t.Errorf("round trip lost the target: %+v", got)
+	}
+	byTrace := &Incident{TraceID: "tr_t", EntryRunID: "plr_e", TargetKey: "vm-pg"}
+	if err := s.Create(ctx, byTrace); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetByTraceID(ctx, "tr_t"); err != nil || got.TargetKey != "vm-pg" {
+		t.Errorf("GetByTraceID target = %+v, %v", got, err)
+	}
+
+	prod, err := s.List(ctx, IncidentListFilter{TargetKey: "prod-main"})
+	if err != nil || len(prod) != 2 {
+		t.Fatalf("List(target_key=prod-main) = %d, %v; want 2", len(prod), err)
+	}
+	for _, inc := range prod {
+		if inc.TargetKey != "prod-main" {
+			t.Errorf("a %q incident came back for prod-main", inc.TargetKey)
+		}
+	}
+	// No filter returns the unresolved incident too: it is never dropped.
+	all, err := s.List(ctx, IncidentListFilter{})
+	if err != nil || len(all) != 5 {
+		t.Fatalf("List() = %d, %v; want 5", len(all), err)
+	}
+}
+
 func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()

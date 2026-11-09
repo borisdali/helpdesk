@@ -14,6 +14,7 @@ import (
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
 	"helpdesk/internal/discovery"
+	"helpdesk/internal/infra"
 
 	"github.com/a2aproject/a2a-go/a2aclient"
 )
@@ -229,7 +230,7 @@ func TestRecordPlaybookRunStart_IncidentCreateFails_RunStillReturned(t *testing.
 func TestCreateIncidentRecord_NoAuditURL_NoOp(t *testing.T) {
 	gw := &Gateway{}
 	// Should not panic and should simply return — no server configured.
-	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "")
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "", "")
 }
 
 func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
@@ -237,7 +238,7 @@ func TestCreateIncidentRecord_EmptyRunID_NoOp(t *testing.T) {
 	srv := mock.start(t)
 	gw := &Gateway{auditURL: srv.URL}
 
-	gw.createIncidentRecord(context.Background(), "", "trace_x", "pbs_x", "")
+	gw.createIncidentRecord(context.Background(), "", "trace_x", "pbs_x", "", "")
 
 	if calls := mock.calls(http.MethodPost, "/v1/incidents"); len(calls) != 0 {
 		t.Errorf("POST /v1/incidents calls = %d, want 0 when runID is empty", len(calls))
@@ -1294,7 +1295,7 @@ func TestCreateIncidentRecord_FaulttestOrigin_SetOnIncident(t *testing.T) {
 	srv := mock.start(t)
 	gw := &Gateway{auditURL: srv.URL}
 
-	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", audit.IncidentOriginFaulttest)
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", audit.IncidentOriginFaulttest, "")
 
 	calls := mock.calls(http.MethodPost, "/v1/incidents")
 	if len(calls) != 1 {
@@ -1309,6 +1310,101 @@ func TestCreateIncidentRecord_FaulttestOrigin_SetOnIncident(t *testing.T) {
 	}
 }
 
+// The incident is attributed to a database once, when it is created, by the
+// same rules the agents use. However the caller names the target (key, alias,
+// connection string with another password), the same database gets the same
+// key; anything that does not resolve to exactly one database gets none, and
+// the input is kept, masked, so it can be found.
+func TestCreateIncidentRecord_ResolvesTheTargetToADatabaseKey(t *testing.T) {
+	cfg := &infra.Config{DBServers: map[string]infra.DBServer{
+		"prod-main":  {Name: "Prod Main", ConnectionString: "host=db1.example.com port=5432 dbname=app user=u password=s3cret"},
+		"prod-other": {Name: "Prod Other", ConnectionString: "host=db2.example.com port=5432 dbname=app user=u"},
+	}}
+	tests := []struct {
+		name      string
+		target    string
+		wantKey   string
+		wantInput string
+	}{
+		{"the key", "prod-main", "prod-main", "prod-main"},
+		{"a DSN with a different password", "host=db1.example.com port=5432 dbname=app user=u password=other", "prod-main", "host=db1.example.com port=5432 dbname=app user=u password=***"},
+		{"a URI", "postgres://u:hunter2@db2.example.com:5432/app", "prod-other", "postgres://u:***@db2.example.com:5432/app"},
+		{"an unknown target", "no-such-server", "", "no-such-server"},
+		{"a bare port two servers share", "5432", "", "5432"},
+		{"no target", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockRunStartAuditd{}
+			srv := mock.start(t)
+			gw := &Gateway{auditURL: srv.URL, infra: cfg}
+
+			gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "", tc.target)
+
+			calls := mock.calls(http.MethodPost, "/v1/incidents")
+			if len(calls) != 1 {
+				t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+			}
+			var body audit.Incident
+			if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.TargetKey != tc.wantKey || body.TargetInput != tc.wantInput {
+				t.Errorf("target = (%q, %q), want (%q, %q)", body.TargetKey, body.TargetInput, tc.wantKey, tc.wantInput)
+			}
+			if strings.Contains(calls[0].body, "s3cret") || strings.Contains(calls[0].body, "hunter2") || strings.Contains(calls[0].body, "password=other") {
+				t.Errorf("a password reached the incident record: %s", calls[0].body)
+			}
+		})
+	}
+}
+
+func TestCreateIncidentRecord_NoInfraConfig_StillKeepsTheInput(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL}
+
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "", "prod-main")
+
+	var body audit.Incident
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.TargetKey != "" || body.TargetInput != "prod-main" {
+		t.Errorf("target = (%q, %q), want an unresolved key and the input kept", body.TargetKey, body.TargetInput)
+	}
+}
+
+// Through the real entry point: a run started against a DSN lands as an
+// incident about the database that DSN names.
+func TestRecordPlaybookRunStart_EntryRun_ThreadsTheTargetToTheIncident(t *testing.T) {
+	mock := &mockRunStartAuditd{}
+	srv := mock.start(t)
+	gw := &Gateway{auditURL: srv.URL, infra: &infra.Config{DBServers: map[string]infra.DBServer{
+		"vm-pg": {ConnectionString: "host=pgbackrest-vm.test port=5433 dbname=postgres"},
+	}}}
+
+	pb := &audit.Playbook{PlaybookID: "pb_test", SeriesID: "series1"}
+	gw.recordPlaybookRunStart(context.Background(), pb, "ctx1", "host=pgbackrest-vm.test port=5433 dbname=postgres user=a password=b", "", "diagnostic",
+		"trace_abc", "", "", "operator1", "")
+
+	calls := mock.calls(http.MethodPost, "/v1/incidents")
+	if len(calls) != 1 {
+		t.Fatalf("POST /v1/incidents calls = %d, want 1", len(calls))
+	}
+	var body audit.Incident
+	if err := json.Unmarshal([]byte(calls[0].body), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.TargetKey != "vm-pg" {
+		t.Errorf("TargetKey = %q, want vm-pg", body.TargetKey)
+	}
+}
+
 func TestCreateIncidentRecord_UnrecognizedOrigin_TreatedAsUnset(t *testing.T) {
 	mock := &mockRunStartAuditd{}
 	srv := mock.start(t)
@@ -1318,7 +1414,7 @@ func TestCreateIncidentRecord_UnrecognizedOrigin_TreatedAsUnset(t *testing.T) {
 	// the incidents table verbatim — only the recognized "faulttest" value
 	// survives; anything else is treated the same as unset (IncidentStore.Create
 	// then defaults it to "real" server-side).
-	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "not-a-real-origin-value")
+	gw.createIncidentRecord(context.Background(), "plr_x", "trace_x", "pbs_x", "not-a-real-origin-value", "")
 
 	calls := mock.calls(http.MethodPost, "/v1/incidents")
 	if len(calls) != 1 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2859,9 +2860,30 @@ func (g *Gateway) recordPlaybookRunStartRT(ctx context.Context, pb *audit.Playbo
 		// this is where the incidents table's one row per user-facing
 		// incident gets created. See docs/INCIDENTS.md and the v0.29
 		// incident-entity design (Phase 1).
-		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID, origin)
+		g.createIncidentRecord(ctx, created.RunID, traceID, pb.SeriesID, origin, connStr)
 	}
 	return created.RunID
+}
+
+// resolveIncidentTarget resolves the target a run was started against (an
+// infra key, an alias or a connection string, as the caller sent it) to the
+// db_servers key it names, by the same rules the agents use
+// (infra.ResolveTarget). The key is empty, never a guess, when there is no
+// infra config, no target, no match or an ambiguous one; input is always the
+// target as sent with credentials masked, so such an incident can be found.
+func (g *Gateway) resolveIncidentTarget(target string) (key, input string) {
+	input = audit.RedactConnString(strings.TrimSpace(target))
+	if g.infra == nil || input == "" {
+		return "", input
+	}
+	key, err := g.infra.ResolveTarget(target)
+	if err != nil {
+		if !errors.Is(err, infra.ErrTargetNotFound) {
+			slog.Warn("incident target not attributed to a database", "target", input, "err", err)
+		}
+		return "", input
+	}
+	return key, input
 }
 
 // createIncidentRecord creates the incidents table row for a genuine
@@ -2875,18 +2897,21 @@ func (g *Gateway) recordPlaybookRunStartRT(ctx context.Context, pb *audit.Playbo
 // Best-effort: a failure here must never block the playbook run itself, so it
 // only logs — recordPlaybookRunStart's caller already has the run ID it needs
 // regardless of whether this succeeds.
-func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID, origin string) {
+func (g *Gateway) createIncidentRecord(ctx context.Context, runID, traceID, seriesID, origin, target string) {
 	if g.auditURL == "" || runID == "" {
 		return
 	}
 	if origin != audit.IncidentOriginFaulttest {
 		origin = ""
 	}
+	targetKey, targetInput := g.resolveIncidentTarget(target)
 	inc := audit.Incident{
-		TraceID:    traceID,
-		EntryRunID: runID,
-		SeriesID:   seriesID,
-		Origin:     origin,
+		TraceID:     traceID,
+		EntryRunID:  runID,
+		SeriesID:    seriesID,
+		Origin:      origin,
+		TargetKey:   targetKey,
+		TargetInput: targetInput,
 	}
 	body, err := json.Marshal(inc)
 	if err != nil {
