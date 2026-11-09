@@ -71,6 +71,26 @@ func TestResolveTarget_SamePortDifferentHosts(t *testing.T) {
 	}
 }
 
+// Two entries on one host and port that differ only by database name cannot be
+// told apart by a target that names them by host and port: it is refused, not
+// matched to one, so an incident is never attributed to the wrong one. Naming
+// the entry by its key still works. (A DSN's dbname is not used to break the
+// tie: today's agents do not either, and the two must agree.)
+func TestResolveTarget_SameHostAndPortDifferentDatabase(t *testing.T) {
+	cfg := &Config{DBServers: map[string]DBServer{
+		"app-db":     {ConnectionString: "host=shared.example.com port=5432 dbname=app"},
+		"reports-db": {ConnectionString: "host=shared.example.com port=5432 dbname=reports"},
+	}}
+	_, err := cfg.ResolveTarget("host=shared.example.com port=5432 dbname=app user=u")
+	var amb *AmbiguousTargetError
+	if !errors.As(err, &amb) || strings.Join(amb.Matches, ",") != "app-db,reports-db" {
+		t.Fatalf("err = %v, want an ambiguity between app-db and reports-db", err)
+	}
+	if got, err := cfg.ResolveTarget("reports-db"); err != nil || got != "reports-db" {
+		t.Errorf("by key = %q, %v", got, err)
+	}
+}
+
 func TestResolveTarget_AmbiguousNames(t *testing.T) {
 	cfg := targetFixture()
 	for _, tc := range []struct{ target, by string }{

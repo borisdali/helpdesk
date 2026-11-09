@@ -504,6 +504,14 @@ func TestIncidentStore_MigrateAddsSeriesID(t *testing.T) {
 	if got.SeriesID != "" {
 		t.Errorf("SeriesID = %q, want empty-string default for a pre-existing row", got.SeriesID)
 	}
+	// An incident from before v0.35 has no database: empty, not an error, and
+	// it is not matched by any target_key filter.
+	if got.TargetKey != "" || got.TargetInput != "" {
+		t.Errorf("a pre-existing row has target (%q, %q), want empty", got.TargetKey, got.TargetInput)
+	}
+	if listed, err := s.List(context.Background(), IncidentListFilter{TargetKey: "prod-main"}); err != nil || len(listed) != 0 {
+		t.Errorf("target_key filter matched a pre-existing row: %d, %v", len(listed), err)
+	}
 
 	// New rows can set series_id without collision.
 	newInc := &Incident{EntryRunID: "plr_new", SeriesID: "pbs_new_series"}

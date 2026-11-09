@@ -82,6 +82,72 @@ func TestIncidentHandlers_Create_SeriesIDSurvivesRoundTrip(t *testing.T) {
 	}
 }
 
+// The gateway sends the database an incident is about in the create body; it
+// must survive the HTTP handler and come back on both GET and the list filter.
+func TestIncidentHandlers_Create_TargetSurvivesRoundTripAndFilters(t *testing.T) {
+	srv := newIncidentServer(t)
+
+	for _, body := range []map[string]any{
+		{"entry_run_id": "plr_a", "target_key": "prod-main", "target_input": "host=db1 port=5432 password=***"},
+		{"entry_run_id": "plr_b", "target_key": "prod-main", "target_input": "prod-main"},
+		{"entry_run_id": "plr_c", "target_key": "vm-pg", "target_input": "vm-pg"},
+		{"entry_run_id": "plr_d", "target_input": "no-such-server"},
+	} {
+		data, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %v: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	list := func(query string) []audit.Incident {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.handleList(rec, httptest.NewRequest(http.MethodGet, "/v1/incidents"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list%s: %d %s", query, rec.Code, rec.Body.String())
+		}
+		var result struct {
+			Incidents []audit.Incident `json:"incidents"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return result.Incidents
+	}
+
+	prod := list("?target_key=prod-main")
+	if len(prod) != 2 {
+		t.Fatalf("?target_key=prod-main = %d incidents, want 2", len(prod))
+	}
+	for _, inc := range prod {
+		if inc.TargetKey != "prod-main" || inc.TargetInput == "" {
+			t.Errorf("incident lost its target: %+v", inc)
+		}
+	}
+	if got := list("?target_key=nothing-here"); len(got) != 0 {
+		t.Errorf("an unknown key matched %d incidents", len(got))
+	}
+	// Without the filter the unresolved incident is still listed, with its input.
+	all := list("")
+	if len(all) != 4 {
+		t.Fatalf("unfiltered list = %d, want 4", len(all))
+	}
+	unresolved := 0
+	for _, inc := range all {
+		if inc.TargetKey == "" {
+			unresolved++
+			if inc.TargetInput != "no-such-server" {
+				t.Errorf("the unresolved incident lost its input: %+v", inc)
+			}
+		}
+	}
+	if unresolved != 1 {
+		t.Errorf("unresolved incidents = %d, want 1", unresolved)
+	}
+}
+
 func TestIncidentHandlers_Create_InvalidJSON(t *testing.T) {
 	srv := newIncidentServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader([]byte("not json")))
