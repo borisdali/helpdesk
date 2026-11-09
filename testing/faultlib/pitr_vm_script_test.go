@@ -109,9 +109,11 @@ func TestDroppedTableVMInject_RealBash(t *testing.T) {
 			if lsn, err := ParsePITRMarker(out, "lsn"); err != nil || lsn.Value != "0/4000028" {
 				t.Errorf("lsn = %+v, %v", lsn, err)
 			}
-			// The order the fault depends on: rows, backup, target, then the damage.
+			// The order the fault depends on: rows, backup, a write (so the LSN
+			// read next is where a record starts, not a segment's bare start),
+			// target, then the damage.
 			pos := func(needle string) int { return strings.Index(log, needle) }
-			order := []string{"INSERT INTO pitr_orders", "pgbackrest --stanza=main --type=incr backup", "to_char(clock_timestamp()", "CREATE TABLE pitr_after_drop", "DROP TABLE pitr_orders"}
+			order := []string{"INSERT INTO pitr_orders", "pgbackrest --stanza=main --type=incr backup", "SQL: SELECT txid_current()", "to_char(clock_timestamp()", "pg_current_wal_lsn", "CREATE TABLE pitr_after_drop", "DROP TABLE pitr_orders"}
 			for i, n := range order {
 				if pos(n) < 0 {
 					t.Fatalf("the script never ran %q:\n%s", n, log)
@@ -163,7 +165,7 @@ func TestDroppedTableVMTeardown_RealBash(t *testing.T) {
 		ir := strings.Index(log, "pgbackrest --stanza=main --delta restore")
 		is := strings.Index(log, "sudo systemctl restart")
 		id := strings.Index(log, "SQL: DROP TABLE IF EXISTS pitr_orders")
-		if ir < 0 || is < 0 || id < 0 || !(ir < is && is < id) {
+		if ir < 0 || is < 0 || id < 0 || ir >= is || is >= id {
 			t.Errorf("want the restore, then the restart, then the drops; got positions %d %d %d:\n%s", ir, is, id, log)
 		}
 	})

@@ -20,7 +20,7 @@ How to read the status column:
 | Piece | What it is | Can run on |
 |---|---|---|
 | **Client** | the operator's `helpdesk-client` or the `faulttest` harness | laptop, a Docker container, a K8s Job (faulttest, via Helm) |
-| **aiHelpDesk services** | gateway, orchestrator, the agents (database, sysadmin, k8s, incident, research) and auditd: the control plane and the governance half of the management plane ([Planes](PLANES.md)) | host processes (`startall.sh`, systemd), Docker Compose, K8s (Helm) |
+| **aiHelpDesk services** | gateway orchestrator, the agents (database, sysadmin, k8s, incident, research) and auditd: the control plane and the governance half of the management plane ([Planes](PLANES.md)) | host processes (`startall.sh`, systemd), Docker Compose, K8s (Helm) |
 | **auditd storage** | the audit and playbook-run database | SQLite (a file, a Docker volume, a PVC) or a **dedicated** Postgres |
 | **Target PostgreSQL** | the database being diagnosed and repaired | a Docker/Podman container, a systemd VM or host, a K8s Pod, an operator-managed cluster, a managed cloud service |
 | **pgBackRest** | the stanza and repository of a target | the same container, VM or pod as the target (a volume or local path); a remote repository is not handled by the restore ([§6](#6-not-supported-or-not-verified)) |
@@ -56,13 +56,13 @@ the operator CLI never touches the target.
 
 **Services on a laptop, database on a Linux VM.** A common host-process setup: the gateway and agents run on your
 laptop (unpacked from `make binaries`, started with `startall.sh`) and the database and pgBackRest repository run on
-a VM reached over SSH. The agent needs a route to the VM's SSH port and PostgreSQL port, and the VM's name resolving on
+a VM reached over SSH. The agent needs a route to the VM's SSH port and PostgreSQL port and the VM's name resolving on
 the laptop. The agent checks the VM's host key against `~/.ssh/known_hosts` (or `SSH_KNOWN_HOSTS`) and, if that file
 is absent, logs a warning and skips the check. Set both `HELPDESK_INFRA_CONFIG` (in the `.env` that
 `startall.sh` reads) and each VM's `ssh_key_path` to **absolute** paths: a relative path resolves against the agent's
 working directory and fails with a key-read error (`check_host` reports it). An agent started before the setting
 changed keeps the old infra file, so restart it and check `HELPDESK_INFRA_CONFIG` in its environment. A laptop that
-sleeps, or a VM that hibernates, shows up as an SSH `i/o timeout` and nothing else.
+sleeps or a VM that hibernates, shows up as an SSH `i/o timeout` and nothing else.
 
 ## 3. What aiHelpDesk can do per target
 
@@ -102,17 +102,24 @@ Each row is a recorded run; the incident IDs are in the vault (`faulttest vault 
 | laptop | K8s | pod | `db-pitr-dropped-table-k8s` (a table dropped on the running pod: plan, gate held at `recovery_target_required`, running pod flushed, stopped and restored to the target, resumed, rows checked), 121.9s after injection | `plr_5e4dba37` (remediation `plr_bcbb05cf`), 2026-10-28 |
 | laptop | host processes | Docker container | `db-pitr-dropped-table` (a table dropped on the running container: plan, gate held, running container flushed, stopped and restored in a throwaway container, restarted, rows checked), 106.1s after injection | `plr_245be7fb` (remediation `plr_52c37957`), 2026-10-28 |
 | laptop | host processes | Ubuntu VM over SSH | point-in-time restore of a table dropped on the running VM, started by hand: triage with a time target, plan read with `helpdesk-client --pitr-plan`, gate approved with `--pitr-approve ... --allow-stop-serving`; live instance flushed, stopped with `sudo systemctl stop`, restored from an incremental backup, restarted; log and rows checked by hand (timeline 44 to 45) | `plr_2577a3bc` (remediation `plr_1516145c`), 2026-10-29 |
-| `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify, and point-in-time restore of a crashed pod and of a **running** one (stop, scale to 0, one-off-pod restore, resume) (`make integration-k8s`, 28 checks; needs `K8S_SYSADMIN_API_KEY` on a release that enforces identity) | 2026-10-28 |
-| `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | point-in-time restore to a time and to an LSN, of a stopped and of a **running** instance (archive flushed, clean stop, restore in a throwaway container, `restart_container`), a target the archive never reaches then retried, and the catalog fault `db-pitr-dropped-table` from inject to `verify_sql` | `agents/sysadmin` `pitr_integration_test.go` |
+| laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm` (v0.34; no objective on the VM entry, so the plan shows the loss and compares with the 1h default): plan, gate held, running instance flushed, stopped with `sudo systemctl stop`, restored in place, restarted, rows checked by `verify_sql`; `recovery_decision` trail checked (plan, gate, execution, outcome; chain verifies), 106 to 110s after injection | `plr_0d09e035` (remediation `plr_c18e7bbd`), 2026-11-09 |
+| laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm` with `rpo: 1s`, `enforcement: acknowledge` on the VM entry: plan `exceeds` (8s against 1s), the harness acknowledged the breach as the operator, the loss re-measured at 1m 10s before the stop, recovery 39s against an RTO of 30m; trail checked | `plr_630c3539` (remediation `plr_cf7bac2a`), 2026-11-09 |
+| laptop | host processes | Ubuntu VM over SSH | the same, after the attribution classes were described: the run is filed `pitr-plan-feasible` (`plr_630c3539` had been filed `pitr-plan-not-feasible`) | `plr_69ea0730` (remediation `plr_3321e843`), 2026-11-09 |
+| laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm-lsn` (an LSN target, same objective): verdict `not_comparable` (the target segment was not archived yet, so no lower bound), no second yes asked for, restore stopped at `0/3C000028`, 40 bytes past the target (the first record after a segment's page header); trail checked | `plr_fb5a9f6b` (remediation `plr_eb2a2741`), 2026-11-09 |
+| `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify and point-in-time restore of a crashed pod and of a **running** one (stop, scale to 0, one-off-pod restore, resume) (`make integration-k8s`, 28 checks; needs `K8S_SYSADMIN_API_KEY` on a release that enforces identity) | 2026-10-28 |
+| `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | point-in-time restore to a time and to an LSN, of a stopped and of a **running** instance (archive flushed, clean stop, restore in a throwaway container, `restart_container`), a target the archive never reaches then retried and the catalog fault `db-pitr-dropped-table` from inject to `verify_sql` | `agents/sysadmin` `pitr_integration_test.go` |
 
 Not yet run: the destructive teardown *repair* branch of `db-pgdata-corrupted-k8s` from a Job (the pod had
 recovered, so the teardown found nothing to repair).
 
-Point-in-time recovery (v0.33) has run with a live model once on a Kubernetes pod, once on the Docker fixture (100%
+Point-in-time recovery (v0.33) has run with a live model once on a K8s Pod, once on the Docker fixture (100%
 remediation each; both plans reported `archive_flush_required=true`, so the flush-first branch has run on both) and
-once on a systemd VM over SSH, the last by hand rather than as a catalog fault (there is no VM PITR fault yet). The VM
-needs `systemctl stop <unit>` in its sudoers file, which `setup-pgbackrest-vm.sh` grants. One run per platform says the
-chain works, not how often.
+once on a systemd VM over SSH, the last by hand. Since v0.34 the VM has catalog faults too (`db-pitr-dropped-table-vm`
+and `-vm-lsn`, run from the `faulttest` CLI with `--external=false`; see [FAULTTEST.md §6.6](FAULTTEST.md#point-in-time-faults-on-a-vm)),
+and the four runs above are those. The VM needs `systemctl stop <unit>` in its sudoers file, which
+`setup-pgbackrest-vm.sh` grants. One run per case says the chain works, not how often. The v0.34 objective check
+(`exceeds` with the second yes, `not_comparable` for an LSN) has run live on the Docker fixture and on the VM, not yet on a
+K8s Pod.
 
 ### Where the faulttest client can run
 
