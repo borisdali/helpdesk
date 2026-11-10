@@ -2,6 +2,7 @@ package availability
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +168,37 @@ func TestEstimateRecovery_SetAgainstTheDeclaredRTO(t *testing.T) {
 	few := EstimateRecovery(resolved(10), []string{restoreSeries}, now, EstimateWindow, rto(time.Minute))
 	if few.VsRTO != "" || few.OverRTO != nil {
 		t.Errorf("a comparison from one sample: %+v", few)
+	}
+}
+
+// A restore that began before the window and finished inside it is counted: the
+// window is about when recoveries happened, and this one ended inside it. One that
+// began and ended before it is not.
+func TestEstimateRecovery_ARunStraddlingTheWindowStartCountsIfItFinishedInside(t *testing.T) {
+	window := 90 * 24 * time.Hour
+	straddle := audit.RunSpan{SeriesID: restoreSeries, Outcome: audit.OutcomeResolved,
+		StartedAt: now.Add(-window - time.Hour), CompletedAt: now.Add(-window + time.Hour)}
+	before := audit.RunSpan{SeriesID: restoreSeries, Outcome: audit.OutcomeResolved,
+		StartedAt: now.Add(-window - 3*time.Hour), CompletedAt: now.Add(-window - time.Hour)}
+	l := listingOf("real", []audit.RunSpan{straddle}, []audit.RunSpan{before}, []audit.RunSpan{restoreRun(audit.OutcomeResolved, 10*time.Minute, time.Hour)})
+	e := EstimateRecovery(l, []string{restoreSeries}, now, window, nil)
+	if e.Samples != 2 || e.Excluded != 0 {
+		t.Errorf("samples %d excluded %d: the run that finished inside the window should count, and the one wholly before it should not", e.Samples, e.Excluded)
+	}
+}
+
+// When the history cannot be read, what is reported says so in words, and carries
+// the reason, so it is never taken for there being no history.
+func TestUnavailableEstimate(t *testing.T) {
+	e := UnavailableEstimate(errors.New("auditd returned 503: starting"))
+	if e.Status != EstimateUnavailable || e.Samples != 0 || e.WindowSeconds != 90*86400 {
+		t.Errorf("%+v", e)
+	}
+	if !strings.Contains(e.Basis, "could not be read (auditd returned 503: starting)") || !strings.Contains(e.Basis, "no estimate") {
+		t.Errorf("basis = %q", e.Basis)
+	}
+	if e.Status == EstimateNone || e.P90Seconds != nil || e.VsRTO != "" {
+		t.Errorf("an unreadable history looks like an estimate or like none: %+v", e)
 	}
 }
 

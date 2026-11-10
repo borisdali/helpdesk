@@ -637,6 +637,45 @@ func TestAvailabilityClient_EstimateReadsTheRealHandlerOverHTTP(t *testing.T) {
 	}
 }
 
+// If the incidents can be read but their runs cannot, the listing is an error, not
+// a listing that quietly lacks the runs: a ledger would take those incidents for
+// ones that cost nothing, and an estimate would take them for no history.
+func TestIncidentHandlers_List_UnreadableRunsAreAnErrorNotAGap(t *testing.T) {
+	live, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "live.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { live.Close() })
+	is, err := audit.NewIncidentStore(live.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The run store lives in another database, which is then closed.
+	other, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "runs.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := audit.NewPlaybookRunStore(other.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Close()
+	srv := &incidentServer{store: is, runs: runs}
+
+	data, _ := json.Marshal(map[string]any{"entry_run_id": "plr_x", "target_key": "prod-orders"})
+	srv.handleCreate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+
+	// Without the option the listing is unaffected.
+	if got, code := listIncidents(t, srv, ""); code != http.StatusOK || len(got.Incidents) != 1 {
+		t.Fatalf("plain: %d %+v", code, got)
+	}
+	for _, q := range []string{"?include=series", "?include=runs", "?include=series,runs"} {
+		if _, code := listIncidents(t, srv, q); code != http.StatusInternalServerError {
+			t.Errorf("list%s with unreadable runs = %d, want 500", q, code)
+		}
+	}
+}
+
 func TestIncidentHandlers_List_StoreFailureIs500(t *testing.T) {
 	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {

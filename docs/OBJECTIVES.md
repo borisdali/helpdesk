@@ -328,9 +328,12 @@ The rules that keep it honest:
 
 - **Real incidents only.** A faulttest injection never counts. So a database that has only ever been restored by
   faulttest has no history and says so.
-- **Only restores that recovered.** Runs of the restore playbooks (`pbs_pgbackrest_pitr_remediate` and
+- **Only restores that ran.** Runs of the restore playbooks (`pbs_pgbackrest_pitr_remediate` and
   `pbs_pgbackrest_restore_remediate`, which are dominated by the same thing: the size of the data) that ended
-  `resolved`. A restore that failed took a time too, but was not a recovery; the count of runs left out is stated.
+  `resolved`. For a remediation run that means its own trace shows a write or destructive tool call that succeeded:
+  the restore itself ran. A restore that failed, or did nothing (its precondition failed), took a time too, but was not
+  a recovery; the count of runs left out is stated. `resolved` does not mean the verification afterwards passed: a
+  restore that ran and then reported a recovery mismatch is still counted, as the time it took to do the restore.
 - **Only this database.** Another database's restores say little about this one's, so there is no fallback to the
   fleet. With fewer than three samples the status is `insufficient_history` and with none `no_history`; the declared
   `rto` then stands alone, exactly as before.

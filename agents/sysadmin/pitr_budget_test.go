@@ -416,6 +416,85 @@ func TestPlan_HistoryDecidesWhatTheBudgetIsComparedWith(t *testing.T) {
 	}
 }
 
+// The names helpdesk-client reads for the estimate are the ones the agent writes:
+// a renamed field would otherwise read as "no estimate" on the other side, and the
+// operator would see nothing about how long restores here have taken.
+func TestPlanJSON_CarriesTheEstimateNamesTheClientReads(t *testing.T) {
+	withLedger(t, 10*time.Minute, nil)
+	withEstimate(t, restoresThatTook(40, 45, 50), nil)
+	budgetObjectives(t, "", "warn")
+	_, _ = liveEnv(t)
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	raw, _ := json.Marshal(plan)
+	var m struct {
+		B map[string]any `json:"availability_budget"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"duration_basis", "duration_seconds", "recovery_estimate"} {
+		if _, ok := m.B[k]; !ok {
+			t.Errorf("availability_budget.%s missing from %s", k, raw)
+		}
+	}
+	est, _ := m.B["recovery_estimate"].(map[string]any)
+	for _, k := range []string{"status", "basis", "vs_rto", "vs_rto_detail", "samples", "p50_seconds", "p90_seconds"} {
+		if _, ok := est[k]; !ok {
+			t.Errorf("recovery_estimate.%s missing from %s", k, raw)
+		}
+	}
+}
+
+// Nothing stubbed on the way: the agent reads the history of past restores
+// through the real client, from a listing shaped as auditd writes it, and the
+// verdict is made on it. Only the ledger and the history are served by the fake
+// auditd; everything between it and the verdict is the real code.
+func TestBudgetCheckFor_UsesHistoryReadThroughTheRealClient(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	restore := func(minutes int) audit.IncidentWithSeries {
+		end := now.Add(-48 * time.Hour)
+		return audit.IncidentWithSeries{
+			Incident:  &audit.Incident{IncidentID: "inc_r", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusResolved, TargetKey: "pgbackrest_db"},
+			SeriesIDs: []string{"pbs_pgbackrest_pitr_remediate"},
+			Runs: []audit.RunSpan{{SeriesID: "pbs_pgbackrest_pitr_remediate", Outcome: audit.OutcomeResolved,
+				StartedAt: end.Add(-time.Duration(minutes) * time.Minute), CompletedAt: end}},
+		}
+	}
+	history := audit.IncidentListing{Incidents: []audit.IncidentWithSeries{restore(35), restore(45), restore(55)}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case strings.Contains(q.Get("include"), "runs"):
+			_ = json.NewEncoder(w).Encode(history)
+		default: // the ledger's two reads: nothing spent, nothing unattributed
+			_ = json.NewEncoder(w).Encode(audit.IncidentListing{Incidents: []audit.IncidentWithSeries{}})
+		}
+	}))
+	defer srv.Close()
+
+	oldClient, oldLedger, oldEst := ledgerClient, budgetLedgerFn, recoveryEstimateFn
+	t.Cleanup(func() { ledgerClient, budgetLedgerFn, recoveryEstimateFn = oldClient, oldLedger, oldEst })
+	ledgerClient, budgetLedgerFn, recoveryEstimateFn = &availability.Client{URL: srv.URL}, readLedger, readEstimate
+	budgetObjectives(t, "", "acknowledge") // 43m12s budget, nothing spent, rto 30m
+
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	// 43m12s left covers the declared rto of 30m, but not what restores here have taken (p90 55m).
+	if v.Status != availability.BudgetMayExceed || v.DurationBasis != availability.DurationFromHistory || *v.DurationSeconds != 55*60 {
+		t.Fatalf("verdict = %+v", v)
+	}
+	e := v.RecoveryEstimate
+	if e == nil || e.Status != availability.EstimateEstimated || e.Samples != 3 || *e.P50Seconds != 45*60 || e.VsRTO != "exceeds" || *e.OverRTO != 3 {
+		t.Errorf("estimate = %+v", e)
+	}
+	if v.Gate != availability.GateAcknowledge {
+		t.Errorf("gate = %q: a restore history says may not fit asks under acknowledge", v.Gate)
+	}
+}
+
 // Long restores make a restore that may not fit ask, and never refuse.
 func TestRestore_HistoryNeverMakesARestoreRefused(t *testing.T) {
 	withLedger(t, 10*time.Minute, nil)
