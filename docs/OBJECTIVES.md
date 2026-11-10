@@ -27,6 +27,7 @@ documented where they appear.
    - [5.2 The availability budget](#52-the-availability-budget)
    - [5.3 The availability ledger](#53-the-availability-ledger)
    - [5.4 The budget at the gate](#54-the-budget-at-the-gate)
+   - [5.5 The recovery-time estimate](#55-the-recovery-time-estimate)
 6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
@@ -105,12 +106,12 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
   honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
   restore before the instance is stopped. The downtime a restore costs has its own setting,
-  `availability_enforcement`, below, and the `rto` is shown against what a recovery took, after the fact.
-- **`availability_enforcement`** is `warn`, `acknowledge` or `refuse`, and says what happens when a restore is
+  `availability_enforcement`, below and the `rto` is shown against what a recovery took, after the fact.
+- **`availability_enforcement`** is `warn`, `acknowledge` or `refuse` and says what happens when a restore is
   expected to breach the availability budget ([§5.4](#54-the-budget-at-the-gate)). It is its own setting and not
   `enforcement`'s, because an existing `enforcement: refuse` means "refuse a restore that loses too much data" and
   must not start refusing restores for a budget it never named. Unset means `warn`. It follows the same rules as
-  `enforcement`: an invalid value, inherited or not, and a database that names an environment that is not declared
+  `enforcement`: an invalid value, inherited or not and a database that names an environment that is not declared
   and sets none of its own, are treated as `acknowledge`, never as `warn`.
 - Both are exact lowercase strings. `Refuse` is an error, not a guess.
 
@@ -218,52 +219,65 @@ Availability budget: prod-orders
   Left     23m 12s
 ```
 
-What counts, and what is said about what does not:
+What counts and what is said about what does not:
 
-- **Real incidents only.** A faulttest injection never counts, and the ledger says how many it left out.
-- **Only outages are charged.** An incident is classified by the worst playbook among all the runs it spanned
-  ([§5.1](#51-which-incidents-spend-the-availability-budget)). Degraded and harmless incidents, and ones whose
+- **Real incidents only.**   
+  A faulttest injection never counts and the ledger says how many it left out.
+
+- **Only outages are charged.**   
+  An incident is classified by the worst playbook among all the runs it spanned
+  ([§5.1](#51-which-incidents-spend-the-availability-budget)). Degraded and harmless incidents and ones whose
   playbooks declare nothing (`unclassified`), are listed beside the charge and cost nothing.
-- **Only a confirmed recovery is charged.** An outage that ended `escalated`, `needs_human` or `abandoned`, or that has
+
+- **Only a confirmed recovery is charged.**   
+  An outage that ended `escalated`, `needs_human` or `abandoned` or that has
   stayed open for more than a day (almost certainly a run that never finished), has an unknown real downtime. It is
-  listed as **unconfirmed** and not charged, and `remaining_worst_case` says what is left if all of it counts. An outage
+  listed as **unconfirmed** and not charged and `remaining_worst_case` says what is left if all of it counts. An outage
   still open and younger than a day is charged up to now.
-- **Duration is from detection to recovery.** It runs from the start of the incident's entry playbook run to the end of
+
+- **Duration is from detection to recovery.**   
+  It runs from the start of the incident's entry playbook run to the end of
   its last run, so it includes the wait for approvals and begins when aiHelpDesk was engaged, not when the failure
-  began. It is not measured downtime, and the output says so every time.
-- **Only the part inside the window is spent.** An incident that began before the window is clipped to it, and one that
+  began. It is not measured downtime and the output says so every time.
+
+- **Only the part inside the window is spent.**   
+  An incident that began before the window is clipped to it and one that
   ended before it is not counted.
-- **A database is found the way the agents find it.** `database` may be a key, a name, a container name or a connection
+
+- **A database is found the way the agents find it.**   
+  `database` may be a key, a name, a container name or a connection
   string; a bare port two servers share is refused (`409`). An incident is attributed to a database once, when it is
-  created ([INCIDENTS.md](INCIDENTS.md)); incidents that could not be attributed are in no database's ledger, and the
+  created ([INCIDENTS.md](INCIDENTS.md)); incidents that could not be attributed are in no database's ledger and the
   ledger says how many there were. Incidents recorded before v0.35 have no database and are among them.
-- **It never guesses.** If the incidents cannot be read from auditd the answer is an error, not an empty ledger. If the
-  page was full the ledger says it may be missing incidents. With no budget (no `availability_slo`, or one that cannot
+
+- **It never guesses.**   
+  If the incidents cannot be read from auditd the answer is an error, not an empty ledger. If the
+  page was full the ledger says it may be missing incidents. With no budget (no `availability_slo` or one that cannot
   be trusted) the spend is still listed and nothing is shown as remaining.
 
 ### 5.4 The budget at the gate
 
 A point-in-time restore costs downtime as well as data. Before it stops anything, the sysadmin agent sets what is
-left of the downtime budget (§5.3) against the restore, next to the data-loss estimate set against the `rpo`, and the
+left of the downtime budget (§5.3) against the restore, next to the data-loss estimate set against the `rpo` and the
 plan carries the result as `availability_budget` (`helpdesk-client --pitr-plan` prints it as `BUDGET CHECK`).
 
 It is evaluated in the agent, not at the gateway, for two reasons: only the agent knows whether the instance is
-**serving**, and it already measures again just before the stop, so the ledger is read at that moment too. The
+**serving** and it already measures again just before the stop, so the ledger is read at that moment too. The
 gateway's own ledger endpoint and the agent read it with the same code.
 
 How long the restore will take is not known: until there is an estimate from history, the declared `rto` stands in
 for it, as an upper bound. So a restore that does not fit in what is left only **may** exceed the budget (a restore
-can beat its `rto`), and that never refuses. Only a budget that is already spent is a certain breach.
+can beat its `rto`) and that never refuses. Only a budget that is already spent is a certain breach.
 
 | Verdict | When |
 |---|---|
 | `within` | what is left of the budget is at least the `rto` |
 | `may_exceed` | some is left, but less than the `rto` |
-| `exceeds` | the budget is already spent (nothing left, or overspent) |
+| `exceeds` | the budget is already spent (nothing left or overspent) |
 | `not_comparable` | there is budget left but no `rto` is declared, so how long the restore may take is not known |
-| `no_objective` | no `availability_slo` is set, or the target is not a configured database |
+| `no_objective` | no `availability_slo` is set or the target is not a configured database |
 | `objective_invalid` | the SLO or its window was set and could not be read |
-| `ledger_unavailable` | the budget is known but how much of it has been spent could not be read (no audit service, or it failed) |
+| `ledger_unavailable` | the budget is known but how much of it has been spent could not be read (no audit service or it failed) |
 
 The verdict is made on the **confirmed** spend. Outages whose real length is unknown (§5.3) are not counted, so a
 guess cannot refuse a restore, but the detail says how many there are and what would be left if they counted in full.
@@ -276,15 +290,15 @@ What approving demands is `availability_enforcement`:
 | `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
 | `refuse` | the restore is refused, whatever is acknowledged, **if the instance is serving**; otherwise it needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` (asks, never refuses) | shown |
 
-- **Refusing is only coherent for a serving instance.** The restore is then what causes the downtime, and refusing
+- **Refusing is only coherent for a serving instance.** The restore is then what causes the downtime and refusing
   keeps it serving. An instance that is already down accrues the downtime whether or not it is restored, so refusing
-  would leave it down and spend the budget faster. There a `refuse` asks for the acknowledgement instead, and the plan
+  would leave it down and spend the budget faster. There a `refuse` asks for the acknowledgement instead and the plan
   says why.
-- **What cannot be checked asks, and does not refuse.** An unreadable objective and an unreadable spend are not "nothing
+- **What cannot be checked asks and does not refuse.** An unreadable objective and an unreadable spend are not "nothing
   to check": a typo or a dead audit service must not quietly switch a strict enforcement off. Nothing is known to be
   breached, so they ask.
 - **One acknowledgement covers every breach shown at the gate.** The gate has one field, `acknowledge_objective_breach`.
-  A refusal from either objective stands whatever is acknowledged. When both ask, the error names both, and the
+  A refusal from either objective stands whatever is acknowledged. When both ask, the error names both and the
   recovery decision records which objectives stood in the way (`approval.breaches`: `rpo`, `availability_budget`), so
   that acknowledging a data-loss breach is never taken to have acknowledged a budget breach too.
 - **It is recorded.** Each option on the plan and execution decisions carries `budget_verdict`, `budget_gate`,
@@ -292,8 +306,48 @@ What approving demands is `availability_enforcement`:
   `availability_enforcement`. `vault incidents` shows it on the option line, apart from the loss verdict.
 
 What this does not do: it does not predict the restore's duration (the `rto` is an upper bound), it does not count
-downtime that is not in a recorded incident, and it does not choose between restoring fast and restoring precisely
+downtime that is not in a recorded incident and it does not choose between restoring fast and restoring precisely
 (`recovery_preference` has no consumer yet).
+
+### 5.5 The recovery-time estimate
+
+The `rto` is a promise someone wrote down. The estimate is what has actually happened: how long this database's
+restores have taken, from its own history, shown beside the promise. The plan carries it as
+`availability_budget.recovery_estimate` and `helpdesk-client --pitr-plan` prints it under `Past restores`.
+
+What it measures is the same duration the outcome stage of a recovery decision records and compares with the `rto`:
+the remediation run that did the restore (restore, restart, verify), which begins **after** the approval. It is not the
+downtime, which began earlier and includes the wait for an approval.
+
+```
+Past restores      : 5 resolved restores of this database in the last 90d (real incidents): p50 20m, p90 40m, longest 45m
+RTO CHECK (!)      : exceeds: 2 of the 5 past restores took longer than the rto of 30m (the longest took 45m)
+```
+
+The rules that keep it honest:
+
+- **Real incidents only.** A faulttest injection never counts. So a database that has only ever been restored by
+  faulttest has no history and says so.
+- **Only restores that recovered.** Runs of the restore playbooks (`pbs_pgbackrest_pitr_remediate` and
+  `pbs_pgbackrest_restore_remediate`, which are dominated by the same thing: the size of the data) that ended
+  `resolved`. A restore that failed took a time too, but was not a recovery; the count of runs left out is stated.
+- **Only this database.** Another database's restores say little about this one's, so there is no fallback to the
+  fleet. With fewer than three samples the status is `insufficient_history` and with none `no_history`; the declared
+  `rto` then stands alone, exactly as before.
+- **A percentile of what happened, never a promise.** p50, p90 and the longest, nearest-rank, over the last 90 days,
+  with the sample size beside them. A history that cannot be read is reported as `unavailable`, never as no history.
+- **The `rto` comparison is a count.** `vs_rto` is `within` when none of the counted restores took longer than the
+  declared `rto` and `exceeds` when some did, with how many: the declared number against the demonstrated one.
+
+**What it changes.** In the budget check (§5.4) a restore is taken to last as long as its **p90** when there is an
+estimate and as long as the declared `rto`, as an upper bound, when there is not. The verdict says which
+(`duration_basis`: `history` or `declared_rto`) and the decision record keeps it. The estimate only moves a `within`
+to a `may_exceed` and back: it never refuses a restore, because a `may_exceed` asks and does not refuse and a spent
+budget is a breach whatever history says.
+
+**What it does not do.** It holds nothing by itself: a history that breaks the `rto` is shown at the gate (`RTO CHECK
+(!)`) and recorded and is not enforced. It covers restores only, not a restart or a scale-up. And it is only as good as
+the incidents behind it: real history is thin and a database restored three times in a year has three samples.
 
 ## 6. Design: how objectives will be used (not built yet)
 
@@ -324,10 +378,13 @@ it spends.
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
 | A ledger of the downtime budget already spent in the window, from recorded real incidents, charged by availability impact, with unconfirmed outages listed apart ([§5.3](#53-the-availability-ledger)) | Built |
-| The remaining budget shown to the person at the gate (`helpdesk-client --pitr-plan`, and recorded on the plan and execution decisions) | Built |
+| The remaining budget shown to the person at the gate (`helpdesk-client --pitr-plan` and recorded on the plan and execution decisions) | Built |
 | A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built |
+| The budget check applied to any tool declared `impact: outage` in the tool registry (planned restarts, scale-downs, failover), not only the restore: a spent budget argues against voluntary downtime, never against recovery | Not built (v0.36) |
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
-| Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
+| Recovery-time estimate for a restore, from this database's past real restores (p50, p90, longest, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
+| A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
+| The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
 | Per-incident outcome (actual loss, duration, budget burn) recorded against the objective | Not built |
 

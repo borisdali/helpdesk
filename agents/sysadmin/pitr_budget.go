@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"helpdesk/internal/audit"
@@ -36,6 +37,32 @@ func readLedger(ctx context.Context, key string, budget infra.AvailabilityBudget
 // budgetLedgerFn is how the check reads the ledger. A variable so a test can say
 // what the ledger holds; production uses readLedger.
 var budgetLedgerFn = readLedger
+
+// readEstimate reads how long this database's restores have taken, through the
+// configured client.
+func readEstimate(ctx context.Context, key string, rto *time.Duration, now time.Time) (*availability.RecoveryEstimate, error) {
+	return ledgerClient.RecoveryEstimate(ctx, key, availability.RestoreSeries, rto, now)
+}
+
+// recoveryEstimateFn is how the check reads that history: a variable for the same
+// reason as budgetLedgerFn.
+var recoveryEstimateFn = readEstimate
+
+// recoveryEstimateOf reads the estimate for a database. With no audit service
+// there is no history to look at and nothing is said (the budget check already
+// says the ledger is unavailable); any other failure is reported as an estimate
+// that could not be made, so it is never read as there being no history.
+func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now time.Time) *availability.RecoveryEstimate {
+	est, err := recoveryEstimateFn(ctx, key, rto, now)
+	switch {
+	case errors.Is(err, availability.ErrNoAudit):
+		return nil
+	case err != nil:
+		slog.Warn("recovery estimate unavailable", "database", key, "err", err)
+		return availability.UnavailableEstimate(err)
+	}
+	return est
+}
 
 // budgetCheckFor sets what is left of the downtime budget of the database a call
 // targets against a restore about to run on it. serving says the instance is up,
@@ -62,14 +89,23 @@ func budgetCheckFor(ctx context.Context, target string, serving bool) *availabil
 		return availability.CompareToBudget(availability.BudgetInputs{Found: false})
 	}
 	budget := res.Budget()
+	now := restoreClock()
 	in := availability.BudgetInputs{
 		Found: true, Budget: budget, Problems: res.Problems,
 		Invalid:     res.AvailabilitySLOInvalid || res.AvailabilityWindowInvalid,
 		Enforcement: res.EffectiveAvailabilityEnforcement(), Serving: serving,
 	}
+	// How long this database's restores have taken is worth saying whether or not
+	// an SLO is set, and against the declared rto when there is one.
+	var rto *time.Duration
+	if res.RTO.Set {
+		d := res.RTO.Value
+		rto = &d
+	}
+	in.Estimate = recoveryEstimateOf(ctx, key, rto, now)
 	// Only a budget that can be computed has anything to read the spend against.
 	if budget.Computed && !in.Invalid {
-		in.Ledger, in.LedgerErr = budgetLedgerFn(ctx, key, budget, restoreClock())
+		in.Ledger, in.LedgerErr = budgetLedgerFn(ctx, key, budget, now)
 	}
 	return availability.CompareToBudget(in)
 }

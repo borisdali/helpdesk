@@ -191,16 +191,25 @@ func TestBudgetCheckFor_ReadsTheLedgerThroughTheRealClient(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(queries) != 2 {
+	// The history of past restores, the database's incidents with their series, and
+	// the count of incidents no database could be found for.
+	if len(queries) != 3 {
 		t.Fatalf("auditd was asked %d times: %v", len(queries), queries)
 	}
+	history := 0
 	for i, q := range queries {
 		if auth[i] != "Bearer svc-key" {
 			t.Errorf("request %d authorization = %q", i, auth[i])
 		}
 		if q.Get("unattributed") != "true" && q.Get("target_key") != "pgbackrest_db" {
-			t.Errorf("the ledger was asked for %q, not the resolved database key", q.Get("target_key"))
+			t.Errorf("auditd was asked for %q, not the resolved database key", q.Get("target_key"))
 		}
+		if q.Get("include") == "runs" {
+			history++
+		}
+	}
+	if history != 1 {
+		t.Errorf("the history of past restores was asked for %d times, want once", history)
 	}
 }
 
@@ -282,6 +291,167 @@ func TestSnapshotOf_RecordsTheAvailabilityEnforcementInForce(t *testing.T) {
 	}
 	if s := snapshotOf(both, ""); s.Enforcement != "refuse" || s.AvailabilityEnforcement != "warn" {
 		t.Errorf("both: rpo %q, budget %q", s.Enforcement, s.AvailabilityEnforcement)
+	}
+}
+
+// ── the recovery-time estimate ────────────────────────────────────────────────
+
+// estimateCalls records what the check asked the history for.
+type estimateCalls struct {
+	keys []string
+	rtos []*time.Duration
+	nows []time.Time
+}
+
+// withEstimate makes the history of past restores say this (or fail).
+func withEstimate(t *testing.T, est *availability.RecoveryEstimate, readErr error) *estimateCalls {
+	t.Helper()
+	old := recoveryEstimateFn
+	t.Cleanup(func() { recoveryEstimateFn = old })
+	calls := &estimateCalls{}
+	recoveryEstimateFn = func(_ context.Context, key string, rto *time.Duration, now time.Time) (*availability.RecoveryEstimate, error) {
+		calls.keys, calls.rtos, calls.nows = append(calls.keys, key), append(calls.rtos, rto), append(calls.nows, now)
+		return est, readErr
+	}
+	return calls
+}
+
+// restoresThatTook is an estimate of restores that took these many minutes each.
+func restoresThatTook(minutes ...int) *availability.RecoveryEstimate {
+	var runs [][]audit.RunSpan
+	end := time.Now().UTC().Add(-24 * time.Hour)
+	for _, m := range minutes {
+		runs = append(runs, []audit.RunSpan{{SeriesID: "pbs_pgbackrest_pitr_remediate", Outcome: audit.OutcomeResolved,
+			StartedAt: end.Add(-time.Duration(m) * time.Minute), CompletedAt: end}})
+	}
+	l := &audit.IncidentListing{}
+	for _, r := range runs {
+		l.Incidents = append(l.Incidents, audit.IncidentWithSeries{Incident: &audit.Incident{Origin: audit.IncidentOriginReal}, Runs: r})
+	}
+	rto := 30 * time.Minute
+	e := availability.EstimateRecovery(l, availability.RestoreSeries, time.Now().UTC(), availability.EstimateWindow, &rto)
+	return &e
+}
+
+// The history is read for the database the target resolves to, against the
+// declared rto, as of the restore's clock, and shown even when no SLO is set.
+func TestBudgetCheckFor_ReadsTheHistoryOfTheDatabaseAgainstItsRTO(t *testing.T) {
+	calls := withEstimate(t, restoresThatTook(10, 20, 30), nil)
+	ledger := withLedger(t, 0, nil)
+	fixed := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	oldClock := restoreClock
+	t.Cleanup(func() { restoreClock = oldClock })
+	restoreClock = func() time.Time { return fixed }
+
+	// A database with an rto but no SLO: the history is read and shown; the ledger is not.
+	objectiveInfra(t, "", func(db *infra.DBServer, _ *infra.Config) {
+		db.Objectives = &infra.Objectives{RTO: &infra.Duration{Duration: 45 * time.Minute}}
+	})
+	v := budgetCheckFor(context.Background(), "helpdesk-test-pg-pgbackrest", true)
+	if v.Status != availability.BudgetNoObjective || v.RecoveryEstimate == nil || v.RecoveryEstimate.Samples != 3 {
+		t.Fatalf("verdict = %+v", v)
+	}
+	if len(calls.keys) != 1 || calls.keys[0] != "pgbackrest_db" || !calls.nows[0].Equal(fixed) || calls.rtos[0] == nil || *calls.rtos[0] != 45*time.Minute {
+		t.Errorf("the history was read for %v against rto %v as of %v", calls.keys, calls.rtos, calls.nows)
+	}
+	if len(ledger.keys) != 0 {
+		t.Error("the ledger was read for a database with no SLO")
+	}
+	// With no rto declared, the history is read with none to compare against.
+	objectiveInfra(t, "15m", nil)
+	budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	if calls.rtos[len(calls.rtos)-1] != nil {
+		t.Errorf("an rto was passed for a database that declares none: %v", calls.rtos[len(calls.rtos)-1])
+	}
+	// A target that is not a configured database reads no history at all.
+	n := len(calls.keys)
+	budgetCheckFor(context.Background(), "nope", true)
+	if len(calls.keys) != n {
+		t.Error("history was read for a database that does not exist")
+	}
+}
+
+// What has been demonstrated outranks what was declared, through the agent, and
+// the plan shows both.
+func TestPlan_HistoryDecidesWhatTheBudgetIsComparedWith(t *testing.T) {
+	withLedger(t, 10*time.Minute, nil) // 33m12s left; rto 30m
+	withEstimate(t, restoresThatTook(40, 45, 50), nil)
+	budgetObjectives(t, "", "acknowledge")
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	b := plan.AvailabilityBudget
+	// By the rto it would fit; by what restores here have taken (p90 50m) it may not.
+	if b.Status != availability.BudgetMayExceed || b.DurationBasis != availability.DurationFromHistory || *b.DurationSeconds != 50*60 || b.Gate != availability.GateAcknowledge {
+		t.Fatalf("budget = %+v", b)
+	}
+	e := b.RecoveryEstimate
+	if e == nil || e.Status != availability.EstimateEstimated || *e.P90Seconds != 50*60 || e.VsRTO != "exceeds" || *e.OverRTO != 3 {
+		t.Fatalf("estimate = %+v", e)
+	}
+	// It is in the JSON the CLI and the harness read, and on the record.
+	raw, _ := json.Marshal(plan)
+	var view struct {
+		B struct {
+			E map[string]any `json:"recovery_estimate"`
+		} `json:"availability_budget"`
+	}
+	if json.Unmarshal(raw, &view) != nil || view.B.E["status"] != "estimated" || view.B.E["vs_rto"] != "exceeds" || view.B.E["basis"] == nil {
+		t.Errorf("json = %s", raw)
+	}
+	got := decisions(t, store)[audit.RecoveryStagePlan]
+	if len(got) != 1 || len(got[0].Options) != 1 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	o := got[0].Options[0]
+	if o.BudgetDurationBasis != "history" || *o.BudgetDurationSeconds != 3000 || o.EstimateStatus != "estimated" || *o.EstimateSamples != 3 ||
+		*o.EstimateP90Seconds != 3000 || o.EstimateVsRTO != "exceeds" || *o.EstimateOverRTO != 3 {
+		t.Errorf("recorded option = %+v", o)
+	}
+}
+
+// Long restores make a restore that may not fit ask, and never refuse.
+func TestRestore_HistoryNeverMakesARestoreRefused(t *testing.T) {
+	withLedger(t, 10*time.Minute, nil)
+	withEstimate(t, restoresThatTook(120, 130, 140), nil) // far longer than what is left
+	budgetObjectives(t, "", "refuse")
+	for _, ack := range []bool{false, true} {
+		_, d, stopped, err := runRestore(t, ack)
+		if !ack {
+			if err == nil || !strings.Contains(err.Error(), "may exceed the availability budget") || stopped {
+				t.Errorf("not acknowledged: err=%v stopped=%v", err, stopped)
+			}
+			continue
+		}
+		if err != nil || !stopped || d.Options[0].BudgetVerdict != "may_exceed" || d.Options[0].BudgetDurationBasis != "history" || *d.Options[0].EstimateSamples != 3 {
+			t.Errorf("acknowledged: err=%v stopped=%v option=%+v", err, stopped, d.Options[0])
+		}
+	}
+}
+
+// A history that cannot be read is said to be unreadable, not taken as no
+// history; the verdict falls back to the declared rto.
+func TestBudgetCheckFor_AnUnreadableHistoryIsSaidAndTheRTOStands(t *testing.T) {
+	withLedger(t, 20*time.Minute, nil)
+	withEstimate(t, nil, errors.New("auditd returned 500: boom"))
+	budgetObjectives(t, "", "acknowledge")
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	if v.RecoveryEstimate == nil || v.RecoveryEstimate.Status != availability.EstimateUnavailable || !strings.Contains(v.RecoveryEstimate.Basis, "could not be read (auditd returned 500: boom)") {
+		t.Fatalf("estimate = %+v", v.RecoveryEstimate)
+	}
+	if v.DurationBasis != availability.DurationFromRTO || v.Status != availability.BudgetMayExceed || *v.DurationSeconds != 1800 {
+		t.Errorf("verdict = %+v", v)
+	}
+	// With no audit service at all, nothing is said about history (the ledger check says it).
+	withEstimate(t, nil, availability.ErrNoAudit)
+	if v := budgetCheckFor(context.Background(), "pgbackrest_db", true); v.RecoveryEstimate != nil {
+		t.Errorf("an estimate was reported with no audit service: %+v", v.RecoveryEstimate)
 	}
 }
 

@@ -150,6 +150,122 @@ func TestCompareToBudget_SaysWhatItDoesNotCount(t *testing.T) {
 	}
 }
 
+// ── the recovery-time estimate in the verdict ─────────────────────────────────
+
+func estimateOf(minutes ...int) *RecoveryEstimate {
+	e := EstimateRecovery(resolved(minutes...), []string{restoreSeries}, now, EstimateWindow, nil)
+	return &e
+}
+
+// With history, the restore is taken to last as long as its p90, not as long as
+// the rto: what has been demonstrated outranks what was declared.
+func TestCompareToBudget_HistoryOutranksTheDeclaredRTO(t *testing.T) {
+	// 33m12s left, and an rto of 30m: by the rto alone this fits.
+	l := ledgerSpending(rtoBudget(), 10*time.Minute)
+	if v := CompareToBudget(inputs(rtoBudget(), l)); v.Status != BudgetWithin || v.DurationBasis != DurationFromRTO || *v.DurationSeconds != 1800 {
+		t.Fatalf("by the rto: %+v", v)
+	}
+
+	// Restores of this database have taken up to 40m at the p90: it may not.
+	in := inputs(rtoBudget(), l)
+	in.Estimate = estimateOf(20, 25, 30, 35, 40)
+	v := CompareToBudget(in)
+	if v.Status != BudgetMayExceed || v.DurationBasis != DurationFromHistory || *v.DurationSeconds != 40*60 {
+		t.Fatalf("by history: %+v", v)
+	}
+	for _, frag := range []string{"only 33m12s left", "this database's restores have taken up to 40m at the p90 (5 past restores)", "may use more than is left"} {
+		if !strings.Contains(v.Detail, frag) {
+			t.Errorf("detail %q lacks %q", v.Detail, frag)
+		}
+	}
+
+	// Quick restores: it fits, and says what it rests on.
+	in.Estimate = estimateOf(10, 12, 14, 16, 18)
+	v = CompareToBudget(in)
+	if v.Status != BudgetWithin || *v.DurationSeconds != 18*60 || !strings.Contains(v.Detail, "enough for a restore as long as this database's have been (p90 18m over 5 past restores)") {
+		t.Errorf("quick: %+v", v)
+	}
+	// And the estimate rides along on the verdict.
+	if v.RecoveryEstimate == nil || v.RecoveryEstimate.Samples != 5 {
+		t.Errorf("estimate not attached: %+v", v.RecoveryEstimate)
+	}
+}
+
+// History makes a restore comparable even when no rto was ever declared.
+func TestCompareToBudget_HistoryMakesItComparableWithoutAnRTO(t *testing.T) {
+	l := ledgerSpending(noRTOBudget(), 10*time.Minute)
+	if v := CompareToBudget(inputs(noRTOBudget(), l)); v.Status != BudgetNotComparable || !strings.Contains(v.Detail, "no rto is declared and there is no history") {
+		t.Fatalf("without either: %+v", v)
+	}
+	in := inputs(noRTOBudget(), l)
+	in.Estimate = estimateOf(20, 25, 30)
+	v := CompareToBudget(in)
+	if v.Status != BudgetWithin || v.DurationBasis != DurationFromHistory || v.RTOSeconds != nil {
+		t.Errorf("with history only: %+v", v)
+	}
+}
+
+// Too little history is not used, and the declared rto stands, as it did.
+func TestCompareToBudget_ThinHistoryFallsBackToTheRTO(t *testing.T) {
+	l := ledgerSpending(rtoBudget(), 20*time.Minute) // 23m12s left; rto 30m: may exceed
+	for name, est := range map[string]*RecoveryEstimate{
+		"two restores":              estimateOf(5, 6),
+		"no restores":               estimateOf(),
+		"a nil estimate":            nil,
+		"estimated but with no p90": {Status: EstimateEstimated, Samples: 9},
+	} {
+		in := inputs(rtoBudget(), l)
+		in.Estimate = est
+		v := CompareToBudget(in)
+		if v.Status != BudgetMayExceed || v.DurationBasis != DurationFromRTO || *v.DurationSeconds != 1800 || !strings.Contains(v.Detail, "may take up to the rto of 30m") {
+			t.Errorf("%s: %+v", name, v)
+		}
+	}
+	// A thin estimate is still shown beside the verdict: what there is to say.
+	in := inputs(rtoBudget(), l)
+	in.Estimate = estimateOf(5, 6)
+	if v := CompareToBudget(in); v.RecoveryEstimate == nil || v.RecoveryEstimate.Status != EstimateTooFew {
+		t.Errorf("the thin estimate was dropped: %+v", v.RecoveryEstimate)
+	}
+}
+
+// A spent budget is a breach whatever the history says, and the estimate never
+// changes what is refused: a may_exceed from history still only asks.
+func TestCompareToBudget_HistoryDoesNotChangeWhatIsRefused(t *testing.T) {
+	in := inputs(rtoBudget(), ledgerSpending(rtoBudget(), 50*time.Minute))
+	in.Estimate = estimateOf(1, 1, 1) // very quick restores
+	if v := CompareToBudget(in); v.Status != BudgetExceeds {
+		t.Errorf("a spent budget with quick restores = %s", v.Status)
+	}
+	in = inputs(rtoBudget(), ledgerSpending(rtoBudget(), 10*time.Minute))
+	in.Estimate = estimateOf(120, 130, 140) // restores far longer than what is left
+	in.Enforcement = infra.EnforceRefuse
+	v := CompareToBudget(in)
+	if v.Status != BudgetMayExceed || v.Gate != GateAcknowledge {
+		t.Errorf("long restores under refuse = %s, gate %q: a restore that may exceed asks, and is never refused", v.Status, v.Gate)
+	}
+}
+
+// The estimate is shown whatever the verdict, even for a database with no SLO at
+// all, but it only sets a duration when there is a budget to compare it with.
+func TestCompareToBudget_TheEstimateRidesAlongWhateverTheVerdict(t *testing.T) {
+	est := estimateOf(10, 20, 30)
+	for name, in := range map[string]BudgetInputs{
+		"no SLO":             {Found: true, Budget: infra.AvailabilityBudget{}, Estimate: est},
+		"not a database":     {Found: false, Estimate: est},
+		"unreadable SLO":     {Found: true, Invalid: true, Estimate: est},
+		"spend not readable": {Found: true, Budget: rtoBudget(), Estimate: est, LedgerErr: errors.New("down")},
+	} {
+		v := CompareToBudget(in)
+		if v.RecoveryEstimate == nil || v.RecoveryEstimate.Samples != 3 {
+			t.Errorf("%s: estimate = %+v", name, v.RecoveryEstimate)
+		}
+		if v.DurationSeconds != nil {
+			t.Errorf("%s: a duration was set with no budget to compare it with: %d", name, *v.DurationSeconds)
+		}
+	}
+}
+
 // The gate: what each verdict demands under each enforcement, and where.
 func TestCompareToBudget_Gate(t *testing.T) {
 	spent := func(d time.Duration) *Ledger { return ledgerSpending(rtoBudget(), d) }

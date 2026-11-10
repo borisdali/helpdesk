@@ -85,6 +85,12 @@ func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chose
 	o := audit.DecisionOption{Name: pitrOptionName, Chosen: chosen}
 	if budget != nil {
 		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.RemainingSeconds
+		o.BudgetDurationSeconds, o.BudgetDurationBasis = budget.DurationSeconds, budget.DurationBasis
+		if e := budget.RecoveryEstimate; e != nil {
+			n := e.Samples
+			o.EstimateStatus, o.EstimateVsRTO, o.EstimateOverRTO = e.Status, e.VsRTO, e.OverRTO
+			o.EstimateSamples, o.EstimateP50Seconds, o.EstimateP90Seconds = &n, e.P50Seconds, e.P90Seconds
+		}
 	}
 	if est == nil {
 		return o

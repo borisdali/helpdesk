@@ -6,7 +6,9 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"helpdesk/internal/audit"
@@ -122,12 +124,28 @@ func (s *incidentServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(inc) //nolint:errcheck
 }
 
+// includeSet reads ?include= values, each possibly a comma-separated list
+// ("series,runs"), into a set.
+func includeSet(values []string) map[string]bool {
+	set := map[string]bool{}
+	for _, v := range values {
+		for _, name := range strings.Split(v, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				set[name] = true
+			}
+		}
+	}
+	return set
+}
+
 // handleList handles GET /v1/incidents. Supports ?origin=&status=&attribution=&
 // series_id=&target_key=&limit=, and for the availability ledger:
 //
 //	unattributed=true   only incidents with no target_key (the database could not be resolved)
 //	since=<RFC3339>     only incidents still open, or resolved at or after that time
 //	include=series      each incident also carries series_ids, the series of every run it spanned
+//	include=runs        ... and runs, each with its series, outcome and times (a recovery-time
+//	                    estimate is made from them); "series,runs" asks for both
 //
 // "truncated" is true when the page is full, so a caller summing incidents
 // knows it may have left some out.
@@ -167,24 +185,44 @@ func (s *incidentServer) handleList(w http.ResponseWriter, r *http.Request) {
 	truncated := len(incidents) >= audit.EffectiveIncidentLimit(filter.Limit)
 
 	var out any = incidents
-	if q.Get("include") == "series" && s.runs != nil {
+	include := includeSet(q["include"])
+	if (include["series"] || include["runs"]) && s.runs != nil {
 		ids := make([]string, 0, len(incidents))
 		for _, inc := range incidents {
 			if inc.EntryRunID != "" {
 				ids = append(ids, inc.EntryRunID)
 			}
 		}
-		series, err := s.runs.SeriesByEntryRun(r.Context(), ids)
-		if err != nil {
-			slog.Error("failed to read the series of listed incidents", "err", err)
-			http.Error(w, "failed to list incidents", http.StatusInternalServerError)
-			return
+		withRuns := make([]audit.IncidentWithSeries, 0, len(incidents))
+		if include["runs"] {
+			// The runs carry their series, so one query serves both.
+			spans, err := s.runs.SpansByEntryRun(r.Context(), ids)
+			if err != nil {
+				slog.Error("failed to read the runs of listed incidents", "err", err)
+				http.Error(w, "failed to list incidents", http.StatusInternalServerError)
+				return
+			}
+			for _, inc := range incidents {
+				var series []string
+				for _, sp := range spans[inc.EntryRunID] {
+					if !slices.Contains(series, sp.SeriesID) {
+						series = append(series, sp.SeriesID)
+					}
+				}
+				withRuns = append(withRuns, audit.IncidentWithSeries{Incident: inc, SeriesIDs: series, Runs: spans[inc.EntryRunID]})
+			}
+		} else {
+			series, err := s.runs.SeriesByEntryRun(r.Context(), ids)
+			if err != nil {
+				slog.Error("failed to read the series of listed incidents", "err", err)
+				http.Error(w, "failed to list incidents", http.StatusInternalServerError)
+				return
+			}
+			for _, inc := range incidents {
+				withRuns = append(withRuns, audit.IncidentWithSeries{Incident: inc, SeriesIDs: series[inc.EntryRunID]})
+			}
 		}
-		withSeries := make([]audit.IncidentWithSeries, 0, len(incidents))
-		for _, inc := range incidents {
-			withSeries = append(withSeries, audit.IncidentWithSeries{Incident: inc, SeriesIDs: series[inc.EntryRunID]})
-		}
-		out = withSeries
+		out = withRuns
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"incidents": out, "count": len(incidents), "truncated": truncated}) //nolint:errcheck

@@ -17,6 +17,7 @@ import (
 func rdI64(n int64) *int64     { return &n }
 func rdU64(n uint64) *uint64   { return &n }
 func rdF64(n float64) *float64 { return &n }
+func rdInt(n int) *int         { return &n }
 
 func sampleDecision() RecoveryDecision {
 	return RecoveryDecision{
@@ -43,6 +44,9 @@ func sampleDecision() RecoveryDecision {
 			LossAtLeastSeconds: rdI64(1000), LossAtLeastBasis: "the segment holding the target reached the repository at 2026-11-04T01:40:12Z",
 			Verdict: "exceeds", VerdictDetail: "18h 12m 43s discarded against an RPO of 15m 00s", Gate: "acknowledge",
 			BudgetVerdict: "may_exceed", BudgetVerdictDetail: "only 23m12s left", BudgetGate: "acknowledge", BudgetRemainingSeconds: rdI64(1392),
+			BudgetDurationSeconds: rdI64(3000), BudgetDurationBasis: "history",
+			EstimateStatus: "estimated", EstimateSamples: rdInt(5), EstimateP50Seconds: rdI64(2400), EstimateP90Seconds: rdI64(3000),
+			EstimateVsRTO: "exceeds", EstimateOverRTO: rdInt(3),
 		}},
 		DurationSeconds: rdI64(2472),
 		Approval:        &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, Breaches: []string{BreachRPO, BreachAvailabilityBudget}},
@@ -117,6 +121,14 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the loss", func(d *RecoveryDecision) { *d.Options[0].LossSeconds = 1 }},
 		{"the configuration used", func(d *RecoveryDecision) { d.Objectives.ConfigDigest = "0000000000000000" }},
 		{"the recovery duration", func(d *RecoveryDecision) { *d.DurationSeconds = 1 }},
+		{"how long the restore was taken to last", func(d *RecoveryDecision) { *d.Options[0].BudgetDurationSeconds = 1 }},
+		{"what that rested on", func(d *RecoveryDecision) { d.Options[0].BudgetDurationBasis = "declared_rto" }},
+		{"the estimate's status", func(d *RecoveryDecision) { d.Options[0].EstimateStatus = "no_history" }},
+		{"how many restores the estimate rested on", func(d *RecoveryDecision) { *d.Options[0].EstimateSamples = 99 }},
+		{"the estimate's median", func(d *RecoveryDecision) { *d.Options[0].EstimateP50Seconds = 1 }},
+		{"the estimate's p90", func(d *RecoveryDecision) { *d.Options[0].EstimateP90Seconds = 1 }},
+		{"what history said of the rto", func(d *RecoveryDecision) { d.Options[0].EstimateVsRTO = "within" }},
+		{"how many past restores broke the rto", func(d *RecoveryDecision) { *d.Options[0].EstimateOverRTO = 0 }},
 		{"the budget verdict", func(d *RecoveryDecision) { d.Options[0].BudgetVerdict = "within" }},
 		{"the budget gate", func(d *RecoveryDecision) { d.Options[0].BudgetGate = "" }},
 		{"what was left of the budget", func(d *RecoveryDecision) { *d.Options[0].BudgetRemainingSeconds = 99999 }},

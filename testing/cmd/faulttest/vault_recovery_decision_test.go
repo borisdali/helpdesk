@@ -157,6 +157,41 @@ func TestRDOption_ShowsTheBudgetVerdictApartFromTheLossVerdict(t *testing.T) {
 	}
 }
 
+// The option line says what the budget verdict took the restore to last, and what
+// history said; with no history it says nothing about it.
+func TestRDOption_SaysWhatTheRestoreWasTakenToLastAndWhatHistorySaid(t *testing.T) {
+	left, dur := int64(1992), int64(3000)
+	n, over, p90, p50 := 5, 2, int64(3000), int64(1200)
+	o := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "may_exceed", BudgetGate: "acknowledge", BudgetRemainingSeconds: &left,
+		BudgetDurationSeconds: &dur, BudgetDurationBasis: "history",
+		EstimateStatus: "estimated", EstimateSamples: &n, EstimateP50Seconds: &p50, EstimateP90Seconds: &p90, EstimateVsRTO: "exceeds", EstimateOverRTO: &over}
+	got := rdOption(o)
+	for _, want := range []string{
+		"budget → may_exceed (33m 12s left; restore taken as 50m 00s, the p90 of past restores)",
+		"; the budget needed the breach acknowledged",
+		"; history: p90 50m 00s over 5 past restores, 2 took longer than the rto",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	// By the declared rto, and with history within it.
+	o.BudgetDurationBasis, o.EstimateVsRTO, o.EstimateOverRTO = "declared_rto", "within", nil
+	got = rdOption(o)
+	if !strings.Contains(got, "restore taken as 50m 00s, from the declared rto") || strings.Contains(got, "took longer than the rto") {
+		t.Errorf("by the rto: %q", got)
+	}
+	// Too little history is said as it is; none at all says nothing.
+	o.EstimateStatus, o.EstimateSamples, o.EstimateP90Seconds = "insufficient_history", &n, nil
+	if got := rdOption(o); !strings.Contains(got, "; history: insufficient_history") || strings.Contains(got, "p90 50m") {
+		t.Errorf("too few: %q", got)
+	}
+	o.EstimateStatus = ""
+	if got := rdOption(o); strings.Contains(got, "history:") {
+		t.Errorf("no estimate: %q", got)
+	}
+}
+
 func TestFormatRecoveryDecisions_SaysWhichObjectivesStoodInTheWay(t *testing.T) {
 	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(3), Decision: audit.RecoveryDecision{
 		Stage: "execution", Decision: "proceeded",

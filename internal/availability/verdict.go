@@ -71,7 +71,20 @@ type BudgetInputs struct {
 	// Refusing is only coherent then: an instance that is already down is
 	// accruing downtime whether or not it is restored.
 	Serving bool
+	// Estimate is how long this database's restores have taken, from history, or
+	// nil. When it is an estimate (enough samples) the restore is taken to last
+	// as long as its p90; without one, as long as the declared rto, as an upper
+	// bound.
+	Estimate *RecoveryEstimate
 }
+
+// What a verdict took a restore's duration to be.
+const (
+	// DurationFromHistory: the p90 of this database's past restores.
+	DurationFromHistory = "history"
+	// DurationFromRTO: the declared rto, an upper bound.
+	DurationFromRTO = "declared_rto"
+)
 
 // BudgetVerdict is the budget set against the restore.
 type BudgetVerdict struct {
@@ -94,6 +107,13 @@ type BudgetVerdict struct {
 	Gate string `json:"gate,omitempty"`
 	// GateNote explains a gate that is not what the enforcement alone would say.
 	GateNote string `json:"gate_note,omitempty"`
+	// DurationSeconds is how long the restore was taken to last, and
+	// DurationBasis what that rests on: DurationFromHistory or DurationFromRTO.
+	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
+	DurationBasis   string `json:"duration_basis,omitempty"`
+	// RecoveryEstimate is how long this database's restores have taken, whatever
+	// the verdict: it is worth showing even when no SLO is set.
+	RecoveryEstimate *RecoveryEstimate `json:"recovery_estimate,omitempty"`
 }
 
 // NeedsAttention says the person approving should be told the restore is, or may
@@ -104,7 +124,7 @@ func (v *BudgetVerdict) NeedsAttention() bool {
 
 // CompareToBudget makes the verdict and the gate it implies.
 func CompareToBudget(in BudgetInputs) *BudgetVerdict {
-	v := &BudgetVerdict{Enforcement: in.Enforcement, WindowSource: in.Budget.WindowSource}
+	v := &BudgetVerdict{Enforcement: in.Enforcement, WindowSource: in.Budget.WindowSource, RecoveryEstimate: in.Estimate}
 	v.Status, v.Detail = verdict(in, v)
 	v.Gate, v.GateNote = gateFor(v.Status, in.Enforcement, in.Serving)
 	return v
@@ -151,19 +171,40 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 			len(l.Unconfirmed), span(*l.RemainingWorstCaseSeconds))
 	}
 
+	// How long the restore is taken to last: what this database's restores have
+	// taken when there is enough history (the p90, with the sample size said), and
+	// otherwise the declared rto, as an upper bound.
+	var dur time.Duration
+	haveDur, fromHistory := false, false
+	if e := in.Estimate; e != nil && e.Status == EstimateEstimated && e.P90Seconds != nil {
+		dur, haveDur, fromHistory = secondsOf(*e.P90Seconds), true, true
+		d, basis := *e.P90Seconds, DurationFromHistory
+		v.DurationSeconds, v.DurationBasis = &d, basis
+	} else if in.Budget.RTOKnown {
+		dur, haveDur = in.Budget.RTO, true
+		d, basis := int64(in.Budget.RTO.Seconds()), DurationFromRTO
+		v.DurationSeconds, v.DurationBasis = &d, basis
+	}
+
 	switch {
 	case rem <= 0:
 		if allowed == 0 {
 			return BudgetExceeds, "the SLO allows no downtime, so any restore breaches it" + note
 		}
 		return BudgetExceeds, fmt.Sprintf("%s: the budget is spent (%s left), so any further downtime breaches the SLO%s", spent, span(rem), note)
-	case !in.Budget.RTOKnown:
-		return BudgetNotComparable, fmt.Sprintf("%s, %s left, but no rto is declared, so how long this restore may take is not known%s", spent, span(rem), note)
-	case rem >= int64(in.Budget.RTO.Seconds()):
-		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore that takes up to the rto of %s%s", spent, span(rem), infra.FormatSpan(in.Budget.RTO), note)
+	case !haveDur:
+		return BudgetNotComparable, fmt.Sprintf("%s, %s left, but no rto is declared and there is no history of past restores, so how long this restore may take is not known%s", spent, span(rem), note)
+	case fromHistory && rem >= int64(dur.Seconds()):
+		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this database's have been (p90 %s over %d past restores)%s",
+			spent, span(rem), infra.FormatSpan(dur), in.Estimate.Samples, note)
+	case fromHistory:
+		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this database's restores have taken up to %s at the p90 (%d past restores): this one may use more than is left%s",
+			spent, span(rem), infra.FormatSpan(dur), in.Estimate.Samples, note)
+	case rem >= int64(dur.Seconds()):
+		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore that takes up to the rto of %s%s", spent, span(rem), infra.FormatSpan(dur), note)
 	default:
 		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this restore may take up to the rto of %s: it may use more than is left (a restore can finish sooner than its rto)%s",
-			spent, span(rem), infra.FormatSpan(in.Budget.RTO), note)
+			spent, span(rem), infra.FormatSpan(dur), note)
 	}
 }
 

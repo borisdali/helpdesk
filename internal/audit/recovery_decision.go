@@ -168,6 +168,23 @@ type DecisionOption struct {
 	BudgetVerdictDetail    string `json:"budget_verdict_detail,omitempty"`
 	BudgetGate             string `json:"budget_gate,omitempty"`
 	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
+	// How long the budget verdict took the restore to last, and on what:
+	// "history" (the p90 of this database's past restores) or "declared_rto" (an
+	// upper bound). Absent when it was not compared.
+	BudgetDurationSeconds *int64 `json:"budget_duration_seconds,omitempty"`
+	BudgetDurationBasis   string `json:"budget_duration_basis,omitempty"`
+
+	// What this database's past restores have taken, from real incidents, as the
+	// plan or the restore saw it. EstimateStatus is estimated, insufficient_history,
+	// no_history or unavailable; the figures are present only when estimated.
+	// EstimateVsRTO is "within" or "exceeds" (some past restore took longer than the
+	// declared rto), with EstimateOverRTO how many.
+	EstimateStatus     string `json:"estimate_status,omitempty"`
+	EstimateSamples    *int   `json:"estimate_samples,omitempty"`
+	EstimateP50Seconds *int64 `json:"estimate_p50_seconds,omitempty"`
+	EstimateP90Seconds *int64 `json:"estimate_p90_seconds,omitempty"`
+	EstimateVsRTO      string `json:"estimate_vs_rto,omitempty"`
+	EstimateOverRTO    *int   `json:"estimate_over_rto,omitempty"`
 }
 
 // The objectives a restore can breach, as named in ApprovalFacts.Breaches.

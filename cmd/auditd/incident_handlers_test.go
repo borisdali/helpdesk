@@ -234,6 +234,58 @@ func TestIncidentHandlers_List_IncludeSeriesCarriesEveryRunsSeries(t *testing.T)
 	}
 }
 
+// include=runs lists each incident's runs with their outcomes and times (and so
+// their series, from the one query); "series,runs" and "runs,series" are the same.
+func TestIncidentHandlers_List_IncludeRunsCarriesOutcomesAndTimes(t *testing.T) {
+	srv, runs := newLedgerServer(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	for _, r := range []audit.PlaybookRun{
+		{RunID: "plr_e1", PlaybookID: "pb_1", SeriesID: "pbs_pgbackrest_pitr_triage", Outcome: audit.OutcomeTransitioned, StartedAt: t0, CompletedAt: t0.Add(3 * time.Minute)},
+		{RunID: "plr_h1", PlaybookID: "pb_2", SeriesID: "pbs_pgbackrest_pitr_remediate", Outcome: audit.OutcomeResolved, PriorRunID: "plr_e1", EntryRunID: "plr_e1",
+			StartedAt: t0.Add(4 * time.Minute), CompletedAt: t0.Add(25 * time.Minute)},
+	} {
+		r := r
+		if err := runs.Record(ctx, &r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"entry_run_id": "plr_e1", "series_id": "pbs_pgbackrest_pitr_triage", "target_key": "prod-orders"})
+	srv.handleCreate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+
+	rec := httptest.NewRecorder()
+	srv.handleList(rec, httptest.NewRequest(http.MethodGet, "/v1/incidents?include=runs", nil))
+	var got audit.IncidentListing
+	if rec.Code != http.StatusOK || json.NewDecoder(rec.Body).Decode(&got) != nil || len(got.Incidents) != 1 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	inc := got.Incidents[0]
+	if len(inc.Runs) != 2 || inc.Runs[1].SeriesID != "pbs_pgbackrest_pitr_remediate" || inc.Runs[1].Outcome != audit.OutcomeResolved ||
+		inc.Runs[1].CompletedAt.Sub(inc.Runs[1].StartedAt) != 21*time.Minute {
+		t.Errorf("runs = %+v", inc.Runs)
+	}
+	// The series come from the same query, in order and without repeats.
+	if len(inc.SeriesIDs) != 2 || inc.SeriesIDs[0] != "pbs_pgbackrest_pitr_triage" || inc.SeriesIDs[1] != "pbs_pgbackrest_pitr_remediate" {
+		t.Errorf("series_ids = %v", inc.SeriesIDs)
+	}
+	// The other spellings.
+	for _, q := range []string{"?include=series,runs", "?include=runs,series", "?include=series&include=runs", "?include=%20runs%20"} {
+		rec := httptest.NewRecorder()
+		srv.handleList(rec, httptest.NewRequest(http.MethodGet, "/v1/incidents"+q, nil))
+		var l audit.IncidentListing
+		if json.NewDecoder(rec.Body).Decode(&l) != nil || len(l.Incidents) != 1 || len(l.Incidents[0].Runs) != 2 {
+			t.Errorf("%s: %s", q, rec.Body.String())
+		}
+	}
+	// series alone is as it was: no runs.
+	rec = httptest.NewRecorder()
+	srv.handleList(rec, httptest.NewRequest(http.MethodGet, "/v1/incidents?include=series", nil))
+	var plain audit.IncidentListing
+	if json.NewDecoder(rec.Body).Decode(&plain) != nil || len(plain.Incidents[0].Runs) != 0 || len(plain.Incidents[0].SeriesIDs) != 2 {
+		t.Errorf("include=series: %s", rec.Body.String())
+	}
+}
+
 // With no run store the option is ignored, not an error: the listing still works.
 func TestIncidentHandlers_List_IncludeSeriesWithoutARunStoreIsIgnored(t *testing.T) {
 	srv := newIncidentServer(t)
@@ -504,6 +556,84 @@ func TestAvailabilityClient_ReadsTheRealHandlerOverHTTP(t *testing.T) {
 	}
 	if l.RemainingSeconds == nil || *l.RemainingSeconds != 2592-1200 {
 		t.Errorf("remaining = %v", l.RemainingSeconds)
+	}
+}
+
+// The recovery-time estimate through the real handler over real HTTP: the client's
+// query is understood (target_key, since, include=runs, origin), and what comes back
+// is only what an estimate may be made from: this database's, real, resolved restores.
+func TestAvailabilityClient_EstimateReadsTheRealHandlerOverHTTP(t *testing.T) {
+	srv, runs := newLedgerServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// seed makes an incident whose restore run took `took`, ended `endedAgo` ago.
+	seed := func(id, key, origin, outcome string, took, endedAgo time.Duration) {
+		t.Helper()
+		end := now.Add(-endedAgo)
+		if err := runs.Record(ctx, &audit.PlaybookRun{RunID: id, PlaybookID: "pb_" + id, SeriesID: "pbs_pgbackrest_pitr_triage",
+			Outcome: audit.OutcomeTransitioned, StartedAt: end.Add(-took - 5*time.Minute), CompletedAt: end.Add(-took)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := runs.Record(ctx, &audit.PlaybookRun{RunID: id + "_r", PlaybookID: "pb_" + id + "_r", SeriesID: "pbs_pgbackrest_pitr_remediate",
+			PriorRunID: id, EntryRunID: id, Outcome: outcome, StartedAt: end.Add(-took), CompletedAt: end}); err != nil {
+			t.Fatal(err)
+		}
+		body := map[string]any{"entry_run_id": id, "series_id": "pbs_pgbackrest_pitr_triage", "status": "resolved",
+			"detected_at": end.Add(-took - 5*time.Minute).Format(time.RFC3339), "resolved_at": end.Format(time.RFC3339)}
+		if key != "" {
+			body["target_key"] = key
+		}
+		if origin != "" {
+			body["origin"] = origin
+		}
+		data, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", id, rec.Code, rec.Body.String())
+		}
+	}
+	day := 24 * time.Hour
+	// prod-orders: three real restores that recovered (10m, 20m, 50m), and one that did not.
+	seed("plr_1", "prod-orders", "", audit.OutcomeResolved, 10*time.Minute, 5*day)
+	seed("plr_2", "prod-orders", "", audit.OutcomeResolved, 20*time.Minute, 20*day)
+	seed("plr_3", "prod-orders", "", audit.OutcomeResolved, 50*time.Minute, 60*day)
+	seed("plr_4", "prod-orders", "", audit.OutcomeAbandoned, 90*time.Minute, 7*day)
+	// Not prod-orders': a faulttest one on it, another database's, and one too old for the window.
+	seed("plr_5", "prod-orders", audit.IncidentOriginFaulttest, audit.OutcomeResolved, 300*time.Minute, day)
+	seed("plr_6", "prod-other", "", audit.OutcomeResolved, 400*time.Minute, day)
+	seed("plr_7", "prod-orders", "", audit.OutcomeResolved, 500*time.Minute, 120*day)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/incidents", srv.handleList)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	rto := 30 * time.Minute
+	e, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-orders", availability.RestoreSeries, &rto, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Status != availability.EstimateEstimated || e.Samples != 3 || e.Excluded != 1 {
+		t.Fatalf("estimate = %+v (%s)", e, e.Basis)
+	}
+	// 10m, 20m, 50m: nearest-rank p50 is the middle one, p90 the longest.
+	if *e.P50Seconds != 20*60 || *e.P90Seconds != 50*60 || *e.MinSeconds != 10*60 || *e.MaxSeconds != 50*60 {
+		t.Errorf("p50 %d p90 %d min %d max %d", *e.P50Seconds, *e.P90Seconds, *e.MinSeconds, *e.MaxSeconds)
+	}
+	// One of the three took longer than the declared 30m.
+	if e.VsRTO != "exceeds" || *e.OverRTO != 1 {
+		t.Errorf("vs rto = %q over %v", e.VsRTO, e.OverRTO)
+	}
+	// Another database has its own history, and its own too little of it.
+	other, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-other", availability.RestoreSeries, nil, now)
+	if err != nil || other.Status != availability.EstimateTooFew || other.Samples != 1 {
+		t.Errorf("prod-other = %+v, %v", other, err)
+	}
+	none, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "no-such-db", availability.RestoreSeries, nil, now)
+	if err != nil || none.Status != availability.EstimateNone {
+		t.Errorf("an unknown database = %+v, %v", none, err)
 	}
 }
 

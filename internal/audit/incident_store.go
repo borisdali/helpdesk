@@ -68,6 +68,10 @@ type Incident struct {
 type IncidentWithSeries struct {
 	*Incident
 	SeriesIDs []string `json:"series_ids,omitempty"`
+	// Runs are the incident's runs with their outcomes and times
+	// (?include=runs): what a recovery-time estimate is made from. Absent unless
+	// asked for.
+	Runs []RunSpan `json:"runs,omitempty"`
 }
 
 // IncidentListing is the body of GET /v1/incidents.

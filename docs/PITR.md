@@ -229,6 +229,13 @@ serving; one that is already down asks for the acknowledgement instead. There is
 for both checks, and the recovery decision records which objectives stood in the way. All of it is in
 [OBJECTIVES.md §5.4](OBJECTIVES.md#54-the-budget-at-the-gate).
 
+The plan also shows how long this database's restores have actually taken (`Past restores`: p50, p90 and the longest
+over the last 90 days, from real incidents only, with the sample size) and how many of them broke the declared `rto`
+(`RTO check`). With that history the budget check takes the restore to last as long as its p90 and not as long as the
+`rto`; without enough of it (fewer than three resolved restores of this database) the declared `rto` stands, as an
+upper bound. The history is information: it never refuses a restore. See
+[OBJECTIVES.md §5.5](OBJECTIVES.md#55-the-recovery-time-estimate).
+
 #### LSN targets and the lower bound
 
 An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against

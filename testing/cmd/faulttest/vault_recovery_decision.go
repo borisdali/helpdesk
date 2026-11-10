@@ -179,7 +179,15 @@ func rdOption(opt audit.DecisionOption) string {
 	if opt.BudgetVerdict != "" {
 		fmt.Fprintf(&b, "; budget → %s", opt.BudgetVerdict)
 		if opt.BudgetRemainingSeconds != nil {
-			fmt.Fprintf(&b, " (%s left)", ledgerSpan(*opt.BudgetRemainingSeconds))
+			taken := ""
+			if opt.BudgetDurationSeconds != nil {
+				basis := "from the declared rto"
+				if opt.BudgetDurationBasis == "history" {
+					basis = "the p90 of past restores"
+				}
+				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), basis)
+			}
+			fmt.Fprintf(&b, " (%s left%s)", ledgerSpan(*opt.BudgetRemainingSeconds), taken)
 		}
 		switch opt.BudgetGate {
 		case "acknowledge":
@@ -187,6 +195,15 @@ func rdOption(opt audit.DecisionOption) string {
 		case "refuse":
 			b.WriteString("; budget enforcement refuses it")
 		}
+	}
+	// What this database's past restores have taken, when that was known.
+	if opt.EstimateStatus == "estimated" && opt.EstimateSamples != nil && opt.EstimateP90Seconds != nil {
+		fmt.Fprintf(&b, "; history: p90 %s over %d past restores", rdSpan(*opt.EstimateP90Seconds), *opt.EstimateSamples)
+		if opt.EstimateVsRTO == "exceeds" && opt.EstimateOverRTO != nil {
+			fmt.Fprintf(&b, ", %d took longer than the rto", *opt.EstimateOverRTO)
+		}
+	} else if opt.EstimateStatus != "" && opt.EstimateStatus != "estimated" {
+		fmt.Fprintf(&b, "; history: %s", opt.EstimateStatus)
 	}
 	return b.String()
 }

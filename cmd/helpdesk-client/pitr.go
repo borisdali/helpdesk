@@ -190,6 +190,15 @@ type pitrPlan struct {
 		GateNote         string `json:"gate_note"`
 		Enforcement      string `json:"enforcement"`
 		RemainingSeconds *int64 `json:"remaining_seconds"`
+		DurationBasis    string `json:"duration_basis"`
+		// RecoveryEstimate is how long this database's restores have taken, from
+		// real incidents, and how that stands against its declared rto.
+		RecoveryEstimate *struct {
+			Status      string `json:"status"`
+			Basis       string `json:"basis"`
+			VsRTO       string `json:"vs_rto"`
+			VsRTODetail string `json:"vs_rto_detail"`
+		} `json:"recovery_estimate"`
 	} `json:"availability_budget"`
 }
 
@@ -250,6 +259,19 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		}
 		if bd.GateNote != "" {
 			fmt.Fprintf(&b, "Note               : %s\n", bd.GateNote)
+		}
+	}
+	// How long this database's restores have taken, and against its declared rto.
+	// Shown with or without an SLO: it is what has been demonstrated, from real
+	// incidents, and it says what it rests on. Information; it holds nothing.
+	if bd := p.AvailabilityBudget; bd != nil && bd.RecoveryEstimate != nil && bd.RecoveryEstimate.Basis != "" {
+		e := bd.RecoveryEstimate
+		fmt.Fprintf(&b, "Past restores      : %s\n", e.Basis)
+		switch e.VsRTO {
+		case "exceeds":
+			fmt.Fprintf(&b, "RTO CHECK (!)      : exceeds: %s\n", e.VsRTODetail)
+		case "within":
+			fmt.Fprintf(&b, "RTO check          : within: %s\n", e.VsRTODetail)
 		}
 	}
 	state := "down"
