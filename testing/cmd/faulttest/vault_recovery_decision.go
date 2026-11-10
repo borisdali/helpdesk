@@ -174,6 +174,20 @@ func rdOption(opt audit.DecisionOption) string {
 	case "refuse":
 		b.WriteString("; enforcement refuses it")
 	}
+	// The same restore set against the downtime budget, said apart from the loss
+	// verdict above so the two are never read as one.
+	if opt.BudgetVerdict != "" {
+		fmt.Fprintf(&b, "; budget → %s", opt.BudgetVerdict)
+		if opt.BudgetRemainingSeconds != nil {
+			fmt.Fprintf(&b, " (%s left)", ledgerSpan(*opt.BudgetRemainingSeconds))
+		}
+		switch opt.BudgetGate {
+		case "acknowledge":
+			b.WriteString("; the budget needed the breach acknowledged")
+		case "refuse":
+			b.WriteString("; budget enforcement refuses it")
+		}
+	}
 	return b.String()
 }
 
@@ -241,6 +255,11 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		case audit.RecoveryStageExecution:
 			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
 				fmt.Fprintf(&b, " on %s's approval", a.ApprovedBy)
+			}
+			// Which objectives demanded the acknowledgement: one acknowledgement
+			// covers them all, and this says what it covered.
+			if a := rd.Approval; a != nil && len(a.Breaches) > 0 {
+				fmt.Fprintf(&b, "; objectives in the way: %s", strings.Join(a.Breaches, ", "))
 			}
 		case audit.RecoveryStageOutcome:
 			sawOutcome = true

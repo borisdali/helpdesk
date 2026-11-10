@@ -119,6 +119,11 @@ type ObjectivesInForce struct {
 	// configured one came from, empty when it was not configured.
 	Enforcement       string `json:"enforcement,omitempty"`
 	EnforcementSource string `json:"enforcement_source,omitempty"`
+	// AvailabilityEnforcement is the effective enforcement of the availability
+	// budget (warn when none is set, acknowledge when it could not be trusted),
+	// and its source where one was configured. Absent before v0.35.
+	AvailabilityEnforcement       string `json:"availability_enforcement,omitempty"`
+	AvailabilityEnforcementSource string `json:"availability_enforcement_source,omitempty"`
 
 	// Problems are the configuration problems that affected the resolution.
 	Problems []string `json:"problems,omitempty"`
@@ -152,7 +157,24 @@ type DecisionOption struct {
 	Verdict       string `json:"verdict,omitempty"`
 	VerdictDetail string `json:"verdict_detail,omitempty"`
 	Gate          string `json:"gate,omitempty"`
+
+	// The restore set against the availability budget (the downtime the SLO
+	// allows in its window): what is left of it, as the restore stood to use it.
+	// BudgetVerdict is within, exceeds, may_exceed, not_comparable, no_objective,
+	// objective_invalid or ledger_unavailable; BudgetGate what approving demands
+	// because of it. BudgetRemainingSeconds is negative when the budget is
+	// overspent. Absent on a record from before v0.35.
+	BudgetVerdict          string `json:"budget_verdict,omitempty"`
+	BudgetVerdictDetail    string `json:"budget_verdict_detail,omitempty"`
+	BudgetGate             string `json:"budget_gate,omitempty"`
+	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
 }
+
+// The objectives a restore can breach, as named in ApprovalFacts.Breaches.
+const (
+	BreachRPO                = "rpo"
+	BreachAvailabilityBudget = "availability_budget"
+)
 
 // ApprovalFacts is what an approval carried.
 type ApprovalFacts struct {
@@ -160,6 +182,12 @@ type ApprovalFacts struct {
 	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
 	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
 	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+	// Breaches are the objectives that stood in the way of this restore (each one
+	// demanded the acknowledgement), so that a person who acknowledged an rpo
+	// breach is not taken to have acknowledged a budget breach too. One
+	// acknowledgement covers every breach shown at the gate; this says which
+	// there were. Empty when nothing demanded it.
+	Breaches []string `json:"breaches,omitempty"`
 }
 
 var (

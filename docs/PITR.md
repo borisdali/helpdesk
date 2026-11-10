@@ -217,6 +217,18 @@ shown. A problem with some *other* setting is not an invalid `rpo`.
 "Anything else" is `within`, `not_comparable` (an LSN target whose lower bound proves no breach) and
 `no_objective` (nothing is set at all): with nothing to compare, the restore has nothing to enforce, and says so.
 
+#### The downtime budget at the gate
+
+A restore costs downtime as well as data, and the SLO allows only so much of it. The plan carries a second check,
+`availability_budget` (`helpdesk-client --pitr-plan` prints it as `BUDGET CHECK`): what is left of the database's
+downtime budget, set against the restore, which stands for its duration with the declared `rto` as an upper bound.
+Its verdicts mirror the `rpo`'s (`within`, `may_exceed`, `exceeds`, `not_comparable`, `no_objective`,
+`objective_invalid`, plus `ledger_unavailable` when what has been spent cannot be read), and what approving demands is
+the database's separate `availability_enforcement`, `warn` unless set. Refusing applies only to an instance that is
+serving; one that is already down asks for the acknowledgement instead. There is one `acknowledge_objective_breach`
+for both checks, and the recovery decision records which objectives stood in the way. All of it is in
+[OBJECTIVES.md §5.4](OBJECTIVES.md#54-the-budget-at-the-gate).
+
 #### LSN targets and the lower bound
 
 An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against

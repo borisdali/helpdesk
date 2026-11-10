@@ -250,6 +250,107 @@ func TestBudget_ReportsTheDefaultWindowAsADefault(t *testing.T) {
 	}
 }
 
+// --- availability_enforcement: its own setting ---
+
+// The reason it is separate: a config written for v0.34 that says `enforcement:
+// refuse` means "refuse a restore that loses too much data". It must not start
+// refusing restores for a budget it never mentioned.
+func TestAvailabilityEnforcement_IsIndependentOfTheRPOsEnforcement(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"enforcement": "refuse"}},
+	  "environments": {"prod": {"objectives": {"enforcement": "acknowledge"}}},
+	  "db_servers": {
+	    "strict-rpo":  {"connection_string": "host=a", "environment": "prod", "objectives": {"enforcement": "refuse"}},
+	    "both":        {"connection_string": "host=b", "environment": "prod", "objectives": {"enforcement": "refuse", "availability_enforcement": "acknowledge"}},
+	    "budget-only": {"connection_string": "host=c", "objectives": {"availability_enforcement": "refuse"}}
+	  }
+	}`)
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]struct{ rpo, budget string }{
+		// An existing refuse does not reach the budget.
+		"strict-rpo": {EnforceRefuse, EnforceWarn},
+		// Each says its own.
+		"both": {EnforceRefuse, EnforceAcknowledge},
+		// (The fleet default still sets the rpo's.)
+		"budget-only": {EnforceRefuse, EnforceRefuse},
+	} {
+		res, _ := c.ResolveObjectives(id)
+		if got := res.EffectiveEnforcement(); got != want.rpo {
+			t.Errorf("%s: rpo enforcement = %q, want %q", id, got, want.rpo)
+		}
+		if got := res.EffectiveAvailabilityEnforcement(); got != want.budget {
+			t.Errorf("%s: availability enforcement = %q, want %q", id, got, want.budget)
+		}
+	}
+}
+
+func TestAvailabilityEnforcement_ResolvesFieldByFieldWithSources(t *testing.T) {
+	c := load(t, `{
+	  "defaults": {"objectives": {"availability_enforcement": "warn"}},
+	  "environments": {"prod": {"objectives": {"availability_enforcement": "acknowledge"}}, "dev": {}},
+	  "db_servers": {
+	    "own":     {"connection_string": "host=a", "environment": "prod", "objectives": {"availability_enforcement": "refuse"}},
+	    "env":     {"connection_string": "host=b", "environment": "prod"},
+	    "default": {"connection_string": "host=c", "environment": "dev"}
+	  }
+	}`)
+	for id, want := range map[string]struct{ value, source string }{
+		"own": {"refuse", "database"}, "env": {"acknowledge", "environment:prod"}, "default": {"warn", "default"},
+	} {
+		res, _ := c.ResolveObjectives(id)
+		if !res.AvailabilityEnforcement.Set || res.AvailabilityEnforcement.Value != want.value || res.AvailabilityEnforcement.Source != want.source {
+			t.Errorf("%s = %+v, want %s from %s", id, res.AvailabilityEnforcement, want.value, want.source)
+		}
+	}
+	// Nothing set anywhere: warn, and not "invalid".
+	none, _ := load(t, `{"db_servers": {"a": {"connection_string": "host=a"}}}`).ResolveObjectives("a")
+	if none.EffectiveAvailabilityEnforcement() != EnforceWarn || none.AvailabilityEnforcementInvalid {
+		t.Errorf("unset = %q (invalid %v), want warn", none.EffectiveAvailabilityEnforcement(), none.AvailabilityEnforcementInvalid)
+	}
+}
+
+// A typo must never quietly weaken the check: it falls toward acknowledge, not
+// warn, and does not fall through to a more lenient level.
+func TestAvailabilityEnforcement_ATypoFallsTowardAcknowledge(t *testing.T) {
+	for name, tc := range map[string]struct{ cfg, db string }{
+		"a wrong value": {`{"db_servers": {"a": {"connection_string": "host=a", "objectives": {"availability_enforcement": "Refuse"}}}}`, "a"},
+		"not a string":  {`{"db_servers": {"a": {"connection_string": "host=a", "objectives": {"availability_enforcement": true}}}}`, "a"},
+		"a typo that would have fallen through to the default's warn": {`{
+		  "defaults": {"objectives": {"availability_enforcement": "warn"}},
+		  "db_servers": {"a": {"connection_string": "host=a", "objectives": {"availability_enforcement": "blok"}}}}`, "a"},
+	} {
+		c := load(t, tc.cfg)
+		res, _ := c.ResolveObjectives(tc.db)
+		if !res.AvailabilityEnforcementInvalid || res.EffectiveAvailabilityEnforcement() != EnforceAcknowledge {
+			t.Errorf("%s: effective = %q, invalid = %v", name, res.EffectiveAvailabilityEnforcement(), res.AvailabilityEnforcementInvalid)
+		}
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "availability_enforcement") {
+			t.Errorf("%s: Validate = %v, want it to name availability_enforcement", name, err)
+		}
+	}
+	// A database in an environment that is not declared cannot tell what that
+	// environment would have set, unless it says for itself.
+	c := load(t, `{"db_servers": {
+	  "lost":  {"connection_string": "host=a", "environment": "prdo"},
+	  "known": {"connection_string": "host=b", "environment": "prdo", "objectives": {"availability_enforcement": "warn"}}}}`)
+	if res, _ := c.ResolveObjectives("lost"); res.EffectiveAvailabilityEnforcement() != EnforceAcknowledge {
+		t.Errorf("an undeclared environment with nothing set = %q, want acknowledge", res.EffectiveAvailabilityEnforcement())
+	}
+	if res, _ := c.ResolveObjectives("known"); res.EffectiveAvailabilityEnforcement() != EnforceWarn {
+		t.Errorf("what a database sets itself is honoured: %q", res.EffectiveAvailabilityEnforcement())
+	}
+}
+
+func TestAvailabilityEnforcement_RoundTripsThroughJSON(t *testing.T) {
+	c := load(t, `{"defaults": {"objectives": {"availability_enforcement": "acknowledge"}}}`)
+	b, err := json.Marshal(c.Defaults.Objectives)
+	if err != nil || !strings.Contains(string(b), `"availability_enforcement":"acknowledge"`) {
+		t.Errorf("%s, %v", b, err)
+	}
+}
+
 // --- the config-wide check ---
 
 func TestConsistency(t *testing.T) {

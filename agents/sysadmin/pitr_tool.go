@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 )
 
 // Plan statuses.
@@ -70,6 +71,12 @@ type PITRPlan struct {
 	// Not part of the plan digest: on a serving instance it grows while the
 	// plan waits for approval.
 	DataLossEstimate *DataLossEstimate `json:"data_loss_estimate,omitempty"`
+	// AvailabilityBudget sets the downtime this restore costs against what is
+	// left of the database's downtime budget (the SLO over its window), and says
+	// what approving will demand because of it. Not part of the plan digest, as
+	// what is left of a budget changes while the plan waits for approval: the
+	// restore reads it again just before it stops anything.
+	AvailabilityBudget *availability.BudgetVerdict `json:"availability_budget,omitempty"`
 	// DecisionUnrecorded is set when this plan could not be written to the
 	// audit trail. The plan stands; it just is not on record.
 	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
@@ -260,6 +267,7 @@ func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 		}
 	}
 	plan.DataLossEstimate = withObjective(estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now()), args.Target)
+	plan.AvailabilityBudget = budgetCheckFor(ctx, args.Target, plan.InstanceServing)
 	return plan, nil
 }
 

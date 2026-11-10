@@ -186,6 +186,8 @@ type pitrFakes struct {
 	planStatus, planDigest string
 	// planObjective, when set, is the plan's data_loss_estimate.objective.
 	planObjective map[string]any
+	// planBudget, when set, is the plan's availability_budget.
+	planBudget map[string]any
 }
 
 func newPITRFakes(t *testing.T) *pitrFakes {
@@ -203,6 +205,9 @@ func newPITRFakes(t *testing.T) *pitrFakes {
 		body := map[string]any{"status": f.planStatus, "detail": "because", "plan_digest": f.planDigest, "instance_serving": true, "archive_flush_required": true}
 		if f.planObjective != nil {
 			body["data_loss_estimate"] = map[string]any{"summary": "s", "objective": f.planObjective}
+		}
+		if f.planBudget != nil {
+			body["availability_budget"] = f.planBudget
 		}
 		plan, _ := json.Marshal(body)
 		json.NewEncoder(w).Encode(map[string]any{"output": string(plan)}) //nolint:errcheck
@@ -309,6 +314,61 @@ func TestRemediator_ObjectiveBreachAtTheGate(t *testing.T) {
 		fk.planObjective = map[string]any{"status": "exceeds", "gate": "refuse", "enforcement": "refuse", "detail": "18h over the objective"}
 		err := approve(fk)
 		if err == nil || !strings.Contains(err.Error(), "would be refused") || !strings.Contains(err.Error(), "18h over the objective") {
+			t.Fatalf("err = %v", err)
+		}
+		if fk.gateCalls != 0 {
+			t.Errorf("the gateway was called %d time(s) for an approval the restore would refuse", fk.gateCalls)
+		}
+	})
+}
+
+// The same, for the downtime budget: the harness acknowledges what the plan says
+// to, does not approve around a budget refusal, and one acknowledgement covers
+// whichever breaches the plan shows.
+func TestRemediator_BudgetBreachAtTheGate(t *testing.T) {
+	approve := func(fk *pitrFakes) error {
+		r := fk.remediator()
+		if err := r.SetPITR(droppedTable, droppedTableOut); err != nil {
+			t.Fatal(err)
+		}
+		_, err := r.ProceedEscalation(context.Background(), "plr_g", ProceedEscalationRequest{Resolution: "approved"})
+		return err
+	}
+	acked := func(fk *pitrFakes) bool { return fk.gateBody["acknowledge_objective_breach"] == true }
+
+	t.Run("the budget asks: acknowledged", func(t *testing.T) {
+		fk := newPITRFakes(t)
+		fk.planBudget = map[string]any{"status": "may_exceed", "gate": "acknowledge", "enforcement": "acknowledge", "detail": "only 23m left"}
+		if err := approve(fk); err != nil || !acked(fk) {
+			t.Fatalf("err=%v approval=%v", err, fk.gateBody)
+		}
+	})
+	t.Run("both ask: one acknowledgement", func(t *testing.T) {
+		fk := newPITRFakes(t)
+		fk.planObjective = map[string]any{"status": "exceeds", "gate": "acknowledge", "enforcement": "acknowledge", "detail": "d"}
+		fk.planBudget = map[string]any{"status": "exceeds", "gate": "acknowledge", "enforcement": "acknowledge", "detail": "spent"}
+		if err := approve(fk); err != nil || !acked(fk) {
+			t.Fatalf("err=%v approval=%v", err, fk.gateBody)
+		}
+	})
+	t.Run("the budget demands nothing: nothing sent", func(t *testing.T) {
+		for _, budget := range []map[string]any{nil, {"status": "within", "gate": ""}, {"status": "exceeds", "gate": "", "enforcement": "warn"}} {
+			fk := newPITRFakes(t)
+			fk.planBudget = budget
+			if err := approve(fk); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := fk.gateBody["acknowledge_objective_breach"]; present {
+				t.Errorf("budget %v: an acknowledgement nobody asked for was sent: %v", budget, fk.gateBody)
+			}
+		}
+	})
+	t.Run("the budget refuses: the gate is not approved, whatever the loss verdict says", func(t *testing.T) {
+		fk := newPITRFakes(t)
+		fk.planObjective = map[string]any{"status": "within", "gate": ""}
+		fk.planBudget = map[string]any{"status": "exceeds", "gate": "refuse", "enforcement": "refuse", "detail": "the budget is spent"}
+		err := approve(fk)
+		if err == nil || !strings.Contains(err.Error(), "downtime budget") || !strings.Contains(err.Error(), "the budget is spent") {
 			t.Fatalf("err = %v", err)
 		}
 		if fk.gateCalls != 0 {

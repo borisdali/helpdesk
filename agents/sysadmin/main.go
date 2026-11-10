@@ -18,6 +18,7 @@ import (
 	"helpdesk/agentutil"
 	agentserve "helpdesk/agentutil/serve"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/prompts"
@@ -49,6 +50,13 @@ func main() {
 			sort.Strings(dbKeys)
 			slog.Info("infrastructure config loaded", "databases", len(infraConfig.DBServers), "db_keys", strings.Join(dbKeys, ", "))
 		}
+	}
+
+	// The availability budget at a restore's gate is read from the incidents in
+	// the audit service: the same URL and key this agent writes its decisions
+	// with. Without one the budget reads as unavailable, never as unspent.
+	if cfg.AuditURL != "" {
+		ledgerClient = &availability.Client{URL: cfg.AuditURL, APIKey: os.Getenv("HELPDESK_AUDIT_API_KEY")}
 	}
 
 	// Load objective_evidence rules if available. Same convention as

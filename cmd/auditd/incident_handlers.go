@@ -122,14 +122,6 @@ func (s *incidentServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(inc) //nolint:errcheck
 }
 
-// incidentWithSeries is an incident listed with the series of every playbook
-// run it spanned (?include=series): what an availability ledger needs to
-// classify it by its worst hop.
-type incidentWithSeries struct {
-	*audit.Incident
-	SeriesIDs []string `json:"series_ids,omitempty"`
-}
-
 // handleList handles GET /v1/incidents. Supports ?origin=&status=&attribution=&
 // series_id=&target_key=&limit=, and for the availability ledger:
 //
@@ -188,9 +180,9 @@ func (s *incidentServer) handleList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to list incidents", http.StatusInternalServerError)
 			return
 		}
-		withSeries := make([]incidentWithSeries, 0, len(incidents))
+		withSeries := make([]audit.IncidentWithSeries, 0, len(incidents))
 		for _, inc := range incidents {
-			withSeries = append(withSeries, incidentWithSeries{Incident: inc, SeriesIDs: series[inc.EntryRunID]})
+			withSeries = append(withSeries, audit.IncidentWithSeries{Incident: inc, SeriesIDs: series[inc.EntryRunID]})
 		}
 		out = withSeries
 	}

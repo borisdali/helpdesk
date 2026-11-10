@@ -26,6 +26,7 @@ documented where they appear.
    - [5.1 Which incidents spend the availability budget](#51-which-incidents-spend-the-availability-budget)
    - [5.2 The availability budget](#52-the-availability-budget)
    - [5.3 The availability ledger](#53-the-availability-ledger)
+   - [5.4 The budget at the gate](#54-the-budget-at-the-gate)
 6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
@@ -102,10 +103,15 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   value, inherited or not, is treated as `acknowledge`, not `warn`. So is a database that names an environment
   that is not declared and sets no enforcement of its own, because it cannot tell which enforcement its real
   environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
-  honoured. **Today `enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
-  restore before the instance is stopped. The `rto` is shown against what a recovery took, after the fact and the
-  availability budget is shown and checked for contradictions; neither holds a recovery. Extending enforcement to
-  them is planned (see the status table below), not built.
+  honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
+  restore before the instance is stopped. The downtime a restore costs has its own setting,
+  `availability_enforcement`, below, and the `rto` is shown against what a recovery took, after the fact.
+- **`availability_enforcement`** is `warn`, `acknowledge` or `refuse`, and says what happens when a restore is
+  expected to breach the availability budget ([§5.4](#54-the-budget-at-the-gate)). It is its own setting and not
+  `enforcement`'s, because an existing `enforcement: refuse` means "refuse a restore that loses too much data" and
+  must not start refusing restores for a budget it never named. Unset means `warn`. It follows the same rules as
+  `enforcement`: an invalid value, inherited or not, and a database that names an environment that is not declared
+  and sets none of its own, are treated as `acknowledge`, never as `warn`.
 - Both are exact lowercase strings. `Refuse` is an error, not a guess.
 
 Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
@@ -235,6 +241,60 @@ What counts, and what is said about what does not:
   page was full the ledger says it may be missing incidents. With no budget (no `availability_slo`, or one that cannot
   be trusted) the spend is still listed and nothing is shown as remaining.
 
+### 5.4 The budget at the gate
+
+A point-in-time restore costs downtime as well as data. Before it stops anything, the sysadmin agent sets what is
+left of the downtime budget (§5.3) against the restore, next to the data-loss estimate set against the `rpo`, and the
+plan carries the result as `availability_budget` (`helpdesk-client --pitr-plan` prints it as `BUDGET CHECK`).
+
+It is evaluated in the agent, not at the gateway, for two reasons: only the agent knows whether the instance is
+**serving**, and it already measures again just before the stop, so the ledger is read at that moment too. The
+gateway's own ledger endpoint and the agent read it with the same code.
+
+How long the restore will take is not known: until there is an estimate from history, the declared `rto` stands in
+for it, as an upper bound. So a restore that does not fit in what is left only **may** exceed the budget (a restore
+can beat its `rto`), and that never refuses. Only a budget that is already spent is a certain breach.
+
+| Verdict | When |
+|---|---|
+| `within` | what is left of the budget is at least the `rto` |
+| `may_exceed` | some is left, but less than the `rto` |
+| `exceeds` | the budget is already spent (nothing left, or overspent) |
+| `not_comparable` | there is budget left but no `rto` is declared, so how long the restore may take is not known |
+| `no_objective` | no `availability_slo` is set, or the target is not a configured database |
+| `objective_invalid` | the SLO or its window was set and could not be read |
+| `ledger_unavailable` | the budget is known but how much of it has been spent could not be read (no audit service, or it failed) |
+
+The verdict is made on the **confirmed** spend. Outages whose real length is unknown (§5.3) are not counted, so a
+guess cannot refuse a restore, but the detail says how many there are and what would be left if they counted in full.
+
+What approving demands is `availability_enforcement`:
+
+| `availability_enforcement` | `exceeds` | `may_exceed`, `objective_invalid`, `ledger_unavailable` | anything else |
+|---|---|---|---|
+| `warn` (the default) | shown | shown | shown |
+| `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
+| `refuse` | the restore is refused, whatever is acknowledged, **if the instance is serving**; otherwise it needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` (asks, never refuses) | shown |
+
+- **Refusing is only coherent for a serving instance.** The restore is then what causes the downtime, and refusing
+  keeps it serving. An instance that is already down accrues the downtime whether or not it is restored, so refusing
+  would leave it down and spend the budget faster. There a `refuse` asks for the acknowledgement instead, and the plan
+  says why.
+- **What cannot be checked asks, and does not refuse.** An unreadable objective and an unreadable spend are not "nothing
+  to check": a typo or a dead audit service must not quietly switch a strict enforcement off. Nothing is known to be
+  breached, so they ask.
+- **One acknowledgement covers every breach shown at the gate.** The gate has one field, `acknowledge_objective_breach`.
+  A refusal from either objective stands whatever is acknowledged. When both ask, the error names both, and the
+  recovery decision records which objectives stood in the way (`approval.breaches`: `rpo`, `availability_budget`), so
+  that acknowledging a data-loss breach is never taken to have acknowledged a budget breach too.
+- **It is recorded.** Each option on the plan and execution decisions carries `budget_verdict`, `budget_gate`,
+  `budget_remaining_seconds` and the sentence that made it; the objectives in force carry the effective
+  `availability_enforcement`. `vault incidents` shows it on the option line, apart from the loss verdict.
+
+What this does not do: it does not predict the restore's duration (the `rto` is an upper bound), it does not count
+downtime that is not in a recorded incident, and it does not choose between restoring fast and restoring precisely
+(`recovery_preference` has no consumer yet).
+
 ## 6. Design: how objectives will be used (not built yet)
 
 Sections 1-5 are built. This section is the design the next steps follow. Everything in it is marked built or not,
@@ -264,8 +324,9 @@ it spends.
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
 | A ledger of the downtime budget already spent in the window, from recorded real incidents, charged by availability impact, with unconfirmed outages listed apart ([§5.3](#53-the-availability-ledger)) | Built |
-| The remaining budget shown to the person at the gate | Not built |
-| `enforcement` extended past the `rpo`: a restore expected to breach the remaining availability budget (or the `rto`) is held to `acknowledge` or `refuse`. Whether `refuse` is one setting for every objective or one per objective is undecided | Not built (v0.35) |
+| The remaining budget shown to the person at the gate (`helpdesk-client --pitr-plan`, and recorded on the plan and execution decisions) | Built |
+| A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built |
+| The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
 | Per-incident outcome (actual loss, duration, budget burn) recorded against the objective | Not built |

@@ -362,7 +362,7 @@ func TestDecisionRecords_NeverCarryAPasswordInTheTarget(t *testing.T) {
 	if err := recordPlanDecision(context.Background(), dsn, PITRPlan{Status: PITRNotFeasible, Detail: "could not connect: " + dsn}); err != nil {
 		t.Fatalf("recording the plan decision: %v", err)
 	}
-	if err := recordExecutionDecision(context.Background(), RestoreToPITArgs{Target: dsn, PlanDigest: "0123456789abcdef"}, PITRPlan{}, nil, "refusing to restore — "+dsn); err != nil {
+	if err := recordExecutionDecision(context.Background(), RestoreToPITArgs{Target: dsn, PlanDigest: "0123456789abcdef"}, PITRPlan{}, nil, nil, "refusing to restore — "+dsn); err != nil {
 		t.Fatalf("recording the execution decision: %v", err)
 	}
 

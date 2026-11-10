@@ -60,6 +60,24 @@ type Incident struct {
 	TargetInput string `json:"target_input,omitempty"`
 }
 
+// IncidentWithSeries is an incident listed with the playbook series of every run
+// it spanned (GET /v1/incidents?include=series): what an availability ledger needs
+// to classify it by its worst run. It is defined here so that the service that
+// writes the listing (auditd) and the code that reads it (internal/availability)
+// share one shape, not two that could drift.
+type IncidentWithSeries struct {
+	*Incident
+	SeriesIDs []string `json:"series_ids,omitempty"`
+}
+
+// IncidentListing is the body of GET /v1/incidents.
+type IncidentListing struct {
+	Incidents []IncidentWithSeries `json:"incidents"`
+	Count     int                  `json:"count"`
+	// Truncated says the page was full, so the listing may have left incidents out.
+	Truncated bool `json:"truncated"`
+}
+
 // IncidentUpdate carries the mutable subset of Incident fields for a partial
 // (PATCH-style) update — every field is a pointer so a caller can update just
 // one or two without clobbering the rest. Mirrors this package's existing

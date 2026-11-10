@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 	"helpdesk/internal/infra"
 )
 
@@ -51,6 +52,10 @@ func snapshotOf(res infra.ResolvedObjectives, configDigest string) *audit.Object
 	if res.Enforcement.Set {
 		s.EnforcementSource = res.Enforcement.Source
 	}
+	s.AvailabilityEnforcement = res.EffectiveAvailabilityEnforcement()
+	if res.AvailabilityEnforcement.Set {
+		s.AvailabilityEnforcementSource = res.AvailabilityEnforcement.Source
+	}
 	return s
 }
 
@@ -76,8 +81,11 @@ func objectivesSnapshot(target string) *audit.ObjectivesInForce {
 
 // pitrOption is the audit form of the point-in-time restore as an option, with
 // what it would cost and how that stands against the objective.
-func pitrOption(est *DataLossEstimate, chosen bool) audit.DecisionOption {
+func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chosen bool) audit.DecisionOption {
 	o := audit.DecisionOption{Name: pitrOptionName, Chosen: chosen}
+	if budget != nil {
+		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.RemainingSeconds
+	}
 	if est == nil {
 		return o
 	}
@@ -112,8 +120,8 @@ func recordPlanDecision(ctx context.Context, target string, plan PITRPlan) error
 	if plan.Status != PITRFeasible {
 		d.Reason = plan.Detail
 	}
-	if plan.DataLossEstimate != nil {
-		d.Options = []audit.DecisionOption{pitrOption(plan.DataLossEstimate, false)}
+	if plan.DataLossEstimate != nil || plan.AvailabilityBudget != nil {
+		d.Options = []audit.DecisionOption{pitrOption(plan.DataLossEstimate, plan.AvailabilityBudget, false)}
 	}
 	return toolAuditor.RecordRecoveryDecision(ctx, d)
 }
@@ -122,7 +130,7 @@ func recordPlanDecision(ctx context.Context, target string, plan PITRPlan) error
 // stopped anything: to go ahead (reason empty) or to refuse (reason). The
 // approval facts are what the call carried; the approver's name is known only
 // when the approval came through the gateway. It returns the write error, if any.
-func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PITRPlan, est *DataLossEstimate, reason string) error {
+func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PITRPlan, est *DataLossEstimate, budget *availability.BudgetVerdict, reason string) error {
 	proceeded := reason == ""
 	d := audit.RecoveryDecision{
 		Stage: audit.RecoveryStageExecution, Tool: "restore_to_point_in_time", Target: args.Target,
@@ -133,6 +141,13 @@ func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PI
 			AllowedStopServing: args.AllowStopServing, AcknowledgedBreach: args.AcknowledgeObjectiveBreach,
 		},
 	}
+	// Which objectives stood in the way (each one demanded the acknowledgement),
+	// so that one acknowledgement is not taken to cover a breach it did not name.
+	var rpo *RPOComparison
+	if est != nil {
+		rpo = est.Objective
+	}
+	d.Approval.Breaches = breachesToAcknowledge(rpo, budget)
 	if ap := audit.RecoveryApprovalFromContext(ctx); ap != nil {
 		d.Approval.ApprovedBy, d.Approval.AcknowledgedDataLoss = ap.ApprovedBy, ap.Acknowledged
 	}
@@ -141,7 +156,7 @@ func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PI
 	} else {
 		d.Decision, d.Reason = audit.RecoveryDecisionRefused, reason
 	}
-	d.Options = []audit.DecisionOption{pitrOption(est, proceeded)}
+	d.Options = []audit.DecisionOption{pitrOption(est, budget, proceeded)}
 	return toolAuditor.RecordRecoveryDecision(ctx, d)
 }
 

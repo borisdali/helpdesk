@@ -131,6 +131,48 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 	}
 }
 
+// The budget verdict is on the option line, apart from the loss verdict, and an
+// older record (no budget fields) reads exactly as it did.
+func TestRDOption_ShowsTheBudgetVerdictApartFromTheLossVerdict(t *testing.T) {
+	spent := int64(-408)
+	left := int64(1392)
+	both := rdOptionFixture(true)
+	both.BudgetVerdict, both.BudgetGate, both.BudgetRemainingSeconds = "may_exceed", "acknowledge", &left
+	if got := rdOption(both); !strings.Contains(got, "→ exceeds; needed the breach acknowledged; budget → may_exceed (23m 12s left); the budget needed the breach acknowledged") {
+		t.Errorf("both verdicts: %q", got)
+	}
+	// A spent budget shows as negative, and a refusal as a refusal of the budget, not the loss.
+	over := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "exceeds", BudgetGate: "refuse", BudgetRemainingSeconds: &spent}
+	if got := rdOption(over); got != "point_in_time_restore; budget → exceeds (-6m 48s left); budget enforcement refuses it" {
+		t.Errorf("a spent budget: %q", got)
+	}
+	// Nothing demanded: the verdict alone, with no gate text.
+	room := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "within", BudgetRemainingSeconds: &left}
+	if got := rdOption(room); got != "point_in_time_restore; budget → within (23m 12s left)" {
+		t.Errorf("room: %q", got)
+	}
+	// A record from before v0.35 has no budget, and says nothing about one.
+	if got := rdOption(rdOptionFixture(false)); strings.Contains(got, "budget") {
+		t.Errorf("an old record mentions a budget: %q", got)
+	}
+}
+
+func TestFormatRecoveryDecisions_SaysWhichObjectivesStoodInTheWay(t *testing.T) {
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedBreach: true, Breaches: []string{"rpo", "availability_budget"}},
+	}}})
+	if !strings.Contains(out, "on alice's approval; objectives in the way: rpo, availability_budget") {
+		t.Errorf("%s", out)
+	}
+	none := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded", Approval: &audit.ApprovalFacts{ApprovedBy: "alice"},
+	}}})
+	if strings.Contains(none, "objectives in the way") {
+		t.Errorf("a restore with nothing in the way says so: %s", none)
+	}
+}
+
 func TestFormatRecoveryDecisions_ARefusalSaysWhy(t *testing.T) {
 	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(5), Decision: audit.RecoveryDecision{
 		Stage: "execution", Decision: "refused", Reason: "the data this restore discards exceeds the recovery objective; approve again with acknowledge_objective_breach",

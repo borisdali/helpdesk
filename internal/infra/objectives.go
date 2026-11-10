@@ -193,8 +193,16 @@ type Objectives struct {
 	AvailabilityWindow *Duration `json:"availability_window,omitempty"`
 	// RecoveryPreference is availability_first or data_first.
 	RecoveryPreference *Choice `json:"recovery_preference,omitempty"`
-	// Enforcement is warn, acknowledge or refuse. Unset means warn.
+	// Enforcement is warn, acknowledge or refuse. Unset means warn. It governs
+	// the rpo only (what a restore discards).
 	Enforcement *Choice `json:"enforcement,omitempty"`
+	// AvailabilityEnforcement is what happens when a restore is expected to
+	// breach the availability budget (the downtime the SLO allows): warn,
+	// acknowledge or refuse. Unset means warn. It is its own setting, not
+	// Enforcement's, because an existing `enforcement: refuse` means "refuse a
+	// restore that loses too much data", and must not start refusing for a
+	// reason it never named. See budget.go.
+	AvailabilityEnforcement *Choice `json:"availability_enforcement,omitempty"`
 }
 
 // Environment is a named group of databases that share objectives.
@@ -260,6 +268,7 @@ func (o Objectives) problems() map[string]string {
 	}
 	choice("recovery_preference", o.RecoveryPreference, validPreferences)
 	choice("enforcement", o.Enforcement, validEnforcements)
+	choice("availability_enforcement", o.AvailabilityEnforcement, validEnforcements)
 	return out
 }
 
@@ -359,6 +368,11 @@ type ResolvedObjectives struct {
 	AvailabilityWindow ResolvedDuration `json:"availability_window"`
 	RecoveryPreference ResolvedChoice   `json:"recovery_preference"`
 	Enforcement        ResolvedChoice   `json:"enforcement"`
+	// AvailabilityEnforcement is the enforcement of the availability budget, as
+	// declared. AvailabilityEnforcementInvalid says it cannot be trusted, as
+	// EnforcementInvalid does for the rpo's.
+	AvailabilityEnforcement        ResolvedChoice `json:"availability_enforcement"`
+	AvailabilityEnforcementInvalid bool           `json:"availability_enforcement_invalid,omitempty"`
 	// AvailabilitySLOInvalid and AvailabilityWindowInvalid say the setting
 	// cannot be trusted (unreadable, or the database names an undeclared
 	// environment and sets none of its own). Budget then computes nothing: a
@@ -459,6 +473,11 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 				r.Enforcement = ResolvedChoice{Set: true, Value: o.Enforcement.Value, Source: s}
 			},
 			func(r *ResolvedObjectives) { r.EnforcementInvalid = true }},
+		{"availability_enforcement", func(o Objectives) bool { return o.AvailabilityEnforcement != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.AvailabilityEnforcement = ResolvedChoice{Set: true, Value: o.AvailabilityEnforcement.Value, Source: s}
+			},
+			func(r *ResolvedObjectives) { r.AvailabilityEnforcementInvalid = true }},
 	}
 	for _, s := range settings {
 		for _, l := range levels {
@@ -497,8 +516,26 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 		if !res.AvailabilityWindow.Set {
 			res.AvailabilityWindowInvalid = true
 		}
+		// The environment may have set a strict availability enforcement too.
+		if !res.AvailabilityEnforcement.Set {
+			res.AvailabilityEnforcementInvalid = true
+		}
 	}
 	return res, true
+}
+
+// EffectiveAvailabilityEnforcement is what to do when a restore is expected to
+// breach the availability budget: the configured one, warn when none is set, and
+// acknowledge when it cannot be trusted (an invalid value, or a database in an
+// environment that is not declared), as EffectiveEnforcement does for the rpo.
+func (r ResolvedObjectives) EffectiveAvailabilityEnforcement() string {
+	switch {
+	case r.AvailabilityEnforcementInvalid:
+		return EnforceAcknowledge
+	case r.AvailabilityEnforcement.Set:
+		return r.AvailabilityEnforcement.Value
+	}
+	return EnforceWarn
 }
 
 // EffectiveEnforcement is what to do when a recovery would breach an
