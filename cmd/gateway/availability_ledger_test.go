@@ -16,11 +16,12 @@ import (
 
 // ledgerAuditd stands in for auditd's incident listing and records every query.
 type ledgerAuditd struct {
-	mu      sync.Mutex
-	queries []url.Values
-	mine    string // JSON of the incidents for a database
-	loose   string // JSON of the unattributed incidents
-	status  int    // non-zero: answer with this instead
+	mu         sync.Mutex
+	queries    []url.Values
+	mine       string // JSON of the incidents for a database
+	loose      string // JSON of the unattributed incidents
+	status     int    // non-zero: answer with this instead
+	looseFails bool   // only the unattributed query fails
 }
 
 func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
@@ -39,6 +40,10 @@ func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("unattributed") == "true" {
+			if a.looseFails {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
 			w.Write([]byte(a.loose)) //nolint:errcheck
 			return
 		}
@@ -221,6 +226,44 @@ func TestAvailabilityLedger_AuditdFailureIsAnErrorNotAnEmptyLedger(t *testing.T)
 	rec, _ = getLedger(t, &Gateway{infra: ledgerInfra()}, "?database=prod-orders")
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "no audit service is configured") {
 		t.Errorf("no auditd: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A ledger missing half of what it reports on is not returned as if whole: if the
+// count of unattributed incidents cannot be read, or auditd answers with
+// something that is not a listing, it is an error.
+func TestAvailabilityLedger_AHalfReadLedgerIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		aud  *ledgerAuditd
+	}{
+		{"the unattributed query fails", &ledgerAuditd{mine: `{"incidents": []}`, looseFails: true}},
+		{"auditd answers with something that is not JSON", &ledgerAuditd{mine: `<html>not a listing</html>`, loose: `{"incidents": []}`}},
+		{"the unattributed answer is not JSON", &ledgerAuditd{mine: `{"incidents": []}`, loose: `nope`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.aud.server(t)
+			rec, _ := getLedger(t, &Gateway{auditURL: srv.URL, infra: ledgerInfra()}, "?database=prod-orders")
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "could not read the incidents") {
+				t.Errorf("%d %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// The service key is sent, and a bare auditd that wants none is still read.
+func TestAvailabilityLedger_SendsTheAuditKey(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		w.Write([]byte(`{"incidents": []}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	if rec, _ := getLedger(t, &Gateway{auditURL: srv.URL, auditAPIKey: "svc-key", infra: ledgerInfra()}, "?database=prod-orders"); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	if len(got) != 2 || got[0] != "Bearer svc-key" || got[1] != "Bearer svc-key" {
+		t.Errorf("authorization headers = %v", got)
 	}
 }
 

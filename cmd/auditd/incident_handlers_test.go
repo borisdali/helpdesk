@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
+	"helpdesk/internal/infra"
+	"helpdesk/playbooks"
 )
 
 func newIncidentServer(t *testing.T) *incidentServer {
@@ -290,6 +294,141 @@ func TestIncidentHandlers_List_SaysWhenThePageIsFull(t *testing.T) {
 	}
 	if got, _ := listIncidents(t, srv, "?limit=10"); got.Count != 3 || got.Truncated {
 		t.Errorf("a page under the limit: %+v", got)
+	}
+}
+
+// The whole ledger path on real stores, with nothing mocked on the data side:
+// incidents and runs written the way the gateway writes them (created at the
+// entry, closed by a PATCH), read back through the listing the gateway uses, and
+// run through the ledger. It checks the assumptions the unit tests of each piece
+// share: that the stored times, statuses and series mean what the ledger takes
+// them to mean.
+func TestLedgerPipeline_RealStores(t *testing.T) {
+	srv, runs := newLedgerServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
+
+	create := func(body map[string]any) {
+		t.Helper()
+		data, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %v: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	// closeIt is what the gateway does when the last run of an incident ends.
+	closeIt := func(entryRun, status string, ended time.Duration) {
+		t.Helper()
+		got, err := srv.store.GetByEntryRunID(ctx, entryRun)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(map[string]any{"status": status, "resolved_at": at(ended)})
+		req := httptest.NewRequest(http.MethodPatch, "/v1/incidents/"+got.IncidentID, bytes.NewReader(data))
+		req.SetPathValue("incidentID", got.IncidentID)
+		rec := httptest.NewRecorder()
+		srv.handleUpdate(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("close %s: %d %s", entryRun, rec.Code, rec.Body.String())
+		}
+	}
+	record := func(id, series, prior, entry string, started time.Duration) {
+		t.Helper()
+		if err := runs.Record(ctx, &audit.PlaybookRun{RunID: id, PlaybookID: "pb_" + id, SeriesID: series, PriorRunID: prior, EntryRunID: entry, StartedAt: now.Add(-started)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// prod-orders: a PITR (triage that only reads, then the restore) that took 20
+	// minutes; a vacuum; a restore that ended needing a human.
+	record("plr_pitr", "pbs_pgbackrest_pitr_triage", "", "", 6*time.Hour)
+	record("plr_pitr_h", "pbs_pgbackrest_pitr_remediate", "plr_pitr", "plr_pitr", 6*time.Hour-5*time.Minute)
+	create(map[string]any{"entry_run_id": "plr_pitr", "series_id": "pbs_pgbackrest_pitr_triage", "target_key": "prod-orders", "detected_at": at(6 * time.Hour)})
+	closeIt("plr_pitr", "resolved", 6*time.Hour-20*time.Minute)
+
+	record("plr_vac", "pbs_vacuum_triage", "", "", 8*time.Hour)
+	create(map[string]any{"entry_run_id": "plr_vac", "series_id": "pbs_vacuum_triage", "target_key": "prod-orders", "detected_at": at(8 * time.Hour)})
+	closeIt("plr_vac", "resolved", 8*time.Hour-10*time.Minute)
+
+	record("plr_human", "pbs_db_restart_triage", "", "", 3*time.Hour)
+	create(map[string]any{"entry_run_id": "plr_human", "series_id": "pbs_db_restart_triage", "target_key": "prod-orders", "detected_at": at(3 * time.Hour)})
+	closeIt("plr_human", "needs_human", 3*time.Hour-15*time.Minute)
+
+	// Not prod-orders': a faulttest one on the same database, another database's,
+	// one with no database, and one resolved before the window.
+	record("plr_ft", "pbs_db_restart_triage", "", "", time.Hour)
+	create(map[string]any{"entry_run_id": "plr_ft", "series_id": "pbs_db_restart_triage", "target_key": "prod-orders", "origin": "faulttest", "detected_at": at(time.Hour)})
+	closeIt("plr_ft", "resolved", 30*time.Minute)
+	record("plr_other", "pbs_db_restart_triage", "", "", time.Hour)
+	create(map[string]any{"entry_run_id": "plr_other", "series_id": "pbs_db_restart_triage", "target_key": "prod-other", "detected_at": at(time.Hour)})
+	record("plr_loose", "pbs_db_restart_triage", "", "", time.Hour)
+	create(map[string]any{"entry_run_id": "plr_loose", "series_id": "pbs_db_restart_triage", "target_input": "no-such-server", "detected_at": at(time.Hour)})
+	record("plr_ancient", "pbs_db_restart_triage", "", "", 40*24*time.Hour)
+	create(map[string]any{"entry_run_id": "plr_ancient", "series_id": "pbs_db_restart_triage", "target_key": "prod-orders", "detected_at": at(40 * 24 * time.Hour)})
+	closeIt("plr_ancient", "resolved", 39*24*time.Hour)
+
+	// What the gateway asks for: a 30-day window, written with a zone offset to
+	// check the since filter is not fooled by one.
+	zone := time.FixedZone("IST", 5*3600+1800)
+	since := now.Add(-30 * 24 * time.Hour).In(zone).Format(time.RFC3339)
+	query := "?origin=real&target_key=prod-orders&include=series&limit=200&since=" + neturlEscape(since)
+	listed, code := listIncidents(t, srv, query)
+	if code != http.StatusOK || listed.Truncated {
+		t.Fatalf("%d, truncated %v", code, listed.Truncated)
+	}
+
+	var incs []availability.Incident
+	for _, i := range listed.Incidents {
+		incs = append(incs, availability.Incident{ID: i.IncidentID, SeriesIDs: i.SeriesIDs, Status: i.Status, Origin: i.Origin,
+			DetectedAt: i.DetectedAt, ResolvedAt: i.ResolvedAt})
+	}
+	l := availability.Compute(availability.Params{
+		Database: "prod-orders", Now: now, Incidents: incs, Classify: playbooks.AvailabilityImpact,
+		Budget: infra.ComputeBudget(99.9, 30*24*time.Hour, "environment:prod", 30*time.Minute, true),
+	})
+
+	if len(listed.Incidents) != 3 {
+		t.Fatalf("the listing returned %d incidents, want prod-orders' three real, in-window ones", len(listed.Incidents))
+	}
+	// The PITR is charged for its 20 minutes: detection to the end of its last run,
+	// and charged as an outage because of its second run, though its first only reads.
+	if len(l.Charged) != 1 || l.Charged[0].DurationSeconds != 1200 || l.ChargedSeconds != 1200 {
+		t.Errorf("charged = %+v", l.Charged)
+	}
+	if len(l.Unconfirmed) != 1 || l.Unconfirmed[0].DurationSeconds != 900 {
+		t.Errorf("unconfirmed = %+v", l.Unconfirmed)
+	}
+	if len(l.None) != 1 || l.None[0].DurationSeconds != 600 {
+		t.Errorf("none = %+v", l.None)
+	}
+	if l.RemainingSeconds == nil || *l.RemainingSeconds != 2592-1200 || *l.RemainingWorstCaseSeconds != 2592-1200-900 {
+		t.Errorf("remaining %v / worst case %v", l.RemainingSeconds, l.RemainingWorstCaseSeconds)
+	}
+
+	// And the incidents no database could be found for are counted, not lost.
+	loose, _ := listIncidents(t, srv, "?origin=real&unattributed=true&limit=200&since="+neturlEscape(since))
+	if loose.Count != 1 || loose.Incidents[0].EntryRunID != "plr_loose" || loose.Incidents[0].TargetInput != "no-such-server" {
+		t.Errorf("unattributed = %+v", loose)
+	}
+}
+
+func neturlEscape(s string) string { return url.QueryEscape(s) }
+
+func TestIncidentHandlers_List_StoreFailureIs500(t *testing.T) {
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	is, _ := audit.NewIncidentStore(store.DB(), false)
+	runs, _ := audit.NewPlaybookRunStore(store.DB(), false)
+	srv := &incidentServer{store: is, runs: runs}
+	store.Close() // every query now fails
+	for _, q := range []string{"", "?include=series"} {
+		if _, code := listIncidents(t, srv, q); code != http.StatusInternalServerError {
+			t.Errorf("list%s with a dead database = %d, want 500, not an empty listing", q, code)
+		}
 	}
 }
 

@@ -205,6 +205,22 @@ func TestCompute_ClipsToTheWindow(t *testing.T) {
 	}
 }
 
+// A clock that is ahead of ours can date an incident after now. It costs nothing,
+// and never a negative amount that would hand budget back.
+func TestCompute_AnIncidentDatedInTheFutureCostsNothing(t *testing.T) {
+	skewed := Incident{ID: "skewed", Status: audit.IncidentStatusResolved, SeriesIDs: []string{"pbs_db_restart_triage"},
+		DetectedAt: now.Add(time.Hour), ResolvedAt: now.Add(2 * time.Hour)}
+	l := Compute(params(skewed, outage("real", 10*time.Minute, time.Hour)))
+	for _, e := range l.Charged {
+		if e.DurationSeconds < 0 {
+			t.Errorf("%s has a negative duration %d", e.IncidentID, e.DurationSeconds)
+		}
+	}
+	if l.ChargedSeconds != 600 || *l.RemainingSeconds != 2592-600 {
+		t.Errorf("charged %d, remaining %v: the skewed incident changed the budget", l.ChargedSeconds, secs(l.RemainingSeconds))
+	}
+}
+
 func TestCompute_FaulttestIncidentsNeverCount(t *testing.T) {
 	ft := outage("ft", time.Hour, time.Hour)
 	ft.Origin = audit.IncidentOriginFaulttest

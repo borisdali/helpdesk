@@ -103,6 +103,23 @@ func TestPlaybookRunStore_SeriesByEntryRun(t *testing.T) {
 	}
 }
 
+// A database that cannot be read is an error, not an answer of "no series":
+// the ledger would read that as incidents that cost nothing.
+func TestPlaybookRunStore_SeriesByEntryRun_DatabaseFailureIsAnError(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	if got, err := s.SeriesByEntryRun(context.Background(), []string{"plr_a"}); err == nil {
+		t.Errorf("a dead database answered %v with no error", got)
+	}
+}
+
 // More incidents than one query's batch still all come back.
 func TestPlaybookRunStore_SeriesByEntryRun_ManyIncidents(t *testing.T) {
 	s := newPlaybookRunStore(t)
