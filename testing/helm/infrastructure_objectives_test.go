@@ -19,7 +19,7 @@ import (
 const objectivesInfrastructure = `{
   "defaults": {"objectives": {"rpo": "1h", "rto": "4h", "availability_slo": 99.0}},
   "environments": {
-    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "recovery_preference": "data_first", "enforcement": "acknowledge"}},
+    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "availability_slo": 99.9, "availability_window": "30d", "recovery_preference": "data_first", "enforcement": "acknowledge"}},
     "staging": {"objectives": {"rpo": "1d"}}
   },
   "db_servers": {
@@ -78,6 +78,17 @@ func TestInfrastructureObjectivesSurviveTheChart(t *testing.T) {
 		orders.RTO.Value != 30*time.Minute || orders.RecoveryPreference.Value != "data_first" ||
 		orders.EffectiveEnforcement() != infra.EnforceAcknowledge {
 		t.Errorf("orders = %+v", orders)
+	}
+	// The availability window and the budget it gives survive the chart too: a
+	// 30m rto in 43m12s of downtime, tolerating one recovery, and no contradiction.
+	if !orders.AvailabilityWindow.Set || orders.AvailabilityWindow.Value != 30*24*time.Hour || orders.AvailabilityWindow.Source != "environment:prod" {
+		t.Errorf("orders window = %+v", orders.AvailabilityWindow)
+	}
+	if b := orders.Budget(); !b.Computed || b.Allowed != 43*time.Minute+12*time.Second || b.Tolerated != 1 || b.Contradictory {
+		t.Errorf("orders budget = %+v", b)
+	}
+	if got := cfg.Consistency(); len(got) != 0 {
+		t.Errorf("the rendered objectives contradict each other: %v", got)
 	}
 	ledger, _ := cfg.ResolveObjectives("ledger")
 	// A zero rpo is a value (no loss tolerated), and a database's own enforcement wins.

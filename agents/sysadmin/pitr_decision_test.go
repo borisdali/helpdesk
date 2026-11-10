@@ -150,6 +150,63 @@ func TestPlanDecision_IsRecordedForEveryPlanShown(t *testing.T) {
 	}
 }
 
+// The budget reaches the record through the real path: the config the agent
+// loaded, the plan the operator is shown, the event the plan writes. A unit
+// test of snapshotOf alone would not notice if the plan stopped passing it.
+func TestPlanDecision_RecordsTheAvailabilityBudgetFromTheLoadedConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		window     *infra.Duration
+		wantWindow int64
+		wantBudget int64 // 99.9% of the window, to the nearest second
+		wantSource string
+	}{
+		{"a window the database sets", &infra.Duration{Duration: 7 * 24 * time.Hour}, 7 * 86400, 605, "database"}, // 604.8s
+		{"no window: the built-in default, called that", nil, 30 * 86400, 2592, infra.SourceBuiltin},              // 43m12s
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objectiveInfra(t, "15m", func(db *infra.DBServer, _ *infra.Config) {
+				db.Objectives = &infra.Objectives{
+					RTO:                &infra.Duration{Duration: 30 * time.Minute},
+					AvailabilitySLO:    &infra.Percent{Value: 99.9},
+					AvailabilityWindow: tc.window,
+				}
+			})
+			_, _ = liveEnv(t)
+			store, cleanup := withRealToolAuditor(t)
+			defer cleanup()
+
+			if _, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+				RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget}); err != nil {
+				t.Fatal(err)
+			}
+			got := decisions(t, store)[audit.RecoveryStagePlan]
+			if len(got) != 1 || got[0].Objectives == nil {
+				t.Fatalf("plan decisions = %+v", got)
+			}
+			o := got[0].Objectives
+			wantBudget := tc.wantBudget
+			if o.AvailabilityWindowSeconds == nil || *o.AvailabilityWindowSeconds != tc.wantWindow ||
+				o.AvailabilityWindowSource != tc.wantSource ||
+				o.AvailabilityBudgetSeconds == nil || *o.AvailabilityBudgetSeconds != wantBudget {
+				t.Errorf("recorded window/budget = %v / %v from %q, want %d / %d from %q",
+					deref(o.AvailabilityWindowSeconds), deref(o.AvailabilityBudgetSeconds), o.AvailabilityWindowSource,
+					tc.wantWindow, wantBudget, tc.wantSource)
+			}
+			if status, err := store.VerifyIntegrity(context.Background()); err != nil || !status.Valid {
+				t.Errorf("chain = %+v, %v", status, err)
+			}
+		})
+	}
+}
+
+func deref(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // A plan that cannot be restored is on record too, with why.
 func TestPlanDecision_RecordsAPlanThatIsNotFeasible(t *testing.T) {
 	withPgBackRestDockerInfra(t)

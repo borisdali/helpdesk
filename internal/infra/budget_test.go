@@ -217,6 +217,30 @@ func TestBudget_InvalidSettingsComputeNothing(t *testing.T) {
 	})
 }
 
+// The general rule, for the window: an invalid value blocks its objective, it
+// does not fall through to the next level, not even to a valid one.
+func TestBudget_AnInvalidWindowDoesNotFallThroughToTheEnvironments(t *testing.T) {
+	c := load(t, `{
+	  "environments": {"prod": {"objectives": {"availability_slo": 99.9, "availability_window": "30d", "rto": "30m"}}},
+	  "db_servers": {
+	    "bad":  {"connection_string": "host=a", "environment": "prod", "objectives": {"availability_window": "a month"}},
+	    "good": {"connection_string": "host=b", "environment": "prod", "objectives": {"availability_window": "7d"}}
+	  }
+	}`)
+	bad, _ := c.ResolveObjectives("bad")
+	if b := bad.Budget(); b.Computed || !bad.AvailabilityWindowInvalid || bad.AvailabilityWindow.Set {
+		t.Errorf("the database's unreadable window fell through to its environment's: %+v / %+v", bad.AvailabilityWindow, b)
+	}
+	// The slo still resolves from the environment: only the window is blocked.
+	if !bad.AvailabilitySLO.Set || bad.AvailabilitySLO.Source != "environment:prod" {
+		t.Errorf("the slo was disturbed: %+v", bad.AvailabilitySLO)
+	}
+	good, _ := c.ResolveObjectives("good")
+	if b := good.Budget(); !b.Computed || b.Window != 7*24*time.Hour || b.WindowSource != "database" {
+		t.Errorf("a database's own valid window should win over its environment's: %+v", b)
+	}
+}
+
 func TestBudget_ReportsTheDefaultWindowAsADefault(t *testing.T) {
 	c := load(t, `{"db_servers": {"a": {"connection_string": "host=a", "objectives": {"availability_slo": 99.9, "rto": "30m"}}}}`)
 	res, _ := c.ResolveObjectives("a")

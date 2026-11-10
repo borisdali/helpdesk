@@ -89,7 +89,7 @@ An environment does not imply a tag and a tag does not imply an environment. A d
 - **`rto`** must be greater than zero.
 - **`availability_slo`** is a percentage greater than 0 and at most 100.
 - **`availability_window`** is a duration greater than zero: the rolling window the SLO is measured over. Unset
-  means 30 days, and everything that shows a budget says when the window is that default. An unreadable window
+  means 30 days and everything that shows a budget says when the window is that default. An unreadable window
   is never replaced by the default: no budget is computed and the problem is logged. Together with the SLO it
   gives the downtime budget ([§5.2](#52-the-availability-budget)).
 - **`recovery_preference`** is `availability_first` or `data_first`: what to favour when a recovery has to choose
@@ -101,7 +101,10 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   value, inherited or not, is treated as `acknowledge`, not `warn`. So is a database that names an environment
   that is not declared and sets no enforcement of its own, because it cannot tell which enforcement its real
   environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
-  honoured.
+  honoured. **Today `enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
+  restore before the instance is stopped. The `rto` is shown against what a recovery took, after the fact and the
+  availability budget is shown and checked for contradictions; neither holds a recovery. Extending enforcement to
+  them is planned (see the status table below), not built.
 - Both are exact lowercase strings. `Refuse` is an error, not a guess.
 
 Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
@@ -157,9 +160,9 @@ Only `outage` is charged to the budget. The others are listed beside it, uncharg
 
 ### 5.2 The availability budget
 
-An `rto` says how long one recovery may take. It says nothing about how often a failure may happen, and the two
+An `rto` says how long one recovery may take. It says nothing about how often a failure may happen and the two
 together decide whether the SLO can be met at all. The SLO and its window give the total downtime a database may
-have, and the `rto` says how much of it one recovery can use:
+have and the `rto` says how much of it one recovery can use:
 
 ```
 budget               = window x (100 - availability_slo) / 100
@@ -174,24 +177,24 @@ recoveries absorbed  = floor(budget / rto)
 | 99.99% | 4m 19s | longer than the whole budget: **contradictory** |
 
 An `rto` longer than the whole budget means one recovery that takes the full `rto` breaks the SLO: the two
-declared numbers cannot both be met. aiHelpDesk says so, but blocks nothing, and does not change either number: it is
-your objective, and the fix is yours (a wider window, a lower SLO, or a faster recovery).
+declared numbers cannot both be met. aiHelpDesk says so, but blocks nothing and does not change either number: it is
+your objective and the fix is yours (a wider window, a lower SLO or a faster recovery).
 
 - **Where it is stated.** `LogProblems` logs it at startup for the gateway and the sysadmin agent, once per database
   (`infrastructure config: availability objectives contradict each other`); `infra.Config.Consistency()` lists the
   same findings; and the RECOVERY DECISION section of `vault incidents` shows a `budget:` line (with a `⚠` when
   contradictory) beneath the objectives in force. The recovery decision records the window, where it came from and
   the budget, so the record shows the numbers the approver saw.
-- **The default window is a default.** With no `availability_window` the window is 30 days, rolling, and every
+- **The default window is a default.** With no `availability_window` the window is 30 days, rolling and every
   statement says `(default window)` and the record says `built-in default`. A calendar month would need the
   month's start, which no setting carries.
-- **A typo never becomes a default.** An unreadable `availability_slo` or `availability_window`, or a database in an
+- **A typo never becomes a default.** An unreadable `availability_slo` or `availability_window` or a database in an
   environment that is not declared (whose own slo or window might have been the environment's), computes no
-  budget, and says why. It never falls back to the default window or to "no objective".
+  budget and says why. It never falls back to the default window or to "no objective".
 - **Old events are not rewritten.** A decision recorded before v0.35 has no window and gets no budget line; the
   default is not assumed after the fact.
 - **What this is not.** It is arithmetic on declared numbers. It does not measure downtime, count incidents already
-  in the window, or forecast: a recovery that finishes faster than its `rto` uses less than the share shown, and one
+  in the window or forecast: a recovery that finishes faster than its `rto` uses less than the share shown and one
   that fails uses more. The budget already spent comes from the ledger, which is not built yet.
 
 ## 6. Design: how objectives will be used (not built yet)
@@ -221,9 +224,10 @@ it spends.
 | An audit spool, so an unwritable record is kept and replayed; fail-closed when auditing is configured but unreachable, with a human break-glass override at the gate | Not built (v0.35) |
 | Actual downtime (not just the recovery hop's duration) recorded against the `rto` | Not built |
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
-| A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`), and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
+| A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
 | A ledger of the downtime budget already spent in the window, from recorded incidents | Not built |
 | The remaining budget shown to the person at the gate | Not built |
+| `enforcement` extended past the `rpo`: a restore expected to breach the remaining availability budget (or the `rto`) is held to `acknowledge` or `refuse`. Whether `refuse` is one setting for every objective or one per objective is undecided | Not built (v0.35) |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
 | Per-incident outcome (actual loss, duration, budget burn) recorded against the objective | Not built |
