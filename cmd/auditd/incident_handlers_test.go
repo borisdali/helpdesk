@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
 )
@@ -145,6 +147,149 @@ func TestIncidentHandlers_Create_TargetSurvivesRoundTripAndFilters(t *testing.T)
 	}
 	if unresolved != 1 {
 		t.Errorf("unresolved incidents = %d, want 1", unresolved)
+	}
+}
+
+// newLedgerServer is an incident server that can also read each incident's
+// playbook runs, as auditd wires it.
+func newLedgerServer(t *testing.T) (*incidentServer, *audit.PlaybookRunStore) {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	is, err := audit.NewIncidentStore(store.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := audit.NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &incidentServer{store: is, runs: runs}, runs
+}
+
+type listedIncidents struct {
+	Incidents []struct {
+		audit.Incident
+		SeriesIDs []string `json:"series_ids"`
+	} `json:"incidents"`
+	Count     int  `json:"count"`
+	Truncated bool `json:"truncated"`
+}
+
+func listIncidents(t *testing.T, srv *incidentServer, query string) (listedIncidents, int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.handleList(rec, httptest.NewRequest(http.MethodGet, "/v1/incidents"+query, nil))
+	var out listedIncidents
+	if rec.Code == http.StatusOK {
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return out, rec.Code
+}
+
+func TestIncidentHandlers_List_IncludeSeriesCarriesEveryRunsSeries(t *testing.T) {
+	srv, runs := newLedgerServer(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	for _, r := range []audit.PlaybookRun{
+		{RunID: "plr_e1", PlaybookID: "pb_1", SeriesID: "pbs_db_restart_triage", StartedAt: t0},
+		{RunID: "plr_h1", PlaybookID: "pb_2", SeriesID: "pbs_pgbackrest_restore_remediate", PriorRunID: "plr_e1", EntryRunID: "plr_e1", StartedAt: t0.Add(time.Minute)},
+	} {
+		r := r
+		if err := runs.Record(ctx, &r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"entry_run_id": "plr_e1", "series_id": "pbs_db_restart_triage", "target_key": "prod-main"})
+	rec := httptest.NewRecorder()
+	srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+
+	// Without the option the shape is as it always was: no series_ids.
+	plain, _ := listIncidents(t, srv, "")
+	if len(plain.Incidents) != 1 || plain.Incidents[0].SeriesIDs != nil {
+		t.Errorf("a plain listing carries series: %+v", plain.Incidents)
+	}
+	with, code := listIncidents(t, srv, "?include=series")
+	if code != http.StatusOK || len(with.Incidents) != 1 {
+		t.Fatalf("%d %+v", code, with)
+	}
+	got := with.Incidents[0]
+	if got.TargetKey != "prod-main" || got.EntryRunID != "plr_e1" {
+		t.Errorf("the incident's own fields were lost: %+v", got.Incident)
+	}
+	if len(got.SeriesIDs) != 2 || got.SeriesIDs[0] != "pbs_db_restart_triage" || got.SeriesIDs[1] != "pbs_pgbackrest_restore_remediate" {
+		t.Errorf("series_ids = %v", got.SeriesIDs)
+	}
+}
+
+// With no run store the option is ignored, not an error: the listing still works.
+func TestIncidentHandlers_List_IncludeSeriesWithoutARunStoreIsIgnored(t *testing.T) {
+	srv := newIncidentServer(t)
+	data, _ := json.Marshal(map[string]any{"entry_run_id": "plr_x"})
+	srv.handleCreate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+	got, code := listIncidents(t, srv, "?include=series")
+	if code != http.StatusOK || len(got.Incidents) != 1 || got.Incidents[0].SeriesIDs != nil {
+		t.Errorf("%d %+v", code, got)
+	}
+}
+
+func TestIncidentHandlers_List_SinceAndUnattributed(t *testing.T) {
+	srv, _ := newLedgerServer(t)
+	for _, body := range []map[string]any{
+		{"entry_run_id": "old", "detected_at": "2026-10-01T00:00:00Z", "resolved_at": "2026-10-01T01:00:00Z", "target_key": "a"},
+		{"entry_run_id": "new", "detected_at": "2026-11-09T00:00:00Z", "resolved_at": "2026-11-09T01:00:00Z", "target_key": "a"},
+		{"entry_run_id": "open", "detected_at": "2026-11-09T02:00:00Z", "target_input": "no-such-server"},
+	} {
+		data, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+		if rec.Code != http.StatusCreated {
+			t.Fatal(rec.Body.String())
+		}
+	}
+	runs := func(query string) map[string]bool {
+		t.Helper()
+		got, code := listIncidents(t, srv, query)
+		if code != http.StatusOK {
+			t.Fatalf("%s: %d", query, code)
+		}
+		out := map[string]bool{}
+		for _, inc := range got.Incidents {
+			out[inc.EntryRunID] = true
+		}
+		return out
+	}
+	if got := runs("?since=2026-11-01T00:00:00Z"); !got["new"] || !got["open"] || got["old"] {
+		t.Errorf("since kept %v, want new and open but not old", got)
+	}
+	if got := runs("?unattributed=true"); len(got) != 1 || !got["open"] {
+		t.Errorf("unattributed = %v, want only the incident with no database", got)
+	}
+	if _, code := listIncidents(t, srv, "?since=yesterday"); code != http.StatusBadRequest {
+		t.Errorf("a bad since: %d, want 400", code)
+	}
+}
+
+// A full page may have left incidents out; the listing says so.
+func TestIncidentHandlers_List_SaysWhenThePageIsFull(t *testing.T) {
+	srv, _ := newLedgerServer(t)
+	for i := 0; i < 3; i++ {
+		data, _ := json.Marshal(map[string]any{"entry_run_id": "plr_" + string(rune('a'+i))})
+		srv.handleCreate(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+	}
+	if got, _ := listIncidents(t, srv, "?limit=3"); got.Count != 3 || !got.Truncated {
+		t.Errorf("a page of exactly the limit: %+v (it may have left some out)", got)
+	}
+	if got, _ := listIncidents(t, srv, "?limit=10"); got.Count != 3 || got.Truncated {
+		t.Errorf("a page under the limit: %+v", got)
 	}
 }
 

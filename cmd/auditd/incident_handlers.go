@@ -19,6 +19,9 @@ import (
 // (real or faulttest-injected), not one row per hop.
 type incidentServer struct {
 	store *audit.IncidentStore
+	// runs, when set, lets a listing carry each incident's playbook series
+	// (?include=series). Without it that option is ignored.
+	runs *audit.PlaybookRunStore
 }
 
 // handleCreate handles POST /v1/incidents. Called by the gateway when a
@@ -119,15 +122,40 @@ func (s *incidentServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(inc) //nolint:errcheck
 }
 
-// handleList handles GET /v1/incidents. Supports ?origin=&status=&attribution=&limit=.
+// incidentWithSeries is an incident listed with the series of every playbook
+// run it spanned (?include=series): what an availability ledger needs to
+// classify it by its worst hop.
+type incidentWithSeries struct {
+	*audit.Incident
+	SeriesIDs []string `json:"series_ids,omitempty"`
+}
+
+// handleList handles GET /v1/incidents. Supports ?origin=&status=&attribution=&
+// series_id=&target_key=&limit=, and for the availability ledger:
+//
+//	unattributed=true   only incidents with no target_key (the database could not be resolved)
+//	since=<RFC3339>     only incidents still open, or resolved at or after that time
+//	include=series      each incident also carries series_ids, the series of every run it spanned
+//
+// "truncated" is true when the page is full, so a caller summing incidents
+// knows it may have left some out.
 func (s *incidentServer) handleList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := audit.IncidentListFilter{
-		Origin:      q.Get("origin"),
-		Status:      q.Get("status"),
-		Attribution: q.Get("attribution"),
-		SeriesID:    q.Get("series_id"),
-		TargetKey:   q.Get("target_key"),
+		Origin:       q.Get("origin"),
+		Status:       q.Get("status"),
+		Attribution:  q.Get("attribution"),
+		SeriesID:     q.Get("series_id"),
+		TargetKey:    q.Get("target_key"),
+		Unattributed: q.Get("unattributed") == "true",
+	}
+	if v := q.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			http.Error(w, "since must be an RFC3339 time, e.g. 2026-11-09T00:00:00Z", http.StatusBadRequest)
+			return
+		}
+		filter.Since = t
 	}
 	if l := q.Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil {
@@ -144,8 +172,30 @@ func (s *incidentServer) handleList(w http.ResponseWriter, r *http.Request) {
 	if incidents == nil {
 		incidents = []*audit.Incident{}
 	}
+	truncated := len(incidents) >= audit.EffectiveIncidentLimit(filter.Limit)
+
+	var out any = incidents
+	if q.Get("include") == "series" && s.runs != nil {
+		ids := make([]string, 0, len(incidents))
+		for _, inc := range incidents {
+			if inc.EntryRunID != "" {
+				ids = append(ids, inc.EntryRunID)
+			}
+		}
+		series, err := s.runs.SeriesByEntryRun(r.Context(), ids)
+		if err != nil {
+			slog.Error("failed to read the series of listed incidents", "err", err)
+			http.Error(w, "failed to list incidents", http.StatusInternalServerError)
+			return
+		}
+		withSeries := make([]incidentWithSeries, 0, len(incidents))
+		for _, inc := range incidents {
+			withSeries = append(withSeries, incidentWithSeries{Incident: inc, SeriesIDs: series[inc.EntryRunID]})
+		}
+		out = withSeries
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"incidents": incidents, "count": len(incidents)}) //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]any{"incidents": out, "count": len(incidents), "truncated": truncated}) //nolint:errcheck
 }
 
 // handleGetByEntryRunID handles GET /v1/incidents/by-run/{runID} — lets a

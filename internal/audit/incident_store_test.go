@@ -409,6 +409,68 @@ func TestIncidentStore_TargetKey_RoundTripsAndFilters(t *testing.T) {
 	}
 }
 
+// A window keeps the incidents that overlap it: open ones, and ones resolved at
+// or after its start, including an incident detected long before it began.
+func TestIncidentStore_List_SinceKeepsWhatOverlapsTheWindow(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+	since := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) time.Time { return since.Add(d) }
+
+	seed := map[string]*Incident{
+		"still open":                {EntryRunID: "open", DetectedAt: at(-72 * time.Hour)},
+		"resolved before":           {EntryRunID: "before", DetectedAt: at(-48 * time.Hour), ResolvedAt: at(-time.Second)},
+		"resolved exactly at start": {EntryRunID: "at", DetectedAt: at(-time.Hour), ResolvedAt: at(0)},
+		"began before, ended in":    {EntryRunID: "straddle", DetectedAt: at(-time.Hour), ResolvedAt: at(time.Hour)},
+		"inside":                    {EntryRunID: "inside", DetectedAt: at(time.Hour), ResolvedAt: at(2 * time.Hour)},
+	}
+	for name, inc := range seed {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	got, err := s.List(ctx, IncidentListFilter{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, inc := range got {
+		have[inc.EntryRunID] = true
+	}
+	for run, want := range map[string]bool{"open": true, "before": false, "at": true, "straddle": true, "inside": true} {
+		if have[run] != want {
+			t.Errorf("incident %q kept = %v, want %v", run, have[run], want)
+		}
+	}
+	// Without Since nothing is dropped.
+	if all, _ := s.List(ctx, IncidentListFilter{}); len(all) != 5 {
+		t.Errorf("unfiltered = %d, want 5", len(all))
+	}
+}
+
+func TestIncidentStore_List_UnattributedWinsOverTargetKey(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+	for _, inc := range []*Incident{
+		{EntryRunID: "a", TargetKey: "prod-main"},
+		{EntryRunID: "b", TargetInput: "no-such-server"},
+		{EntryRunID: "c", TargetInput: "5432"},
+	} {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.List(ctx, IncidentListFilter{Unattributed: true, TargetKey: "prod-main"})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("unattributed = %d, %v; want the 2 with no key", len(got), err)
+	}
+	for _, inc := range got {
+		if inc.TargetKey != "" {
+			t.Errorf("an attributed incident came back: %+v", inc)
+		}
+	}
+}
+
 func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()

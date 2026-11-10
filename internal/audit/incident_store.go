@@ -332,15 +332,32 @@ type IncidentListFilter struct {
 	SeriesID string
 	// TargetKey filters to incidents about one database (its db_servers key).
 	TargetKey string
-	Limit     int
+	// Unattributed filters to incidents with no TargetKey: the target was
+	// missing, unknown or ambiguous when they were created. It wins over
+	// TargetKey.
+	Unattributed bool
+	// Since keeps only incidents still open or resolved at or after this time:
+	// those that overlap a window starting then. An incident detected before
+	// Since that was still running inside the window is kept. Second precision,
+	// like the stored times.
+	Since time.Time
+	Limit int
+}
+
+// EffectiveIncidentLimit is the page size List uses for a requested limit: the
+// request when it is 1 to 200, else 50. A caller that needs to know whether a
+// page was full (and so may have left incidents out) compares its length with
+// this, not with what it asked for.
+func EffectiveIncidentLimit(requested int) int {
+	if requested <= 0 || requested > 200 {
+		return 50
+	}
+	return requested
 }
 
 // List returns incidents matching filter, most recently detected first.
 func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]*Incident, error) {
-	limit := filter.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
+	limit := EffectiveIncidentLimit(filter.Limit)
 	query := `
 		SELECT incident_id, trace_id, entry_run_id, series_id, origin, severity, status,
 		       attribution, external_correlation_id, bundle_path, draft_playbook_id,
@@ -365,9 +382,18 @@ func (s *IncidentStore) List(ctx context.Context, filter IncidentListFilter) ([]
 		query += " AND series_id = ?"
 		args = append(args, filter.SeriesID)
 	}
-	if filter.TargetKey != "" {
+	switch {
+	case filter.Unattributed:
+		query += " AND target_key = ''"
+	case filter.TargetKey != "":
 		query += " AND target_key = ?"
 		args = append(args, filter.TargetKey)
+	}
+	if !filter.Since.IsZero() {
+		// resolved_at is '' while an incident is open, and a UTC "2006-01-02
+		// 15:04:05" string otherwise, which orders as time does.
+		query += " AND (resolved_at = '' OR resolved_at >= ?)"
+		args = append(args, filter.Since.UTC().Format("2006-01-02 15:04:05"))
 	}
 	query += fmt.Sprintf(" ORDER BY detected_at DESC LIMIT %d", limit)
 

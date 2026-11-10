@@ -272,7 +272,7 @@ func main() {
 	uploadSrv := &uploadServer{store: uploadStore}
 	toolResultSrv := &toolResultServer{store: toolResultStore}
 	playbookRunSrv := &playbookRunServer{store: playbookRunStore, playbookStore: playbookStore, feedbackStore: runFeedbackStore, evaluationStore: runEvaluationStore}
-	incidentSrv := &incidentServer{store: incidentStore}
+	incidentSrv := &incidentServer{store: incidentStore, runs: playbookRunStore}
 	playbookRunStepSrv := &playbookRunStepServer{store: playbookRunStepStore}
 	rollbackSrv := &rollbackServer{store: rollbackStore, auditStore: store, fleetStore: fleetStore, approvalStore: approvalStore}
 	faultStabilitySrv := &faultStabilityServer{store: faultStabilityStore}

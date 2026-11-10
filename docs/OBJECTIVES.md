@@ -25,6 +25,7 @@ documented where they appear.
 5. [Reading it in code](#5-reading-it-in-code)
    - [5.1 Which incidents spend the availability budget](#51-which-incidents-spend-the-availability-budget)
    - [5.2 The availability budget](#52-the-availability-budget)
+   - [5.3 The availability ledger](#53-the-availability-ledger)
 6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
@@ -197,6 +198,43 @@ your objective and the fix is yours (a wider window, a lower SLO or a faster rec
   in the window or forecast: a recovery that finishes faster than its `rto` uses less than the share shown and one
   that fails uses more. The budget already spent comes from the ledger, which is not built yet.
 
+### 5.3 The availability ledger
+
+The budget is what the SLO allows. The ledger is how much of it the database's recorded incidents have already used
+in the window. `GET /api/v1/availability-ledger?database=<key>` returns it and `faulttest vault budget <database>`
+prints it.
+
+```
+Availability budget: prod-orders
+  Window   30d [environment:prod], as of 2026-11-10 12:00 UTC
+  Budget   availability 99.9% over 30d allows 43m12s of downtime per window; rto 30m uses 69% of it: tolerates 1 recovery per window at the rto
+  Spent    20m 00s in 1 outage incident(s), 46% of the budget
+  Left     23m 12s
+```
+
+What counts, and what is said about what does not:
+
+- **Real incidents only.** A faulttest injection never counts, and the ledger says how many it left out.
+- **Only outages are charged.** An incident is classified by the worst playbook among all the runs it spanned
+  ([§5.1](#51-which-incidents-spend-the-availability-budget)). Degraded and harmless incidents, and ones whose
+  playbooks declare nothing (`unclassified`), are listed beside the charge and cost nothing.
+- **Only a confirmed recovery is charged.** An outage that ended `escalated`, `needs_human` or `abandoned`, or that has
+  stayed open for more than a day (almost certainly a run that never finished), has an unknown real downtime. It is
+  listed as **unconfirmed** and not charged, and `remaining_worst_case` says what is left if all of it counts. An outage
+  still open and younger than a day is charged up to now.
+- **Duration is from detection to recovery.** It runs from the start of the incident's entry playbook run to the end of
+  its last run, so it includes the wait for approvals and begins when aiHelpDesk was engaged, not when the failure
+  began. It is not measured downtime, and the output says so every time.
+- **Only the part inside the window is spent.** An incident that began before the window is clipped to it, and one that
+  ended before it is not counted.
+- **A database is found the way the agents find it.** `database` may be a key, a name, a container name or a connection
+  string; a bare port two servers share is refused (`409`). An incident is attributed to a database once, when it is
+  created ([INCIDENTS.md](INCIDENTS.md)); incidents that could not be attributed are in no database's ledger, and the
+  ledger says how many there were. Incidents recorded before v0.35 have no database and are among them.
+- **It never guesses.** If the incidents cannot be read from auditd the answer is an error, not an empty ledger. If the
+  page was full the ledger says it may be missing incidents. With no budget (no `availability_slo`, or one that cannot
+  be trusted) the spend is still listed and nothing is shown as remaining.
+
 ## 6. Design: how objectives will be used (not built yet)
 
 Sections 1-5 are built. This section is the design the next steps follow. Everything in it is marked built or not,
@@ -225,7 +263,7 @@ it spends.
 | Actual downtime (not just the recovery hop's duration) recorded against the `rto` | Not built |
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
 | A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
-| A ledger of the downtime budget already spent in the window, from recorded incidents | Not built |
+| A ledger of the downtime budget already spent in the window, from recorded real incidents, charged by availability impact, with unconfirmed outages listed apart ([§5.3](#53-the-availability-ledger)) | Built |
 | The remaining budget shown to the person at the gate | Not built |
 | `enforcement` extended past the `rpo`: a restore expected to breach the remaining availability budget (or the `rto`) is held to `acknowledge` or `refuse`. Whether `refuse` is one setting for every objective or one per objective is undecided | Not built (v0.35) |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |

@@ -664,6 +664,7 @@ For consumers that prefer plain REST API over JSON-RPC, the optional REST Gatewa
 | POST   | `/api/v1/research`                                     | Web research query                       |
 | GET    | `/api/v1/infrastructure`                               | Infrastructure inventory summary         |
 | GET    | `/api/v1/databases`                                    | List configured databases                |
+| GET    | `/api/v1/availability-ledger`                          | Downtime budget spent by a database's incidents |
 | GET    | `/api/v1/tools`                                        | List all registered tools with action classes |
 | GET    | `/api/v1/tools/{toolName}`                             | Get a single tool's metadata             |
 | GET    | `/api/v1/governance`                                   | Governance status (audit + policy)       |

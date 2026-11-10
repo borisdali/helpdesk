@@ -139,13 +139,14 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|budget|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
 		fmt.Fprintln(os.Stderr, "  drift           Highlight faults/playbooks with declining pass rates")
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
+		fmt.Fprintln(os.Stderr, "  budget          Show how much of a database's downtime budget its incidents have spent")
 		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
@@ -179,6 +180,8 @@ func cmdVault(args []string) {
 		vaultAccuracy(args[1:])
 	case "incidents":
 		vaultIncidents(args[1:])
+	case "budget":
+		vaultBudget(args[1:])
 	case "journey", "journeys":
 		vaultJourney(args[1:])
 	case "versions":

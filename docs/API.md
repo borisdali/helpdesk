@@ -423,6 +423,32 @@ curl http://localhost:8080/api/v1/databases
 
 ---
 
+### `GET /api/v1/availability-ledger`
+
+How much of a database's downtime budget its recorded incidents have spent in the SLO window
+([OBJECTIVES.md §5.3](OBJECTIVES.md#53-the-availability-ledger)).
+
+| Query | Meaning |
+|---|---|
+| `database` (required) | A `db_servers` key, a name, a container name or a connection string. Resolved by the same rules the agents use. A bare port two servers share is refused (`409`); an unknown database is `404`. |
+
+```bash
+curl "http://localhost:8080/api/v1/availability-ledger?database=prod-orders"
+```
+
+Response: `database`, `as_of`, `window_start`, `window_seconds`, `window_source`, `budget_seconds` and
+`budget_detail` (absent and explained when no budget could be computed), `charged` (outage incidents that count) with
+`charged_seconds`, `unconfirmed` (outages not charged because their real downtime is unknown) with
+`unconfirmed_seconds`, `degraded`, `none` and `unclassified` (incidents that cost no budget), `remaining_seconds`
+(negative when overspent), `remaining_worst_case_seconds` (also takes off everything unconfirmed), `overspent`,
+`used_share`, `truncated`, `unattributed`, `excluded_faulttest`, `notes` and `basis`. Each entry has `incident_id`,
+`impact`, `status`, `duration_seconds`, `ongoing`, `detected_at` and, when it is not charged although it is an outage,
+`why`. A failure to read the incidents from auditd is `502`, never an empty ledger.
+
+`faulttest vault budget <database>` prints it.
+
+---
+
 ### Governance endpoints (gateway → auditd proxies)
 
 All `/api/v1/governance/*` endpoints require `auditd` to be running and `HELPDESK_AUDIT_URL` set. When not configured they return `{"enabled": false, ...}`. Query parameters are forwarded verbatim to auditd.
