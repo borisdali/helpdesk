@@ -89,7 +89,7 @@ func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chose
 		if e := budget.RecoveryEstimate; e != nil {
 			n := e.Samples
 			o.EstimateStatus, o.EstimateVsRTO, o.EstimateOverRTO = e.Status, e.VsRTO, e.OverRTO
-			o.EstimateSamples, o.EstimateP50Seconds, o.EstimateP90Seconds = &n, e.P50Seconds, e.P90Seconds
+			o.EstimateSamples, o.EstimateP50Seconds, o.EstimateP90Seconds, o.EstimateMaxSeconds = &n, e.P50Seconds, e.P90Seconds, e.MaxSeconds
 		}
 	}
 	if est == nil {

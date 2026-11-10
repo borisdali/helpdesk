@@ -619,8 +619,10 @@ func TestAvailabilityClient_EstimateReadsTheRealHandlerOverHTTP(t *testing.T) {
 		t.Fatalf("estimate = %+v (%s)", e, e.Basis)
 	}
 	// 10m, 20m, 50m: nearest-rank p50 is the middle one, p90 the longest.
-	if *e.P50Seconds != 20*60 || *e.P90Seconds != 50*60 || *e.MinSeconds != 10*60 || *e.MaxSeconds != 50*60 {
-		t.Errorf("p50 %d p90 %d min %d max %d", *e.P50Seconds, *e.P90Seconds, *e.MinSeconds, *e.MaxSeconds)
+	// Three restores: a median and a longest, planned for as the longest, and no p90.
+	if *e.P50Seconds != 20*60 || e.P90Seconds != nil || *e.MinSeconds != 10*60 || *e.MaxSeconds != 50*60 ||
+		e.PlanningBasis != availability.PlanningLongest || *e.PlanningSeconds != 50*60 {
+		t.Errorf("p50 %d p90 %v min %d max %d planning %v/%s", *e.P50Seconds, e.P90Seconds, *e.MinSeconds, *e.MaxSeconds, e.PlanningSeconds, e.PlanningBasis)
 	}
 	// One of the three took longer than the declared 30m.
 	if e.VsRTO != "exceeds" || *e.OverRTO != 1 {

@@ -311,16 +311,23 @@ downtime that is not in a recorded incident and it does not choose between resto
 
 ### 5.5 The recovery-time estimate
 
-The `rto` is a promise someone wrote down. The estimate is what has actually happened: how long this database's
+The `rto` is a promise someone wrote down. The estimate is what has actually happened: how long this **server's**
 restores have taken, from its own history, shown beside the promise. The plan carries it as
 `availability_budget.recovery_estimate` and `helpdesk-client --pitr-plan` prints it under `Past restores`.
+
+**"Server", not "database".** Everywhere in the objectives, "the database" means one `db_servers` entry: one PostgreSQL
+server (the instance, or cluster), because that is what a restore restores (`pgbackrest --delta restore` with no
+`--db-include`: every database in the cluster comes back, or none does). Objectives, incident attribution, the downtime
+ledger and this estimate are all kept per entry. Nothing here is per database inside a server, and nothing claims to be.
+Two entries that reach the same host and port are one machine with two separate budgets and histories; the config says
+so at startup (a warning, not an error).
 
 What it measures is the same duration the outcome stage of a recovery decision records and compares with the `rto`:
 the remediation run that did the restore (restore, restart, verify), which begins **after** the approval. It is not the
 downtime, which began earlier and includes the wait for an approval.
 
 ```
-Past restores      : 5 resolved restores of this database in the last 90d (real incidents): p50 20m, p90 40m, longest 45m
+Past restores      : 5 resolved restores of this server in the last 90d (real incidents): median 20m, longest 45m (too few for a p90, which needs 10)
 RTO CHECK (!)      : exceeds: 2 of the 5 past restores took longer than the rto of 30m (the longest took 45m)
 ```
 
@@ -334,23 +341,31 @@ The rules that keep it honest:
   the restore itself ran. A restore that failed, or did nothing (its precondition failed), took a time too, but was not
   a recovery; the count of runs left out is stated. `resolved` does not mean the verification afterwards passed: a
   restore that ran and then reported a recovery mismatch is still counted, as the time it took to do the restore.
-- **Only this database.** Another database's restores say little about this one's, so there is no fallback to the
+- **Only this server.** Another server's restores say little about this one's, so there is no fallback to the
   fleet. With fewer than three samples the status is `insufficient_history` and with none `no_history`; the declared
   `rto` then stands alone, exactly as before.
-- **A percentile of what happened, never a promise.** p50, p90 and the longest, nearest-rank, over the last 90 days,
-  with the sample size beside them. A history that cannot be read is reported as `unavailable`, never as no history.
+- **What it summarises depends on how much there is.** From three samples: the median, the longest, and the restore is
+  planned for as long as the **longest**. From ten: a real p90 (nearest-rank), and the restore is planned for the p90.
+  Below ten the p90 would be the longest under another name (by nearest rank the p90 of nine samples *is* the longest),
+  so it is not offered and not called one. The sample size and the 90-day window are always beside the numbers. A
+  history that cannot be read is reported as `unavailable`, never as no history.
 - **The `rto` comparison is a count.** `vs_rto` is `within` when none of the counted restores took longer than the
   declared `rto` and `exceeds` when some did, with how many: the declared number against the demonstrated one.
 
-**What it changes.** In the budget check (§5.4) a restore is taken to last as long as its **p90** when there is an
-estimate and as long as the declared `rto`, as an upper bound, when there is not. The verdict says which
-(`duration_basis`: `history` or `declared_rto`) and the decision record keeps it. The estimate only moves a `within`
+**What it changes.** In the budget check (§5.4) a restore is taken to last as long as the estimate plans for (its
+**p90** from ten samples, its **longest** from three to nine) when there is an estimate, and as long as the declared
+`rto`, as an upper bound, when there is not. The verdict says which (`duration_basis`: `history_p90`,
+`history_longest` or `declared_rto`) and the decision record keeps it, with the longest (`estimate_max_seconds`)
+and, from ten samples, the p90. Records from before this say `history`, which meant the p90. The estimate only moves a `within`
 to a `may_exceed` and back: it never refuses a restore, because a `may_exceed` asks and does not refuse and a spent
 budget is a breach whatever history says.
 
 **What it does not do.** It holds nothing by itself: a history that breaks the `rto` is shown at the gate (`RTO CHECK
 (!)`) and recorded and is not enforced. It covers restores only, not a restart or a scale-up. And it is only as good as
-the incidents behind it: real history is thin and a database restored three times in a year has three samples.
+the incidents behind it: real history is thin and a server restored three times in a year has three samples. Two
+more limits are not corrected for. A restore's time is roughly the size of the data over the throughput, plus the WAL
+to replay, so a history from when the server was half its size is optimistic, and a restore to ten minutes ago is not
+a restore to three days ago; both kinds are counted together, and the restored size is not recorded yet (v0.36).
 
 ## 6. Design: how objectives will be used (not built yet)
 
@@ -385,7 +400,7 @@ it spends.
 | A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built |
 | The budget check applied to any tool declared `impact: outage` in the tool registry (planned restarts, scale-downs, failover), not only the restore: a spent budget argues against voluntary downtime, never against recovery | Not built (v0.36) |
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
-| Recovery-time estimate for a restore, from this database's past real restores (p50, p90, longest, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
+| Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
@@ -406,12 +421,22 @@ yardstick and no engine for getting better. Each supplies what the other lacks:
 
 | Connection | Direction | Status |
 |---|---|---|
-| The recovery-time estimate is built from the history of real recoveries of that database (p50/p90) and improves as incidents accumulate | Vault → objectives | Not built |
+| The recovery-time estimate is built from the history of real recoveries of that database (p50/p90) and improves as incidents accumulate | Vault → objectives | Built for restores ([§5.5](#55-the-recovery-time-estimate)): from the incidents' own runs, per database, not per playbook version; a restore that has never happened has no history |
 | A playbook's resolution rate says how likely an option is to work, so an option's expected downtime includes the chance it fails | Vault → objectives | Not built |
 | The Vault's review queue (drafts waiting for a human) is ordered by budget burned or objective breached | Objectives → Vault | Not built |
 | Certification (STABLE on pass rate and spread) also requires "recovers within the environment's `rto` at p90" | Objectives → Vault | Not built |
 | The flywheel's improvement is stated in the customer's terms: "about 25% of a month's downtime budget saved per incident" | Both | Not built |
 | A declared-versus-demonstrated report: "RTO 30 min, met 40% of the time, p90 52 min", for a person to act on (invest in HA or renegotiate; the system never changes the objective) | Both | Not built |
+| Practice restores (drills) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. Proposed, not decided: needs a declared link from the clone to the server, a data-size comparison, and a recency limit | Both | Not built (proposed) |
+
+**What closes the loop is a person.** The system measures and shows the gap between what was declared and what has been
+demonstrated; a human acts on it (more resources, a faster backup path, a better playbook, or a more honest objective);
+the next recoveries then measure the result. The system never changes an objective. Without the "act, then measure
+again" half there is only a log of what happened.
+
+**The unit is a server.** "Database" in this section and in §5 means one `db_servers` entry, a whole PostgreSQL server
+(see §5.5): that is what an objective is declared for, what an incident is attributed to, what a restore restores and
+what the budget and the estimate are kept for. Per-database figures inside a server are not claimed.
 
 Here's the visual of how we think about relationship between the inner/flywheel and the outer/objectives loops:
 

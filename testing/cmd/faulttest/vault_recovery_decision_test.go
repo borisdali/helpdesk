@@ -163,7 +163,7 @@ func TestRDOption_SaysWhatTheRestoreWasTakenToLastAndWhatHistorySaid(t *testing.
 	left, dur := int64(1992), int64(3000)
 	n, over, p90, p50 := 5, 2, int64(3000), int64(1200)
 	o := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "may_exceed", BudgetGate: "acknowledge", BudgetRemainingSeconds: &left,
-		BudgetDurationSeconds: &dur, BudgetDurationBasis: "history",
+		BudgetDurationSeconds: &dur, BudgetDurationBasis: "history_p90",
 		EstimateStatus: "estimated", EstimateSamples: &n, EstimateP50Seconds: &p50, EstimateP90Seconds: &p90, EstimateVsRTO: "exceeds", EstimateOverRTO: &over}
 	got := rdOption(o)
 	for _, want := range []string{
@@ -175,7 +175,28 @@ func TestRDOption_SaysWhatTheRestoreWasTakenToLastAndWhatHistorySaid(t *testing.
 			t.Errorf("missing %q in %q", want, got)
 		}
 	}
+	// Too few restores for a p90: the longest is said as the longest, never as a p90.
+	max := int64(3000)
+	o.BudgetDurationBasis, o.EstimateP90Seconds, o.EstimateMaxSeconds = "history_longest", nil, &max
+	got = rdOption(o)
+	for _, want := range []string{
+		"restore taken as 50m 00s, the longest past restore (too few for a p90)",
+		"; history: longest 50m 00s of 5 past restores (too few for a p90), 2 took longer than the rto",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("longest: missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "history: p90") {
+		t.Errorf("a longest called a p90: %q", got)
+	}
+	// A record from before the p90 needed ten samples says "history", which meant the p90.
+	o.BudgetDurationBasis = "history"
+	if got := rdOption(o); !strings.Contains(got, "the p90 of past restores") {
+		t.Errorf("an old record's basis: %q", got)
+	}
 	// By the declared rto, and with history within it.
+	o.EstimateP90Seconds = &p90
 	o.BudgetDurationBasis, o.EstimateVsRTO, o.EstimateOverRTO = "declared_rto", "within", nil
 	got = rdOption(o)
 	if !strings.Contains(got, "restore taken as 50m 00s, from the declared rto") || strings.Contains(got, "took longer than the rto") {

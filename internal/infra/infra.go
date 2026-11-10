@@ -131,7 +131,8 @@ func Load(path string) (*Config, error) {
 // returns how many lines it logged. It also logs the databases whose declared
 // availability objectives contradict each other (an rto longer than the whole
 // downtime budget), which are not unreadable values, so nothing is treated as
-// unset for them. Call it right after a successful Load.
+// unset for them, and the entries that reach one and the same server (see
+// SharedServers). Call it right after a successful Load.
 func (c *Config) LogProblems(log func(msg string, args ...any)) int {
 	n := 0
 	if err := c.Validate(); err != nil {
@@ -143,6 +144,10 @@ func (c *Config) LogProblems(log func(msg string, args ...any)) int {
 	}
 	for _, l := range c.Consistency() {
 		log("infrastructure config: availability objectives contradict each other (nothing is blocked; the declared numbers cannot all be met)", "problem", l)
+		n++
+	}
+	for _, l := range c.SharedServers() {
+		log("infrastructure config: several db_servers entries reach one PostgreSQL server (nothing is blocked; objectives, budget and restore history are kept per entry)", "problem", l)
 		n++
 	}
 	return n

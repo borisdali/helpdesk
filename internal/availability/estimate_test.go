@@ -47,7 +47,7 @@ func TestEstimateRecovery_PercentilesAreNearestRank(t *testing.T) {
 		minutes            []int
 		p50, p90, min, max int64
 	}{
-		{"three", []int{30, 10, 20}, 20 * 60, 30 * 60, 10 * 60, 30 * 60}, // unsorted in: ranks 2 and 3 of 3
+		{"three", []int{30, 10, 20}, 20 * 60, 30 * 60, 10 * 60, 30 * 60}, // unsorted in: median rank 2 of 3; p90 is rank 3, the longest
 		{"ten", []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, 50 * 60, 90 * 60, 10 * 60, 100 * 60},
 		{"one value repeated", []int{25, 25, 25, 25}, 25 * 60, 25 * 60, 25 * 60, 25 * 60},
 		{"a long tail is the p90 and the max, not the p50", []int{10, 11, 12, 13, 14, 15, 16, 17, 18, 120}, 14 * 60, 18 * 60, 10 * 60, 120 * 60},
@@ -58,10 +58,40 @@ func TestEstimateRecovery_PercentilesAreNearestRank(t *testing.T) {
 			if e.Status != EstimateEstimated || e.Samples != len(tc.minutes) {
 				t.Fatalf("status %s, samples %d (%s)", e.Status, e.Samples, e.Basis)
 			}
-			if *e.P50Seconds != tc.p50 || *e.P90Seconds != tc.p90 || *e.MinSeconds != tc.min || *e.MaxSeconds != tc.max {
-				t.Errorf("p50 %d p90 %d min %d max %d; want %d %d %d %d", *e.P50Seconds, *e.P90Seconds, *e.MinSeconds, *e.MaxSeconds, tc.p50, tc.p90, tc.min, tc.max)
+			if *e.P50Seconds != tc.p50 || *e.MinSeconds != tc.min || *e.MaxSeconds != tc.max {
+				t.Errorf("p50 %d min %d max %d; want %d %d %d", *e.P50Seconds, *e.MinSeconds, *e.MaxSeconds, tc.p50, tc.min, tc.max)
+			}
+			// A p90 only from ten samples; below that it would be the longest by another name.
+			if len(tc.minutes) >= MinP90Samples {
+				if e.P90Seconds == nil || *e.P90Seconds != tc.p90 || *e.PlanningSeconds != tc.p90 || e.PlanningBasis != PlanningP90 {
+					t.Errorf("p90 %v planning %v/%s; want %d from the p90", e.P90Seconds, e.PlanningSeconds, e.PlanningBasis, tc.p90)
+				}
+			} else if e.P90Seconds != nil || *e.PlanningSeconds != tc.max || e.PlanningBasis != PlanningLongest {
+				t.Errorf("fewer than %d samples offered a p90 (%v) or planned for %v/%s, not the longest %d", MinP90Samples, e.P90Seconds, e.PlanningSeconds, e.PlanningBasis, tc.max)
 			}
 		})
+	}
+}
+
+// Nine samples are summarised by their longest and ten by a p90: the line where
+// the p90 stops being the longest under another name. It is pinned exactly, so a
+// change to MinP90Samples is a decision and not an accident.
+func TestEstimateRecovery_P90StartsAtTenSamples(t *testing.T) {
+	nine := EstimateRecovery(resolved(10, 11, 12, 13, 14, 15, 16, 17, 90), []string{restoreSeries}, now, EstimateWindow, nil)
+	if nine.P90Seconds != nil || nine.PlanningBasis != PlanningLongest || *nine.PlanningSeconds != 90*60 {
+		t.Errorf("nine: p90 %v, planning %v/%s", nine.P90Seconds, nine.PlanningSeconds, nine.PlanningBasis)
+	}
+	if !strings.Contains(nine.Basis, "median 14m, longest 1h30m (too few for a p90, which needs 10)") || strings.Contains(nine.Basis, "p50") {
+		t.Errorf("nine basis = %q", nine.Basis)
+	}
+	ten := EstimateRecovery(resolved(10, 11, 12, 13, 14, 15, 16, 17, 18, 90), []string{restoreSeries}, now, EstimateWindow, nil)
+	if ten.P90Seconds == nil || *ten.P90Seconds != 18*60 || ten.PlanningBasis != PlanningP90 {
+		t.Errorf("ten: p90 %v, planning %v/%s: one outlier among ten is not the p90", ten.P90Seconds, ten.PlanningSeconds, ten.PlanningBasis)
+	}
+	// The estimate that is not estimated plans for nothing.
+	few := EstimateRecovery(resolved(10, 20), []string{restoreSeries}, now, EstimateWindow, nil)
+	if few.PlanningSeconds != nil || few.PlanningBasis != "" {
+		t.Errorf("a planning figure from two samples: %+v", few)
 	}
 }
 
@@ -77,12 +107,12 @@ func TestEstimateRecovery_NeedsEnoughHistory(t *testing.T) {
 		if e.Status != want || e.Samples != n {
 			t.Errorf("%d samples = %s (%d)", n, e.Status, e.Samples)
 		}
-		if want != EstimateEstimated && (e.P50Seconds != nil || e.P90Seconds != nil || e.MaxSeconds != nil) {
+		if want != EstimateEstimated && (e.P50Seconds != nil || e.P90Seconds != nil || e.MaxSeconds != nil || e.PlanningSeconds != nil) {
 			t.Errorf("%d samples: a summary was offered: %+v", n, e)
 		}
 	}
 	none := EstimateRecovery(nil, []string{restoreSeries}, now, EstimateWindow, nil)
-	if none.Status != EstimateNone || !strings.Contains(none.Basis, "no resolved restore of this database in the last 90d among real incidents") {
+	if none.Status != EstimateNone || !strings.Contains(none.Basis, "no resolved restore of this server in the last 90d among real incidents") {
 		t.Errorf("nil listing: %+v", none)
 	}
 	few := EstimateRecovery(resolved(10, 20), []string{restoreSeries}, now, EstimateWindow, nil)
@@ -197,7 +227,7 @@ func TestUnavailableEstimate(t *testing.T) {
 	if !strings.Contains(e.Basis, "could not be read (auditd returned 503: starting)") || !strings.Contains(e.Basis, "no estimate") {
 		t.Errorf("basis = %q", e.Basis)
 	}
-	if e.Status == EstimateNone || e.P90Seconds != nil || e.VsRTO != "" {
+	if e.Status == EstimateNone || e.P90Seconds != nil || e.PlanningSeconds != nil || e.VsRTO != "" {
 		t.Errorf("an unreadable history looks like an estimate or like none: %+v", e)
 	}
 }
@@ -213,7 +243,7 @@ func TestEstimateRecovery_SaysWhenTheListingWasCutOff(t *testing.T) {
 
 func TestEstimateRecovery_BasisReadsAsASentence(t *testing.T) {
 	e := EstimateRecovery(resolved(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), []string{restoreSeries}, now, EstimateWindow, nil)
-	want := "10 resolved restores of this database in the last 90d (real incidents): p50 50m, p90 1h30m, longest 1h40m"
+	want := "10 resolved restores of this server in the last 90d (real incidents): p50 50m, p90 1h30m, longest 1h40m"
 	if e.Basis != want {
 		t.Errorf("\n got  %q\n want %q", e.Basis, want)
 	}

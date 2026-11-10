@@ -133,6 +133,42 @@ func ConnStrHost(s string) string {
 	return s
 }
 
+// SharedServers lists the groups of db_servers entries whose connection strings
+// name the same host and port. An objective, an incident, a restore, the downtime
+// ledger and the recovery-time estimate are all kept per entry, and an entry is a
+// whole PostgreSQL server (the cluster), not a database inside it. Two entries
+// that reach one server therefore have separate budgets and histories for the
+// same machine, and an outage can be charged to one and not the other. It is a
+// warning and not an error: two entries behind one tunnel or proxy can be
+// deliberate. Entries with no host are skipped, an absent port is 5432, and the
+// order is stable.
+func (c *Config) SharedServers() []string {
+	if c == nil {
+		return nil
+	}
+	byAddr := map[string][]string{}
+	for _, id := range sortedKeys(c.DBServers) {
+		s := c.DBServers[id].ConnectionString
+		host := strings.ToLower(ConnStrHost(s))
+		if host == "" {
+			continue
+		}
+		port := ConnStrPort(s)
+		if port == "" {
+			port = "5432"
+		}
+		addr := host + ":" + port
+		byAddr[addr] = append(byAddr[addr], id)
+	}
+	var out []string
+	for _, addr := range sortedKeys(byAddr) {
+		if ids := byAddr[addr]; len(ids) > 1 {
+			out = append(out, fmt.Sprintf("db_servers %s all reach %s: each is kept as its own server, with its own objectives, budget and restore history, so an outage on that machine is charged to only one of them", strings.Join(ids, ", "), addr))
+		}
+	}
+	return out
+}
+
 // ConnStrPort extracts the port from a libpq key=value connection string, a
 // postgres:// URI or a "host:port" address, or a bare port number. Returns ""
 // when there is none.

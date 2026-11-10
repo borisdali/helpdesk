@@ -166,27 +166,39 @@ func TestCompareToBudget_HistoryOutranksTheDeclaredRTO(t *testing.T) {
 		t.Fatalf("by the rto: %+v", v)
 	}
 
-	// Restores of this database have taken up to 40m at the p90: it may not.
+	// Restores of this server have taken up to 40m, the longest of five (too few
+	// for a p90): it may not fit.
 	in := inputs(rtoBudget(), l)
 	in.Estimate = estimateOf(20, 25, 30, 35, 40)
 	v := CompareToBudget(in)
-	if v.Status != BudgetMayExceed || v.DurationBasis != DurationFromHistory || *v.DurationSeconds != 40*60 {
+	if v.Status != BudgetMayExceed || v.DurationBasis != DurationFromHistoryLongest || *v.DurationSeconds != 40*60 {
 		t.Fatalf("by history: %+v", v)
 	}
-	for _, frag := range []string{"only 33m12s left", "this database's restores have taken up to 40m at the p90 (5 past restores)", "may use more than is left"} {
+	for _, frag := range []string{"only 33m12s left", "this server's restores have taken up to 40m, the longest of 5 past restores", "may use more than is left"} {
 		if !strings.Contains(v.Detail, frag) {
 			t.Errorf("detail %q lacks %q", v.Detail, frag)
 		}
+	}
+	if strings.Contains(v.Detail, "p90") {
+		t.Errorf("five samples called a p90: %q", v.Detail)
 	}
 
 	// Quick restores: it fits, and says what it rests on.
 	in.Estimate = estimateOf(10, 12, 14, 16, 18)
 	v = CompareToBudget(in)
-	if v.Status != BudgetWithin || *v.DurationSeconds != 18*60 || !strings.Contains(v.Detail, "enough for a restore as long as this database's have been (p90 18m over 5 past restores)") {
+	if v.Status != BudgetWithin || *v.DurationSeconds != 18*60 || !strings.Contains(v.Detail, "enough for a restore as long as this server's have been (18m, the longest of 5 past restores)") {
 		t.Errorf("quick: %+v", v)
 	}
+
+	// From ten samples it is a p90, and says so: one outlier among ten is not planned for.
+	in.Estimate = estimateOf(10, 12, 14, 16, 18, 20, 22, 24, 26, 120)
+	v = CompareToBudget(in)
+	if v.Status != BudgetWithin || v.DurationBasis != DurationFromHistoryP90 || *v.DurationSeconds != 26*60 ||
+		!strings.Contains(v.Detail, "enough for a restore as long as this server's have been (26m at the p90 of 10 past restores)") {
+		t.Errorf("ten: %+v", v)
+	}
 	// And the estimate rides along on the verdict.
-	if v.RecoveryEstimate == nil || v.RecoveryEstimate.Samples != 5 {
+	if v.RecoveryEstimate == nil || v.RecoveryEstimate.Samples != 10 {
 		t.Errorf("estimate not attached: %+v", v.RecoveryEstimate)
 	}
 }
@@ -200,7 +212,7 @@ func TestCompareToBudget_HistoryMakesItComparableWithoutAnRTO(t *testing.T) {
 	in := inputs(noRTOBudget(), l)
 	in.Estimate = estimateOf(20, 25, 30)
 	v := CompareToBudget(in)
-	if v.Status != BudgetWithin || v.DurationBasis != DurationFromHistory || v.RTOSeconds != nil {
+	if v.Status != BudgetWithin || v.DurationBasis != DurationFromHistoryLongest || v.RTOSeconds != nil {
 		t.Errorf("with history only: %+v", v)
 	}
 }
@@ -209,10 +221,10 @@ func TestCompareToBudget_HistoryMakesItComparableWithoutAnRTO(t *testing.T) {
 func TestCompareToBudget_ThinHistoryFallsBackToTheRTO(t *testing.T) {
 	l := ledgerSpending(rtoBudget(), 20*time.Minute) // 23m12s left; rto 30m: may exceed
 	for name, est := range map[string]*RecoveryEstimate{
-		"two restores":              estimateOf(5, 6),
-		"no restores":               estimateOf(),
-		"a nil estimate":            nil,
-		"estimated but with no p90": {Status: EstimateEstimated, Samples: 9},
+		"two restores":                          estimateOf(5, 6),
+		"no restores":                           estimateOf(),
+		"a nil estimate":                        nil,
+		"estimated but with no planning figure": {Status: EstimateEstimated, Samples: 9},
 	} {
 		in := inputs(rtoBudget(), l)
 		in.Estimate = est

@@ -387,12 +387,13 @@ func TestPlan_HistoryDecidesWhatTheBudgetIsComparedWith(t *testing.T) {
 		t.Fatalf("%+v, %v", plan, err)
 	}
 	b := plan.AvailabilityBudget
-	// By the rto it would fit; by what restores here have taken (p90 50m) it may not.
-	if b.Status != availability.BudgetMayExceed || b.DurationBasis != availability.DurationFromHistory || *b.DurationSeconds != 50*60 || b.Gate != availability.GateAcknowledge {
+	// By the rto it would fit; by what restores here have taken (the longest of
+	// three, 50m, too few for a p90) it may not.
+	if b.Status != availability.BudgetMayExceed || b.DurationBasis != availability.DurationFromHistoryLongest || *b.DurationSeconds != 50*60 || b.Gate != availability.GateAcknowledge {
 		t.Fatalf("budget = %+v", b)
 	}
 	e := b.RecoveryEstimate
-	if e == nil || e.Status != availability.EstimateEstimated || *e.P90Seconds != 50*60 || e.VsRTO != "exceeds" || *e.OverRTO != 3 {
+	if e == nil || e.Status != availability.EstimateEstimated || e.P90Seconds != nil || *e.MaxSeconds != 50*60 || e.VsRTO != "exceeds" || *e.OverRTO != 3 {
 		t.Fatalf("estimate = %+v", e)
 	}
 	// It is in the JSON the CLI and the harness read, and on the record.
@@ -410,8 +411,8 @@ func TestPlan_HistoryDecidesWhatTheBudgetIsComparedWith(t *testing.T) {
 		t.Fatalf("decisions = %+v", got)
 	}
 	o := got[0].Options[0]
-	if o.BudgetDurationBasis != "history" || *o.BudgetDurationSeconds != 3000 || o.EstimateStatus != "estimated" || *o.EstimateSamples != 3 ||
-		*o.EstimateP90Seconds != 3000 || o.EstimateVsRTO != "exceeds" || *o.EstimateOverRTO != 3 {
+	if o.BudgetDurationBasis != "history_longest" || *o.BudgetDurationSeconds != 3000 || o.EstimateStatus != "estimated" || *o.EstimateSamples != 3 ||
+		o.EstimateP90Seconds != nil || *o.EstimateMaxSeconds != 3000 || o.EstimateVsRTO != "exceeds" || *o.EstimateOverRTO != 3 {
 		t.Errorf("recorded option = %+v", o)
 	}
 }
@@ -442,10 +443,14 @@ func TestPlanJSON_CarriesTheEstimateNamesTheClientReads(t *testing.T) {
 		}
 	}
 	est, _ := m.B["recovery_estimate"].(map[string]any)
-	for _, k := range []string{"status", "basis", "vs_rto", "vs_rto_detail", "samples", "p50_seconds", "p90_seconds"} {
+	for _, k := range []string{"status", "basis", "vs_rto", "vs_rto_detail", "samples", "p50_seconds", "max_seconds", "planning_seconds", "planning_basis"} {
 		if _, ok := est[k]; !ok {
 			t.Errorf("recovery_estimate.%s missing from %s", k, raw)
 		}
+	}
+	// Three restores are too few for a p90: the field is absent, not a longest under its name.
+	if _, ok := est["p90_seconds"]; ok || est["planning_basis"] != "longest" {
+		t.Errorf("three samples: p90 present or not planned for the longest in %s", raw)
 	}
 }
 
@@ -482,8 +487,9 @@ func TestBudgetCheckFor_UsesHistoryReadThroughTheRealClient(t *testing.T) {
 	budgetObjectives(t, "", "acknowledge") // 43m12s budget, nothing spent, rto 30m
 
 	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
-	// 43m12s left covers the declared rto of 30m, but not what restores here have taken (p90 55m).
-	if v.Status != availability.BudgetMayExceed || v.DurationBasis != availability.DurationFromHistory || *v.DurationSeconds != 55*60 {
+	// 43m12s left covers the declared rto of 30m, but not what restores here have
+	// taken (the longest of three, 55m).
+	if v.Status != availability.BudgetMayExceed || v.DurationBasis != availability.DurationFromHistoryLongest || *v.DurationSeconds != 55*60 {
 		t.Fatalf("verdict = %+v", v)
 	}
 	e := v.RecoveryEstimate
@@ -508,7 +514,7 @@ func TestRestore_HistoryNeverMakesARestoreRefused(t *testing.T) {
 			}
 			continue
 		}
-		if err != nil || !stopped || d.Options[0].BudgetVerdict != "may_exceed" || d.Options[0].BudgetDurationBasis != "history" || *d.Options[0].EstimateSamples != 3 {
+		if err != nil || !stopped || d.Options[0].BudgetVerdict != "may_exceed" || d.Options[0].BudgetDurationBasis != "history_longest" || *d.Options[0].EstimateSamples != 3 {
 			t.Errorf("acknowledged: err=%v stopped=%v option=%+v", err, stopped, d.Options[0])
 		}
 	}

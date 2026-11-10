@@ -169,20 +169,25 @@ type DecisionOption struct {
 	BudgetGate             string `json:"budget_gate,omitempty"`
 	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
 	// How long the budget verdict took the restore to last, and on what:
-	// "history" (the p90 of this database's past restores) or "declared_rto" (an
-	// upper bound). Absent when it was not compared.
+	// "history_p90" (the p90 of this server's past restores, from ten of them),
+	// "history_longest" (the longest of three to nine, too few for a p90) or
+	// "declared_rto" (an upper bound). Absent when it was not compared. Records
+	// from before this naming say "history", which meant the p90.
 	BudgetDurationSeconds *int64 `json:"budget_duration_seconds,omitempty"`
 	BudgetDurationBasis   string `json:"budget_duration_basis,omitempty"`
 
-	// What this database's past restores have taken, from real incidents, as the
+	// What this server's past restores have taken, from real incidents, as the
 	// plan or the restore saw it. EstimateStatus is estimated, insufficient_history,
 	// no_history or unavailable; the figures are present only when estimated.
+	// EstimateP90Seconds only from ten samples (below that it would be the longest
+	// under another name), EstimateMaxSeconds always, when estimated.
 	// EstimateVsRTO is "within" or "exceeds" (some past restore took longer than the
 	// declared rto), with EstimateOverRTO how many.
 	EstimateStatus     string `json:"estimate_status,omitempty"`
 	EstimateSamples    *int   `json:"estimate_samples,omitempty"`
 	EstimateP50Seconds *int64 `json:"estimate_p50_seconds,omitempty"`
 	EstimateP90Seconds *int64 `json:"estimate_p90_seconds,omitempty"`
+	EstimateMaxSeconds *int64 `json:"estimate_max_seconds,omitempty"`
 	EstimateVsRTO      string `json:"estimate_vs_rto,omitempty"`
 	EstimateOverRTO    *int   `json:"estimate_over_rto,omitempty"`
 }

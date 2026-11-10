@@ -182,7 +182,12 @@ func rdOption(opt audit.DecisionOption) string {
 			taken := ""
 			if opt.BudgetDurationSeconds != nil {
 				basis := "from the declared rto"
-				if opt.BudgetDurationBasis == "history" {
+				switch opt.BudgetDurationBasis {
+				case "history_p90":
+					basis = "the p90 of past restores"
+				case "history_longest":
+					basis = "the longest past restore (too few for a p90)"
+				case "history": // records from before the p90 needed ten samples
 					basis = "the p90 of past restores"
 				}
 				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), basis)
@@ -197,8 +202,12 @@ func rdOption(opt audit.DecisionOption) string {
 		}
 	}
 	// What this database's past restores have taken, when that was known.
-	if opt.EstimateStatus == "estimated" && opt.EstimateSamples != nil && opt.EstimateP90Seconds != nil {
-		fmt.Fprintf(&b, "; history: p90 %s over %d past restores", rdSpan(*opt.EstimateP90Seconds), *opt.EstimateSamples)
+	if opt.EstimateStatus == "estimated" && opt.EstimateSamples != nil && (opt.EstimateP90Seconds != nil || opt.EstimateMaxSeconds != nil) {
+		if opt.EstimateP90Seconds != nil {
+			fmt.Fprintf(&b, "; history: p90 %s over %d past restores", rdSpan(*opt.EstimateP90Seconds), *opt.EstimateSamples)
+		} else {
+			fmt.Fprintf(&b, "; history: longest %s of %d past restores (too few for a p90)", rdSpan(*opt.EstimateMaxSeconds), *opt.EstimateSamples)
+		}
 		if opt.EstimateVsRTO == "exceeds" && opt.EstimateOverRTO != nil {
 			fmt.Fprintf(&b, ", %d took longer than the rto", *opt.EstimateOverRTO)
 		}

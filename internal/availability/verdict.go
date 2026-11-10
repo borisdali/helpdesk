@@ -71,17 +71,21 @@ type BudgetInputs struct {
 	// Refusing is only coherent then: an instance that is already down is
 	// accruing downtime whether or not it is restored.
 	Serving bool
-	// Estimate is how long this database's restores have taken, from history, or
+	// Estimate is how long this server's restores have taken, from history, or
 	// nil. When it is an estimate (enough samples) the restore is taken to last
-	// as long as its p90; without one, as long as the declared rto, as an upper
+	// as long as the estimate plans for (its p90 from ten samples, its longest
+	// from three to nine); without one, as long as the declared rto, as an upper
 	// bound.
 	Estimate *RecoveryEstimate
 }
 
 // What a verdict took a restore's duration to be.
 const (
-	// DurationFromHistory: the p90 of this database's past restores.
-	DurationFromHistory = "history"
+	// DurationFromHistoryP90: the p90 of this server's past restores (ten or more).
+	DurationFromHistoryP90 = "history_p90"
+	// DurationFromHistoryLongest: the longest of this server's past restores
+	// (three to nine, too few for a p90 to mean more than that).
+	DurationFromHistoryLongest = "history_longest"
 	// DurationFromRTO: the declared rto, an upper bound.
 	DurationFromRTO = "declared_rto"
 )
@@ -108,10 +112,11 @@ type BudgetVerdict struct {
 	// GateNote explains a gate that is not what the enforcement alone would say.
 	GateNote string `json:"gate_note,omitempty"`
 	// DurationSeconds is how long the restore was taken to last, and
-	// DurationBasis what that rests on: DurationFromHistory or DurationFromRTO.
+	// DurationBasis what that rests on: DurationFromHistoryP90,
+	// DurationFromHistoryLongest or DurationFromRTO.
 	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
 	DurationBasis   string `json:"duration_basis,omitempty"`
-	// RecoveryEstimate is how long this database's restores have taken, whatever
+	// RecoveryEstimate is how long this server's restores have taken, whatever
 	// the verdict: it is worth showing even when no SLO is set.
 	RecoveryEstimate *RecoveryEstimate `json:"recovery_estimate,omitempty"`
 }
@@ -171,14 +176,18 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 			len(l.Unconfirmed), span(*l.RemainingWorstCaseSeconds))
 	}
 
-	// How long the restore is taken to last: what this database's restores have
-	// taken when there is enough history (the p90, with the sample size said), and
+	// How long the restore is taken to last: what this server's restores have
+	// taken when there is enough history (what the estimate plans for: the p90 from
+	// ten samples, the longest from three to nine, with the sample size said), and
 	// otherwise the declared rto, as an upper bound.
 	var dur time.Duration
-	haveDur, fromHistory := false, false
-	if e := in.Estimate; e != nil && e.Status == EstimateEstimated && e.P90Seconds != nil {
-		dur, haveDur, fromHistory = secondsOf(*e.P90Seconds), true, true
-		d, basis := *e.P90Seconds, DurationFromHistory
+	haveDur, fromHistory, historyIsP90 := false, false, false
+	if e := in.Estimate; e != nil && e.Status == EstimateEstimated && e.PlanningSeconds != nil {
+		dur, haveDur, fromHistory = secondsOf(*e.PlanningSeconds), true, true
+		d, basis := *e.PlanningSeconds, DurationFromHistoryLongest
+		if e.PlanningBasis == PlanningP90 {
+			basis, historyIsP90 = DurationFromHistoryP90, true
+		}
 		v.DurationSeconds, v.DurationBasis = &d, basis
 	} else if in.Budget.RTOKnown {
 		dur, haveDur = in.Budget.RTO, true
@@ -195,17 +204,26 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 	case !haveDur:
 		return BudgetNotComparable, fmt.Sprintf("%s, %s left, but no rto is declared and there is no history of past restores, so how long this restore may take is not known%s", spent, span(rem), note)
 	case fromHistory && rem >= int64(dur.Seconds()):
-		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this database's have been (p90 %s over %d past restores)%s",
-			spent, span(rem), infra.FormatSpan(dur), in.Estimate.Samples, note)
+		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this server's have been (%s)%s",
+			spent, span(rem), historyPhrase(infra.FormatSpan(dur), in.Estimate.Samples, historyIsP90), note)
 	case fromHistory:
-		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this database's restores have taken up to %s at the p90 (%d past restores): this one may use more than is left%s",
-			spent, span(rem), infra.FormatSpan(dur), in.Estimate.Samples, note)
+		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this server's restores have taken up to %s: this one may use more than is left%s",
+			spent, span(rem), historyPhrase(infra.FormatSpan(dur), in.Estimate.Samples, historyIsP90), note)
 	case rem >= int64(dur.Seconds()):
 		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore that takes up to the rto of %s%s", spent, span(rem), infra.FormatSpan(dur), note)
 	default:
 		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this restore may take up to the rto of %s: it may use more than is left (a restore can finish sooner than its rto)%s",
 			spent, span(rem), infra.FormatSpan(dur), note)
 	}
+}
+
+// historyPhrase says what a duration taken from history rests on, as a p90 when
+// there are enough samples for one and as the longest when there are not.
+func historyPhrase(span string, samples int, p90 bool) string {
+	if p90 {
+		return fmt.Sprintf("%s at the p90 of %d past restores", span, samples)
+	}
+	return fmt.Sprintf("%s, the longest of %d past restores", span, samples)
 }
 
 // gateFor is what a verdict demands under an enforcement.

@@ -14,11 +14,14 @@ package availability
 //   - only real incidents; a faulttest injection never counts;
 //   - only runs that ended resolved: a restore that failed took a time too, but it
 //     was not a recovery, and is said to have been left out;
-//   - only the same database: another database's restores say little about this
+//   - only the same server: another server's restores say little about this
 //     one's (data size dominates), so there is no fallback to the fleet, and with
-//     too few of its own the estimate says so and the declared rto stands alone;
-//   - it is a percentile of what happened, with the sample size beside it, never a
-//     promise.
+//     too few of its own the estimate says so and the declared rto stands alone.
+//     (A restore is of a whole PostgreSQL server, the cluster, never of one
+//     database inside it, so the unit is the server.);
+//   - it summarises what happened, with the sample size beside it, never a
+//     promise: the median and the longest from three samples, and a p90 only from
+//     ten, since below that the p90 is the longest under another name.
 
 import (
 	"context"
@@ -43,8 +46,21 @@ const (
 	// EstimateWindow is how far back the estimate looks.
 	EstimateWindow = 90 * 24 * time.Hour
 	// MinEstimateSamples is how many resolved restores an estimate needs. Below
-	// it a percentile is the one or two numbers there are, and is not offered.
+	// it a summary is the one or two numbers there are, and is not offered.
 	MinEstimateSamples = 3
+	// MinP90Samples is how many it takes before a p90 means more than the longest.
+	// By nearest rank the p90 of fewer than ten samples IS the longest, so it is
+	// not called a p90 until there are ten: below that the estimate offers the
+	// median and the longest, and plans for the longest.
+	MinP90Samples = 10
+)
+
+// What an estimate plans for.
+const (
+	// PlanningP90: the p90 of the samples (ten or more of them).
+	PlanningP90 = "p90"
+	// PlanningLongest: the longest of the samples (three to nine of them).
+	PlanningLongest = "longest"
 )
 
 // Estimate statuses.
@@ -73,11 +89,18 @@ func UnavailableEstimate(err error) *RecoveryEstimate {
 type RecoveryEstimate struct {
 	Status  string `json:"status"`
 	Samples int    `json:"samples"`
-	// The summary, in whole seconds; absent unless Status is estimated.
+	// The summary, in whole seconds; absent unless Status is estimated. P50 is
+	// the median. P90 is only offered from MinP90Samples samples: with fewer it
+	// would be the longest under another name.
 	P50Seconds *int64 `json:"p50_seconds,omitempty"`
 	P90Seconds *int64 `json:"p90_seconds,omitempty"`
 	MinSeconds *int64 `json:"min_seconds,omitempty"`
 	MaxSeconds *int64 `json:"max_seconds,omitempty"`
+	// PlanningSeconds is what a restore is planned to take, and PlanningBasis what
+	// that is: the p90 when there are MinP90Samples samples, the longest when
+	// there are fewer. Present exactly when Status is estimated.
+	PlanningSeconds *int64 `json:"planning_seconds,omitempty"`
+	PlanningBasis   string `json:"planning_basis,omitempty"`
 	// WindowSeconds is how far back it looked.
 	WindowSeconds int64 `json:"window_seconds"`
 	// Excluded counts runs of these series in the window that are not counted:
@@ -140,14 +163,16 @@ func EstimateRecovery(l *audit.IncidentListing, series []string, now time.Time, 
 		left += "; the incident listing was cut off at its page limit, so older restores may be missing"
 	}
 
+	// "Server" and not "database": a restore is of a whole PostgreSQL server (the
+	// cluster), never of one database inside it.
 	switch {
 	case e.Samples == 0:
 		e.Status = EstimateNone
-		e.Basis = fmt.Sprintf("no resolved restore of this database in the last %s among real incidents: nothing to estimate from%s", span, left)
+		e.Basis = fmt.Sprintf("no resolved restore of this server in the last %s among real incidents: nothing to estimate from%s", span, left)
 		return e
 	case e.Samples < MinEstimateSamples:
 		e.Status = EstimateTooFew
-		e.Basis = fmt.Sprintf("only %d resolved restore(s) of this database in the last %s (real incidents): %d are needed for an estimate%s",
+		e.Basis = fmt.Sprintf("only %d resolved restore(s) of this server in the last %s (real incidents): %d are needed for an estimate%s",
 			e.Samples, span, MinEstimateSamples, left)
 		return e
 	}
@@ -155,10 +180,20 @@ func EstimateRecovery(l *audit.IncidentListing, series []string, now time.Time, 
 	sort.Slice(took, func(i, j int) bool { return took[i] < took[j] })
 	secs := func(d time.Duration) *int64 { v := int64(d.Round(time.Second) / time.Second); return &v }
 	e.Status = EstimateEstimated
-	e.P50Seconds, e.P90Seconds = secs(percentile(took, 0.50)), secs(percentile(took, 0.90))
+	e.P50Seconds = secs(percentile(took, 0.50))
 	e.MinSeconds, e.MaxSeconds = secs(took[0]), secs(took[len(took)-1])
-	e.Basis = fmt.Sprintf("%d resolved restores of this database in the last %s (real incidents): p50 %s, p90 %s, longest %s%s",
-		e.Samples, span, infra.FormatSpan(percentile(took, 0.50)), infra.FormatSpan(percentile(took, 0.90)), infra.FormatSpan(took[len(took)-1]), left)
+	longest := took[len(took)-1]
+	if e.Samples >= MinP90Samples {
+		p90 := percentile(took, 0.90)
+		e.P90Seconds, e.PlanningSeconds, e.PlanningBasis = secs(p90), secs(p90), PlanningP90
+		e.Basis = fmt.Sprintf("%d resolved restores of this server in the last %s (real incidents): p50 %s, p90 %s, longest %s%s",
+			e.Samples, span, infra.FormatSpan(percentile(took, 0.50)), infra.FormatSpan(p90), infra.FormatSpan(longest), left)
+	} else {
+		// Too few for a p90 to mean more than the longest: say the longest, and plan for it.
+		e.PlanningSeconds, e.PlanningBasis = secs(longest), PlanningLongest
+		e.Basis = fmt.Sprintf("%d resolved restores of this server in the last %s (real incidents): median %s, longest %s (too few for a p90, which needs %d)%s",
+			e.Samples, span, infra.FormatSpan(percentile(took, 0.50)), infra.FormatSpan(longest), MinP90Samples, left)
+	}
 
 	if rto != nil {
 		over := 0

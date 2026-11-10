@@ -156,3 +156,56 @@ func TestConnStrHostPort(t *testing.T) {
 		}
 	}
 }
+
+// Two entries that reach one PostgreSQL server are two servers as far as
+// objectives, budget and restore history go, so the config says so. Different
+// ports, different hosts and entries with no host are not the same server.
+func TestSharedServers(t *testing.T) {
+	c := &Config{DBServers: map[string]DBServer{
+		"orders-a":  {ConnectionString: "host=db.prod port=5432 dbname=orders"},
+		"orders-b":  {ConnectionString: "postgres://app@DB.prod/billing"}, // default port, host case ignored
+		"orders-c":  {ConnectionString: "host=db.prod port=5433"},         // another port: another server
+		"reports":   {ConnectionString: "host=db.reports port=5432"},
+		"warehouse": {ConnectionString: "host=db.reports port=5432"},
+		"unknown-1": {ConnectionString: "5432"}, // no host: skipped
+		"unknown-2": {ConnectionString: "5432"},
+	}}
+	got := c.SharedServers()
+	if len(got) != 2 {
+		t.Fatalf("SharedServers = %v, want two groups", got)
+	}
+	// Stable order, by address.
+	if !strings.Contains(got[0], "db.prod:5432") || !strings.Contains(got[0], "orders-a, orders-b") || strings.Contains(got[0], "orders-c") {
+		t.Errorf("first group = %q", got[0])
+	}
+	if !strings.Contains(got[1], "db.reports:5432") || !strings.Contains(got[1], "reports, warehouse") {
+		t.Errorf("second group = %q", got[1])
+	}
+	if !strings.Contains(got[0], "charged to only one of them") {
+		t.Errorf("the consequence is not said: %q", got[0])
+	}
+	if (*Config)(nil).SharedServers() != nil || (&Config{}).SharedServers() != nil {
+		t.Error("an empty config reported shared servers")
+	}
+	// Distinct servers say nothing.
+	if got := (&Config{DBServers: map[string]DBServer{"a": {ConnectionString: "host=a"}, "b": {ConnectionString: "host=b"}}}).SharedServers(); got != nil {
+		t.Errorf("distinct servers: %v", got)
+	}
+}
+
+// The warning reaches the log, counted with the other config problems, and blocks
+// nothing: the config still loads and both entries still resolve.
+func TestLogProblems_SaysWhenEntriesReachOneServer(t *testing.T) {
+	c := load(t, `{"db_servers": {
+	  "a": {"connection_string": "host=same port=5432"},
+	  "b": {"connection_string": "host=same port=5432"}
+	}}`)
+	var lines []string
+	n := c.LogProblems(func(msg string, args ...any) { lines = append(lines, msg) })
+	if n != 1 || len(lines) != 1 || !strings.Contains(lines[0], "several db_servers entries reach one PostgreSQL server") {
+		t.Errorf("LogProblems = %d, %v", n, lines)
+	}
+	if _, ok := c.DBServers["a"]; !ok {
+		t.Error("the entry was dropped")
+	}
+}
