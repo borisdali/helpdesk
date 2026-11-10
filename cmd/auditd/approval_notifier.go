@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"strings"
+	"sync"
 	"time"
 
 	"helpdesk/internal/audit"
@@ -16,7 +17,12 @@ import (
 
 // ApprovalNotifier sends notifications for approval events.
 type ApprovalNotifier struct {
-	webhookURL   string
+	webhookURL string
+	// callbackURLs is read and written by concurrent request handlers (one
+	// registers a callback as an approval is created, another spends it as it is
+	// resolved), so mu guards it. Without the lock Go can abort the whole process
+	// with "concurrent map writes".
+	mu           sync.Mutex
 	callbackURLs map[string]string // approvalID -> callbackURL
 	baseURL      string            // Base URL for approve/deny links in emails
 
@@ -71,8 +77,20 @@ func (n *ApprovalNotifier) IsEnabled() bool {
 // RegisterCallback registers a callback URL for an approval ID.
 func (n *ApprovalNotifier) RegisterCallback(approvalID, callbackURL string) {
 	if callbackURL != "" {
+		n.mu.Lock()
 		n.callbackURLs[approvalID] = callbackURL
+		n.mu.Unlock()
 	}
+}
+
+// takeCallback returns the callback registered for an approval and forgets it:
+// a callback is called once.
+func (n *ApprovalNotifier) takeCallback(approvalID string) (string, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	u, ok := n.callbackURLs[approvalID]
+	delete(n.callbackURLs, approvalID)
+	return u, ok
 }
 
 // NotifyCreated sends notifications when a new approval request is created.
@@ -100,9 +118,8 @@ func (n *ApprovalNotifier) NotifyCreated(ctx context.Context, approval *audit.St
 // NotifyResolved sends notifications when an approval request is resolved.
 func (n *ApprovalNotifier) NotifyResolved(ctx context.Context, approval *audit.StoredApproval) {
 	// Send callback to registered URL
-	if callbackURL, ok := n.callbackURLs[approval.ApprovalID]; ok {
+	if callbackURL, ok := n.takeCallback(approval.ApprovalID); ok {
 		go n.sendCallback(callbackURL, approval)
-		delete(n.callbackURLs, approval.ApprovalID)
 	}
 
 	// Send webhook notification

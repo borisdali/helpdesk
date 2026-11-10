@@ -30,6 +30,11 @@ ignore:
   - "cmd/jwttest/**"
   - "cmd/secbot/**"
   - "cmd/srebot/**"
+  # Startup wiring of the two services that are measured: flag parsing, store
+  # construction and route registration, needing a live process, the same
+  # category as the agents' main.go below. Their handlers are measured.
+  - "cmd/gateway/main.go"
+  - "cmd/auditd/main.go"
   # Agent startup/wiring code — same category as cmd/
   - "agents/database/main.go"
   - "agents/k8s/main.go"

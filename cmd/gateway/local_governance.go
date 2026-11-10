@@ -21,6 +21,13 @@ import (
 // the given local store. It listens on a random loopback port and returns the
 // base URL (e.g. "http://127.0.0.1:54321").
 func startLocalGovernanceServer(store *audit.Store) (string, error) {
+	// The journeys filters (?incident_only, ?run_id) look in playbook_runs. A
+	// gateway that owns its store has no other reason to create that table, so
+	// without it ?incident_only=true is a 500 ("no such table"), not an empty list.
+	// Creating it is idempotent, and in local mode it simply stays empty.
+	if _, err := audit.NewPlaybookRunStore(store.DB(), store.IsPostgres()); err != nil {
+		return "", err
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
