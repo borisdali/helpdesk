@@ -103,6 +103,13 @@ type ObjectivesInForce struct {
 
 	AvailabilitySLO    *float64 `json:"availability_slo,omitempty"`
 	AvailabilitySource string   `json:"availability_source,omitempty"`
+	// The window the SLO was read over and the downtime budget that gives, as
+	// they were when the decision was made. The window source is a config level,
+	// or "built-in default" when no level set one. Absent on events recorded
+	// before v0.35 and when no budget could be computed.
+	AvailabilityWindowSeconds *int64 `json:"availability_window_seconds,omitempty"`
+	AvailabilityWindowSource  string `json:"availability_window_source,omitempty"`
+	AvailabilityBudgetSeconds *int64 `json:"availability_budget_seconds,omitempty"`
 
 	RecoveryPreference string `json:"recovery_preference,omitempty"`
 	PreferenceSource   string `json:"preference_source,omitempty"`

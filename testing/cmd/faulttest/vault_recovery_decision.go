@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 )
 
 // narrativeRecoveryDecision mirrors the gateway's RecoveryDecisionRecord.
@@ -67,6 +68,30 @@ func recoveryDecisionsFromEvents(events []journeyEvent) []narrativeRecoveryDecis
 	return out
 }
 
+// rdBudget states the availability budget that was in force, from the numbers
+// the event recorded (the same wording the config check uses). An event
+// recorded without a window (before v0.35, or when no budget could be
+// computed) gets no line: the default is not assumed after the fact.
+func rdBudget(o *audit.ObjectivesInForce) string {
+	if o.AvailabilitySLO == nil || o.AvailabilityWindowSeconds == nil {
+		return ""
+	}
+	var rto time.Duration
+	if o.RTOSeconds != nil {
+		rto = time.Duration(*o.RTOSeconds) * time.Second
+	}
+	b := infra.ComputeBudget(*o.AvailabilitySLO, time.Duration(*o.AvailabilityWindowSeconds)*time.Second,
+		o.AvailabilityWindowSource, rto, o.RTOSeconds != nil)
+	if !b.Computed {
+		return ""
+	}
+	prefix := "  budget: "
+	if b.Contradictory {
+		prefix = "  ⚠ budget: "
+	}
+	return prefix + b.Detail
+}
+
 // rdObjectives renders the objectives that were in force, with where each came
 // from. Nothing is shown for an objective that was not set.
 func rdObjectives(o *audit.ObjectivesInForce) []string {
@@ -93,6 +118,9 @@ func rdObjectives(o *audit.ObjectivesInForce) []string {
 		parts = append(parts, "no objective set")
 	}
 	lines = append(lines, "  "+strings.Join(parts, "   "))
+	if line := rdBudget(o); line != "" {
+		lines = append(lines, line)
+	}
 	policy := []string{}
 	if o.RecoveryPreference != "" {
 		policy = append(policy, fmt.Sprintf("preference %s [%s]", o.RecoveryPreference, o.PreferenceSource))

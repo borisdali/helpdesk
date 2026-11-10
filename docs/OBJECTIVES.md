@@ -8,7 +8,8 @@ each database is **supposed** to achieve, so the numbers aiHelpDesk produces (th
 |---|---|---|
 | `rpo` | The most data, as time, that may be lost | The [PITR data-loss estimate](PITR.md#4-operating-it), which is set against it |
 | `rto` | The longest a recovery may take | Not consumed yet |
-| `availability_slo` | Share of time the database should be available, in percent | Recorded and resolved, not consumed yet |
+| `availability_slo` | Share of time the database should be available, in percent | The [availability budget](#52-the-availability-budget): what it allows to be down |
+| `availability_window` | The rolling window the SLO is measured over (`"30d"`; 30 days when unset) | The same budget |
 
 This page describes the configuration and how it resolves. The checks that use it are added one at a time and
 documented where they appear.
@@ -23,6 +24,7 @@ documented where they appear.
 4. [A mistake never costs the inventory](#4-a-mistake-never-costs-the-inventory)
 5. [Reading it in code](#5-reading-it-in-code)
    - [5.1 Which incidents spend the availability budget](#51-which-incidents-spend-the-availability-budget)
+   - [5.2 The availability budget](#52-the-availability-budget)
 6. [Design: how objectives will be used (not built yet)](#6-design-how-objectives-will-be-used-not-built-yet)
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
@@ -49,7 +51,7 @@ environment and the environment's from the fleet default. Every resolved value c
 {
   "defaults": { "objectives": { "rpo": "1h", "rto": "4h", "availability_slo": 99.0 } },
   "environments": {
-    "prod":    { "description": "customer-facing", "objectives": { "rpo": "5m", "rto": "30m", "availability_slo": 99.95 } },
+    "prod":    { "description": "customer-facing", "objectives": { "rpo": "5m", "rto": "30m", "availability_slo": 99.95, "availability_window": "90d" } },
     "staging": { "objectives": { "rpo": "1d" } },
     "dev":     {}
   },
@@ -86,6 +88,10 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   next level.
 - **`rto`** must be greater than zero.
 - **`availability_slo`** is a percentage greater than 0 and at most 100.
+- **`availability_window`** is a duration greater than zero: the rolling window the SLO is measured over. Unset
+  means 30 days, and everything that shows a budget says when the window is that default. An unreadable window
+  is never replaced by the default: no budget is computed and the problem is logged. Together with the SLO it
+  gives the downtime budget ([§5.2](#52-the-availability-budget)).
 - **`recovery_preference`** is `availability_first` or `data_first`: what to favour when a recovery has to choose
   between getting the database back sooner and losing less data. It will decide how a recommendation is ranked
   and how an option that breaches an objective is treated. It never decides to act. Unset means no preference.
@@ -149,6 +155,45 @@ Only `outage` is charged to the budget. The others are listed beside it, uncharg
 - The values are judgements, made so that a restore counts as the outage it is and a vacuum does not. Review them
   against how an incident of that kind looks to your clients. A test fails when a system playbook is added without one.
 
+### 5.2 The availability budget
+
+An `rto` says how long one recovery may take. It says nothing about how often a failure may happen, and the two
+together decide whether the SLO can be met at all. The SLO and its window give the total downtime a database may
+have, and the `rto` says how much of it one recovery can use:
+
+```
+budget               = window x (100 - availability_slo) / 100
+recoveries absorbed  = floor(budget / rto)
+```
+
+| SLO over 30 days | Budget | A 30m `rto` |
+|---|---|---|
+| 99% | 7h 12m | uses 7% of it, tolerates 14 recoveries |
+| 99.9% | 43m 12s | uses 69%, tolerates **1** recovery |
+| 99.95% | 21m 36s | longer than the whole budget: **contradictory** |
+| 99.99% | 4m 19s | longer than the whole budget: **contradictory** |
+
+An `rto` longer than the whole budget means one recovery that takes the full `rto` breaks the SLO: the two
+declared numbers cannot both be met. aiHelpDesk says so, but blocks nothing, and does not change either number: it is
+your objective, and the fix is yours (a wider window, a lower SLO, or a faster recovery).
+
+- **Where it is stated.** `LogProblems` logs it at startup for the gateway and the sysadmin agent, once per database
+  (`infrastructure config: availability objectives contradict each other`); `infra.Config.Consistency()` lists the
+  same findings; and the RECOVERY DECISION section of `vault incidents` shows a `budget:` line (with a `⚠` when
+  contradictory) beneath the objectives in force. The recovery decision records the window, where it came from and
+  the budget, so the record shows the numbers the approver saw.
+- **The default window is a default.** With no `availability_window` the window is 30 days, rolling, and every
+  statement says `(default window)` and the record says `built-in default`. A calendar month would need the
+  month's start, which no setting carries.
+- **A typo never becomes a default.** An unreadable `availability_slo` or `availability_window`, or a database in an
+  environment that is not declared (whose own slo or window might have been the environment's), computes no
+  budget, and says why. It never falls back to the default window or to "no objective".
+- **Old events are not rewritten.** A decision recorded before v0.35 has no window and gets no budget line; the
+  default is not assumed after the fact.
+- **What this is not.** It is arithmetic on declared numbers. It does not measure downtime, count incidents already
+  in the window, or forecast: a recovery that finishes faster than its `rto` uses less than the share shown, and one
+  that fails uses more. The budget already spent comes from the ledger, which is not built yet.
+
 ## 6. Design: how objectives will be used (not built yet)
 
 Sections 1-5 are built. This section is the design the next steps follow. Everything in it is marked built or not,
@@ -176,7 +221,9 @@ it spends.
 | An audit spool, so an unwritable record is kept and replayed; fail-closed when auditing is configured but unreachable, with a human break-glass override at the gate | Not built (v0.35) |
 | Actual downtime (not just the recovery hop's duration) recorded against the `rto` | Not built |
 | `recovery_preference` read by anything (ranking recommendations) | Not built |
-| A budget window on `availability_slo` and the number of worst-case recoveries it absorbs (budget ÷ `rto`) | Not built |
+| A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`), and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
+| A ledger of the downtime budget already spent in the window, from recorded incidents | Not built |
+| The remaining budget shown to the person at the gate | Not built |
 | Recovery-time estimate, with its basis shown and "unknown" when there is no history | Not built |
 | Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
 | Per-incident outcome (actual loss, duration, budget burn) recorded against the objective | Not built |

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
@@ -28,6 +29,44 @@ func decisions(t *testing.T, store *audit.Store) map[string][]audit.RecoveryDeci
 		out[ev.RecoveryDecision.Stage] = append(out[ev.RecoveryDecision.Stage], *ev.RecoveryDecision)
 	}
 	return out
+}
+
+// The record shows the window and budget the approver saw, including a window
+// that was only the built-in default, and nothing when no budget could be
+// computed (never a default laid over a setting that could not be read).
+func TestSnapshotOf_RecordsTheAvailabilityBudget(t *testing.T) {
+	declared := infra.ResolvedObjectives{
+		RTO:                infra.ResolvedDuration{Set: true, Value: 30 * time.Minute, Source: "environment:prod"},
+		AvailabilitySLO:    infra.ResolvedPercent{Set: true, Value: 99.9, Source: "environment:prod"},
+		AvailabilityWindow: infra.ResolvedDuration{Set: true, Value: 90 * 24 * time.Hour, Source: "environment:prod"},
+	}
+	s := snapshotOf(declared, "")
+	if s.AvailabilityWindowSeconds == nil || *s.AvailabilityWindowSeconds != 90*24*3600 ||
+		s.AvailabilityWindowSource != "environment:prod" ||
+		s.AvailabilityBudgetSeconds == nil || *s.AvailabilityBudgetSeconds != 129*60+36 {
+		t.Errorf("declared window: %+v", s)
+	}
+
+	// No window set anywhere: the default is recorded, and called what it is.
+	defaulted := declared
+	defaulted.AvailabilityWindow = infra.ResolvedDuration{}
+	s = snapshotOf(defaulted, "")
+	if s.AvailabilityWindowSeconds == nil || *s.AvailabilityWindowSeconds != 30*24*3600 ||
+		s.AvailabilityWindowSource != infra.SourceBuiltin ||
+		*s.AvailabilityBudgetSeconds != 43*60+12 {
+		t.Errorf("default window: %+v", s)
+	}
+
+	// An unreadable window, or an unreadable slo, leaves no budget in the record.
+	bad := declared
+	bad.AvailabilityWindow, bad.AvailabilityWindowInvalid = infra.ResolvedDuration{}, true
+	if s = snapshotOf(bad, ""); s.AvailabilityWindowSeconds != nil || s.AvailabilityBudgetSeconds != nil || s.AvailabilityWindowSource != "" {
+		t.Errorf("an unreadable window was recorded: %+v", s)
+	}
+	noSLO := infra.ResolvedObjectives{RTO: declared.RTO}
+	if s = snapshotOf(noSLO, ""); s.AvailabilityWindowSeconds != nil || s.AvailabilityBudgetSeconds != nil {
+		t.Errorf("a budget was recorded with no slo: %+v", s)
+	}
 }
 
 func TestSnapshotOf_RecordsWhatWasInForceAndWhereItCameFrom(t *testing.T) {

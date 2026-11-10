@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"strings"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
@@ -36,6 +37,13 @@ func snapshotOf(res infra.ResolvedObjectives, configDigest string) *audit.Object
 	if res.AvailabilitySLO.Set {
 		v := res.AvailabilitySLO.Value
 		s.AvailabilitySLO, s.AvailabilitySource = &v, res.AvailabilitySLO.Source
+	}
+	// The window and budget the SLO gave, as they stood: the record must show the
+	// numbers the approver saw, including a window that was only the built-in
+	// default, not leave them to be recomputed under a later rule.
+	if b := res.Budget(); b.Computed {
+		w, a := int64(b.Window/time.Second), int64(b.Allowed.Round(time.Second)/time.Second)
+		s.AvailabilityWindowSeconds, s.AvailabilityWindowSource, s.AvailabilityBudgetSeconds = &w, b.WindowSource, &a
 	}
 	if res.RecoveryPreference.Set {
 		s.RecoveryPreference, s.PreferenceSource = res.RecoveryPreference.Value, res.RecoveryPreference.Source

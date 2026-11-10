@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 )
 
 func rdI(n int64) *int64     { return &n }
@@ -33,6 +34,61 @@ func rdOptionFixture(chosen bool) audit.DecisionOption {
 		Name: "point_in_time_restore", Chosen: chosen,
 		LossBasis: "live_instance", LossSeconds: rdI(65563), LossBytes: rdU(16 << 20),
 		Verdict: "exceeds", Gate: "acknowledge",
+	}
+}
+
+// The budget line comes from the numbers the event recorded, in the config
+// check's own words, and only when the event recorded a window: an event from
+// before v0.35 is not given the default after the fact.
+func TestRDBudget(t *testing.T) {
+	withBudget := func(slo float64, window int64, source string, rto *int64) *audit.ObjectivesInForce {
+		return &audit.ObjectivesInForce{
+			AvailabilitySLO: rdF(slo), AvailabilityWindowSeconds: rdI(window), AvailabilityWindowSource: source,
+			AvailabilityBudgetSeconds: rdI(1), RTOSeconds: rto,
+		}
+	}
+	const thirtyDays = 30 * 24 * 3600
+	tests := []struct {
+		name string
+		o    *audit.ObjectivesInForce
+		want string
+	}{
+		{"consistent", withBudget(99.9, thirtyDays, "environment:prod", rdI(1800)),
+			"  budget: availability 99.9% over 30d allows 43m12s of downtime per window; rto 30m uses 69% of it: tolerates 1 recovery per window at the rto"},
+		{"contradictory is flagged", withBudget(99.99, thirtyDays, "environment:prod", rdI(1800)),
+			"  ⚠ budget: availability 99.99% over 30d allows 4m19s of downtime per window; rto 30m is longer than the whole budget: one recovery that takes the full rto breaks the SLO"},
+		{"the default window is called a default", withBudget(99.9, thirtyDays, infra.SourceBuiltin, rdI(300)),
+			"  budget: availability 99.9% over 30d (default window) allows 43m12s of downtime per window; rto 5m uses 12% of it: tolerates 8 recoveries per window at the rto"},
+		{"no rto", withBudget(99.9, thirtyDays, "database", nil),
+			"  budget: availability 99.9% over 30d allows 43m12s of downtime per window; no rto is set, so the recoveries it absorbs are not computed"},
+		{"an event from before v0.35 has no window: no line, no assumed default",
+			&audit.ObjectivesInForce{AvailabilitySLO: rdF(99.95), RTOSeconds: rdI(1800)}, ""},
+		{"no slo", &audit.ObjectivesInForce{AvailabilityWindowSeconds: rdI(thirtyDays), RTOSeconds: rdI(1800)}, ""},
+		{"a recorded window that is nonsense", withBudget(99.9, 0, "database", rdI(1800)), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rdBudget(tc.o); got != tc.want {
+				t.Errorf("\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRDObjectives_ShowsTheBudgetLineBeneathTheObjectives(t *testing.T) {
+	o := rdObjectivesFixture("0123456789abcdef")
+	o.AvailabilitySLO = rdF(99.9)
+	o.AvailabilityWindowSeconds, o.AvailabilityWindowSource = rdI(30*24*3600), "default"
+	out := strings.Join(rdObjectives(o), "\n")
+	objectives := strings.Index(out, "availability 99.9% [database]")
+	budget := strings.Index(out, "  budget: availability 99.9% over 30d allows 43m12s")
+	policy := strings.Index(out, "enforcement acknowledge")
+	if objectives < 0 || budget < objectives || policy < budget {
+		t.Errorf("want objectives, then the budget, then the policy:\n%s", out)
+	}
+	// The unchanged fixture has no window: its rendering is as it was.
+	if old := strings.Join(rdObjectives(rdObjectivesFixture("0123456789abcdef")), "\n"); strings.Contains(old, "budget") {
+		t.Errorf("an event with no recorded window got a budget line:\n%s", old)
 	}
 }
 
