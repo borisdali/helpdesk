@@ -416,6 +416,97 @@ func TestLedgerPipeline_RealStores(t *testing.T) {
 
 func neturlEscape(s string) string { return url.QueryEscape(s) }
 
+// The shared client reads the real handler's output over real HTTP. Both ends use
+// audit.IncidentListing, so the shape cannot drift; this checks what a shared type
+// cannot: that the query the client builds is the one the handler understands
+// (target_key, unattributed, since, include=series, origin, limit), and that what
+// comes back is what the ledger needs, through the same code the gateway endpoint
+// and the sysadmin agent run.
+func TestAvailabilityClient_ReadsTheRealHandlerOverHTTP(t *testing.T) {
+	srv, runs := newLedgerServer(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
+
+	create := func(body map[string]any) {
+		t.Helper()
+		data, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		srv.handleCreate(rec, httptest.NewRequest(http.MethodPost, "/v1/incidents", bytes.NewReader(data)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %v: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	run := func(id, series, prior string, started time.Duration) {
+		t.Helper()
+		// A hop belongs to the incident its prior run started; an entry run is its own.
+		entry := ""
+		if prior != "" {
+			entry = prior
+		}
+		if err := runs.Record(ctx, &audit.PlaybookRun{RunID: id, PlaybookID: "pb_" + id, SeriesID: series, PriorRunID: prior, EntryRunID: entry, StartedAt: now.Add(-started)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// prod-orders: a PITR (a triage that only reads, then the restore): 20 minutes.
+	run("plr_p", "pbs_pgbackrest_pitr_triage", "", 6*time.Hour)
+	run("plr_p2", "pbs_pgbackrest_pitr_remediate", "plr_p", 6*time.Hour-5*time.Minute)
+	create(map[string]any{"entry_run_id": "plr_p", "series_id": "pbs_pgbackrest_pitr_triage", "target_key": "prod-orders",
+		"detected_at": at(6 * time.Hour), "resolved_at": at(6*time.Hour - 20*time.Minute), "status": "resolved"})
+	// A vacuum, a faulttest one, another database's, one with no database, and one long ago.
+	for _, c := range []struct {
+		id, series, key, origin string
+		start, took             time.Duration
+	}{
+		{"plr_v", "pbs_vacuum_triage", "prod-orders", "", 8 * time.Hour, 10 * time.Minute},
+		{"plr_f", "pbs_db_restart_triage", "prod-orders", audit.IncidentOriginFaulttest, time.Hour, 30 * time.Minute},
+		{"plr_o", "pbs_db_restart_triage", "prod-other", "", 2 * time.Hour, 30 * time.Minute},
+		{"plr_l", "pbs_db_restart_triage", "", "", 2 * time.Hour, 30 * time.Minute},
+		{"plr_a", "pbs_db_restart_triage", "prod-orders", "", 40 * 24 * time.Hour, 30 * time.Minute},
+	} {
+		run(c.id, c.series, "", c.start)
+		body := map[string]any{"entry_run_id": c.id, "series_id": c.series, "status": "resolved", "detected_at": at(c.start), "resolved_at": at(c.start - c.took)}
+		if c.key != "" {
+			body["target_key"] = c.key
+		} else {
+			body["target_input"] = "no-such-server"
+		}
+		if c.origin != "" {
+			body["origin"] = c.origin
+		}
+		create(body)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/incidents", srv.handleList)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	budget := infra.ComputeBudget(99.9, 30*24*time.Hour, "environment:prod", 30*time.Minute, true)
+	l, err := (&availability.Client{URL: ts.URL}).Ledger(ctx, "prod-orders", budget, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The PITR is charged 20 minutes: an outage because of its second run, though its first only reads.
+	if len(l.Charged) != 1 || l.Charged[0].DurationSeconds != 1200 || l.ChargedSeconds != 1200 {
+		t.Errorf("charged = %+v", l.Charged)
+	}
+	if len(l.None) != 1 || l.None[0].DurationSeconds != 600 {
+		t.Errorf("none = %+v", l.None)
+	}
+	// Faulttest, another database's and the 40-day-old incident are not in it; the one with no database is counted.
+	if len(l.Degraded)+len(l.Unclassified)+len(l.Unconfirmed) != 0 || l.ExcludedFaulttest != 0 {
+		t.Errorf("the ledger holds more than prod-orders' own real, in-window incidents: %+v", l)
+	}
+	if l.Unattributed != 1 || l.Truncated {
+		t.Errorf("unattributed = %d, truncated = %v", l.Unattributed, l.Truncated)
+	}
+	if l.RemainingSeconds == nil || *l.RemainingSeconds != 2592-1200 {
+		t.Errorf("remaining = %v", l.RemainingSeconds)
+	}
+}
+
 func TestIncidentHandlers_List_StoreFailureIs500(t *testing.T) {
 	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {

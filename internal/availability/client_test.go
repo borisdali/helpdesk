@@ -147,6 +147,23 @@ func TestClient_LedgerUsesTheBudgetsWindowAndMapsTheListing(t *testing.T) {
 	}
 }
 
+// An entry that carries no incident at all (a listing with an empty object in it)
+// is skipped, not dereferenced.
+func TestClient_LedgerSkipsAListingEntryWithNoIncident(t *testing.T) {
+	aud := &recordingAuditd{
+		mine:  `{"incidents": [{}, {"series_ids": ["pbs_vacuum_triage"]}], "count": 2}`,
+		loose: `{"incidents": []}`,
+	}
+	srv := aud.serve(t)
+	l, err := (&Client{URL: srv.URL}).Ledger(context.Background(), "x", budget(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Charged)+len(l.None)+len(l.Degraded)+len(l.Unclassified)+len(l.Unconfirmed) != 0 {
+		t.Errorf("an empty entry became an incident: %+v", l)
+	}
+}
+
 func TestClient_LedgerWithNoBudgetUsesTheDefaultWindow(t *testing.T) {
 	aud := &recordingAuditd{mine: `{"incidents": []}`, loose: `{"incidents": []}`}
 	srv := aud.serve(t)

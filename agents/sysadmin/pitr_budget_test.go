@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -143,12 +147,141 @@ func TestBudgetCheckFor_ALedgerThatCannotBeReadAsksAndDoesNotRefuse(t *testing.T
 		t.Errorf("%+v", v)
 	}
 	// With no audit service configured at all, the same.
-	budgetLedgerFn = func(ctx context.Context, key string, b infra.AvailabilityBudget, now time.Time) (*availability.Ledger, error) {
-		return ledgerClient.Ledger(ctx, key, b, now) // the real one, with no client
-	}
+	budgetLedgerFn = readLedger // the real reader, with no client
 	ledgerClient = nil
 	if v := budgetCheckFor(context.Background(), "pgbackrest_db", true); v.Status != availability.BudgetLedgerUnavailable || !strings.Contains(v.Detail, "no audit service") {
 		t.Errorf("no client: %+v", v)
+	}
+}
+
+// Every other test here stubs the ledger. This one does not: the agent's check
+// reads a real listing through the real client, with the service key, for the
+// database the target resolves to, whatever name it was given.
+func TestBudgetCheckFor_ReadsTheLedgerThroughTheRealClient(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	listing := audit.IncidentListing{Count: 1, Incidents: []audit.IncidentWithSeries{{
+		Incident: &audit.Incident{IncidentID: "inc_1", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusResolved, TargetKey: "pgbackrest_db",
+			DetectedAt: now.Add(-3 * time.Hour), ResolvedAt: now.Add(-3*time.Hour + 20*time.Minute)},
+		SeriesIDs: []string{"pbs_pgbackrest_restore_remediate"},
+	}}}
+	var mu sync.Mutex
+	var auth []string
+	var queries []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auth, queries = append(auth, r.Header.Get("Authorization")), append(queries, r.URL.Query())
+		mu.Unlock()
+		out := listing
+		if r.URL.Query().Get("unattributed") == "true" {
+			out = audit.IncidentListing{Incidents: []audit.IncidentWithSeries{}}
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+
+	oldClient, oldFn := ledgerClient, budgetLedgerFn
+	t.Cleanup(func() { ledgerClient, budgetLedgerFn = oldClient, oldFn })
+	ledgerClient, budgetLedgerFn = &availability.Client{URL: srv.URL, APIKey: "svc-key"}, readLedger
+	budgetObjectives(t, "", "acknowledge")
+
+	// By the container name, which resolveHost also accepts: the ledger asked for is the database's key.
+	v := budgetCheckFor(context.Background(), "helpdesk-test-pg-pgbackrest", true)
+	if v.Status != availability.BudgetMayExceed || v.Gate != availability.GateAcknowledge || *v.RemainingSeconds != 2592-1200 {
+		t.Fatalf("verdict = %+v", v)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(queries) != 2 {
+		t.Fatalf("auditd was asked %d times: %v", len(queries), queries)
+	}
+	for i, q := range queries {
+		if auth[i] != "Bearer svc-key" {
+			t.Errorf("request %d authorization = %q", i, auth[i])
+		}
+		if q.Get("unattributed") != "true" && q.Get("target_key") != "pgbackrest_db" {
+			t.Errorf("the ledger was asked for %q, not the resolved database key", q.Get("target_key"))
+		}
+	}
+}
+
+// The ledger is read as of the restore's own clock, the one the data loss is
+// measured against, not some other moment.
+func TestBudgetCheckFor_ReadsTheLedgerAsOfTheRestoresClock(t *testing.T) {
+	fixed := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	oldClock := restoreClock
+	t.Cleanup(func() { restoreClock = oldClock })
+	restoreClock = func() time.Time { return fixed }
+
+	oldFn := budgetLedgerFn
+	t.Cleanup(func() { budgetLedgerFn = oldFn })
+	var asOf time.Time
+	budgetLedgerFn = func(_ context.Context, key string, b infra.AvailabilityBudget, now time.Time) (*availability.Ledger, error) {
+		asOf = now
+		l := availability.Compute(availability.Params{Database: key, Budget: b, Now: now, Classify: playbooks.AvailabilityImpact})
+		return &l, nil
+	}
+	budgetObjectives(t, "", "")
+	budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	if !asOf.Equal(fixed) {
+		t.Errorf("the ledger was read as of %v, want the restore clock's %v", asOf, fixed)
+	}
+}
+
+func TestBudgetGateError_AnAcknowledgementThatNeedsAnExplanationGetsIt(t *testing.T) {
+	err := budgetGateError(&availability.BudgetVerdict{
+		Status: availability.BudgetExceeds, Gate: availability.GateAcknowledge, Enforcement: "refuse", Detail: "spent",
+		GateNote: "availability enforcement is refuse, but the instance is already down",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "acknowledge_objective_breach") || !strings.Contains(err.Error(), "the instance is already down") {
+		t.Errorf("err = %v: an acknowledgement asked for in place of a refusal should say why", err)
+	}
+	if err := budgetGateError(&availability.BudgetVerdict{Status: availability.BudgetExceeds, Gate: availability.GateAcknowledge, GateNote: "n"}, true); err != nil {
+		t.Errorf("acknowledged: %v", err)
+	}
+}
+
+// A plan that cannot be restored has nothing to cost, and asks nobody what is
+// left of the budget: no read, and no verdict a reader could mistake for one.
+func TestPlan_NotFeasibleReadsNoLedgerAndCarriesNoBudget(t *testing.T) {
+	calls := withLedger(t, 0, nil)
+	budgetObjectives(t, "", "refuse")
+	sim, _ := liveEnv(t)
+	sim.up = false // down, and a target past the end of the archive: not feasible
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRNotFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	if plan.AvailabilityBudget != nil {
+		t.Errorf("an infeasible plan carries a budget verdict: %+v", plan.AvailabilityBudget)
+	}
+	if len(calls.keys) != 0 {
+		t.Errorf("the ledger was read %d times for a plan that cannot run", len(calls.keys))
+	}
+}
+
+// What the decision record says about the availability enforcement in force.
+func TestSnapshotOf_RecordsTheAvailabilityEnforcementInForce(t *testing.T) {
+	set := infra.ResolvedObjectives{AvailabilityEnforcement: infra.ResolvedChoice{Set: true, Value: "refuse", Source: "environment:prod"}}
+	if s := snapshotOf(set, ""); s.AvailabilityEnforcement != "refuse" || s.AvailabilityEnforcementSource != "environment:prod" {
+		t.Errorf("set: %+v", s)
+	}
+	// Unset: the effective value (warn) is what was applied, and has no source.
+	if s := snapshotOf(infra.ResolvedObjectives{}, ""); s.AvailabilityEnforcement != "warn" || s.AvailabilityEnforcementSource != "" {
+		t.Errorf("unset: %+v", s)
+	}
+	// Could not be trusted: acknowledge was applied, and the record says so, with no source to blame.
+	bad := infra.ResolvedObjectives{AvailabilityEnforcementInvalid: true}
+	if s := snapshotOf(bad, ""); s.AvailabilityEnforcement != "acknowledge" || s.AvailabilityEnforcementSource != "" {
+		t.Errorf("invalid: %+v", s)
+	}
+	// And it is independent of the rpo's: each records its own.
+	both := infra.ResolvedObjectives{
+		Enforcement:             infra.ResolvedChoice{Set: true, Value: "refuse", Source: "database"},
+		AvailabilityEnforcement: infra.ResolvedChoice{Set: true, Value: "warn", Source: "default"},
+	}
+	if s := snapshotOf(both, ""); s.Enforcement != "refuse" || s.AvailabilityEnforcement != "warn" {
+		t.Errorf("both: rpo %q, budget %q", s.Enforcement, s.AvailabilityEnforcement)
 	}
 }
 

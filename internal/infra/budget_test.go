@@ -343,6 +343,20 @@ func TestAvailabilityEnforcement_ATypoFallsTowardAcknowledge(t *testing.T) {
 	}
 }
 
+// A mistake at any level is reported at that level, by name.
+func TestAvailabilityEnforcement_ValidateNamesTheLevel(t *testing.T) {
+	for cfg, want := range map[string]string{
+		`{"defaults": {"objectives": {"availability_enforcement": "block"}}}`:                `defaults.objectives: availability_enforcement must be one of warn, acknowledge, refuse, got "block"`,
+		`{"environments": {"prod": {"objectives": {"availability_enforcement": "Refuse"}}}}`: `environments.prod.objectives: availability_enforcement must be one of`,
+		`{"db_servers": {"a": {"objectives": {"availability_enforcement": 3}}}}`:             `db_servers.a.objectives: availability_enforcement: expected a string`,
+	} {
+		err := load(t, cfg).Validate()
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s\n got  %v\n want it to contain %q", cfg, err, want)
+		}
+	}
+}
+
 func TestAvailabilityEnforcement_RoundTripsThroughJSON(t *testing.T) {
 	c := load(t, `{"defaults": {"objectives": {"availability_enforcement": "acknowledge"}}}`)
 	b, err := json.Marshal(c.Defaults.Objectives)

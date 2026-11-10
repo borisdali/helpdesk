@@ -27,11 +27,15 @@ import (
 // the budget then reads as unavailable, not as unspent.
 var ledgerClient *availability.Client
 
-// budgetLedgerFn reads the downtime budget spent by one database's incidents.
-// A variable so a test can say what the ledger holds.
-var budgetLedgerFn = func(ctx context.Context, key string, budget infra.AvailabilityBudget, now time.Time) (*availability.Ledger, error) {
+// readLedger reads the downtime budget spent by one database's incidents through
+// the configured client.
+func readLedger(ctx context.Context, key string, budget infra.AvailabilityBudget, now time.Time) (*availability.Ledger, error) {
 	return ledgerClient.Ledger(ctx, key, budget, now)
 }
+
+// budgetLedgerFn is how the check reads the ledger. A variable so a test can say
+// what the ledger holds; production uses readLedger.
+var budgetLedgerFn = readLedger
 
 // budgetCheckFor sets what is left of the downtime budget of the database a call
 // targets against a restore about to run on it. serving says the instance is up,
