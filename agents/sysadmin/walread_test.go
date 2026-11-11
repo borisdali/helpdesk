@@ -246,6 +246,42 @@ func TestWALReadScript_RunsAndItsOutputReadsBack(t *testing.T) {
 	}
 }
 
+// Over SSH the script goes out as one quoted string (shellCommand), which the
+// remote shell parses again. The script has quotes, $(), pipes and newlines in it,
+// so what the remote shell runs must be what a direct run runs: the same output.
+func TestWALReadScript_SurvivesTheSSHCommandLine(t *testing.T) {
+	sb := newWALSandbox(t, true)
+	dd := t.TempDir()
+	live := liveAt("0/45000100", 3, dd)
+	p, why := planWALRead(timeTarget(rangeT0.Add(90*time.Second)), "", archiveOf(0x40, 0x42, 0, 3, 3), live, 16)
+	if why != "" {
+		t.Fatal(why)
+	}
+	script, err := walReadScript("main", dd, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := readFixture(t, "waldump_live_utc.txt")
+	sb.put("dump.out", captured[:strings.Index(captured, "pg_waldump: error")]) // the commits, without the end-of-WAL line
+
+	direct := sb.run(script)
+	// The sandbox's PATH has no sh (on purpose, so a real pg_waldump cannot be found
+	// by mistake): name it by path, as a login shell's PATH would resolve it.
+	oneString := shellCommand(sb.sh, []string{"-c", script}, nil)
+	viaSSH := sb.run(oneString)
+	if direct != viaSSH {
+		t.Errorf("the script behaves differently through the SSH command line.\ndirect:\n%s\nvia ssh:\n%s", direct, viaSSH)
+	}
+	got, err := parseWALReadOutput(viaSSH)
+	if err != nil || len(got.Ranges) != 2 || got.Ranges[0].RC == nil || len(got.Ranges[1].Parsed.Commits) != 3 {
+		t.Errorf("%+v, %v\n%s", got, err, viaSSH)
+	}
+	// The data directory with a quote is refused before it could reach the string at all.
+	if _, err := walReadScript("main", "/d/it's", p); err == nil {
+		t.Error("a data directory with a quote was accepted")
+	}
+}
+
 // A segment the archive will not give up is a failure of that range, named, and
 // pg_waldump is not run on what was not fetched.
 func TestWALReadScript_AFailedFetchIsNamedAndNothingIsDecoded(t *testing.T) {

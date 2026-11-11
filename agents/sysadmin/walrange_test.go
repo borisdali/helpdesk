@@ -223,6 +223,75 @@ func TestPlanWALRead_WhatCannotBePlanned(t *testing.T) {
 	}
 }
 
+// The planner's assumptions about the segment map (keyed by segment number, each
+// on the timeline the replay path reads it from, with the time it reached the
+// repository) hold for the map the real continuity check builds from a real
+// repository listing, here the captured one that spans 30 timelines.
+func TestPlanWALRead_FromTheRealContinuityOfACapturedRepository(t *testing.T) {
+	wal := evaluateWALContinuity(multiTimelineInput(t), readFixture(t, "multi_timeline_top.txt"),
+		readFixture(t, "multi_timeline_0000001E.history"), readFixture(t, "multi_timeline_listing.json"))
+	if wal.Status != WALContinuous || len(wal.segments) == 0 {
+		t.Fatalf("the captured repository did not give a segment map: %+v", wal)
+	}
+	size := wal.SegmentSizeBytes
+	all := archivedSegnos(&wal, ^uint64(0))
+	first, last := all[0], all[len(all)-1]
+
+	// Every name the plan produces is one the repository has: the timeline in the
+	// name is the one the map holds for that segment number.
+	check := func(p WALReadPlan) {
+		t.Helper()
+		n := 0
+		for _, r := range p.Ranges {
+			if r.Source != WALFromArchive {
+				t.Fatalf("a captured archive gave a %s range", r.Source)
+			}
+			for _, name := range r.Names {
+				tli, logID, seg, err := parseSegmentName(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				segno := logID*segsPerLogID(size) + seg
+				if wal.segments[segno].timeline != tli {
+					t.Errorf("%s: the map has segment %d on timeline %d", name, segno, wal.segments[segno].timeline)
+				}
+				n++
+			}
+		}
+		if n != p.Segments {
+			t.Errorf("%d names for %d segments", n, p.Segments)
+		}
+	}
+
+	// From the first segment's own LSN: every segment of the archive, in order, on
+	// the timelines the map gives, which is more than one run when the timeline changes.
+	p, why := planWALRead(RecoveryTarget{Type: TargetLSN}, lsnText(first*size), &wal, nil, 1000)
+	if why != "" {
+		t.Fatal(why)
+	}
+	check(p)
+	if p.Segments != len(all) || p.Truncated {
+		t.Errorf("%d segments of %d (truncated %v)", p.Segments, len(all), p.Truncated)
+	}
+	var runs []string
+	for _, r := range p.Ranges {
+		runs = append(runs, r.First[:8]+"-"+r.Last[:8])
+	}
+	t.Logf("%d segment(s) in %d run(s): %v", p.Segments, len(p.Ranges), runs)
+
+	// From the time the last segment reached the repository: that segment and no
+	// earlier one, since nothing earlier can hold a later commit.
+	endTime := time.Unix(wal.segments[last].time, 0).UTC()
+	p, why = planWALRead(timeTarget(endTime), "", &wal, nil, 1000)
+	if why != "" {
+		t.Fatal(why)
+	}
+	check(p)
+	if p.Ranges[0].First != segmentName(wal.segments[last].timeline, last, size) {
+		t.Errorf("started at %s, want the last segment %s", p.Ranges[0].First, segmentName(wal.segments[last].timeline, last, size))
+	}
+}
+
 func TestLSNText(t *testing.T) {
 	for in, want := range map[uint64]string{0: "0/0", 0x42000A28: "0/42000A28", 0x1_0000_0010: "1/10", 0xABCD_1234_5678_9ABC: "ABCD1234/56789ABC"} {
 		if got := lsnText(in); got != want {

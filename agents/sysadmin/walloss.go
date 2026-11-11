@@ -73,6 +73,32 @@ func countDiscarded(plan WALReadPlan, parts []WALCommits, firstRecord *uint64) *
 		unread += p.Unread
 	}
 
+	discarded, how, failed := discardedCommits(plan, ends, firstRecord)
+	if failed != nil {
+		return failed
+	}
+
+	n := len(discarded)
+	loss := &TransactionLoss{Status: TxLossMeasured, Commits: &n, SegmentsRead: plan.Segments}
+	if n > 0 {
+		first, last := discarded[0], discarded[n-1]
+		loss.FirstLSN, loss.LastLSN = lsnText(first.LSN), lsnText(last.LSN)
+		if !first.TimeUnread {
+			loss.FirstAt = first.Time.UTC().Format(time.RFC3339)
+		}
+		if !last.TimeUnread {
+			loss.LastAt = last.Time.UTC().Format(time.RFC3339)
+		}
+	}
+	loss.AtLeast = !plan.Complete() || unread > 0
+	loss.Basis = lossBasis(plan, how, unread)
+	return loss
+}
+
+// discardedCommits applies the stop rule to the commit and abort records, in WAL
+// order: the commits recovery would throw away, and a sentence on how the stop was
+// found. A non-nil loss means the stop could not be found, and is the answer.
+func discardedCommits(plan WALReadPlan, ends []WALTxEnd, firstRecord *uint64) ([]WALCommit, string, *TransactionLoss) {
 	var discarded []WALCommit
 	var how string
 	switch plan.Mode {
@@ -82,7 +108,7 @@ func countDiscarded(plan WALReadPlan, parts []WALCommits, firstRecord *uint64) *
 			if e.TimeUnread {
 				// Past this record the stop cannot be told from the rest: a commit whose
 				// time is unknown could be the one.
-				return unavailableLoss("a commit or abort record's time (LSN %s) could not be read as UTC, so the point where recovery stops cannot be found", lsnText(e.LSN))
+				return nil, "", unavailableLoss("a commit or abort record's time (LSN %s) could not be read as UTC, so the point where recovery stops cannot be found", lsnText(e.LSN))
 			}
 			if e.Time.After(plan.TargetTime) {
 				stop = i
@@ -113,24 +139,9 @@ func countDiscarded(plan WALReadPlan, parts []WALCommits, firstRecord *uint64) *
 			}
 		}
 	default:
-		return unavailableLoss("no stop point to apply")
+		return nil, "", unavailableLoss("no stop point to apply")
 	}
-
-	n := len(discarded)
-	loss := &TransactionLoss{Status: TxLossMeasured, Commits: &n, SegmentsRead: plan.Segments}
-	if n > 0 {
-		first, last := discarded[0], discarded[n-1]
-		loss.FirstLSN, loss.LastLSN = lsnText(first.LSN), lsnText(last.LSN)
-		if !first.TimeUnread {
-			loss.FirstAt = first.Time.UTC().Format(time.RFC3339)
-		}
-		if !last.TimeUnread {
-			loss.LastAt = last.Time.UTC().Format(time.RFC3339)
-		}
-	}
-	loss.AtLeast = !plan.Complete() || unread > 0
-	loss.Basis = lossBasis(plan, how, unread)
-	return loss
+	return discarded, how, nil
 }
 
 // lossBasis says what the count rests on: how the WAL was read, where recovery

@@ -199,6 +199,13 @@ unknown data directory or a record the reader did not understand. When it cannot
 (`pg_waldump` not installed, an archive segment that would not come back, a read that was cut short) and the figures
 above stand alone: it is never turned into "nothing lost".
 
+"Exact" means exact for the WAL that has been written: the read stops at the instance's own write position
+(`pg_current_wal_lsn()`), the furthest `pg_waldump` can read. A commit whose record is still in the WAL buffers is
+not in the count until the WAL writer writes it (`wal_writer_delay`, 200 ms by default). That is only a commit
+PostgreSQL reported as done before it was written: one under `synchronous_commit = off`, or a transaction that took
+an id and wrote nothing else. A commit that wrote data under the default setting is flushed before it returns, so it
+is always counted. (Found by a test whose "commits" were `SELECT txid_current()`: they are in the second group.)
+
 How it runs: one script as the `postgres` user on the instance (Docker, Kubernetes, SSH host or colocated), which
 fetches the archived segments with `pgbackrest archive-get` into a temp directory (removed afterwards) and reads the
 instance's own unarchived WAL in place from `pg_wal`, bounded at its current position. The binary is found by the
