@@ -465,7 +465,7 @@ it spends.
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
-| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified on a real Ubuntu host for the read path and end to end on real WAL in the Docker fixture; not yet verified: the whole path on the VM or K8s, a prepared transaction, the cost over many busy segments, a managed database) |
+| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified end to end on real WAL in the Docker fixture and on the Ubuntu VM over SSH; not yet verified: Kubernetes, a prepared transaction, the cost over many busy segments, a managed database) |
 | The same count measured at the restore itself, after the stop, so the record says how many transactions were actually discarded, not how many were at stake at plan time | Not built |
 | Reading a range across a point-in-time restore on the instance's older timelines and a read longer than 16 segments (only the first 16 are read and the count says "at least") | Partly built (timelines are followed from the replay path; the cap is a starting figure to be set from a measured read) |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
@@ -572,7 +572,8 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   The first costs: reading one archived segment took 0.1-0.3 s and one archived plus one live segment 0.2-0.6 s, on a
   nearly empty fixture, which says little about a busy database.
 
-   **How stable is what is read?** Two different things, and only one of them is a risk here.
+   **How stable is what is read?**   
+   Two different things, and only one of them is a risk here.
    * The WAL **file** format is not stable across major versions (each one changes its page magic, and record layouts
   change), so `pg_waldump` must be the same major version as the server that wrote the WAL. The script picks the
   binary by the server's major version (`PG_VERSION`), and a mismatch makes `pg_waldump` fail, which is a failed
@@ -591,9 +592,18 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   `ABORT` used to count as not understood, so a renamed description would have read as no transactions). The decoder
   that produced a count is kept with it (`transactions.decoder`).
 
-   Not yet verified: the whole path on the Ubuntu VM or in K8s , a prepared transaction's commit line (the reader
-  handles the form from PostgreSQL's source, not from a capture), how long a read takes over many busy segments and a
-  managed or operator-run database, where the binary may be absent. Tier B therefore degrades to the archive-based estimate and records why it could not run and it
+   **And on the remote Linux host/VM accessed over SSH**   
+   PostgreSQL 16.15, the in-cluster SysAdmin Agent): five commits made after a target time, then `plan_point_in_time_recovery` for that time. It reported
+  `feasible` with `transactions.status: measured`, **5 commits**, exact (no `at_least`: a serving instance read to its
+  own position), the first at the second the inserts ran and nothing counted from before the target (the table's
+  `CREATE TABLE` precedes it). The five commit LSNs (`0/45019588` to `0/45019728`) sit directly before the position the
+  `pg_switch_wal()` run after them returned (`0/450197A0`), which is independent evidence that the right records were
+  counted. Three segments (two archived, one live from `pg_wal`) were read in **181 ms**, on a quiet VM. The decoder
+  recorded was `pg_waldump (PostgreSQL) 16.15`.
+
+   Not yet verified: the same in Kubernetes, a prepared transaction's commit line (the reader handles the form from
+  PostgreSQL's source, not from a capture), how long a read takes over many busy segments and a managed or
+  operator-run database, where the binary may be absent. Tier B therefore degrades to the archive-based estimate and records why it could not run and it
   is built that way: a count that could not be made says why and is never "nothing lost".
 
 - **Real versus injected incidents**   

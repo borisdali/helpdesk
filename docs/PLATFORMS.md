@@ -75,6 +75,17 @@ sleeps or a VM that hibernates, shows up as an SSH `i/o timeout` and nothing els
 | Operator-managed (CloudNativePG) | yes | pod state through the k8s agent | no (it uses Barman, not pgBackRest) | no | Diagnosis **Verified**; restore **Not supported** |
 | Managed cloud service | yes | no host to inspect | no | no | SQL diagnosis only, by design; not run against a managed service |
 
+**What the transaction count needs on the target.** A point-in-time plan counts the transactions a restore would
+discard by decoding the WAL with `pg_waldump` on the instance ([PITR.md §4](PITR.md#4-operating-it)). It needs the
+binary of the server's own major version, and says why it did not count when it is not there:
+
+| Target | `pg_waldump` is | Status |
+|---|---|---|
+| Docker container | in the server image, at `/usr/lib/postgresql/N/bin` on Debian-based images (found there by the server's major version) | **Verified** on the pgBackRest fixture (PostgreSQL 16, Debian); present, not run through the count, on `postgres:16-alpine` (`/usr/local/bin`, found on `PATH`) and AlloyDB Omni 17 |
+| systemd VM or host | in the server package: `/usr/lib/postgresql/N/bin` on Debian and Ubuntu (not on `PATH` for the `postgres` user, so found by path), `/usr/pgsql-N/bin` on RHEL | Debian and Ubuntu **Verified** (Ubuntu 24.04, PostgreSQL 16.15, over SSH); RHEL path implemented, not run |
+| K8s Pod (self-managed) | in the server image, as for Docker; run through `kubectl exec` while the pod is ready and in a one-off pod on its volumes when it is not | **Not yet run** |
+| Operator-managed (CloudNativePG), managed cloud service | not available to aiHelpDesk (no pgBackRest repository to decode from, no host) | not counted: the plan says so and keeps the archive-based figures |
+
 ## 4. Which services can reach which target
 
 | aiHelpDesk services ↓ · Target → | Docker container | systemd VM (SSH) | K8s Pod |
@@ -108,6 +119,8 @@ Each row is a recorded run; the incident IDs are in the vault (`faulttest vault 
 | laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm-lsn` (an LSN target, same objective): verdict `not_comparable` (the target segment was not archived yet, so no lower bound), no second yes asked for, restore stopped at `0/3C000028`, 40 bytes past the target (the first record after a segment's page header); trail checked | `plr_fb5a9f6b` (remediation `plr_eb2a2741`), 2026-11-09 |
 | laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm-lsn` again, after the verifier accepted a stop past a segment-boundary LSN: same verdict and stop (`0/3F000028` for a target of `0/3F000000`), and this time no `restore_recovery_mismatch` signal (the first run had raised one for a correct restore); trail checked | `plr_79c8eda2` (remediation `plr_baeffd99`), 2026-11-09 |
 | laptop | host processes | Ubuntu VM over SSH | `db-pitr-dropped-table-vm-lsn` with the target read from `pg_current_wal_insert_lsn()` (the write position, `pg_current_wal_lsn()`, read as a segment's bare start on every earlier run): the target is a record start (`0/42000028`), the restore stopped at it exactly, `verify_restore_recovery` verified it with no gap to explain; trail checked | `plr_998dce3a` (remediation `plr_2b432931`), 2026-11-09 |
+| `curl` from a laptop to the sysadmin agent's `/tool` endpoint | K8s (the agent in minikube, reaching the VM over SSH) | Ubuntu VM over SSH | the v0.35 transaction count: five commits made on purpose after a target time, then `plan_point_in_time_recovery` for that time (no fault, no model, nothing restored): `feasible`, `transactions` measured, **5 commits, exact** (the running instance is read to its own position), decoded from two archived segments and the live `pg_wal` by `pg_waldump` 16.15 in 181 ms; the five commit LSNs sit directly before the position the `pg_switch_wal()` that followed returned | 2026-11-11 |
+| `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | the same count against real WAL: commits before and after a target time read by the real script (`docker exec`, the real `pg_waldump` and `pgbackrest archive-get`); the ones before the target are read and not counted, the ones after are counted, and commits that exist only in the running instance's `pg_wal` (never archived) are counted by the serving read and not by the archive-only one (`TestIntegration_CountsTransactionsFromRealWAL`, stable over eight runs) | 2026-11-11 |
 | `go test` in the repo | K8s | pod | restore refusal, `pg_wal` tail, resume, verify and point-in-time restore of a crashed pod and of a **running** one (stop, scale to 0, one-off-pod restore, resume) (`make integration-k8s`, 28 checks; needs `K8S_SYSADMIN_API_KEY` on a release that enforces identity) | 2026-10-28 |
 | `go test -tags integration` | tools called in-process (no agents, no LLM) | Docker container | point-in-time restore to a time and to an LSN, of a stopped and of a **running** instance (archive flushed, clean stop, restore in a throwaway container, `restart_container`), a target the archive never reaches then retried and the catalog fault `db-pitr-dropped-table` from inject to `verify_sql` | `agents/sysadmin` `pitr_integration_test.go` |
 
@@ -121,7 +134,9 @@ and `-vm-lsn`, run from the `faulttest` CLI with `--external=false`; see [FAULTT
 and the four runs above are those. The VM needs `systemctl stop <unit>` in its sudoers file, which
 `setup-pgbackrest-vm.sh` grants. One run per case says the chain works, not how often. The v0.34 objective check
 (`exceeds` with the second yes, `not_comparable` for an LSN) has run live on the Docker fixture and on the VM, not yet on a
-K8s Pod.
+K8s Pod. The v0.35 transaction count (`data_loss_estimate.transactions`, [PITR.md §4](PITR.md#4-operating-it)) has
+run on the Docker fixture and on the VM, not yet on a K8s Pod; its parser was also compared, read-only, on PostgreSQL
+16.14 (Debian), 16.15 (Ubuntu) and 18.6 (Debian) and found to agree.
 
 ### Where the faulttest client can run
 
