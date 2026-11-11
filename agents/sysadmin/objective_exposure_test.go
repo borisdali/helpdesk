@@ -216,6 +216,90 @@ func TestWithObjectiveExposure_SaysNothingWhenThereIsNothingToSay(t *testing.T) 
 	}
 }
 
+// scriptedPgBackRest answers each pgBackRest command with the captured
+// multi-timeline fixtures: info, the archive listing, the history file and a WAL
+// segment header. Nothing is stubbed between it and the tool.
+type scriptedPgBackRest struct{ t *testing.T }
+
+func (s scriptedPgBackRest) Run(_ context.Context, name string, args []string, _ []string) (string, error) {
+	joined := name + " " + strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "'info'"): // the docker wrapper quotes each argument
+		return readFixture(s.t, "multi_timeline_info.json"), nil
+	case strings.Contains(joined, ".history"):
+		return readFixture(s.t, "multi_timeline_0000001E.history"), nil
+	case strings.Contains(joined, "repo-get"):
+		return readFixture(s.t, "multi_timeline_000000010000000000000002.gz"), nil
+	case strings.Contains(joined, "--recurse"):
+		return readFixture(s.t, "multi_timeline_listing.json"), nil
+	case strings.Contains(joined, "repo-ls"):
+		return readFixture(s.t, "multi_timeline_top.txt"), nil
+	}
+	return "", errors.New("unexpected command " + joined)
+}
+
+// The RPO check reads the archive end time that the real WAL-continuity code
+// derives from a real repository listing, not one a test wrote in: the age of the
+// newest archived segment, against the rpo, through the real tool.
+func TestGetPgBackRestStatus_RPOExposureFromTheRealWALContinuity(t *testing.T) {
+	budgetObjectives(t, "15m", "")
+	withEstimate(t, nil, availability.ErrNoAudit)
+	old := cmdRunner
+	cmdRunner = scriptedPgBackRest{t}
+	defer func() { cmdRunner = old }()
+
+	// First learn when the newest segment reached the repository, from the real chain.
+	withExposureClock(t)
+	res, err := getPgBackRestStatusImpl(context.Background(), GetPgBackRestStatusArgs{Target: "pgbackrest_db", Stanza: "main"})
+	if err != nil || res.WALContinuity == nil || res.WALContinuity.ArchiveEndTime == "" {
+		t.Fatalf("the real chain gave no archive end time: %+v, %v", res.WALContinuity, err)
+	}
+	end, err := time.Parse(time.RFC3339, res.WALContinuity.ArchiveEndTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		age    time.Duration
+		status string
+	}{
+		"fresh":        {5 * time.Minute, ExposureWithin},
+		"the boundary": {15 * time.Minute, ExposureWithin},
+		"stale":        {3 * time.Hour, ExposureMayExceed},
+	} {
+		exposureNow = func() time.Time { return end.Add(tc.age) }
+		res, err := getPgBackRestStatusImpl(context.Background(), GetPgBackRestStatusArgs{Target: "pgbackrest_db", Stanza: "main"})
+		if err != nil || res.ObjectiveExposure == nil || res.ObjectiveExposure.RPO == nil {
+			t.Fatalf("%s: %+v, %v", name, res.ObjectiveExposure, err)
+		}
+		got := res.ObjectiveExposure.RPO
+		if got.Status != tc.status || got.MeasuredSeconds == nil || *got.MeasuredSeconds != int64(tc.age/time.Second) {
+			t.Errorf("%s: %+v, want %s at %s", name, got, tc.status, tc.age)
+		}
+	}
+}
+
+// The audit trail cuts a tool result at 8 KB, and a long list of backups is what
+// reaches it. The exposure must come before that list, or it is the first thing
+// a long history cuts off, and what the model quotes from it can no longer be
+// found in the trail.
+func TestObjectiveExposure_SurvivesTheAuditCutBehindALongBackupList(t *testing.T) {
+	res := statusArchivedAgo(3 * time.Hour)
+	res.ObjectiveExposure = exposureOf(res, exposureAt, infra.ResolvedObjectives{RPO: dur(15*time.Minute, "d"), RTO: dur(30*time.Minute, "d")}, restoresThatTook(10, 20, 45))
+	for i := 0; i < 60; i++ {
+		res.Backups = append(res.Backups, PgBackRestBackup{Label: "20260926-040922F", Type: "full", StartTime: exposureAt, StopTime: exposureAt, WALStart: "000000010000000000000003", WALStop: "000000010000000000000003", DatabaseBytes: 31048775})
+	}
+	raw, _ := json.Marshal(res)
+	x, _ := json.Marshal(res.ObjectiveExposure)
+	at := strings.Index(string(raw), string(x))
+	if at < 0 {
+		t.Fatalf("objective_exposure not found in the result")
+	}
+	if at+len(x) > 8192 {
+		t.Errorf("objective_exposure ends at byte %d of a %d byte result: past the 8192 cut of the audit trail", at+len(x), len(raw))
+	}
+}
+
 // The whole path: get_pgbackrest_status itself carries the block, backup_stale
 // keeps its own meaning beside it, and the names are the ones a model, a
 // playbook and the audit trail read.

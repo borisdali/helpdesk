@@ -1364,17 +1364,22 @@ type GetPgBackRestStatusResult struct {
 	// never hinge on whether the model correctly reconstructs a boolean from
 	// its absence.
 	BackupStale bool `json:"backup_stale"`
+	// ObjectiveExposure sets the backup posture against the server's declared rpo
+	// and rto (see objective_exposure.go). Absent for a target that is not a
+	// configured database and for one that declares neither objective. It is
+	// information, separate from BackupStale, which keeps its meaning.
+	//
+	// It sits BEFORE the bulky fields on purpose: the audit trail cuts a tool
+	// result at 8 KB, a long list of backups is what reaches that, and what the
+	// model quotes from this block must still be in the trail. A test pins the
+	// position.
+	ObjectiveExposure *ObjectiveExposure `json:"objective_exposure,omitempty"`
 	// WALContinuity says whether the latest backup can actually be restored
 	// to the end of the archived WAL — see walcheck.go. Nil only when the
 	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
 	// be asked anything further.
 	WALContinuity *WALContinuity     `json:"wal_continuity,omitempty"`
 	Backups       []PgBackRestBackup `json:"backups,omitempty"`
-	// ObjectiveExposure sets the backup posture against the server's declared rpo
-	// and rto (see objective_exposure.go). Absent for a target that is not a
-	// configured database and for one that declares neither objective. It is
-	// information, separate from BackupStale, which keeps its meaning.
-	ObjectiveExposure *ObjectiveExposure `json:"objective_exposure,omitempty"`
 	// Output is the raw `pgbackrest info` JSON. It is left out of the audited
 	// copy of a successful call (see getPgBackRestStatusTool).
 	Output string `json:"output,omitempty"`
