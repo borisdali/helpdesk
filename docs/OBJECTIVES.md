@@ -32,7 +32,6 @@ documented where they appear.
    - [6.1 One decision loop](#61-one-decision-loop)
    - [6.2 How it connects to the Vault Flywheel](#62-how-it-connects-to-the-vault-flywheel)
    - [6.3 What this depends on and what could mislead](#63-what-this-depends-on-and-what-could-mislead)
-   - [6.4 Open decisions](#64-open-decisions)
 
 ---
 
@@ -521,37 +520,58 @@ Here's the visual of how we think about relationship between the inner/flywheel 
 
 ### 6.3 What this depends on and what could mislead
 
-- **`pg_waldump` for the exact loss (Tier B).** Checked 2026-11-05 on the local fixtures. It is in the server
-  package, so any image or host that runs PostgreSQL has it: present at the server's own version in the Docker
+- **`pg_waldump` for the exact loss (Tier B)**   
+  Checked on the local fixtures. It is in the server package, so any image or host that runs PostgreSQL has it: present at the server's own version in the Docker
   and K8s fixture image (Debian, `postgresql-16`, on `PATH`), in `postgres:16-alpine`
-  (`/usr/local/bin`) and in AlloyDB Omni 17 (`/usr/lib/postgresql/17/bin`). Fetching an archived segment with
-  `pgbackrest archive-get` into a temp directory and reading it with `pg_waldump` worked on the fixture: it
+  (`/usr/local/bin`) and in AlloyDB Omni 17 (`/usr/lib/postgresql/17/bin`).   
+
+  Fetching an archived segment with `pgbackrest archive-get` into a temp directory and reading it with `pg_waldump` worked on the fixture: it
   prints every `COMMIT` with its LSN, transaction id and an exact timestamp, so an LSN maps to a time and commits
-  can be counted. Not yet verified: a real systemd host (a Debian/Ubuntu PGDG install keeps it in
-  `/usr/lib/postgresql/N/bin`, which is not on `PATH` for most users, so it must be found by path and its major
-  version matched to the server's) and a managed or operator-run database, where the binary may be absent. Tier B
-  must therefore degrade to the archive-based estimate and record why it could not run.
-- **Real versus injected incidents.** Faulttest databases are tiny, so injected recovery times flatter any
+  can be counted.   
+
+  **Checked on a real systemd host**   
+  (Ubuntu 24.04, PostgreSQL 16.15 from PGDG): the binary is `/usr/lib/postgresql/16/bin/pg_waldump`, not on `PATH` for the `postgres` user, so it is found by path and its
+  version matched to the server's (it was); `pgbackrest archive-get` of the newest archived segment works as
+  `postgres` and hands over a decompressed 16 MiB segment.   
+
+   Three things the fixtures did not show:   
+    * the commit time ends in a zone **abbreviation** of the host's own `TZ` (`EST`), which is ambiguous, so the reader runs
+  `pg_waldump` with `TZ=UTC` and refuses any other abbreviation (the commit is still counted, with no time)  
+
+   * a DDL commit line was 1245 bytes of invalidation messages, so the reader has no line limit  
+
+   * a file in `pg_wal` is not necessarily WAL (PostgreSQL recycles old files into the names of segments that do not exist yet, and
+  `pg_waldump` answered "could not find a valid record" on one), so what lies past the instance's own
+  `pg_current_wal_lsn()` is never read.   
+
+   Not yet verified: that `TZ=UTC` really changes the printed zone, how
+  `pg_waldump` behaves at the end of valid WAL in the instance's current segment, a prepared transaction's commit
+  line (the reader handles the form from PostgreSQL's source, not from a capture), how long a read takes over many
+  segments, and a managed or operator-run database, where the binary may be absent. Tier B must therefore degrade to
+  the archive-based estimate and record why it could not run.
+
+- **Real versus injected incidents**   
+  Faulttest databases are tiny, so injected recovery times flatter any
   estimate. The incidents table already records an `origin` (`real` or `faulttest`), faulttest sets it on every
   run it triggers and `vault incidents --origin` filters on it, so the estimate can read real incidents only.
   Two limits remain. The per-version playbook metrics (resolution rate, recovery time) are still computed over
   both origins together. And `origin` is self-reported, with the same trust model as `skip_trust_gate`: a run
   that fails to set it counts as real. Until the gateway enforces it, an estimate must say which origin it used.
-- **Duration depends on database size.** An average per playbook across databases means little. The estimate uses
+
+- **Duration depends on database size**   
+  An average per playbook across databases means little. The estimate uses
   per-database history, ideally normalised to restore throughput and says "unknown" with none.
-- **Data volume.** `vault calibration` reports INSUFFICIENT_DATA today. Nothing here may claim that the loop
+
+- **Data volume**   
+  `vault calibration` reports INSUFFICIENT_DATA today. Nothing here may claim that the loop
   "compounds" until there are real numbers behind it.
-- **Optimising for speed.** A playbook tuned for speed could drop its verification steps. Speed counts only when
+
+- **Optimising for speed**   
+  A playbook tuned for speed could drop its verification steps. Speed counts only when
   the verification passed and the gate stays a person.
-- **Measurement.** aiHelpDesk sees only the incidents it handles. Downtime it never detected is not in any
+
+- **Measurement**   
+  aiHelpDesk sees only the incidents it handles. Downtime it never detected is not in any
   figure derived from its records, so every availability figure carries that caveat unless an external
   availability signal is ingested.
 
-### 6.4 Open decisions
-
-1. `recovery_preference`: two values or a rule such as "data-first unless downtime would exceed X"? Leaning: two.
-2. Enforcement when an option breaches an objective: `warn`, `acknowledge` or `refuse`, per environment or global?
-   Leaning: per environment.
-3. Budget window: rolling 30 days or calendar month? Leaning: rolling.
-4. "Downtime" from recorded incidents only (with the caveat) or from an external availability signal? Leaning:
-   recorded incidents first.
