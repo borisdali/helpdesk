@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_objective_exposure_triage
 name: "pgBackRest — Objective Exposure Check"
-version: "1.2"
+version: "1.3"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -74,6 +74,12 @@ guidance: |
     longer than the rto. measured_seconds is the longest one; detail says how
     many restores it is based on.
   - not_comparable and no_objective say why a check could not be made.
+
+  Every EVIDENCE quote must be ONE sentence copied word for word from a
+  detail field (rpo.detail, rto.detail, or the tool's error), inside the
+  quotation marks, with nothing added. Do not build a quote by joining field
+  names and values with semicolons: that text is not in the tool output and
+  is flagged as unverified.
 
   Quote the numbers from the tool output; do not recompute them and do not
   compare anything to a time you were not given. You have no tool here that

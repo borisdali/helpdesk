@@ -27,6 +27,9 @@ func TestObjectiveExposure_IsReadOnlyAndTerminal(t *testing.T) {
 	if !strings.Contains(pb.Guidance, "whether the server is idle or archiving has stopped is not known") {
 		t.Error("Ending D no longer tells the model not to claim idle or stopped: the first live run wrote 'the database has not generated or archived WAL' as its primary hypothesis")
 	}
+	if !strings.Contains(strings.Join(strings.Fields(pb.Guidance), " "), "ONE sentence copied word for word from a detail field") {
+		t.Error("guidance no longer asks for a verbatim detail sentence as evidence: the first live run joined field names with semicolons and was flagged as unverified evidence")
+	}
 	if !strings.Contains(pb.Guidance, "first and only tool call") {
 		t.Error("guidance no longer says get_pgbackrest_status is the only tool call; a first run called check_host first")
 	}
