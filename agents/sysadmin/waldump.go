@@ -63,10 +63,57 @@ type WALCommits struct {
 	// non-zero value as "at least this many".
 	Unread int
 	// EndError is the text of pg_waldump's own error line when it ended on one
-	// ("pg_waldump: error: ..."): reaching the end of valid WAL in the instance's
-	// current segment is reported that way, and so is every real failure, so the
-	// caller decides which it is from where it asked it to stop.
+	// ("pg_waldump: error: ..."). EndKind says what it means and EndAt, for the
+	// end of valid WAL, where that was.
 	EndError string
+	EndKind  string
+	EndAt    uint64
+}
+
+// What a pg_waldump error line means. Only the forms below have been seen on a
+// real host (captured 2026-11-10); anything else is WALEndOther and is treated
+// as a failure, never as a normal end: the safe direction is to read less.
+const (
+	// WALEndOfValid: it read every valid record in a live segment and reached the
+	// zeroed space after the instance's own position ("invalid record length at
+	// 0/430001F8: expected at least 24, got 0"). The commits before it are all
+	// there is. Bounding the read with -e at the instance's position avoids the
+	// message altogether (exit 0, no stderr), which is how it should be asked.
+	WALEndOfValid = "end_of_valid_wal"
+	// WALEndNotWAL: the file holds no valid record where one was asked for ("could
+	// not find a valid record after 0/44000000"): a recycled file named for a
+	// segment that does not exist yet.
+	WALEndNotWAL = "not_wal"
+	// WALEndMissing: the segment file is not where it was looked for ("could not
+	// locate WAL file ...": the archive has no such segment on this timeline).
+	WALEndMissing = "missing_segment"
+	// WALEndOther: any other error line.
+	WALEndOther = "other"
+)
+
+// Captured error forms. The zero-length form is only the end of the written WAL
+// when what it found is zero bytes: any other length is damage.
+var (
+	walEndZeroed  = regexp.MustCompile(`invalid record length at ([0-9A-Fa-f]+/[0-9A-Fa-f]+): expected at least \d+, got 0\b`)
+	walEndNotWAL  = regexp.MustCompile(`could not find a valid record after `)
+	walEndMissing = regexp.MustCompile(`could not locate WAL file `)
+)
+
+func classifyWALEnd(msg string) (kind string, at uint64) {
+	switch {
+	case walEndZeroed.MatchString(msg):
+		m := walEndZeroed.FindStringSubmatch(msg)
+		lsn, err := parseLSN(m[1])
+		if err != nil {
+			return WALEndOther, 0
+		}
+		return WALEndOfValid, lsn
+	case walEndNotWAL.MatchString(msg):
+		return WALEndNotWAL, 0
+	case walEndMissing.MatchString(msg):
+		return WALEndMissing, 0
+	}
+	return WALEndOther, 0
 }
 
 // A commit or an abort record, from the head of its line. The head is all that
@@ -130,6 +177,7 @@ func (o *WALCommits) consume(line string) {
 	switch {
 	case strings.HasPrefix(line, "pg_waldump: error:"):
 		o.EndError = strings.TrimSpace(strings.TrimPrefix(line, "pg_waldump: error:"))
+		o.EndKind, o.EndAt = classifyWALEnd(o.EndError)
 		return
 	case !strings.HasPrefix(line, "rmgr: Transaction"):
 		return

@@ -544,11 +544,23 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   `pg_waldump` answered "could not find a valid record" on one), so what lies past the instance's own
   `pg_current_wal_lsn()` is never read.   
 
-   Not yet verified: that `TZ=UTC` really changes the printed zone, how
-  `pg_waldump` behaves at the end of valid WAL in the instance's current segment, a prepared transaction's commit
-  line (the reader handles the form from PostgreSQL's source, not from a capture), how long a read takes over many
-  segments, and a managed or operator-run database, where the binary may be absent. Tier B must therefore degrade to
-  the archive-based estimate and record why it could not run.
+   **The three commits**   
+   (three commits made on purpose, xids 785-787) verified the rest of the read path:
+   * `TZ=UTC` changes the printed zone from `EST` to `UTC`, and the times then agree with the host's clock to the second  
+
+   * a read bounded with `-e` at the instance's own position exits 0 with nothing on stderr, while an unbounded read of
+  the live segment ends with exit 1 and `invalid record length at <lsn>: expected at least 24, got 0`: the end of the
+  written WAL. The reader treats it as a normal end only for that zero length, and any other damage or unknown message as
+  a failure  
+
+   * the archive's WAL is **per timeline**: after a point-in-time restore the segments before the new timeline's first
+  one are on the earlier timelines, so `archive-get` of the preceding segment numbers on the newest timeline fails
+  ("could not locate WAL file"), and a range that crosses a restore must be read timeline by timeline, not as one run
+  of segment numbers  
+
+   Not yet verified: a prepared transaction's commit line (the reader handles the form from PostgreSQL's source, not
+  from a capture), how long a read takes over many segments, and a managed or operator-run database, where the binary
+  may be absent. Tier B must therefore degrade to the archive-based estimate and record why it could not run.
 
 - **Real versus injected incidents**   
   Faulttest databases are tiny, so injected recovery times flatter any

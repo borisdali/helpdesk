@@ -46,12 +46,90 @@ func TestParseWALCommits_CapturedDDLCommitInTheHostsOwnZone(t *testing.T) {
 	}
 }
 
-// CAPTURED: what pg_waldump prints on a segment it cannot read as WAL (a recycled
-// file in pg_wal), on stderr, with a non-zero exit. It is kept as the end error.
-func TestParseWALCommits_CapturedEndError(t *testing.T) {
-	got, err := ParseWALCommits(strings.NewReader("pg_waldump: error: could not find a valid record after 0/44000000\n"))
-	if err != nil || len(got.Commits) != 0 || got.EndError != "could not find a valid record after 0/44000000" {
-		t.Errorf("%+v, %v", got, err)
+// CAPTURED: the three commits the canary made (xids 785-787, one second apart,
+// between 04:40:24 and 04:40:27 by the host's clock in UTC), read from the live
+// segment with TZ=UTC. The times are exact and agree with the clock; the read
+// ended where the written WAL ends, which is the instance's own position.
+func TestParseWALCommits_CapturedLiveSegmentInUTC(t *testing.T) {
+	got, err := ParseWALCommits(strings.NewReader(readFixture(t, "waldump_live_utc.txt")))
+	if err != nil || len(got.Commits) != 3 || got.Unread != 0 {
+		t.Fatalf("%+v, %v", got, err)
+	}
+	for i, want := range []struct {
+		xid uint64
+		lsn uint64
+		at  time.Time
+	}{
+		{785, 0x43000148, time.Date(2026, 11, 11, 4, 40, 24, 510687000, time.UTC)},
+		{786, 0x430001A8, time.Date(2026, 11, 11, 4, 40, 25, 533544000, time.UTC)},
+		{787, 0x430001D0, time.Date(2026, 11, 11, 4, 40, 26, 555079000, time.UTC)},
+	} {
+		c := got.Commits[i]
+		if c.XID != want.xid || c.LSN != want.lsn || c.TimeUnread || !c.Time.Equal(want.at) {
+			t.Errorf("commit %d = %+v, want xid %d lsn %#x at %v", i, c, want.xid, want.lsn, want.at)
+		}
+	}
+	if got.EndKind != WALEndOfValid || got.EndAt != 0x430001F8 {
+		t.Errorf("end = %q at %#x, want the end of valid WAL at 0/430001F8 (the instance's own position)", got.EndKind, got.EndAt)
+	}
+}
+
+// CAPTURED: the same records in the host's own zone. Counted, with exact LSNs and
+// xids, and no time: this is what reading without TZ=UTC would have given.
+func TestParseWALCommits_CapturedLiveSegmentInTheHostsZone(t *testing.T) {
+	got, err := ParseWALCommits(strings.NewReader(readFixture(t, "waldump_live_est.txt")))
+	if err != nil || len(got.Commits) != 3 {
+		t.Fatalf("%+v, %v", got, err)
+	}
+	for i, c := range got.Commits {
+		if !c.TimeUnread || !c.Time.IsZero() || c.XID != uint64(785+i) {
+			t.Errorf("commit %d = %+v", i, c)
+		}
+	}
+	if got.EndKind != WALEndOfValid {
+		t.Errorf("end = %q", got.EndKind)
+	}
+}
+
+// CAPTURED: the three error lines pg_waldump printed on a real host, each with
+// what it means. A bounded read of the live segment printed none of them (exit 0,
+// no stderr), which is how it should be asked.
+func TestParseWALCommits_CapturedEndErrors(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		kind string
+		at   uint64
+	}{
+		{"pg_waldump: error: could not find a valid record after 0/44000000", WALEndNotWAL, 0},
+		{"pg_waldump: error: error in WAL record at 0/430001D0: invalid record length at 0/430001F8: expected at least 24, got 0", WALEndOfValid, 0x430001F8},
+		{`pg_waldump: error: could not locate WAL file "000000330000000000000040"`, WALEndMissing, 0},
+	} {
+		got, err := ParseWALCommits(strings.NewReader(tc.line + "\n"))
+		if err != nil || len(got.Commits) != 0 || got.EndKind != tc.kind || got.EndAt != tc.at || got.EndError == "" {
+			t.Errorf("%q: %+v, %v", tc.line, got, err)
+		}
+	}
+}
+
+// CONSTRUCTED: an end that was not seen on a host is not taken for a normal one. A
+// record of the wrong length that is not zero is damage; an unknown message is a
+// failure. Reading less is the safe direction.
+func TestParseWALCommits_AnythingElseIsNotANormalEnd(t *testing.T) {
+	for _, line := range []string{
+		"pg_waldump: error: error in WAL record at 0/10: invalid record length at 0/20: expected at least 24, got 7",
+		"pg_waldump: error: error in WAL record at 0/10: invalid magic number 0000 in log segment 000000330000000000000043, offset 8192",
+		"pg_waldump: error: could not open file \"x\": Permission denied",
+		"pg_waldump: error: error in WAL record at 0/10: invalid record length at 123456789/1: expected at least 24, got 0", // an LSN out of range
+		"pg_waldump: error: ",
+	} {
+		got, _ := ParseWALCommits(strings.NewReader(line + "\n"))
+		if got.EndKind != WALEndOther || got.EndAt != 0 {
+			t.Errorf("%q = %q at %#x", line, got.EndKind, got.EndAt)
+		}
+	}
+	// No error line, no end kind: a clean read.
+	if got, _ := ParseWALCommits(strings.NewReader(commitLine(1, "0/10", "COMMIT 2026-11-09 17:18:25 UTC") + "\n")); got.EndKind != "" || got.EndError != "" {
+		t.Errorf("a clean read has an end: %+v", got)
 	}
 }
 
