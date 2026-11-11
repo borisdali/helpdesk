@@ -24,6 +24,9 @@ func TestObjectiveExposure_IsReadOnlyAndTerminal(t *testing.T) {
 	if strings.Contains(pb.Guidance, "TRANSITION_TO") {
 		t.Fatal("guidance tells the model to transition")
 	}
+	if !strings.Contains(pb.Guidance, "whether the server is idle or archiving has stopped is not known") {
+		t.Error("Ending D no longer tells the model not to claim idle or stopped: the first live run wrote 'the database has not generated or archived WAL' as its primary hypothesis")
+	}
 	if !strings.Contains(pb.Guidance, "first and only tool call") {
 		t.Error("guidance no longer says get_pgbackrest_status is the only tool call; a first run called check_host first")
 	}

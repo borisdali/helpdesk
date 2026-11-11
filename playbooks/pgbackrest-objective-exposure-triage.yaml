@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_objective_exposure_triage
 name: "pgBackRest — Objective Exposure Check"
-version: "1.1"
+version: "1.2"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -106,7 +106,12 @@ guidance: |
   ESCALATE_TO: none
 
   Ending D — the archive is older than the rpo (rpo.status=may_exceed, rto not exceeds):
-  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  The hypothesis is the measurement, nothing more: the archive is older than
+  the rpo, by how much. Do not write that the server "has not generated WAL"
+  or that archiving "has stopped" or "failed", and do not add a second
+  hypothesis for either: you cannot tell them apart and a hypothesis you
+  cannot test is not a finding. Say so in cannot_tell.
+  HYPOTHESIS_1: The newest archived WAL is <archive age> old, older than the rpo of <rpo>; whether the server is idle or archiving has stopped is not known | CONFIDENCE: <0.0–1.0, for the measurement itself> | EVIDENCE: "<verbatim quote from tool output>"
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: exposure=exposed; rpo=may_exceed; rpo_seconds=<rpo.objective_seconds>; archive_age_seconds=<rpo.measured_seconds>; rpo_detail=<rpo.detail>; wal_continuity=<wal_continuity.status>; cannot_tell=idle server or archiving stopped; recommended=run the archiving triage (pbs_db_backup_health_triage) if the server is not idle
   ESCALATE_TO: none
