@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_objective_exposure_triage
 name: "pgBackRest — Objective Exposure Check"
-version: "1.0"
+version: "1.1"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -22,13 +22,18 @@ description: |
   product schedules it. A run records one incident, so a schedule should be
   daily, not every few minutes.
 root_cause_classes:
-  version: "1.0"
+  version: "1.1"
   classes:
     - objectives-within
     - objectives-not-assessed
     - rto-exceeded-by-history
     - rpo-exposure-possible
+    - status-not-readable
   descriptions:
+    status-not-readable: >
+      get_pgbackrest_status returned an error or could not reach the host, so
+      there was nothing to read. Nothing is known about the server's exposure;
+      the check did not run.
     objectives-within: >
       Every check that could be made is within its declared objective: the
       archive is no older than the rpo and no past restore of this server took
@@ -53,7 +58,9 @@ symptoms:
   - "get_pgbackrest_status reports objective_exposure.status=exposed"
   - "a restore of this server took longer than its rto"
 guidance: |
-  Call get_pgbackrest_status with the connection_string (target). Do not
+  Call get_pgbackrest_status with the connection_string (target) as your
+  first and only tool call: do not call check_host or anything else first,
+  nothing else is needed to answer this. Do not
   pass a staleness bound of your own: backup_stale answers a different
   question (is the backup job on schedule?) and this check does not use it.
 
@@ -73,7 +80,7 @@ guidance: |
   can tell an idle server from one whose archiving has stopped, so say that
   plainly instead of choosing.
 
-  Four mutually exclusive endings, pick exactly one:
+  Five mutually exclusive endings, pick exactly one:
 
   Ending A — within (objective_exposure.status=within):
   HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
@@ -103,7 +110,19 @@ guidance: |
   ROOT_CAUSE: HYPOTHESIS_1
   FINDINGS: exposure=exposed; rpo=may_exceed; rpo_seconds=<rpo.objective_seconds>; archive_age_seconds=<rpo.measured_seconds>; rpo_detail=<rpo.detail>; wal_continuity=<wal_continuity.status>; cannot_tell=idle server or archiving stopped; recommended=run the archiving triage (pbs_db_backup_health_triage) if the server is not idle
   ESCALATE_TO: none
+
+  Ending E — the status could not be read (get_pgbackrest_status returned an
+  error, or could not reach the host, so there is no objective_exposure to
+  read):
+  This is different from not assessed: nothing is known about the server's
+  objectives either way, so a person needs to know the check did not run.
+  Quote the tool's error and do not guess at exposure.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote of the error from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=unknown; reason=<the tool's error, in one sentence>; the check did not run
+  ESCALATE_TO: none
 escalation:
+  - "get_pgbackrest_status could not be read — the check did not run"
   - "objective_exposure.status=exposed — the declared rpo or rto may not be met"
   - "rto.status=exceeds — a past restore of this server took longer than the rto"
 target_hints: []

@@ -431,13 +431,13 @@ a CronJob (or any scheduler) calling a playbook or tool, as for any other schedu
 [FLEET.md](FLEET.md)).
 
 **The consumer: `pbs_pgbackrest_objective_exposure_triage`.** A read-only playbook that calls `get_pgbackrest_status`
-and files the `objective_exposure` block under one of four endings: within, not assessed, the history breaks the `rto`,
-the archive is older than the `rpo`. It never restores and never takes a backup (it has no transitions and its
+and files the `objective_exposure` block under one of five endings: within, not assessed, the history breaks the `rto`,
+the archive is older than the `rpo`, or the status could not be read at all (the check did not run). It never restores and never takes a backup (it has no transitions and its
 prose names no mutating tool, both pinned by tests); an exposed server goes to a person. It is classified `none` for
 the availability budget. Start it by hand or from a CronJob calling the gateway. **One run records one incident**
 (every entry-point playbook run does), so schedule it daily, not every few minutes: only the within and
-not-assessed endings carry `recommended=no_changes_needed` and are recorded `resolved`; the two exposed endings are
-recorded `needs_human`, which is what they are. Each run also costs one root-cause classification call when the
+not-assessed endings carry `recommended=no_changes_needed` and are recorded `resolved`; the two exposed endings and
+the could-not-read ending are recorded `needs_human`, which is what they are. Each run also costs one root-cause classification call when the
 gateway has a planner model. No gate rule is attached to the block yet: the `rpo` side is an upper bound and would
 gate healthy idle servers.
 

@@ -24,6 +24,9 @@ func TestObjectiveExposure_IsReadOnlyAndTerminal(t *testing.T) {
 	if strings.Contains(pb.Guidance, "TRANSITION_TO") {
 		t.Fatal("guidance tells the model to transition")
 	}
+	if !strings.Contains(pb.Guidance, "first and only tool call") {
+		t.Error("guidance no longer says get_pgbackrest_status is the only tool call; a first run called check_host first")
+	}
 	for _, tool := range []string{"restore_from_backup", "restore_to_point_in_time", "run_pgbackrest_backup"} {
 		if strings.Contains(pb.Guidance, tool) {
 			t.Fatalf("guidance names %s; the check must not point the model at a mutating tool", tool)
@@ -45,14 +48,15 @@ func TestObjectiveExposure_OnlyQuietEndingsAreRecordedResolved(t *testing.T) {
 			endings[cur] = trim
 		}
 	}
-	if len(endings) != 4 {
-		t.Fatalf("found FINDINGS for %d endings, want 4: %v", len(endings), endings)
+	if len(endings) != 5 {
+		t.Fatalf("found FINDINGS for %d endings, want 5: %v", len(endings), endings)
 	}
 	for ending, wantMarker := range map[string]bool{
 		"Ending A": true,  // within
 		"Ending B": true,  // not assessed
 		"Ending C": false, // the history breaks the rto
 		"Ending D": false, // the archive is older than the rpo
+		"Ending E": false, // the status could not be read: the check did not run
 	} {
 		got := strings.Contains(endings[ending], "recommended=no_changes_needed")
 		if got != wantMarker {
