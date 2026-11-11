@@ -188,20 +188,29 @@ An `rto` longer than the whole budget means one recovery that takes the full `rt
 declared numbers cannot both be met. aiHelpDesk says so, but blocks nothing and does not change either number: it is
 your objective and the fix is yours (a wider window, a lower SLO or a faster recovery).
 
-- **Where it is stated.** `LogProblems` logs it at startup for the gateway and the sysadmin agent, once per database
+- **Where it is stated**   
+  `LogProblems` logs it at startup for the gateway and the sysadmin agent, once per database
   (`infrastructure config: availability objectives contradict each other`); `infra.Config.Consistency()` lists the
   same findings; and the RECOVERY DECISION section of `vault incidents` shows a `budget:` line (with a `⚠` when
   contradictory) beneath the objectives in force. The recovery decision records the window, where it came from and
   the budget, so the record shows the numbers the approver saw.
-- **The default window is a default.** With no `availability_window` the window is 30 days, rolling and every
+
+- **The default window is a default**   
+  With no `availability_window` the window is 30 days, rolling and every
   statement says `(default window)` and the record says `built-in default`. A calendar month would need the
   month's start, which no setting carries.
-- **A typo never becomes a default.** An unreadable `availability_slo` or `availability_window` or a database in an
+
+- **A typo never becomes a default**   
+  An unreadable `availability_slo` or `availability_window` or a database in an
   environment that is not declared (whose own slo or window might have been the environment's), computes no
   budget and says why. It never falls back to the default window or to "no objective".
-- **Old events are not rewritten.** A decision recorded before v0.35 has no window and gets no budget line; the
+
+- **Old events are not rewritten**   
+  A decision recorded before v0.35 has no window and gets no budget line; the
   default is not assumed after the fact.
-- **What this is not.** It is arithmetic on declared numbers. It does not measure downtime, count incidents already
+
+- **What this is not**   
+  It is arithmetic on declared numbers. It does not measure downtime, count incidents already
   in the window or forecast: a recovery that finishes faster than its `rto` uses less than the share shown and one
   that fails uses more. The budget already spent comes from the ledger, which is not built yet.
 
@@ -221,36 +230,36 @@ Availability budget: prod-orders
 
 What counts and what is said about what does not:
 
-- **Real incidents only.**   
+- **Real incidents only**   
   A faulttest injection never counts and the ledger says how many it left out.
 
-- **Only outages are charged.**   
+- **Only outages are charged**   
   An incident is classified by the worst playbook among all the runs it spanned
   ([§5.1](#51-which-incidents-spend-the-availability-budget)). Degraded and harmless incidents and ones whose
   playbooks declare nothing (`unclassified`), are listed beside the charge and cost nothing.
 
-- **Only a confirmed recovery is charged.**   
+- **Only a confirmed recovery is charged**   
   An outage that ended `escalated`, `needs_human` or `abandoned` or that has
   stayed open for more than a day (almost certainly a run that never finished), has an unknown real downtime. It is
   listed as **unconfirmed** and not charged and `remaining_worst_case` says what is left if all of it counts. An outage
   still open and younger than a day is charged up to now.
 
-- **Duration is from detection to recovery.**   
+- **Duration is from detection to recovery**   
   It runs from the start of the incident's entry playbook run to the end of
   its last run, so it includes the wait for approvals and begins when aiHelpDesk was engaged, not when the failure
   began. It is not measured downtime and the output says so every time.
 
-- **Only the part inside the window is spent.**   
+- **Only the part inside the window is spent**   
   An incident that began before the window is clipped to it and one that
   ended before it is not counted.
 
-- **A database is found the way the agents find it.**   
+- **A database is found the way the agents find it**   
   `database` may be a key, a name, a container name or a connection
   string; a bare port two servers share is refused (`409`). An incident is attributed to a database once, when it is
   created ([INCIDENTS.md](INCIDENTS.md)); incidents that could not be attributed are in no database's ledger and the
   ledger says how many there were. Incidents recorded before v0.35 have no database and are among them.
 
-- **It never guesses.**   
+- **It never guesses**   
   If the incidents cannot be read from auditd the answer is an error, not an empty ledger. If the
   page was full the ledger says it may be missing incidents. With no budget (no `availability_slo` or one that cannot
   be trusted) the spend is still listed and nothing is shown as remaining.
@@ -290,18 +299,25 @@ What approving demands is `availability_enforcement`:
 | `acknowledge` | needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` | shown |
 | `refuse` | the restore is refused, whatever is acknowledged, **if the instance is serving**; otherwise it needs `acknowledge_objective_breach` | needs `acknowledge_objective_breach` (asks, never refuses) | shown |
 
-- **Refusing is only coherent for a serving instance.** The restore is then what causes the downtime and refusing
+- **Refusing is only coherent for a serving instance**   
+  The restore is then what causes the downtime and refusing
   keeps it serving. An instance that is already down accrues the downtime whether or not it is restored, so refusing
   would leave it down and spend the budget faster. There a `refuse` asks for the acknowledgement instead and the plan
   says why.
-- **What cannot be checked asks and does not refuse.** An unreadable objective and an unreadable spend are not "nothing
+
+- **What cannot be checked asks and does not refuse**   
+  An unreadable objective and an unreadable spend are not "nothing
   to check": a typo or a dead audit service must not quietly switch a strict enforcement off. Nothing is known to be
   breached, so they ask.
-- **One acknowledgement covers every breach shown at the gate.** The gate has one field, `acknowledge_objective_breach`.
+
+- **One acknowledgement covers every breach shown at the gate**   
+  The gate has one field, `acknowledge_objective_breach`.
   A refusal from either objective stands whatever is acknowledged. When both ask, the error names both and the
   recovery decision records which objectives stood in the way (`approval.breaches`: `rpo`, `availability_budget`), so
   that acknowledging a data-loss breach is never taken to have acknowledged a budget breach too.
-- **It is recorded.** Each option on the plan and execution decisions carries `budget_verdict`, `budget_gate`,
+
+- **It is recorded**   
+  Each option on the plan and execution decisions carries `budget_verdict`, `budget_gate`,
   `budget_remaining_seconds` and the sentence that made it; the objectives in force carry the effective
   `availability_enforcement`. `vault incidents` shows it on the option line, apart from the loss verdict.
 
@@ -315,10 +331,11 @@ The `rto` is a promise someone wrote down. The estimate is what has actually hap
 restores have taken, from its own history, shown beside the promise. The plan carries it as
 `availability_budget.recovery_estimate` and `helpdesk-client --pitr-plan` prints it under `Past restores`.
 
-**"Server", not "database".** Everywhere in the objectives, "the database" means one `db_servers` entry: one PostgreSQL
-server (the instance, or cluster), because that is what a restore restores (`pgbackrest --delta restore` with no
-`--db-include`: every database in the cluster comes back, or none does). Objectives, incident attribution, the downtime
-ledger and this estimate are all kept per entry. Nothing here is per database inside a server, and nothing claims to be.
+**"Server", not "database"**   
+Everywhere in the objectives, "the database" means one `db_servers` entry: one PostgreSQL
+server (the instance or cluster), because that is what a restore restores (`pgbackrest --delta restore` with no
+`--db-include`: every database in the cluster comes back or none does). Objectives, incident attribution, the downtime
+ledger and this estimate are all kept per entry. Nothing here is per database inside a server and nothing claims to be.
 Two entries that reach the same host and port are one machine with two separate budgets and histories; the config says
 so at startup (a warning, not an error).
 
@@ -333,39 +350,86 @@ RTO CHECK (!)      : exceeds: 2 of the 5 past restores took longer than the rto 
 
 The rules that keep it honest:
 
-- **Real incidents only.** A faulttest injection never counts. So a database that has only ever been restored by
+- **Real incidents only**   
+  A faulttest injection never counts. So a database that has only ever been restored by
   faulttest has no history and says so.
-- **Only restores that ran.** Runs of the restore playbooks (`pbs_pgbackrest_pitr_remediate` and
+
+- **Only restores that ran**   
+  Runs of the restore playbooks (`pbs_pgbackrest_pitr_remediate` and
   `pbs_pgbackrest_restore_remediate`, which are dominated by the same thing: the size of the data) that ended
   `resolved`. For a remediation run that means its own trace shows a write or destructive tool call that succeeded:
-  the restore itself ran. A restore that failed, or did nothing (its precondition failed), took a time too, but was not
+  the restore itself ran. A restore that failed or did nothing (its precondition failed), took a time too, but was not
   a recovery; the count of runs left out is stated. `resolved` does not mean the verification afterwards passed: a
   restore that ran and then reported a recovery mismatch is still counted, as the time it took to do the restore.
-- **Only this server.** Another server's restores say little about this one's, so there is no fallback to the
+
+- **Only this server**   
+  Another server's restores say little about this one's, so there is no fallback to the
   fleet. With fewer than three samples the status is `insufficient_history` and with none `no_history`; the declared
   `rto` then stands alone, exactly as before.
-- **What it summarises depends on how much there is.** From three samples: the median, the longest, and the restore is
-  planned for as long as the **longest**. From ten: a real p90 (nearest-rank), and the restore is planned for the p90.
+
+- **What it summarises depends on how much there is**   
+  From three samples: the median, the longest and the restore is
+  planned for as long as the **longest**. From ten: a real p90 (nearest-rank) and the restore is planned for the p90.
   Below ten the p90 would be the longest under another name (by nearest rank the p90 of nine samples *is* the longest),
   so it is not offered and not called one. The sample size and the 90-day window are always beside the numbers. A
   history that cannot be read is reported as `unavailable`, never as no history.
-- **The `rto` comparison is a count.** `vs_rto` is `within` when none of the counted restores took longer than the
+
+- **The `rto` comparison is a count**   
+  `vs_rto` is `within` when none of the counted restores took longer than the
   declared `rto` and `exceeds` when some did, with how many: the declared number against the demonstrated one.
 
-**What it changes.** In the budget check (§5.4) a restore is taken to last as long as the estimate plans for (its
-**p90** from ten samples, its **longest** from three to nine) when there is an estimate, and as long as the declared
+**What it changes.**   
+In the budget check (§5.4) a restore is taken to last as long as the estimate plans for (its
+**p90** from ten samples, its **longest** from three to nine) when there is an estimate and as long as the declared
 `rto`, as an upper bound, when there is not. The verdict says which (`duration_basis`: `history_p90`,
 `history_longest` or `declared_rto`) and the decision record keeps it, with the longest (`estimate_max_seconds`)
 and, from ten samples, the p90. Records from before this say `history`, which meant the p90. The estimate only moves a `within`
 to a `may_exceed` and back: it never refuses a restore, because a `may_exceed` asks and does not refuse and a spent
 budget is a breach whatever history says.
 
-**What it does not do.** It holds nothing by itself: a history that breaks the `rto` is shown at the gate (`RTO CHECK
+**What it does not do.**   
+It holds nothing by itself: a history that breaks the `rto` is shown at the gate (`RTO CHECK
 (!)`) and recorded and is not enforced. It covers restores only, not a restart or a scale-up. And it is only as good as
 the incidents behind it: real history is thin and a server restored three times in a year has three samples. Two
 more limits are not corrected for. A restore's time is roughly the size of the data over the throughput, plus the WAL
-to replay, so a history from when the server was half its size is optimistic, and a restore to ten minutes ago is not
-a restore to three days ago; both kinds are counted together, and the restored size is not recorded yet (v0.36).
+to replay, so a history from when the server was half its size is optimistic and a restore to ten minutes ago is not
+a restore to three days ago; both kinds are counted together and the restored size is not recorded yet (v0.36).
+
+### 5.6 Is the backup posture enough for the objectives?
+
+`backup_stale` in `get_pgbackrest_status` answers a question about the backup **job**: is the newest backup older than
+an age somebody passed in? A server can pass that and still be unable to meet what was promised. So the same result
+carries a second, separate answer, `objective_exposure`, which sets the backup posture against the declared objectives:
+
+```json
+"objective_exposure": {
+  "status": "exposed",
+  "rpo": {"status": "may_exceed", "objective_seconds": 900, "measured_seconds": 7200,
+          "detail": "the newest archived WAL reached the repository 2h ago, more than the rpo of 15m: anything committed since is not archived, ... That is an upper bound: an idle server writes no WAL ..."},
+  "rto": {"status": "within", "objective_seconds": 1800, "measured_seconds": 1500,
+          "detail": "none of the 3 past restores took longer than the rto of 30m (the longest took 25m)"}
+}
+```
+
+- **The `rpo` check** is the age of the newest archived WAL against the `rpo`: what is not yet in the archive is what
+  losing the server now would lose. It is an **upper bound**, never a proven breach, because an idle server writes
+  no WAL and an old archive can then mean nothing is unarchived. So over the `rpo` the status is `may_exceed`, in the
+  same words as at the restore gate and the exact figure for a live server stays with the point-in-time plan.
+- **The `rto` check** is the longest past restore of this server (§5.5, real incidents only) against the `rto`:
+  `within` when none took longer, `exceeds` when some did. With too little history or none or a history that could
+  not be read, it says `not_comparable` and why. It is never "within" by default.
+- **`status`** is `exposed` when either check says so, `within` when what could be checked held (a check that cannot
+  be made does not count against it and does not count for it) and `not_assessed` when nothing could be checked.
+- **Additive, deliberately.** `backup_stale` keeps its meaning and its name: playbook endings and cited evidence are
+  written against it and changing what it says would change what they do. The new block is present only for a target
+  that is a configured server declaring at least one of the two objectives, so a server that declared nothing is told
+  nothing about objectives nobody wrote.
+
+**What it does not do.**   
+It is information: it refuses nothing and no playbook acts on it yet. There is no standing
+alert in the sense of a process that watches and notifies: nothing in the product schedules work, scheduled runs are
+a CronJob (or any scheduler) calling a playbook or tool, as for any other scheduled check (see
+[FLEET.md](FLEET.md)). `objective_exposure` is what such a run or the model reading a triage, can act on.
 
 ## 6. Design: how objectives will be used (not built yet)
 
@@ -403,7 +467,10 @@ it spends.
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
-| Backup staleness redefined: estimated restore time over the `rto` or archive lag over the `rpo` | Not built |
+| Backup posture against the objectives in `get_pgbackrest_status` (`objective_exposure`: the age of the newest archived WAL against the `rpo`, an upper bound and the longest past restore against the `rto`), beside an unchanged `backup_stale` ([§5.6](#56-is-the-backup-posture-enough-for-the-objectives)) | Built (information only) |
+| A playbook that acts on `objective_exposure` (today `backup_stale` is what the backup-health playbooks end on) | Not built |
+| A standing alert: a scheduled run of the above that notifies when the posture is `exposed`, with delivery and de-duplication (needs a scheduler; nothing in the product schedules work today) | Not built |
+| An exact `rpo` exposure for a live server (unarchived WAL, from the current LSN and `pg_stat_archiver`) as a recurring measurement, not only inside the point-in-time plan | Not built |
 | Per-incident outcome (actual loss, duration, budget burn) recorded against the objective | Not built |
 
 What it must **not** do: choose the objectives or adjust them toward what it measures (a system that does that is
@@ -427,14 +494,16 @@ yardstick and no engine for getting better. Each supplies what the other lacks:
 | Certification (STABLE on pass rate and spread) also requires "recovers within the environment's `rto` at p90" | Objectives → Vault | Not built |
 | The flywheel's improvement is stated in the customer's terms: "about 25% of a month's downtime budget saved per incident" | Both | Not built |
 | A declared-versus-demonstrated report: "RTO 30 min, met 40% of the time, p90 52 min", for a person to act on (invest in HA or renegotiate; the system never changes the objective) | Both | Not built |
-| Practice restores (drills) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. Proposed, not decided: needs a declared link from the clone to the server, a data-size comparison, and a recency limit | Both | Not built (proposed) |
+| Practice restores (drills) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. Proposed, not decided: needs a declared link from the clone to the server, a data-size comparison and a recency limit | Both | Not built (proposed) |
 
-**What closes the loop is a person.** The system measures and shows the gap between what was declared and what has been
-demonstrated; a human acts on it (more resources, a faster backup path, a better playbook, or a more honest objective);
+**What closes the loop is a person.**   
+The system measures and shows the gap between what was declared and what has been
+demonstrated; a human acts on it (more resources, a faster backup path, a better playbook or a more honest objective);
 the next recoveries then measure the result. The system never changes an objective. Without the "act, then measure
 again" half there is only a log of what happened.
 
-**The unit is a server.** "Database" in this section and in §5 means one `db_servers` entry, a whole PostgreSQL server
+**The unit is a server.**   
+"Database" in this section and in §5 means one `db_servers` entry, a whole PostgreSQL server
 (see §5.5): that is what an objective is declared for, what an incident is attributed to, what a restore restores and
 what the budget and the estimate are kept for. Per-database figures inside a server are not claimed.
 
@@ -454,7 +523,7 @@ Here's the visual of how we think about relationship between the inner/flywheel 
 
 - **`pg_waldump` for the exact loss (Tier B).** Checked 2026-11-05 on the local fixtures. It is in the server
   package, so any image or host that runs PostgreSQL has it: present at the server's own version in the Docker
-  and Kubernetes fixture image (Debian, `postgresql-16`, on `PATH`), in `postgres:16-alpine`
+  and K8s fixture image (Debian, `postgresql-16`, on `PATH`), in `postgres:16-alpine`
   (`/usr/local/bin`) and in AlloyDB Omni 17 (`/usr/lib/postgresql/17/bin`). Fetching an archived segment with
   `pgbackrest archive-get` into a temp directory and reading it with `pg_waldump` worked on the fixture: it
   prints every `COMMIT` with its LSN, transaction id and an exact timestamp, so an LSN maps to a time and commits

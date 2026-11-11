@@ -80,6 +80,12 @@ type RecoveryDecision struct {
 	PlanDigest     string `json:"plan_digest,omitempty"`
 	// PlanStatus is feasible, not_feasible or unverified.
 	PlanStatus string `json:"plan_status,omitempty"`
+	// RestoreBytes is, for the execution stage, the size of the cluster in the
+	// backup the restore used (pgBackRest's own figure for it): what the restore
+	// writes back, and so what its duration mostly depends on. It is kept so that
+	// restore times can later be compared across a server's growth. Absent when
+	// pgBackRest did not report a size, and on a record from before v0.35.
+	RestoreBytes *uint64 `json:"restore_bytes,omitempty"`
 	// Objectives is what was required of this database when the stage ran.
 	Objectives *ObjectivesInForce `json:"objectives,omitempty"`
 	// Options are the courses of action the stage had in front of it, each

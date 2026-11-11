@@ -25,6 +25,7 @@ func sampleDecision() RecoveryDecision {
 		Reason: "the data this restore discards exceeds the recovery objective",
 		Tool:   "restore_to_point_in_time", Target: "pgbackrest-db",
 		RecoveryTarget: "time=2026-11-04T01:39:07Z", PlanDigest: "0123456789abcdef", PlanStatus: "feasible",
+		RestoreBytes: rdU64(31048775),
 		Objectives: &ObjectivesInForce{
 			Environment: "prod",
 			RPOSeconds:  rdI64(900), RPOSource: "environment:prod",
@@ -121,6 +122,7 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the loss", func(d *RecoveryDecision) { *d.Options[0].LossSeconds = 1 }},
 		{"the configuration used", func(d *RecoveryDecision) { d.Objectives.ConfigDigest = "0000000000000000" }},
 		{"the recovery duration", func(d *RecoveryDecision) { *d.DurationSeconds = 1 }},
+		{"the size restored", func(d *RecoveryDecision) { *d.RestoreBytes = 1 }},
 		{"how long the restore was taken to last", func(d *RecoveryDecision) { *d.Options[0].BudgetDurationSeconds = 1 }},
 		{"what that rested on", func(d *RecoveryDecision) { d.Options[0].BudgetDurationBasis = "declared_rto" }},
 		{"the estimate's status", func(d *RecoveryDecision) { d.Options[0].EstimateStatus = "no_history" }},

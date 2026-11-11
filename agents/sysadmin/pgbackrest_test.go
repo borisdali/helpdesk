@@ -297,6 +297,26 @@ func TestParsePgBackRestInfo_RealCapturedSchema(t *testing.T) {
 	if result.BackupStale {
 		t.Error("BackupStale = true, want false (maxAge=0 disables the check)")
 	}
+	// The size of the cluster in the backup (info.size in the captured output), not
+	// the size the repository holds (info.repository.size, 4123469): what a restore
+	// writes back is the former.
+	if b.DatabaseBytes != 31048775 {
+		t.Errorf("DatabaseBytes = %d, want 31048775 (info.size, not info.repository.size)", b.DatabaseBytes)
+	}
+}
+
+// A backup with no reported size has none; zero is not a size.
+func TestParsePgBackRestInfo_NoReportedSizeIsZero(t *testing.T) {
+	js := pgBackRestJSONWithBackups("main", 0, "ok", []struct {
+		label string
+		typ   string
+		err   bool
+		stop  time.Time
+	}{{"20260926-040922F", "full", false, time.Now()}})
+	result, err := parsePgBackRestInfo(js, "", 0)
+	if err != nil || len(result.Backups) != 1 || result.Backups[0].DatabaseBytes != 0 {
+		t.Errorf("%+v, %v", result.Backups, err)
+	}
 }
 
 // pgBackRestJSONWithBackups builds a synthetic (but schema-accurate)

@@ -147,6 +147,10 @@ func recordExecutionDecision(ctx context.Context, args RestoreToPITArgs, plan PI
 			AllowedStopServing: args.AllowStopServing, AcknowledgedBreach: args.AcknowledgeObjectiveBreach,
 		},
 	}
+	if plan.BackupDatabaseBytes > 0 {
+		n := plan.BackupDatabaseBytes
+		d.RestoreBytes = &n
+	}
 	// Which objectives stood in the way (each one demanded the acknowledgement),
 	// so that one acknowledgement is not taken to cover a breach it did not name.
 	var rpo *RPOComparison

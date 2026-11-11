@@ -1303,6 +1303,9 @@ type PgBackRestBackup struct {
 	WALStop  string `json:"wal_stop,omitempty"`
 	LSNStart string `json:"lsn_start,omitempty"`
 	LSNStop  string `json:"lsn_stop,omitempty"`
+	// DatabaseBytes is the size of the cluster when this backup was taken: what a
+	// restore of it writes back. Zero when pgBackRest did not report one.
+	DatabaseBytes uint64 `json:"database_bytes,omitempty"`
 	// archiveID is the repo archive directory (e.g. "16-1") holding this
 	// backup's WAL, matched through the backup's database id.
 	archiveID string
@@ -1367,6 +1370,11 @@ type GetPgBackRestStatusResult struct {
 	// be asked anything further.
 	WALContinuity *WALContinuity     `json:"wal_continuity,omitempty"`
 	Backups       []PgBackRestBackup `json:"backups,omitempty"`
+	// ObjectiveExposure sets the backup posture against the server's declared rpo
+	// and rto (see objective_exposure.go). Absent for a target that is not a
+	// configured database and for one that declares neither objective. It is
+	// information, separate from BackupStale, which keeps its meaning.
+	ObjectiveExposure *ObjectiveExposure `json:"objective_exposure,omitempty"`
 	// Output is the raw `pgbackrest info` JSON. It is left out of the audited
 	// copy of a successful call (see getPgBackRestStatusTool).
 	Output string `json:"output,omitempty"`
@@ -1520,6 +1528,11 @@ type pgBackRestRawBackup struct {
 	Database struct {
 		ID int `json:"id"`
 	} `json:"database"`
+	// Info.Size is the size of the database cluster when the backup was taken
+	// (the bytes a restore of it puts back), not the size the repository holds.
+	Info struct {
+		Size int64 `json:"size"`
+	} `json:"info"`
 }
 
 // jsonArrayPrefix strips any non-JSON preamble before the first `[`,
@@ -1619,6 +1632,9 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 			LSNStop:   b.LSN.Stop,
 			archiveID: archiveIDs[b.Database.ID],
 		})
+		if b.Info.Size > 0 {
+			result.Backups[len(result.Backups)-1].DatabaseBytes = uint64(b.Info.Size)
+		}
 	}
 
 	// Most recent by StopTime, not array position — pgBackRest's own
@@ -1752,6 +1768,11 @@ func readPgBackRestStatus(ctx context.Context, args GetPgBackRestStatusArgs, wit
 			return runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, walArgs)
 		})
 		result.WALContinuity = &wal
+	}
+	// The objectives are only read for the full status (not for the callers that
+	// only need the stanza name), after the WAL it is set against.
+	if withWAL {
+		withObjectiveExposure(ctx, &result, args.Target)
 	}
 
 	if toolAuditor != nil {

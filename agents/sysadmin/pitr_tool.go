@@ -59,6 +59,9 @@ type PITRPlan struct {
 	NormalizedTarget string         `json:"normalized_target,omitempty"`
 	BackupLabel      string         `json:"backup_label,omitempty"`
 	BackupStopTime   string         `json:"backup_stop_time,omitempty"`
+	// BackupDatabaseBytes is the size of the cluster in the selected backup: what
+	// the restore would write back. Absent when pgBackRest did not report it.
+	BackupDatabaseBytes uint64 `json:"backup_database_bytes,omitempty"`
 	// TargetTimeline is the timeline the restore would pin; ExpectedTimeline
 	// the one PostgreSQL should create. v1 uses the archive's newest timeline.
 	TargetTimeline   uint32 `json:"target_timeline,omitempty"`
@@ -118,6 +121,8 @@ func assessPITRPlanFor(stanza string, target RecoveryTarget, normalized string, 
 		BackupLabel:      backup.Label,
 		BackupStopTime:   backup.StopTime.UTC().Format(time.RFC3339),
 		WALContinuity:    wal,
+
+		BackupDatabaseBytes: backup.DatabaseBytes,
 	}
 	notFeasible := func(format string, args ...any) PITRPlan {
 		plan.Status, plan.Detail = PITRNotFeasible, fmt.Sprintf(format, args...)

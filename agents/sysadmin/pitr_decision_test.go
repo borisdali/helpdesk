@@ -15,6 +15,49 @@ import (
 )
 
 // decisions returns the recovery_decision events in the store, by stage.
+// The execution record keeps the size of the cluster the restore wrote back, so
+// restore times can later be compared across a server's growth. A plan with no
+// size records none: nothing is made up.
+func TestRecordExecutionDecision_KeepsTheSizeOfTheRestoredCluster(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	args := RestoreToPITArgs{Target: "pgbackrest_db", PlanDigest: "0123456789abcdef"}
+	if err := recordExecutionDecision(context.Background(), args, PITRPlan{BackupDatabaseBytes: 31048775}, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordExecutionDecision(context.Background(), args, PITRPlan{}, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 2 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	sized, unsized := got[0], got[1]
+	if sized.RestoreBytes == nil {
+		sized, unsized = got[1], got[0]
+	}
+	if sized.RestoreBytes == nil || *sized.RestoreBytes != 31048775 {
+		t.Errorf("sized = %+v", sized.RestoreBytes)
+	}
+	if unsized.RestoreBytes != nil {
+		t.Errorf("a size was recorded for a plan with none: %d", *unsized.RestoreBytes)
+	}
+}
+
+// The plan carries the size of the backup it selected, under the name the record
+// and the CLI read, and leaves it out when pgBackRest reported none.
+func TestAssessPITRPlan_CarriesTheSelectedBackupsSize(t *testing.T) {
+	plan := assessPITRPlan("main", RecoveryTarget{}, "2026-10-28 14:05:00+00", PgBackRestBackup{Label: "L", DatabaseBytes: 31048775}, nil)
+	raw, _ := json.Marshal(plan)
+	if !strings.Contains(string(raw), `"backup_database_bytes":31048775`) {
+		t.Errorf("plan json = %s", raw)
+	}
+	raw, _ = json.Marshal(assessPITRPlan("main", RecoveryTarget{}, "x", PgBackRestBackup{Label: "L"}, nil))
+	if strings.Contains(string(raw), "backup_database_bytes") {
+		t.Errorf("a size was invented: %s", raw)
+	}
+}
+
 func decisions(t *testing.T, store *audit.Store) map[string][]audit.RecoveryDecision {
 	t.Helper()
 	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeRecoveryDecision})
