@@ -465,6 +465,9 @@ it spends.
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
+| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified on a real Ubuntu host for archived and live segments; not yet verified: a prepared transaction, the cost over many segments, a managed database, a live run of the whole path) |
+| The same count measured at the restore itself, after the stop, so the record says how many transactions were actually discarded, not how many were at stake at plan time | Not built |
+| Reading a range across a point-in-time restore on the instance's older timelines, and a read longer than 16 segments (only the first 16 are read, and the count says "at least") | Partly built (timelines are followed from the replay path; the cap is a starting figure to be set from a measured read) |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
 | Backup posture against the objectives in `get_pgbackrest_status` (`objective_exposure`: the age of the newest archived WAL against the `rpo`, an upper bound and the longest past restore against the `rto`), beside an unchanged `backup_stale` ([§5.6](#56-is-the-backup-posture-enough-for-the-objectives)) | Built (information only) |
 | A playbook that acts on `objective_exposure` (today `backup_stale` is what the backup-health playbooks end on) | Not built |
@@ -560,7 +563,8 @@ Here's the visual of how we think about relationship between the inner/flywheel 
 
    Not yet verified: a prepared transaction's commit line (the reader handles the form from PostgreSQL's source, not
   from a capture), how long a read takes over many segments, and a managed or operator-run database, where the binary
-  may be absent. Tier B must therefore degrade to the archive-based estimate and record why it could not run.
+  may be absent. Tier B therefore degrades to the archive-based estimate and records why it could not run, and it
+  is built that way: a count that could not be made says why, and is never "nothing lost".
 
 - **Real versus injected incidents**   
   Faulttest databases are tiny, so injected recovery times flatter any

@@ -165,6 +165,18 @@ func rdOption(opt audit.DecisionOption) string {
 		}
 		fmt.Fprintf(&b, "%sat least %s of history", sep, rdSpan(*opt.LossAtLeastSeconds))
 	}
+	// The transactions counted from the WAL, in the same honesty: a lower bound is
+	// said to be one, and a count that could not be made says why.
+	switch {
+	case opt.LossCommitsStatus == "measured" && opt.LossCommits != nil:
+		lead := ""
+		if opt.LossCommitsAtLeast {
+			lead = "at least "
+		}
+		fmt.Fprintf(&b, "; %s%d transaction(s) discarded (counted from the WAL)", lead, *opt.LossCommits)
+	case opt.LossCommitsStatus == "unavailable":
+		fmt.Fprintf(&b, "; transactions not counted (%s)", opt.LossCommitsReason)
+	}
 	if opt.Verdict != "" {
 		fmt.Fprintf(&b, " → %s", opt.Verdict)
 	}

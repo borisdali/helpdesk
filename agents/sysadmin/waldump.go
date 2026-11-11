@@ -51,9 +51,22 @@ type WALCommit struct {
 	TimeUnread bool `json:"time_unread,omitempty"`
 }
 
+// WALTxEnd is one transaction ending, a commit or an abort, in the order the
+// records appear in WAL. A time-target recovery stops before the first of these,
+// in this order, whose timestamp is later than the target (an abort counts: it
+// carries a time too), so the order and the aborts matter even though only the
+// commits are counted.
+type WALTxEnd struct {
+	WALCommit
+	Commit bool `json:"commit"`
+}
+
 // WALCommits is what reading a stretch of WAL found.
 type WALCommits struct {
 	Commits []WALCommit
+	// Ends is every commit and abort, in WAL order (Commits is the commits among
+	// them).
+	Ends []WALTxEnd
 	// Aborts counts transactions that rolled back in the stretch. They lose
 	// nothing, and are kept apart so a count of commits is never padded by them.
 	Aborts int
@@ -192,10 +205,6 @@ func (o *WALCommits) consume(line string) {
 		}
 		return
 	}
-	if strings.HasPrefix(m[3], "ABORT") {
-		o.Aborts++
-		return
-	}
 	xid, _ := strconv.ParseUint(m[1], 10, 64)
 	lsn, err := parseLSN(m[2])
 	if err != nil {
@@ -208,7 +217,13 @@ func (o *WALCommits) consume(line string) {
 	} else {
 		c.TimeUnread = true
 	}
+	if strings.HasPrefix(m[3], "ABORT") {
+		o.Aborts++
+		o.Ends = append(o.Ends, WALTxEnd{WALCommit: c})
+		return
+	}
 	o.Commits = append(o.Commits, c)
+	o.Ends = append(o.Ends, WALTxEnd{WALCommit: c, Commit: true})
 }
 
 // parseWALTime reads a pg_waldump timestamp as UTC. Only a zone that is

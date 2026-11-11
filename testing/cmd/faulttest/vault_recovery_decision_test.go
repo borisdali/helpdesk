@@ -159,6 +159,35 @@ func TestRDOption_ShowsTheBudgetVerdictApartFromTheLossVerdict(t *testing.T) {
 
 // The option line says what the budget verdict took the restore to last, and what
 // history said; with no history it says nothing about it.
+// The transactions counted from the WAL are said as what they are: a count, a lower
+// bound, or why there is none. Nothing is shown for a record that predates them.
+func TestRDOption_SaysHowManyTransactionsWereAtStake(t *testing.T) {
+	n := 41
+	o := audit.DecisionOption{Name: "point_in_time_restore", LossCommitsStatus: "measured", LossCommits: &n}
+	if got := rdOption(o); !strings.Contains(got, "; 41 transaction(s) discarded (counted from the WAL)") || strings.Contains(got, "at least") {
+		t.Errorf("exact: %q", got)
+	}
+	o.LossCommitsAtLeast = true
+	if got := rdOption(o); !strings.Contains(got, "; at least 41 transaction(s) discarded (counted from the WAL)") {
+		t.Errorf("a lower bound: %q", got)
+	}
+	zero := 0
+	o.LossCommits, o.LossCommitsAtLeast = &zero, false
+	if got := rdOption(o); !strings.Contains(got, "; 0 transaction(s) discarded") {
+		t.Errorf("none: %q", got)
+	}
+	o = audit.DecisionOption{Name: "point_in_time_restore", LossCommitsStatus: "unavailable", LossCommitsReason: "pg_waldump was not found on the instance"}
+	if got := rdOption(o); !strings.Contains(got, "; transactions not counted (pg_waldump was not found on the instance)") || strings.Contains(got, "discarded") {
+		t.Errorf("unavailable: %q", got)
+	}
+	// A record from before the count, and a measured one with no number, say nothing.
+	for _, o := range []audit.DecisionOption{{Name: "x"}, {Name: "x", LossCommitsStatus: "measured"}} {
+		if got := rdOption(o); strings.Contains(got, "transaction") {
+			t.Errorf("%+v said something about transactions: %q", o, got)
+		}
+	}
+}
+
 func TestRDOption_SaysWhatTheRestoreWasTakenToLastAndWhatHistorySaid(t *testing.T) {
 	left, dur := int64(1992), int64(3000)
 	n, over, p90, p50 := 5, 2, int64(3000), int64(1200)

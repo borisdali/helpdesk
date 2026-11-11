@@ -98,6 +98,13 @@ func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chose
 	o.LossBasis, o.LossSeconds, o.LossBytes = est.Basis, est.WindowSeconds, est.WALBytes
 	o.LossUpperBound, o.LossAsOf, o.LossUnmeasured = est.UpperBound, est.AsOf, est.Unmeasured
 	o.LossAtLeastSeconds, o.LossAtLeastBasis = est.WindowAtLeastSeconds, est.AtLeastBasis
+	if t := est.Transactions; t != nil {
+		o.LossCommitsStatus, o.LossCommitsAtLeast, o.LossCommitsReason = t.Status, t.AtLeast, t.Reason
+		if t.Commits != nil {
+			n := *t.Commits
+			o.LossCommits = &n
+		}
+	}
 	if v := est.Objective; v != nil {
 		o.Verdict, o.VerdictDetail, o.Gate = v.Status, v.Detail, v.Gate
 	}

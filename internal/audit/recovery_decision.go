@@ -156,6 +156,15 @@ type DecisionOption struct {
 	// rests on. A breach of the rpo proven by it is recorded as the verdict.
 	LossAtLeastSeconds *int64 `json:"loss_at_least_seconds,omitempty"`
 	LossAtLeastBasis   string `json:"loss_at_least_basis,omitempty"`
+	// The transactions the restore would discard, counted from the WAL with
+	// pg_waldump. LossCommitsStatus is measured or unavailable (absent when no
+	// attempt was made, and on a record from before v0.35). LossCommits is the
+	// count, LossCommitsAtLeast says it is a lower bound, and LossCommitsReason
+	// says why there is none.
+	LossCommitsStatus  string `json:"loss_commits_status,omitempty"`
+	LossCommits        *int   `json:"loss_commits,omitempty"`
+	LossCommitsAtLeast bool   `json:"loss_commits_at_least,omitempty"`
+	LossCommitsReason  string `json:"loss_commits_reason,omitempty"`
 
 	// Verdict is the loss set against the rpo (within, exceeds, may_exceed,
 	// not_comparable, no_objective, objective_invalid); Gate what approving

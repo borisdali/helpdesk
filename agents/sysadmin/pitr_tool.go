@@ -264,14 +264,19 @@ func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 		return plan, err
 	}
 	var live *LivePreState
-	if plan.InstanceServing {
-		if inst, ierr := instanceFor(args.Target); ierr == nil && !inst.local {
-			if pre, perr := livePreflight(ctx, inst); perr == nil {
-				live = &pre
-			}
+	inst, ierr := instanceFor(args.Target)
+	if plan.InstanceServing && ierr == nil && !inst.local {
+		if pre, perr := livePreflight(ctx, inst); perr == nil {
+			live = &pre
 		}
 	}
-	plan.DataLossEstimate = withObjective(estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now()), args.Target)
+	est := estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now())
+	// The transactions the discarded WAL holds, counted from the WAL itself. It
+	// always says something: a count, or why there is none.
+	if est != nil && ierr == nil {
+		est.withTransactions(measureTransactionLoss(ctx, inst, plan, live))
+	}
+	plan.DataLossEstimate = withObjective(est, args.Target)
 	plan.AvailabilityBudget = budgetCheckFor(ctx, args.Target, plan.InstanceServing)
 	return plan, nil
 }
