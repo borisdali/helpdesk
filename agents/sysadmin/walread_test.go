@@ -693,6 +693,10 @@ func TestMeasureTransactionLoss_CountsFromWhatTheInstancePrinted(t *testing.T) {
 	if got == nil || got.Status != TxLossMeasured || *got.Commits != 2 || got.FirstLSN != "0/42000020" || !got.AtLeast {
 		t.Fatalf("%+v", got)
 	}
+	// Which pg_waldump decoded it is kept with the count.
+	if got.Decoder != "pg_waldump (PostgreSQL) 16.15" {
+		t.Errorf("decoder = %q", got.Decoder)
+	}
 	// A down instance reads to the end of the archive: a lower bound, and it says so.
 	if !strings.Contains(got.Basis, "WAL the instance had not archived is not counted") {
 		t.Errorf("basis = %q", got.Basis)

@@ -139,6 +139,11 @@ var walTxnRecord = regexp.MustCompile(
 		`(COMMIT|COMMIT_PREPARED|ABORT|ABORT_PREPARED)\b(?:\s+\d+:)?\s+` + // a prepared one names the prepared xid first
 		`(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?)\s+(\S+?)(?:;|\s|$)`)
 
+// walBenignTxnKind matches the Transaction records that end no transaction: the
+// assignment of subtransaction ids, cache invalidations and a PREPARE (whose
+// commit or abort arrives later as COMMIT_PREPARED or ABORT_PREPARED).
+var walBenignTxnKind = regexp.MustCompile(`desc: (ASSIGNMENT|INVALIDATIONS|PREPARE)\b`)
+
 // canonicalLSN is PostgreSQL's "X/Y" with one to eight hex digits each side.
 var canonicalLSN = regexp.MustCompile(`^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$`)
 
@@ -197,10 +202,13 @@ func (o *WALCommits) consume(line string) {
 	}
 	m := walTxnRecord.FindStringSubmatch(line)
 	if m == nil {
-		// A Transaction record that is neither of the forms above (an assignment,
-		// an invalidation). Only those with COMMIT or ABORT in the description are
-		// worth a count; anything else is not a transaction ending.
-		if strings.Contains(line, "desc: COMMIT") || strings.Contains(line, "desc: ABORT") {
+		// A Transaction record that is not a commit or an abort in the form read.
+		// The kinds that end no transaction are named; anything else is NOT assumed
+		// harmless. Only COMMIT and ABORT lines used to be counted as not understood,
+		// so a version that changed how a commit is described (a rename, a different
+		// case, a new layout) would have read as no commits at all, and a plan would
+		// have said an exact zero: the "nothing lost" this must never say by accident.
+		if !walBenignTxnKind.MatchString(line) {
 			o.Unread++
 		}
 		return

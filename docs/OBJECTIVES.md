@@ -572,6 +572,25 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   The first costs: reading one archived segment took 0.1-0.3 s and one archived plus one live segment 0.2-0.6 s, on a
   nearly empty fixture, which says little about a busy database.
 
+   **How stable is what is read?** Two different things, and only one of them is a risk here.
+   * The WAL **file** format is not stable across major versions (each one changes its page magic, and record layouts
+  change), so `pg_waldump` must be the same major version as the server that wrote the WAL. The script picks the
+  binary by the server's major version (`PG_VERSION`), and a mismatch makes `pg_waldump` fail, which is a failed
+  read with its reason, never a wrong count.
+   * The **text** `pg_waldump` prints is what is parsed: the `rmgr: Transaction … tx: N, lsn: X/Y … desc: COMMIT|ABORT
+  <timestamp> <zone>` line and the flags `-r -s -e -n -p`. It is not a documented stable interface, but it has not
+  changed in anything this reads. Compared on **16.14** (Debian), **16.15** (Ubuntu) and **18.6** (Debian, the audit
+  store's container, read-only): the same line layout, the same `COMMIT` and `ABORT` forms (the aborts are real captures
+  from 18), the same zone behaviour (`UTC` under `TZ=UTC`, an abbreviation such as `EST` otherwise), the same bounded
+  read (exit 0) and the same unbounded end (exit 1, `invalid record length … expected at least 24, got 0`), the same
+  `-p DIR START END` form. Not compared: 13, 14, 15, 17.
+   * Format drift is guarded, not assumed away. A Transaction record that is not a commit or abort in the form read
+  and is not one of the kinds that end no transaction (`ASSIGNMENT`, `INVALIDATIONS`, `PREPARE`) is counted as not
+  understood, so the count becomes "at least"; a read in which records were seen and none could be taken for a commit
+  or an abort is reported as not understood and not as an exact zero (this was a gap: only lines containing `COMMIT` or
+  `ABORT` used to count as not understood, so a renamed description would have read as no transactions). The decoder
+  that produced a count is kept with it (`transactions.decoder`).
+
    Not yet verified: the whole path on the Ubuntu VM or in K8s , a prepared transaction's commit line (the reader
   handles the form from PostgreSQL's source, not from a capture), how long a read takes over many busy segments and a
   managed or operator-run database, where the binary may be absent. Tier B therefore degrades to the archive-based estimate and records why it could not run and it

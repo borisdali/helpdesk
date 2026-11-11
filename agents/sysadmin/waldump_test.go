@@ -264,6 +264,109 @@ func TestParseWALCommits_AnLSNOutOfRangeIsUnread(t *testing.T) {
 	}
 }
 
+// CAPTURED on PostgreSQL 18.6 (Debian, the audit store's container, read-only): a DDL
+// commit and a run of commits and aborts, cut at 220 characters as the script cuts
+// them. The form is the one PostgreSQL 16 prints, aborts included, which until this
+// were only constructed from the source: same fields, same layout, same zone handling.
+func TestParseWALCommits_CapturedPG18(t *testing.T) {
+	got, err := ParseWALCommits(strings.NewReader(readFixture(t, "waldump_pg18.txt")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Commits) != 4 || got.Aborts != 15 || len(got.Ends) != 19 || got.Unread != 0 || got.EndError != "" {
+		t.Fatalf("commits %d aborts %d ends %d unread %d end %q", len(got.Commits), got.Aborts, len(got.Ends), got.Unread, got.EndError)
+	}
+	for i, e := range got.Ends {
+		if e.TimeUnread || e.Time.IsZero() {
+			t.Errorf("record %d has no time: %+v", i, e)
+		}
+		if i > 0 && e.LSN <= got.Ends[i-1].LSN {
+			t.Errorf("record %d is out of WAL order: %#x after %#x", i, e.LSN, got.Ends[i-1].LSN)
+		}
+	}
+	first, abort := got.Ends[0], got.Ends[4]
+	if !first.Commit || first.XID != 1226 || first.LSN != 0x02020CE8 || !first.Time.Equal(time.Date(2026, 11, 7, 5, 10, 50, 548538000, time.UTC)) {
+		t.Errorf("the DDL commit = %+v", first)
+	}
+	if abort.Commit || abort.XID != 1450 || abort.LSN != 0x021F5410 || !abort.Time.Equal(time.Date(2026, 11, 9, 15, 6, 35, 19668000, time.UTC)) {
+		t.Errorf("the first abort = %+v", abort)
+	}
+}
+
+// The stop rule on those real records. An abort later than the target is the stop
+// and is not counted; a commit just before it is kept.
+func TestCountDiscarded_CapturedPG18Records(t *testing.T) {
+	got, err := ParseWALCommits(strings.NewReader(readFixture(t, "waldump_pg18.txt")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(s string) WALReadPlan {
+		tt, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return WALReadPlan{Mode: "time", TargetTime: tt, Serving: true, Segments: 1, Start: "segment X"}
+	}
+	for _, tc := range []struct {
+		name   string
+		target string
+		want   int
+		first  string
+		stop   string // the LSN the basis says recovery stops at
+	}{
+		{"before everything: all four commits, none of the aborts", "2026-11-07T05:00:00Z", 4, "0/2020CE8", "0/2020CE8"},
+		{"a commit is the stop", "2026-11-09T15:06:35.005Z", 1, "0/21F53B8", "0/21F53B8"},
+		{"an abort is the stop: the commit before it is kept, and the abort is not a commit", "2026-11-09T15:06:35.010Z", 0, "", "0/21F5410"},
+		{"after the commits, among the aborts: nothing to lose", "2026-11-09T15:06:35.020Z", 0, "", "0/21F5468"},
+		{"after everything", "2026-11-10T00:00:00Z", 0, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			loss := countDiscarded(at(tc.target), []WALCommits{got}, nil)
+			if n := commitsOf(t, loss); n != tc.want || loss.FirstLSN != tc.first {
+				t.Errorf("%d commits, first %q; want %d, %q", n, loss.FirstLSN, tc.want, tc.first)
+			}
+			if tc.stop != "" && !strings.Contains(loss.Basis, "(LSN "+tc.stop+")") {
+				t.Errorf("basis does not name the stop %s: %q", tc.stop, loss.Basis)
+			}
+			if tc.stop == "" && !strings.Contains(loss.Basis, "no commit or abort in the WAL read is later than the target time") {
+				t.Errorf("basis = %q", loss.Basis)
+			}
+		})
+	}
+}
+
+// If a PostgreSQL version describes a commit in a way this was not built against, the
+// records are not taken for nothing: each is counted as not understood, and a read
+// where none could be understood is not an exact zero.
+func TestParseWALCommits_AnUnfamiliarDescriptionIsNotTakenForNothing(t *testing.T) {
+	in := strings.Join([]string{
+		commitLine(1, "0/10", "Commit 2026-11-09 17:18:25 UTC"),           // a different case
+		commitLine(2, "0/20", "FINISH 2026-11-09 17:18:25 UTC"),           // a different word
+		commitLine(3, "0/30", "COMMIT 2026-11-09T17:18:25Z"),              // a different timestamp layout
+		commitLine(4, "0/40", "ASSIGNMENT xtop 5: subxacts: 6"),           // ends no transaction
+		commitLine(5, "0/50", "INVALIDATIONS ; inval msgs: catcache 7"),   // ends no transaction
+		commitLine(6, "0/60", "PREPARE gid test; its commit comes later"), // ends no transaction
+	}, "\n") + "\n"
+	got, _ := ParseWALCommits(strings.NewReader(in))
+	if len(got.Commits) != 0 || len(got.Ends) != 0 || got.Unread != 3 {
+		t.Fatalf("commits %d ends %d unread %d, want 0 0 3 (only the three unfamiliar ones)", len(got.Commits), len(got.Ends), got.Unread)
+	}
+	loss := countDiscarded(WALReadPlan{Mode: "time", TargetTime: lossTarget, Serving: true}, []WALCommits{got}, nil)
+	if loss.Status != TxLossUnavailable || loss.Commits != nil || !strings.Contains(loss.Reason, "output was not understood") || !strings.Contains(loss.Reason, "3 transaction record(s)") {
+		t.Errorf("an unreadable output became %+v", loss)
+	}
+	// Some understood and some not: a count, and a lower bound.
+	mixed := recs(t, "COMMIT 0/10 12:00:01")
+	mixed.Unread = 2
+	if loss := countDiscarded(timePlan(true), []WALCommits{mixed}, nil); loss.Status != TxLossMeasured || *loss.Commits != 1 || !loss.AtLeast {
+		t.Errorf("mixed: %+v", loss)
+	}
+	// And a read with no records at all is a legitimate zero.
+	if loss := countDiscarded(timePlan(true), []WALCommits{{}}, nil); loss.Status != TxLossMeasured || *loss.Commits != 0 || loss.AtLeast {
+		t.Errorf("empty: %+v", loss)
+	}
+}
+
 func TestParseNumericZone(t *testing.T) {
 	for in, want := range map[string]time.Duration{
 		"+00": 0, "+05": 5 * time.Hour, "-05": -5 * time.Hour, "+0530": 5*time.Hour + 30*time.Minute,

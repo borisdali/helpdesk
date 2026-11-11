@@ -303,6 +303,7 @@ func measureTransactionLoss(ctx context.Context, inst pgInstance, plan PITRPlan,
 	}
 	loss := countDiscarded(rp, parts, first)
 	loss.ReadMillis = took.Milliseconds()
+	loss.Decoder = parsed.Version
 	return loss
 }
 

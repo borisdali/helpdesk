@@ -50,6 +50,10 @@ type TransactionLoss struct {
 	// took (the first real measurement of what a read costs).
 	SegmentsRead int   `json:"segments_read,omitempty"`
 	ReadMillis   int64 `json:"read_millis,omitempty"`
+	// Decoder is the pg_waldump that produced the count, as it reports itself
+	// ("pg_waldump (PostgreSQL) 16.15 ..."), so a surprise can be put down to a
+	// version. The reader was built against the output of 16 and 18.
+	Decoder string `json:"decoder,omitempty"`
 	// Basis says in a sentence what the count rests on and where it stops.
 	Basis string `json:"basis,omitempty"`
 	// Reason says why it could not be measured.
@@ -73,6 +77,12 @@ func countDiscarded(plan WALReadPlan, parts []WALCommits, firstRecord *uint64) *
 		unread += p.Unread
 	}
 
+	// Records were read and not one could be taken for a commit or an abort: the
+	// output was not understood (a format this does not know), which must not read
+	// as an exact "no transactions".
+	if len(ends) == 0 && unread > 0 {
+		return unavailableLoss("the decoder's output was not understood: %d transaction record(s) were read and none could be taken for a commit or an abort, so this PostgreSQL version's output format may differ from the ones this was built against", unread)
+	}
 	discarded, how, failed := discardedCommits(plan, ends, firstRecord)
 	if failed != nil {
 		return failed
