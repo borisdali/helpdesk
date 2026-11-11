@@ -425,10 +425,21 @@ carries a second, separate answer, `objective_exposure`, which sets the backup p
   nothing about objectives nobody wrote.
 
 **What it does not do.**   
-It is information: it refuses nothing and no playbook acts on it yet. There is no standing
+It is information: it refuses nothing and no rule forces a gate on it. There is no standing
 alert in the sense of a process that watches and notifies: nothing in the product schedules work, scheduled runs are
 a CronJob (or any scheduler) calling a playbook or tool, as for any other scheduled check (see
-[FLEET.md](FLEET.md)). `objective_exposure` is what such a run or the model reading a triage, can act on.
+[FLEET.md](FLEET.md)).
+
+**The consumer: `pbs_pgbackrest_objective_exposure_triage`.** A read-only playbook that calls `get_pgbackrest_status`
+and files the `objective_exposure` block under one of four endings: within, not assessed, the history breaks the `rto`,
+the archive is older than the `rpo`. It never restores and never takes a backup (it has no transitions and its
+prose names no mutating tool, both pinned by tests); an exposed server goes to a person. It is classified `none` for
+the availability budget. Start it by hand or from a CronJob calling the gateway. **One run records one incident**
+(every entry-point playbook run does), so schedule it daily, not every few minutes: only the within and
+not-assessed endings carry `recommended=no_changes_needed` and are recorded `resolved`; the two exposed endings are
+recorded `needs_human`, which is what they are. Each run also costs one root-cause classification call when the
+gateway has a planner model. No gate rule is attached to the block yet: the `rpo` side is an upper bound and would
+gate healthy idle servers.
 
 ## 6. Design: how objectives will be used (not built yet)
 
@@ -465,7 +476,7 @@ it spends.
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
-| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified end to end on real WAL in the Docker fixture and on the Ubuntu VM over SSH; not yet verified: Kubernetes, a prepared transaction, the cost over many busy segments, a managed database) |
+| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified end to end on real WAL in the Docker fixture and on the Ubuntu VM over SSH and on a K8s Pod; not yet verified: a prepared transaction, the cost over many busy segments, a managed database) |
 | The same count measured at the restore itself, after the stop, so the record says how many transactions were actually discarded, not how many were at stake at plan time | Not built |
 | Reading a range across a point-in-time restore on the instance's older timelines and a read longer than 16 segments (only the first 16 are read and the count says "at least") | Partly built (timelines are followed from the replay path; the cap is a starting figure to be set from a measured read) |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
@@ -601,7 +612,14 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   counted. Three segments (two archived, one live from `pg_wal`) were read in **181 ms**, on a quiet VM. The decoder
   recorded was `pg_waldump (PostgreSQL) 16.15`.
 
-   Not yet verified: the same in Kubernetes, a prepared transaction's commit line (the reader handles the form from
+   **And on a K8s Pod**   
+  (`pgbackrest-demo-0`, PostgreSQL 16.14 Debian, the in-cluster SysAdmin Agent, `kubectl exec`):
+  the same procedure. `feasible`, `measured`, **5 commits**, exact, all at `19:08:37Z`, after the target `19:08:21Z`.
+  The commit LSNs (`0/90174D0` to `0/90176A8`) sit directly before the position the `pg_switch_wal()` run after them
+  returned (`0/9017720`). Two segments were read in **1167 ms**, from segment `…09`, the first to reach the repository
+  at or after the target time. The decoder recorded was `pg_waldump (PostgreSQL) 16.14 (Debian 16.14-1.pgdg13+1)`.
+
+   Not yet verified: a prepared transaction's commit line (the reader handles the form from
   PostgreSQL's source, not from a capture), how long a read takes over many busy segments and a managed or
   operator-run database, where the binary may be absent. Tier B therefore degrades to the archive-based estimate and records why it could not run and it
   is built that way: a count that could not be made says why and is never "nothing lost".

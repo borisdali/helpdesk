@@ -128,4 +128,7 @@ var availabilityImpact = map[string]Impact{
 	"pbs_disk_pressure_triage":          ImpactNone,
 	"pbs_wal_stale_slot":                ImpactNone,
 	"pbs_stale_slot_remediate":          ImpactNone,
+
+	// Reads the backup posture against the declared objectives and nothing else.
+	"pbs_pgbackrest_objective_exposure_triage": ImpactNone,
 }
