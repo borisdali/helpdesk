@@ -143,7 +143,7 @@ A fair question. We started with the Postgres 16 on Linux, but two different thi
 - the **WAL file format**, which changes with every major version. That is why the binary must match the server's major (the script picks it by `PG_VERSION`). A mismatch is a failed read that says so, never a wrong count.
 - the **text `pg_waldump` prints**, which is all we parse.
 
-Next we compared the text on the one other server we had at hand, a Postgres 18.6 in the Docker container that holds the audit store (read-only, nothing written). It printed the same line layout, real `ABORT` records, `UTC` under `TZ=UTC` and the same bounded/unbounded behaviour. Compare the 18.6 lines (`desc: COMMIT 2026-11-09 15:06:34.941088 UTC`, 38 bytes) with 16.15's above. The capture is kept as a fixture (`TestParseWALCommits_CapturedPG18`). So the text was identical across 16.14 (Debian), 16.15 (Ubuntu) and 18.6 (Debian). An no, we have **not** compared 13, 14, 15 or 17 - anybody?
+Next we compared the text on the one other server we had at hand, a Postgres 18.6 in the Docker container that holds the audit store (read-only, nothing written). It printed the same line layout, real `ABORT` records, `UTC` under `TZ=UTC` and the same bounded/unbounded behaviour. Compare the 18.6 lines (`desc: COMMIT 2026-11-09 15:06:34.941088 UTC`, 38 bytes) with 16.15's above. The capture is kept as a fixture (`TestParseWALCommits_CapturedPG18`). So the text was identical across 16.14 (Debian), 16.15 (Ubuntu) and 18.6 (Debian). An no, we have **not** compared 13, 14 or 15 - anybody? (We did run 17.7 in a container later: section 7.)
 
 ## 7. The same plan on three platforms
 
@@ -204,6 +204,9 @@ Five commits again and the last one at `0/90176A8`, just before the `0/9017720` 
 | Docker fixture (integration test) | 16, Debian | 1–2 | 0.1–0.6 s, nearly empty fixture | exact |
 | Ubuntu VM over SSH | 16.15 | 3 | 181 ms | 5, exact |
 | K8s Pod through `kubectl exec` | 16.14 | 2 | 1167 ms | 5, exact |
+| Docker container (AlloyDB Omni) through the Compose stack | 17.7 | 2 | 214 ms | 5, exact |
+
+The last row is the first time the count ran on PostgreSQL 17. The container had no archiving, so for the test we added a pgBackRest config, created a stanza, switched `archive_mode` on (a restart) and took a full backup. Then the same five commits after a target time (`14:07:23Z`, commits at `14:08:09Z`) and the plan: `feasible`, `decoder: pg_waldump (PostgreSQL) 17.7`, the five commit LSNs `0/36024480` to `0/36024640` just before the `0/360246B8` the switch returned. Exact, but we did not diff 17's raw lines against 16's the way we did for 18.6, so this says the parser handled 17.7, not that every line is identical.
 
 We did not investigate why the Pod's read was slower (`kubectl exec`, an image on another node and the storage are all candidates).
 

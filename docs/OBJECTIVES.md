@@ -476,7 +476,7 @@ it spends.
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only) |
 | A recovery-time estimate for recoveries other than a restore (a restart, a scale-up) | Not built |
-| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified end to end on real WAL in the Docker fixture and on the Ubuntu VM over SSH and on a K8s Pod; not yet verified: a prepared transaction, the cost over many busy segments, a managed database) |
+| The number of transactions a point-in-time restore discards, counted from the WAL with `pg_waldump` at plan time, from where recovery would stop (PostgreSQL's own rule), exact for a serving instance read to its own position and "at least" otherwise, with the reason when it cannot be made, kept on the audit record; can be turned off ([PITR.md §4](PITR.md#4-operating-it)) | Built (verified end to end on real WAL in the Docker fixture and on the Ubuntu VM over SSH, on a K8s Pod and in a Docker container on PostgreSQL 17.7; not yet verified: a prepared transaction, the cost over many busy segments, a managed database) |
 | The same count measured at the restore itself, after the stop, so the record says how many transactions were actually discarded, not how many were at stake at plan time | Not built |
 | Reading a range across a point-in-time restore on the instance's older timelines and a read longer than 16 segments (only the first 16 are read and the count says "at least") | Partly built (timelines are followed from the replay path; the cap is a starting figure to be set from a measured read) |
 | The estimate enforced: a restore whose history breaks the `rto` held to `acknowledge` or `refuse` | Not built |
@@ -595,7 +595,8 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   store's container, read-only): the same line layout, the same `COMMIT` and `ABORT` forms (the aborts are real captures
   from 18), the same zone behaviour (`UTC` under `TZ=UTC`, an abbreviation such as `EST` otherwise), the same bounded
   read (exit 0) and the same unbounded end (exit 1, `invalid record length … expected at least 24, got 0`), the same
-  `-p DIR START END` form. Not compared: 13, 14, 15, 17.
+  `-p DIR START END` form. Run, but not compared line by line: **17.7** (an AlloyDB Omni container; the count came out
+  exact, see below). Not compared: 13, 14, 15.
    * Format drift is guarded, not assumed away. A Transaction record that is not a commit or abort in the form read
   and is not one of the kinds that end no transaction (`ASSIGNMENT`, `INVALIDATIONS`, `PREPARE`) is counted as not
   understood, so the count becomes "at least"; a read in which records were seen and none could be taken for a commit
@@ -618,6 +619,14 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   The commit LSNs (`0/90174D0` to `0/90176A8`) sit directly before the position the `pg_switch_wal()` run after them
   returned (`0/9017720`). Two segments were read in **1167 ms**, from segment `…09`, the first to reach the repository
   at or after the target time. The decoder recorded was `pg_waldump (PostgreSQL) 16.14 (Debian 16.14-1.pgdg13+1)`.
+
+   **And on a Docker container, through the Compose stack**   
+  (an AlloyDB Omni container, PostgreSQL 17.7, local Docker Desktop, the Compose stack's SysAdmin Agent reaching it with
+  `docker exec`; archiving and a pgBackRest stanza were switched on for the test): the same procedure. `feasible`,
+  `measured`, **5 commits**, exact, all at `14:08:09Z`, after the target `14:07:23Z`. The commit LSNs (`0/36024480` to
+  `0/36024640`) sit directly before the position the `pg_switch_wal()` run after them returned (`0/360246B8`). Two
+  segments were read in **214 ms**, from segment `…36`, the first to reach the repository at or after the target time.
+  The decoder recorded was `pg_waldump (PostgreSQL) 17.7`. This is the first run on PostgreSQL 17.
 
    Not yet verified: a prepared transaction's commit line (the reader handles the form from
   PostgreSQL's source, not from a capture), how long a read takes over many busy segments and a managed or
