@@ -432,7 +432,7 @@ a CronJob (or any scheduler) calling a playbook or tool, as for any other schedu
 
 **The consumer: `pbs_pgbackrest_objective_exposure_triage`.** A read-only playbook that calls `get_pgbackrest_status`
 and files the `objective_exposure` block under one of five endings: within, not assessed, the history breaks the `rto`,
-the archive is older than the `rpo`, or the status could not be read at all (the check did not run). It never restores and never takes a backup (it has no transitions and its
+the archive is older than the `rpo` or the status could not be read at all (the check did not run). It never restores and never takes a backup (it has no transitions and its
 prose names no mutating tool, both pinned by tests); an exposed server goes to a person. It is classified `none` for
 the availability budget. Start it by hand or from a CronJob calling the gateway. **One run records one incident**
 (every entry-point playbook run does), so schedule it daily, not every few minutes: only the within and
@@ -440,6 +440,29 @@ not-assessed endings carry `recommended=no_changes_needed` and are recorded `res
 the could-not-read ending are recorded `needs_human`, which is what they are. Each run also costs one root-cause classification call when the
 gateway has a planner model. No gate rule is attached to the block yet: the `rpo` side is an upper bound and would
 gate healthy idle servers.
+
+What "none" and "costs nothing" mean here, since they are easy to over-read:   
+  * The ledger's `none` list is the incidents whose playbooks are declared to have no availability impact ([§5.1](#51-which-incidents-spend-the-availability-budget)):
+they are listed beside the charge and **never spend the downtime budget**, whatever their status (`resolved` for the
+quiet endings, `needs_human` for the exposed ones).   
+  * That is the only thing that costs nothing 😉. A run is not free otherwise: it records an incident, a model reads the status and writes the finding (a few seconds and tokens), a
+root-cause classification call is made when the gateway has a planner model and an incident bundle is written when
+automatic bundles are on.
+
+**Live runs and what they show**   
+Against the Ubuntu VM the playbook ran many times while it was being written, each run changing the wording: an unreachable VM (the model improvised, which added the
+"could-not-read" ending and the "first and only tool call" rule), an archive older than the `rpo` (the model asserted
+the server was idle, then built an evidence quote by joining fields, then added a second hypothesis only to reject it:
+the prescribed measurement wording, the verbatim-quote rule and the one-hypothesis rule).   
+
+These runs against the remote VM are in the ledger's `none` list, each `needs_human`, 13 to 20 seconds. Against a Docker container (AlloyDB Omni,
+PostgreSQL 17.7, through the Compose stack, `rpo` 10m) the quiet ending ran: `exposure=within`, the archive 3m 38s old,
+the `rto` `not_comparable`, one hypothesis, one tool call, recorded `resolved` origin `real`, 10 seconds and in the
+ledger's `none` list.   
+
+Its attribution was `objectives-not-assessed`, which was wrong: the class description named "not
+enough restore history" as a reason, so a run with the `rpo` checked and within was filed as not assessed. The
+descriptions were rewritten since (n playbook 1.5).
 
 ## 6. Design: how objectives will be used (not built yet)
 
@@ -584,10 +607,10 @@ Here's the visual of how we think about relationship between the inner/flywheel 
   nearly empty fixture, which says little about a busy database.
 
    **How stable is what is read?**   
-   Two different things, and only one of them is a risk here.
-   * The WAL **file** format is not stable across major versions (each one changes its page magic, and record layouts
+   Two different things and only one of them is a risk here.
+   * The WAL **file** format is not stable across major versions (each one changes its page magic and record layouts
   change), so `pg_waldump` must be the same major version as the server that wrote the WAL. The script picks the
-  binary by the server's major version (`PG_VERSION`), and a mismatch makes `pg_waldump` fail, which is a failed
+  binary by the server's major version (`PG_VERSION`) and a mismatch makes `pg_waldump` fail, which is a failed
   read with its reason, never a wrong count.
    * The **text** `pg_waldump` prints is what is parsed: the `rmgr: Transaction … tx: N, lsn: X/Y … desc: COMMIT|ABORT
   <timestamp> <zone>` line and the flags `-r -s -e -n -p`. It is not a documented stable interface, but it has not
