@@ -2409,6 +2409,36 @@ func TestCheckEvidenceProvenance_QuoteVerified(t *testing.T) {
 	}
 }
 
+// A tool that refused records its text in Error, not Result. A model that quotes
+// the refusal verbatim must not be flagged (the restore refusing for the budget
+// was flagged on every run before), and a quote that is not in it still is.
+func TestCheckEvidenceProvenance_QuoteFromAToolError(t *testing.T) {
+	events := []audit.Event{
+		{
+			EventType: audit.EventTypeToolExecution,
+			Tool: &audit.ToolExecution{
+				Name:  "restore_to_point_in_time",
+				Error: "refusing to restore — the downtime this restore causes may exceed the availability budget (0s of the 4m19s budget already spent), and this database's availability enforcement is \"acknowledge\"",
+			},
+		},
+	}
+	srv := serveFakeToolEvents(t, events)
+	verbatim := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "refusing to restore — the downtime this restore causes may exceed the availability budget"},
+	}}
+	primary, secondary := checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), verbatim)
+	if primary != nil || secondary != nil {
+		t.Errorf("a verbatim quote of a tool's error was flagged: primary=%v secondary=%v", primary, secondary)
+	}
+	invented := &audit.DiagnosticReport{Hypotheses: []audit.DiagnosticHypothesis{
+		{IsPrimary: true, Evidence: "the instance was stopped and the restore rolled back"},
+	}}
+	primary, _ = checkEvidenceProvenance(srv.URL, "", "tr_abc", time.Now().Add(-time.Minute), invented)
+	if len(primary) != 1 {
+		t.Errorf("a quote that is not in the error was not flagged: %v", primary)
+	}
+}
+
 func TestCheckEvidenceProvenance_QuoteFabricated(t *testing.T) {
 	events := []audit.Event{
 		{

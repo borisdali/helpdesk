@@ -145,7 +145,7 @@ And here's the plan:
   | jq -r .output | jq '{status, detail, data_loss_estimate, availability_budget}'
 {
   "status": "feasible",
-  "detail": "backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse, and recovery can still run    out of WAL before the target",
+  "detail": "backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse and recovery can still run    out of WAL before the target",
   "data_loss_estimate": {
     "basis": "live_instance",
     "as_of": "2026-11-12T14:10:09Z",
@@ -220,7 +220,7 @@ If you find that JSON a bit unwiedly... yeah, we won't be surprised if it offend
 [+] Running 1/1
  ✔ Container helpdesk-auditd-1  Healthy                                                                                                                                                                                                      1.0s
 Plan status        : feasible
-Detail             : backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse, and recovery can      still run out of WAL before the target
+Detail             : backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse and recovery can      still run out of WAL before the target
 Backup to restore  : 20261112-135620F
 Recovery target    : 2026-11-12 14:07:23+00
 Archive ends       : 2026-11-12T14:08:42Z
@@ -248,4 +248,106 @@ To approve exactly this plan:
   | jq -r '(.playbooks // .) | map(select(.series_id=="pbs_pgbackrest_objective_exposure_triage")) | .[] | [.version, .playbook_id, .is_active] | @tsv'
 1.4     pb_af1929f8     true
 ```
+
+
+
+
+
+### Live restores: the budget gate, the ledger and the estimate
+
+The plan above is R/O. To see the rest, the budget has to be actually spent by real restores, started the way an operator would start them (not by `faulttest`, whose runs never count).   
+  
+`scripts/demo-restore-cycle.sh` does one cycle against the pgBackRest fixture:  
+ * a fresh full backup  
+ * a row before a target time
+ * the target, three rows after it
+ * the plan
+ * `pbs_pgbackrest_pitr_triage` through the Gateway
+ * `helpdesk-client --pitr-approve`
+ * a wait for the incident
+ * a check of the rows and the report
+
+The fixture's entry in the infra file was tightened so that the budget has something to say. The `rpo` is loosened to 1h with `warn`, so only the budget gates:
+
+```json
+"objectives": { "rpo": "1h", "enforcement": "warn", "availability_slo": 99.99, "availability_window": "30d", "availability_enforcement": "acknowledge" }
+```
+
+99.99% over 30 days is a budget of 4m 19s, shorter than the 30m `rto`. The Gateway and the SysAdmin Agent read the file at startup and were recreated.
+
+#### The "second yes"
+
+Ah, the "second yes" 😉. If you haven't read (or at least skimmed) [this piece](https://levelup.gitconnected.com/ai-driven-database-restore-is-now-rpo-aware-and-answers-this-question-how-much-did-we-lose-2712ae40defa), we recommend that you do. In a nutshell, it's an explicit ack a human is expected to provide, should they proceed through the already blown objective (RPO in particular in that piece, but as of v0.35 release that also includes the availability SLO).   
+
+With that in mind, let's kick off the first cycle, approved **without** `--acknowledge-objective-breach` (`ACK_BREACH=no`). Now, the plan had already said what it would cost:
+
+```
+"budget": "0s of the 4m19s budget over 30d already spent, only 4m19s left 
+          and this restore may take up to the rto of 30m: 
+          it may use more than is left (a restore can finish sooner than its rto)"
+
+"budget_gate": "acknowledge"
+```
+
+But here's the thing: the Gateway accepted the approval, but the restore tool did not:
+
+```
+refusing to restore — the downtime this restore causes may exceed the availability budget... 
+  approve the gate again with acknowledge_objective_breach
+```
+
+and the instance was not stopped or affected in any other way (and in particular, the three "after" rows were still there).   
+  
+Two things we learned from it:
+
+- The refusal comes from the **tool**, at restore time, not from the Gateway at approval.
+- The gate was already used. Approving the same run again with the flag was refused by the Gateway: `HTTP 409: run "plr_9f9ad29f" is not in gate_pending state (outcome="transitioned")`. The way on is a new triage run. The refusal text said "approve the gate again", which was wrong and it now says to start the triage again.
+
+The incident ended `needs_human`. Because its playbook is an outage-class one and nothing confirmed a recovery, the ledger lists it apart as **unconfirmed** (37 s), not charged:
+
+```
+Unconfirmed (outages not charged: their real downtime is unknown)
+  inc_b8a32b5e   2026-11-12 17:14  needs_human            37s
+```
+
+#### Three restores
+
+With the acknowledgement (the script adds it when the plan asks), three cycles. Each restore stops the serving container, restores the backup, restarts and `verify_restore_recovery` reports `verified`; the timeline goes 1 to 2, 3, 4. Each incident was `resolved` in about 110 seconds through the Gateway. The rows of each cycle are tagged and the check after each restore reads `before-<id>=1` with no `after-<id>` rows.
+
+The ledger after the third:
+
+```
+Availability budget: pgbackrest-db
+  Window   30d [database], as of 2026-11-12 19:30 UTC
+  Budget   availability 99.99% over 30d allows 4m19s of downtime per window; rto 30m is longer than the whole budget: one recovery that takes the full rto breaks the SLO
+  Spent    5m 43s in 3 outage incident(s), 132% of the budget
+  Left     -1m 24s   ⚠ OVERSPENT: the budget is used up
+           -2m 01s if the unconfirmed outages below count in full
+
+Charged (outages that count against the budget)
+  inc_120e0009   2026-11-12 18:27  resolved               2m 02s
+  inc_eb659429   2026-11-12 19:20  resolved               1m 50s
+  inc_49e8d89e   2026-11-12 19:28  resolved               1m 51s
+```
+
+#### The estimate learns
+
+The plan's recovery estimate before and after, from the same server:
+
+| Restores before the plan | `recovery_estimate.status` | What the plan assumed for the restore's duration |
+|---|---|---|
+| 0 | `no_history` | the declared `rto`, 30m |
+| 1, 2 | `insufficient_history` (samples 1, 2) | the declared `rto` |
+| 3 | `estimated`: median 1m30s, longest 1m41s | 101 s, the longest (`duration_basis: history_longest`) |
+
+```
+"basis": "3 resolved restores of this server in the last 90d (real incidents): median 1m30s, longest 1m41s (too few for a p90, which needs 10); 1 other run(s) did not recover or had not finished and are not counted"
+"vs_rto_detail": "none of the 3 past restores took longer than the rto of 30m (the longest took 1m41s)"
+```
+
+The budget status of the plan made after that was `exceeds` (`-1m24s` left), with the gate `acknowledge`.
+
+#### Two durations that look like a discrepancy and are not
+
+The estimate says the longest restore took 1m41s and the ledger charged 2m02s, 1m50s and 1m51s for the same restores. They measure different things. The estimate is the **remediation hop**: from after the gate approval to completion (restore, restart, verification). The ledger charges the **whole incident**, from the start of the triage run to the end of the last run, so it includes the triage, the model's reasoning and the wait at the gate. The first is the recovery duration, the second is the closest the system has to downtime and neither is the downtime itself: the instance may have been down before aiHelpDesk was engaged.
 

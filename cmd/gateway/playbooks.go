@@ -4705,11 +4705,21 @@ func checkEvidenceProvenance(auditURL, apiKey, traceID string, since time.Time, 
 	events := audit.FetchToolExecutionEvents(auditURL, apiKey, traceID, since)
 	var outputs []string
 	for _, ev := range events {
-		if ev.Tool != nil && ev.Tool.Result != "" {
+		if ev.Tool == nil {
+			continue
+		}
+		if ev.Tool.Result != "" {
 			outputs = append(outputs, ev.Tool.Result)
 			if flat := flattenJSONEvidence(ev.Tool.Result); flat != "" {
 				outputs = append(outputs, flat)
 			}
+		}
+		// A tool that refused or failed records its text in Error, not Result. A
+		// quote taken from a refusal (the restore refusing for the budget, a status
+		// check that could not reach the host) is a quote of tool output too; found
+		// live when verbatim refusals were flagged as unverified.
+		if ev.Tool.Error != "" {
+			outputs = append(outputs, ev.Tool.Error)
 		}
 	}
 	flagQuote := func(qs quoteSource, flagged string) {
