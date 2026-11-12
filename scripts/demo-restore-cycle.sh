@@ -12,12 +12,20 @@
 #   verify    the rows after the target are gone, the row before it is back
 #   report    the incident narrative and the availability budget
 #
-# Destructive for the fixture only: it stops and restores the container.
+# Destructive for the target only: it stops and restores the container or the VM's
+# PostgreSQL.
 #
-# Needs: docker, curl, jq, go; the fixture up
+# Two ways to reach the database host for the preparation and the checks (the
+# restore itself is done by the product, whichever the platform):
+#   docker (default)  the pgBackRest fixture container, through docker exec
+#   ssh               a VM, through ssh as the postgres user: set SSH_TARGET
+#                     (postgres@host) and FIXTURE_DB_KEY (the infra key of the VM's
+#                     database); SSH_KEY defaults to the test client key in the repo
+#
+# Needs: curl, jq, go, and docker or ssh; for docker the fixture up
 #   docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
-# and the stack's infra entry for the fixture (default pgbackrest-db) in the file the
-# gateway and the sysadmin agent were started with.
+# and the stack's infra entry for the target in the file the gateway and the sysadmin
+# agent were started with.
 #
 # Environment (the names helpdesk-client already uses):
 #   HELPDESK_GATEWAY_URL     gateway as seen from this shell, e.g. http://localhost:8080
@@ -26,8 +34,12 @@
 #   HELPDESK_SYSADMIN_KEY    its key (HELPDESK_SYSADMIN_API_KEY is accepted too)
 # Optional:
 #   HELPDESK_CLIENT_USER     the approver (default alice@example.com)
-#   FIXTURE_CONTAINER        default helpdesk-test-pg-pgbackrest
-#   FIXTURE_DB_KEY           infra key of the fixture, default pgbackrest-db
+#   FIXTURE_CONTAINER        docker mode: default helpdesk-test-pg-pgbackrest
+#   FIXTURE_DB_KEY           infra key of the database, default pgbackrest-db (required with SSH_TARGET)
+#   SSH_TARGET, SSH_KEY, SSH_OPTS   ssh mode, see above
+#   FIXTURE_DB               database for the marker table (docker: testdb, ssh: postgres)
+#   STANZA                   pgBackRest stanza, default main
+#   ACK_BREACH               auto (default), yes or no: whether to approve with --acknowledge-objective-breach
 #   YES=1                    do not ask before starting
 set -euo pipefail
 
@@ -37,26 +49,45 @@ SYSADMIN=${HELPDESK_SYSADMIN_URL:?set HELPDESK_SYSADMIN_URL}
 SYSADMIN_KEY=${HELPDESK_SYSADMIN_KEY:-${HELPDESK_SYSADMIN_API_KEY:?set HELPDESK_SYSADMIN_KEY}}
 APPROVER=${HELPDESK_CLIENT_USER:-alice@example.com}
 C=${FIXTURE_CONTAINER:-helpdesk-test-pg-pgbackrest}
-DBKEY=${FIXTURE_DB_KEY:-pgbackrest-db}
-STANZA=main
+STANZA=${STANZA:-main}
 
 step() { printf '\n== %s\n' "$*"; }
-psql_c() { docker exec "$C" psql -U postgres -d testdb -Atc "$1"; }
 auth=(-H "Authorization: Bearer $KEY")
 
-docker inspect -f '{{.State.Running}}' "$C" 2>/dev/null | grep -q true || {
-  echo "container $C is not running; start the fixture first (see the header of this script)" >&2
-  exit 1
-}
+if [ -n "${SSH_TARGET:-}" ]; then
+  MODE=ssh
+  DBKEY=${FIXTURE_DB_KEY:?set FIXTURE_DB_KEY (the infra key of the VM database) with SSH_TARGET}
+  DB=${FIXTURE_DB:-postgres}
+  SSH_KEY=${SSH_KEY:-testing/docker/ssh/pgbackrest_test_client_key}
+  WHERE="$DBKEY on $SSH_TARGET"
+  sshx() { ssh -i "$SSH_KEY" -o BatchMode=yes ${SSH_OPTS:-} "$SSH_TARGET" "$@"; }
+  # The remote shell parses what ssh sends, so every argument is quoted for it.
+  psql_c() { sshx "psql -d $(printf %q "$DB") -Atc $(printf %q "$1")"; }
+  pgbr() { sshx "pgbackrest $(printf '%q ' "$@")"; }
+  onhost() { sshx "$1"; }
+  sshx true || { echo "cannot ssh to $SSH_TARGET with $SSH_KEY" >&2; exit 1; }
+else
+  MODE=docker
+  DBKEY=${FIXTURE_DB_KEY:-pgbackrest-db}
+  DB=${FIXTURE_DB:-testdb}
+  WHERE="$DBKEY ($C)"
+  psql_c() { docker exec "$C" psql -U postgres -d "$DB" -Atc "$1"; }
+  pgbr() { docker exec -u postgres "$C" pgbackrest "$@"; }
+  onhost() { docker exec "$C" sh -c "$1"; }
+  docker inspect -f '{{.State.Running}}' "$C" 2>/dev/null | grep -q true || {
+    echo "container $C is not running; start the fixture first (see the header of this script)" >&2
+    exit 1
+  }
+fi
 
 if [ "${YES:-}" != 1 ]; then
-  echo "This restores $C ($DBKEY) to a point a few seconds in the past. It is destructive for that container only."
+  echo "This restores $WHERE to a point a few seconds in the past. It is destructive for that database."
   read -r -p "Continue? [y/N] " ans
   [ "$ans" = y ] || exit 1
 fi
 
 step "prepare: a full backup, a row before the target, the target, rows after it"
-docker exec -u postgres "$C" pgbackrest --stanza=$STANZA --type=full --start-fast --log-level-console=warn backup
+pgbr --stanza=$STANZA --type=full --start-fast --log-level-console=warn backup
 psql_c "create table if not exists cycle_marker(phase text, at timestamptz default now())"
 CYCLE=$(date -u +%H%M%S)   # tags this cycle's rows; rows of earlier cycles are older than the target and stay
 psql_c "insert into cycle_marker(phase) values ('before-$CYCLE')"
@@ -85,8 +116,9 @@ if [ "$(echo "$PLAN" | jq -r '.data_loss_estimate.transactions.status // "absent
   echo
   echo "!! transactions were not counted. State at this moment:"
   echo "$PLAN" | jq '.data_loss_estimate.transactions'
-  docker exec "$C" sh -c 'ls /var/lib/postgresql/data/pg_wal | head -20'
-  docker exec -u postgres "$C" pgbackrest --stanza=$STANZA info | grep "wal archive"
+  DD=$(psql_c "show data_directory")
+  onhost "ls $DD/pg_wal | head -20"
+  pgbr --stanza=$STANZA info | grep "wal archive"
 fi
 [ "$(echo "$PLAN" | jq -r .status)" = feasible ] || { echo "plan is not feasible; not going on" >&2; exit 1; }
 DIGEST=$(echo "$PLAN" | jq -r .plan_digest)
@@ -149,7 +181,7 @@ done
 echo "incident status: $STATUS"
 
 step "verify"
-for _ in $(seq 1 30); do docker exec "$C" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+for _ in $(seq 1 30); do psql_c "select 1" >/dev/null 2>&1 && break; sleep 2; done
 echo "this cycle's rows after the restore: $(psql_c "select phase||'='||count(*) from cycle_marker where phase like '%-$CYCLE' group by phase order by phase" | paste -sd' ' -)"
 echo "expected: before-$CYCLE=1 and no after-$CYCLE rows (rows of earlier cycles are older than the target and stay)"
 
