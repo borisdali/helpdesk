@@ -154,7 +154,7 @@ On the **Ubuntu VM** (the in-cluster agent reaching it over SSH), the plan repor
 ```json
 {
   "status": "feasible",
-  "loss": {
+  "data_loss_estimate": {
     "summary": "27m 51s of history discarded, up to the running instance's position at 2026-11-11T17:52:23Z; it grows until the instance is stopped. 5 transactions committed after the target would be discarded (counted from the WAL).",
     "transactions": {
       "status": "measured",
