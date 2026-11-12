@@ -15,14 +15,17 @@
 # Destructive for the target only: it stops and restores the container or the VM's
 # PostgreSQL.
 #
-# Two ways to reach the database host for the preparation and the checks (the
+# Three ways to reach the database host for the preparation and the checks (the
 # restore itself is done by the product, whichever the platform):
 #   docker (default)  the pgBackRest fixture container, through docker exec
 #   ssh               a VM, through ssh as the postgres user: set SSH_TARGET
 #                     (postgres@host) and FIXTURE_DB_KEY (the infra key of the VM's
 #                     database); SSH_KEY defaults to the test client key in the repo
+#   k8s               a pod, through kubectl exec (su postgres): set KUBE_POD
+#                     (e.g. pgbackrest-demo-0); KUBE_NS defaults to db, FIXTURE_DB_KEY to
+#                     pgbackrest-k8s; KUBE_CONTEXT is optional
 #
-# Needs: curl, jq, go, and docker or ssh; for docker the fixture up
+# Needs: curl, jq, go, and docker, ssh or kubectl; for docker the fixture up
 #   docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
 # and the stack's infra entry for the target in the file the gateway and the sysadmin
 # agent were started with.
@@ -37,7 +40,8 @@
 #   FIXTURE_CONTAINER        docker mode: default helpdesk-test-pg-pgbackrest
 #   FIXTURE_DB_KEY           infra key of the database, default pgbackrest-db (required with SSH_TARGET)
 #   SSH_TARGET, SSH_KEY, SSH_OPTS   ssh mode, see above
-#   FIXTURE_DB               database for the marker table (docker: testdb, ssh: postgres)
+#   KUBE_POD, KUBE_NS, KUBE_CONTEXT k8s mode, see above
+#   FIXTURE_DB               database for the marker table (docker and k8s: testdb, ssh: postgres)
 #   STANZA                   pgBackRest stanza, default main
 #   ACK_BREACH               auto (default), yes or no: whether to approve with --acknowledge-objective-breach
 #   YES=1                    do not ask before starting
@@ -66,6 +70,21 @@ if [ -n "${SSH_TARGET:-}" ]; then
   pgbr() { sshx "pgbackrest $(printf '%q ' "$@")"; }
   onhost() { sshx "$1"; }
   sshx true || { echo "cannot ssh to $SSH_TARGET with $SSH_KEY" >&2; exit 1; }
+elif [ -n "${KUBE_POD:-}" ]; then
+  MODE=k8s
+  KUBE_NS=${KUBE_NS:-db}
+  DBKEY=${FIXTURE_DB_KEY:-pgbackrest-k8s}
+  DB=${FIXTURE_DB:-testdb}
+  WHERE="$DBKEY (pod $KUBE_POD in $KUBE_NS)"
+  kc() { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$KUBE_NS" "$@"; }
+  # su hands the string to the postgres user's shell, so every argument is quoted for it.
+  psql_c() { kc exec "$KUBE_POD" -- su postgres -c "psql -d $(printf %q "$DB") -Atc $(printf %q "$1")"; }
+  pgbr() { kc exec "$KUBE_POD" -- su postgres -c "pgbackrest $(printf '%q ' "$@")"; }
+  onhost() { kc exec "$KUBE_POD" -- sh -c "$1"; }
+  [ "$(kc get pod "$KUBE_POD" -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ] || {
+    echo "pod $KUBE_POD in namespace $KUBE_NS is not running" >&2
+    exit 1
+  }
 else
   MODE=docker
   DBKEY=${FIXTURE_DB_KEY:-pgbackrest-db}
@@ -181,7 +200,7 @@ done
 echo "incident status: $STATUS"
 
 step "verify"
-for _ in $(seq 1 30); do psql_c "select 1" >/dev/null 2>&1 && break; sleep 2; done
+for _ in $(seq 1 90); do psql_c "select 1" >/dev/null 2>&1 && break; sleep 2; done
 echo "this cycle's rows after the restore: $(psql_c "select phase||'='||count(*) from cycle_marker where phase like '%-$CYCLE' group by phase order by phase" | paste -sd' ' -)"
 echo "expected: before-$CYCLE=1 and no after-$CYCLE rows (rows of earlier cycles are older than the target and stay)"
 

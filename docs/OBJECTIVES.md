@@ -377,7 +377,7 @@ The rules that keep it honest:
   `vs_rto` is `within` when none of the counted restores took longer than the
   declared `rto` and `exceeds` when some did, with how many: the declared number against the demonstrated one.
 
-**What it changes.**   
+**What it changes**   
 In the budget check (§5.4) a restore is taken to last as long as the estimate plans for (its
 **p90** from ten samples, its **longest** from three to nine) when there is an estimate and as long as the declared
 `rto`, as an upper bound, when there is not. The verdict says which (`duration_basis`: `history_p90`,
@@ -386,13 +386,30 @@ and, from ten samples, the p90. Records from before this say `history`, which me
 to a `may_exceed` and back: it never refuses a restore, because a `may_exceed` asks and does not refuse and a spent
 budget is a breach whatever history says.
 
-**What it does not do.**   
+**What it does not do**   
 It holds nothing by itself: a history that breaks the `rto` is shown at the gate (`RTO CHECK
 (!)`) and recorded and is not enforced. It covers restores only, not a restart or a scale-up. And it is only as good as
 the incidents behind it: real history is thin and a server restored three times in a year has three samples. Two
 more limits are not corrected for. A restore's time is roughly the size of the data over the throughput, plus the WAL
 to replay, so a history from when the server was half its size is optimistic and a restore to ten minutes ago is not
 a restore to three days ago; both kinds are counted together and the restored size is not recorded yet (v0.36).
+
+**Two clocks**   
+This is a note on a timing used for measuing the estimate and the ledger:  
+ * The estimate is the recovery duration of the remediation hop: after the approval, the restore, the restart and the
+verification.   
+ * The ledger ([§5.3](#53-the-availability-ledger)) charges the incident, from the start of the triage run
+to the end of the last run, so it also holds the triage, the model's reasoning and any wait for a person at the gate.  
+  
+
+The budget check puts the two side by side: what the ledger has left against how long the next restore is planned to
+last. On the smaller databases they differ a lot: on the Ubuntu VM a restore took 33 to 36 seconds and
+each was charged about 1m 33s and on the Docker fixture 90 to 101 seconds against 1m 50s to 2m 02s.   
+  
+The part that is the same for every restore (the triage, the model) matters less as restores get longer, but the wait for an approval
+does not shrink with the data and is charged in full, whether or not the instance was down while it waited (a serving
+instance is not down until the restore stops it). Neither figure is the downtime and a gate that compares one with
+the other is on the optimistic side by about the difference.
 
 ### 5.6 Is the backup posture enough for the objectives?
 
