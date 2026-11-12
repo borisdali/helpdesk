@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_objective_exposure_triage
 name: "pgBackRest — Objective Exposure Check"
-version: "1.3"
+version: "1.4"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -74,6 +74,11 @@ guidance: |
     longer than the rto. measured_seconds is the longest one; detail says how
     many restores it is based on.
   - not_comparable and no_objective say why a check could not be made.
+
+  Write exactly one hypothesis line, HYPOTHESIS_1, in every ending. The rpo
+  and rto checks are two readings of the same result, not competing
+  explanations: the one that decides the ending is the hypothesis, and the
+  other goes in FINDINGS. Never add a HYPOTHESIS_2 only to reject it.
 
   Every EVIDENCE quote must be ONE sentence copied word for word from a
   detail field (rpo.detail, rto.detail, or the tool's error), inside the

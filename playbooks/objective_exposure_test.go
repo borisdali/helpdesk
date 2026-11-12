@@ -30,6 +30,12 @@ func TestObjectiveExposure_IsReadOnlyAndTerminal(t *testing.T) {
 	if !strings.Contains(strings.Join(strings.Fields(pb.Guidance), " "), "ONE sentence copied word for word from a detail field") {
 		t.Error("guidance no longer asks for a verbatim detail sentence as evidence: the first live run joined field names with semicolons and was flagged as unverified evidence")
 	}
+	if !strings.Contains(strings.Join(strings.Fields(pb.Guidance), " "), "Never add a HYPOTHESIS_2 only to reject it") {
+		t.Error("guidance no longer limits a run to one hypothesis: the third live run added the rto as a second hypothesis and rejected it as 'not an alternative'")
+	}
+	if strings.Contains(pb.Guidance, "HYPOTHESIS_2:") {
+		t.Error("an ending template contains a HYPOTHESIS_2 line, contradicting the one-hypothesis rule")
+	}
 	if !strings.Contains(pb.Guidance, "first and only tool call") {
 		t.Error("guidance no longer says get_pgbackrest_status is the only tool call; a first run called check_host first")
 	}
