@@ -14,7 +14,7 @@ Here is the skinny:
 
 The database server entry in the local infra file (the `environment` is `prod`, which supplies `rto: 30m`):
 
-```json
+```
 [boris@ ~/helpdesk]$ grep -m1 availability_slo -B1 infrastructure.json
       "environment": "prod",
       "objectives": { "rpo": "1s", "enforcement": "acknowledge", "availability_slo": 99.9, "availability_window": "30d" }
@@ -121,7 +121,7 @@ Duration is from detection to recovery: each incident runs from the start of its
 
 The same data comes from `GET /api/v1/availability-ledger?database=pgbackrest-ubuntu-vm`, where the four are listed individually:
 
-```
+```bash
 [boris@ ~/helpdesk]$ curl -s "$HELPDESK_GATEWAY_URL/api/v1/availability-ledger?database=pgbackrest-ubuntu-vm" \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   | jq -r '"window \(.window_seconds/86400)d  budget \(.budget_seconds)s  spent \(.charged_seconds)s  left \(.remaining_seconds)s",
