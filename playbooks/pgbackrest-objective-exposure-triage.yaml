@@ -1,6 +1,6 @@
 series_id: pbs_pgbackrest_objective_exposure_triage
 name: "pgBackRest — Objective Exposure Check"
-version: "1.4"
+version: "1.5"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -22,7 +22,7 @@ description: |
   product schedules it. A run records one incident, so a schedule should be
   daily, not every few minutes.
 root_cause_classes:
-  version: "1.1"
+  version: "1.2"
   classes:
     - objectives-within
     - objectives-not-assessed
@@ -35,14 +35,18 @@ root_cause_classes:
       there was nothing to read. Nothing is known about the server's exposure;
       the check did not run.
     objectives-within: >
-      Every check that could be made is within its declared objective: the
-      archive is no older than the rpo and no past restore of this server took
-      longer than the rto.
+      Every check that could be made is within its declared objective. At least
+      one check was made and none is exceeded or may be exceeded: typically the
+      archive is no older than the rpo. The other check may be not comparable
+      (for example, not enough restore history to compare with the rto); that
+      does not change this class.
     objectives-not-assessed: >
-      No check could be made: no rpo or rto is declared for this server, its
-      environment or the fleet, or the declared value could not be used, or
-      there is not enough restore history to compare with the rto. This is a
-      statement about what is known, not a finding that anything is wrong.
+      Neither check could be made: no rpo or rto is declared for this server,
+      its environment or the fleet, or the declared values could not be used,
+      or there is no usable archive age and no restore history. If either check
+      was made and is within its objective, the class is objectives-within, not
+      this one. This is a statement about what is known, not a finding that
+      anything is wrong.
     rto-exceeded-by-history: >
       At least one past restore of this server, from a real incident, took
       longer than the declared rto. A future restore can be expected to run

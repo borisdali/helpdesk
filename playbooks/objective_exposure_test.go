@@ -3,6 +3,8 @@ package playbooks_test
 import (
 	"strings"
 	"testing"
+
+	"helpdesk/playbooks"
 )
 
 // The objective-exposure check (v0.35) is read-only and meant to run on a
@@ -43,6 +45,30 @@ func TestObjectiveExposure_IsReadOnlyAndTerminal(t *testing.T) {
 		if strings.Contains(pb.Guidance, tool) {
 			t.Fatalf("guidance names %s; the check must not point the model at a mutating tool", tool)
 		}
+	}
+}
+
+// The attribution classifier files a run under one of the root-cause classes by
+// their descriptions. A live run with the rpo within and the rto not comparable
+// was filed under objectives-not-assessed, because that description named "not
+// enough restore history" as a reason. Pin the wording that keeps the two apart.
+func TestObjectiveExposure_WithinAndNotAssessedAreNotConfusable(t *testing.T) {
+	raw, err := playbooks.FS.ReadFile(exposureFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, want := range []string{
+		"The other check may be not comparable",
+		"Neither check could be made",
+		"If either check was made and is within its objective, the class is objectives-within, not this one",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("class descriptions no longer say %q: a run with only the rpo checked was filed as not assessed", want)
+		}
+	}
+	if strings.Contains(text, "or there is not enough restore history to compare with the rto. This is a statement") {
+		t.Error("objectives-not-assessed again lists missing restore history as a reason on its own")
 	}
 }
 
