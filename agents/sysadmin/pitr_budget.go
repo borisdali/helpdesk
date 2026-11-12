@@ -130,7 +130,8 @@ func budgetGateError(v *availability.BudgetVerdict, acknowledged bool) error {
 			what = "cannot be checked against the availability budget, because what has been spent could not be read"
 		}
 		msg := fmt.Sprintf("the downtime this restore causes %s (%s), and this database's availability enforcement is %q: "+
-			"approve the gate again with acknowledge_objective_breach (helpdesk-client --acknowledge-objective-breach) to accept that", what, v.Detail, v.Enforcement)
+			"the gate this approval came through is used up: start the triage again and approve its new gate with acknowledge_objective_breach "+
+			"(helpdesk-client --acknowledge-objective-breach) to accept that; the plan (helpdesk-client --pitr-plan) says beforehand when it is needed", what, v.Detail, v.Enforcement)
 		if v.GateNote != "" {
 			msg += " (" + v.GateNote + ")"
 		}

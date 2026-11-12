@@ -77,13 +77,32 @@ echo "$PLAN" | jq '{status, detail, backup_label, plan_digest,
   rpo_check: .data_loss_estimate.objective.detail, rpo_gate: .data_loss_estimate.objective.gate,
   budget: .availability_budget.detail, budget_gate: .availability_budget.gate,
   estimate: .availability_budget.recovery_estimate.status, estimate_samples: .availability_budget.recovery_estimate.samples}'
+if [ "$(echo "$PLAN" | jq -r '.data_loss_estimate.transactions.status // "absent"')" != measured ]; then
+  # The count did not come out. Capture the state now: the first time this happened
+  # (a fresh fixture, a plan made seconds after pg_switch_wal) it could not be
+  # reproduced afterwards, because the next WAL switch changed both listings.
+  echo
+  echo "!! transactions were not counted. State at this moment:"
+  echo "$PLAN" | jq '.data_loss_estimate.transactions'
+  docker exec "$C" sh -c 'ls /var/lib/postgresql/data/pg_wal | head -20'
+  docker exec -u postgres "$C" pgbackrest --stanza=$STANZA info | grep "wal archive"
+fi
 [ "$(echo "$PLAN" | jq -r .status)" = feasible ] || { echo "plan is not feasible; not going on" >&2; exit 1; }
 DIGEST=$(echo "$PLAN" | jq -r .plan_digest)
 ACK=()
+ASKS=no
 if [ "$(echo "$PLAN" | jq -r '[.data_loss_estimate.objective.gate, .availability_budget.gate] | index("acknowledge") // empty')" != "" ]; then
-  ACK=(--acknowledge-objective-breach)
-  echo "the plan asks for an acknowledgement: approving with --acknowledge-objective-breach"
+  ASKS=yes
 fi
+case "${ACK_BREACH:-auto}" in
+  yes) ACK=(--acknowledge-objective-breach) ;;
+  auto) if [ "$ASKS" = yes ]; then
+          ACK=(--acknowledge-objective-breach)
+          echo "the plan asks for an acknowledgement: approving with --acknowledge-objective-breach"
+        fi ;;
+  no) echo "ACK_BREACH=no: approving WITHOUT --acknowledge-objective-breach (plan asks for it: $ASKS)" ;;
+  *) echo "ACK_BREACH must be auto, yes or no" >&2; exit 1 ;;
+esac
 
 step "triage through the gateway (holds at the gate)"
 PB=$(curl -s "${auth[@]}" "$GW/api/v1/fleet/playbooks?series_id=pbs_pgbackrest_pitr_triage&active_only=true" | jq -r '.playbooks[0].playbook_id')
@@ -94,9 +113,30 @@ RUN=$(echo "$RESP" | jq -r '.run_id // empty')
 echo "run $RUN: $(echo "$RESP" | jq -r .status)"
 
 step "approve as $APPROVER"
-HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=$KEY go run ./cmd/helpdesk-client --user "$APPROVER" \
-  --pitr-approve "$RUN" --recovery-target-type time --recovery-target "$TARGET" --plan-digest "$DIGEST" \
-  --acknowledge-data-loss --allow-stop-serving ${ACK[@]+"${ACK[@]}"}
+approve() {
+  HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=$KEY go run ./cmd/helpdesk-client --user "$APPROVER" \
+    --pitr-approve "$RUN" --recovery-target-type time --recovery-target "$TARGET" --plan-digest "$DIGEST" \
+    --acknowledge-data-loss --allow-stop-serving "$@"
+}
+if [ "${ACK_BREACH:-auto}" = no ]; then
+  # Show what the second yes does: this approval is expected to be refused (or the
+  # restore refused) when the plan asks for an acknowledgement. The gate stays open.
+  if approve; then
+    echo
+    echo "the gateway accepted the approval. When the plan asks for the acknowledgement the restore tool is expected to refuse"
+    echo "it (see the incident below); the instance is not stopped. To approve again with the acknowledgement:"
+    echo "  HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=... go run ./cmd/helpdesk-client --user $APPROVER --pitr-approve $RUN \\"
+    echo "    --recovery-target-type time --recovery-target $TARGET --plan-digest $DIGEST --acknowledge-data-loss --allow-stop-serving --acknowledge-objective-breach"
+  else
+    echo
+    echo "refused, as expected when the plan asks for the acknowledgement. The gate is still open; approve it with:"
+    echo "  HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=... go run ./cmd/helpdesk-client --user $APPROVER --pitr-approve $RUN \\"
+    echo "    --recovery-target-type time --recovery-target $TARGET --plan-digest $DIGEST --acknowledge-data-loss --allow-stop-serving --acknowledge-objective-breach"
+    exit 0
+  fi
+else
+  approve ${ACK[@]+"${ACK[@]}"}
+fi
 
 step "wait for the incident to leave open"
 STATUS=open

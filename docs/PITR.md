@@ -337,6 +337,11 @@ weaken the check.
 The plan prints what approving will demand (`Approving needs : --acknowledge-objective-breach` or `Approving :
 REFUSED`) and adds the flag to the approve command it offers.
 
+Read it before approving. A gate can be approved once: if the approval lacks a required acknowledgement the restore
+refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the gateway
+(HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
+found by running it: the refusal used to say "approve the gate again".
+
 **The loss is measured again just before the instance is stopped**   
 Not taken from the plan. A plan that said `within` can be approved minutes or hours later and a serving instance has gone on committing since, so the
 restore carries the instance's clock forward by the time that has passed since it last asked (the archive flush

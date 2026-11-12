@@ -112,7 +112,8 @@ func (c *RPOComparison) objectiveGate(acknowledged bool) error {
 			what = "cannot be checked against the recovery objective, which could not be read"
 		}
 		return fmt.Errorf("the data this restore discards %s (%s), and this database's enforcement is %q: "+
-			"approve the gate again with acknowledge_objective_breach (helpdesk-client --acknowledge-objective-breach) to accept that", what, c.Detail, c.Enforcement)
+			"the gate this approval came through is used up: start the triage again and approve its new gate with acknowledge_objective_breach "+
+			"(helpdesk-client --acknowledge-objective-breach) to accept that; the plan (helpdesk-client --pitr-plan) says beforehand when it is needed", what, c.Detail, c.Enforcement)
 	}
 	return nil
 }
