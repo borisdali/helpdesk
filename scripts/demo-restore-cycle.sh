@@ -58,14 +58,15 @@ fi
 step "prepare: a full backup, a row before the target, the target, rows after it"
 docker exec -u postgres "$C" pgbackrest --stanza=$STANZA --type=full --start-fast --log-level-console=warn backup
 psql_c "create table if not exists cycle_marker(phase text, at timestamptz default now())"
-psql_c "insert into cycle_marker(phase) values ('before')"
+CYCLE=$(date -u +%H%M%S)   # tags this cycle's rows; rows of earlier cycles are older than the target and stay
+psql_c "insert into cycle_marker(phase) values ('before-$CYCLE')"
 sleep 3
 TARGET=$(psql_c "select to_char(clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")
 sleep 3
-for _ in 1 2 3; do psql_c "insert into cycle_marker(phase) values ('after')" >/dev/null; done
+for _ in 1 2 3; do psql_c "insert into cycle_marker(phase) values ('after-$CYCLE')" >/dev/null; done
 psql_c "select pg_switch_wal()" >/dev/null
 echo "target: $TARGET"
-echo "rows now: $(psql_c "select phase||'='||count(*) from cycle_marker group by phase order by phase" | paste -sd' ' -)"
+echo "this cycle's rows now: $(psql_c "select phase||'='||count(*) from cycle_marker where phase like '%-$CYCLE' group by phase order by phase" | paste -sd' ' -)"
 
 step "plan (read-only)"
 PLAN=$(curl -s -X POST "$SYSADMIN/tool/plan_point_in_time_recovery" \
@@ -149,8 +150,8 @@ echo "incident status: $STATUS"
 
 step "verify"
 for _ in $(seq 1 30); do docker exec "$C" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
-echo "rows after restore: $(psql_c "select phase||'='||count(*) from cycle_marker group by phase order by phase" | paste -sd' ' -)"
-echo "expected: before=1 (or more from earlier cycles) and no after rows from this cycle"
+echo "this cycle's rows after the restore: $(psql_c "select phase||'='||count(*) from cycle_marker where phase like '%-$CYCLE' group by phase order by phase" | paste -sd' ' -)"
+echo "expected: before-$CYCLE=1 and no after-$CYCLE rows (rows of earlier cycles are older than the target and stay)"
 
 step "report"
 go run ./testing/cmd/faulttest vault incidents "$RUN" --summary --gateway "$GW" --api-key "$KEY" || true

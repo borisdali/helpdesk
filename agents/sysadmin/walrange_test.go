@@ -121,6 +121,36 @@ func TestPlanWALRead_ServingInstanceAddsItsOwnUnarchivedWAL(t *testing.T) {
 	}
 }
 
+// Right after a WAL switch the instance is at the start of a segment that holds
+// no record yet. pg_waldump fails on such a segment ("could not find a valid
+// record", or "could not locate WAL file" before the file exists), which made the
+// whole count unavailable on two plans made seconds after pg_switch_wal() on the
+// Docker fixture. The empty segment is not read; the one before it, whole, is.
+func TestPlanWALRead_EmptyLiveSegmentIsNotRead(t *testing.T) {
+	wal := archiveOf(0x40, 0x42, 0, 3, 3)
+	target := timeTarget(rangeT0.Add(90 * time.Second))
+	for _, tc := range []struct {
+		name, lsn, want string
+	}{
+		{"exactly at the segment start, everything archived", "0/43000000", "archive:0000000000000042-0000000000000042"},
+		{"inside the page header", "0/43000028", "archive:0000000000000042-0000000000000042"},
+		{"one record in: the segment is read, to the position", "0/43000030", "archive:0000000000000042-0000000000000042 | pg_wal:0000000000000043-0000000000000043 to 0/43000030"},
+		{"empty segment after an unarchived whole one: the whole one, unbounded", "0/44000010", "archive:0000000000000042-0000000000000042 | pg_wal:0000000000000043-0000000000000043"},
+	} {
+		p, why := planWALRead(target, "", wal, liveAt(tc.lsn, 3, "/var/lib/postgresql/16/main"), 16)
+		if why != "" {
+			t.Errorf("%s: %s", tc.name, why)
+			continue
+		}
+		if got := names(p); got != tc.want {
+			t.Errorf("%s: ranges = %s, want %s", tc.name, got, tc.want)
+		}
+		if !p.Serving || !p.Complete() {
+			t.Errorf("%s: %+v", tc.name, p)
+		}
+	}
+}
+
 // An LSN target starts in the segment that holds it, from the LSN itself.
 func TestPlanWALRead_LSNTarget(t *testing.T) {
 	wal := archiveOf(0x40, 0x45, 0, 3, 3)
@@ -132,9 +162,9 @@ func TestPlanWALRead_LSNTarget(t *testing.T) {
 		t.Errorf("%s %+v", got, p)
 	}
 	// In the instance's own WAL, past the archive.
-	live := liveAt("0/47000010", 3, "/data")
+	live := liveAt("0/47000100", 3, "/data")
 	p, why = planWALRead(RecoveryTarget{Type: TargetLSN}, "0/46000100", wal, live, 16)
-	if why != "" || names(p) != "pg_wal:0000000000000046-0000000000000047 from 0/46000100 to 0/47000010" {
+	if why != "" || names(p) != "pg_wal:0000000000000046-0000000000000047 from 0/46000100 to 0/47000100" {
 		t.Errorf("%s (%s)", names(p), why)
 	}
 	if _, why := planWALRead(RecoveryTarget{Type: TargetLSN}, "0/46000100", wal, nil, 16); !strings.Contains(why, "past the end of the archive") {

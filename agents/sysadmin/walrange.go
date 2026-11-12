@@ -48,6 +48,11 @@ const (
 // size. A starting figure, to be set from a measured read on a real host.
 const walReadMaxSegments = 16
 
+// walLongPageHeader is the size of the header on a segment's first page
+// (SizeOfXLogLongPHD on a 64-bit build): the first record of a segment starts
+// there, so an instance position at or below it means nothing is written yet.
+const walLongPageHeader = 40
+
 // WALReadRange is one pg_waldump invocation: consecutive segments of one
 // timeline, from one place.
 type WALReadRange struct {
@@ -124,6 +129,16 @@ func planWALRead(target RecoveryTarget, normalized string, wal *WALContinuity, l
 	}
 	p.Serving = liveOK
 	liveSeg := liveLSN / size
+	// Right after a WAL switch the instance's position is at, or just past the page
+	// header of, a segment that holds no record yet, and pg_waldump says "could not
+	// find a valid record" (or "could not locate WAL file" when the file does not
+	// exist yet) for it. Nothing is in it to count: the live WAL ends with the
+	// segment before, which is whole and needs no bound. Seen live twice on a fresh
+	// fixture, on plans made seconds after pg_switch_wal().
+	liveEmpty := liveOK && liveSeg > 0 && liveLSN%size <= walLongPageHeader
+	if liveEmpty {
+		liveSeg--
+	}
 
 	var start uint64
 	switch target.Type {
@@ -223,7 +238,7 @@ func planWALRead(target RecoveryTarget, normalized string, wal *WALContinuity, l
 					p.Truncated = true
 				}
 				r := WALReadRange{Source: WALFromPgWal, First: segmentName(live.Timeline, first, size), Last: segmentName(live.Timeline, last, size), Segments: int(last - first + 1)}
-				if last == liveSeg {
+				if last == liveSeg && !liveEmpty {
 					r.EndLSN = lsnText(liveLSN)
 				}
 				p.Ranges = append(p.Ranges, r)
