@@ -107,7 +107,7 @@ This output is from a later run than the JSON above, on the same VM after its au
 ```
 [boris@ ~/helpdesk]$ HELPDESK_SYSADMIN_API_KEY=... go run ./cmd/helpdesk-client --pitr-plan \
     --pitr-server pgbackrest-ubuntu-vm --pitr-stanza main \
-    --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url http://localhost:1103
+    --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url $HELPDESK_SYSADMIN_URL
 Plan status        : feasible
 Detail             : backup 20261112-174614F can be restored and the WAL from it to the end of the archive is continuous. 
                      The instance is serving and the target is in WAL it has not archived yet: 
@@ -159,7 +159,7 @@ Let's read it against the raw JSON output from the previous section:
 
 ## 3. The ledger
 
-So the plan is "before", but the `vault budget` is "after" (because it works on the incident data stored in a vault):
+So the plan is "before", but the new `vault budget` command is the "after" (because it works on the incident data stored in a vault and each restore automatically generates an incident):
 
 ```
 [boris@ ~/helpdesk]$ go run ./testing/cmd/faulttest vault budget pgbackrest-ubuntu-vm \

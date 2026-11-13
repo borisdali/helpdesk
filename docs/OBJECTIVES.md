@@ -394,7 +394,7 @@ more limits are not corrected for. A restore's time is roughly the size of the d
 to replay, so a history from when the server was half its size is optimistic and a restore to ten minutes ago is not
 a restore to three days ago; both kinds are counted together and the restored size is not recorded yet (v0.36).
 
-**Two clocks**   
+#### **Two clocks**   
 This is a note on a timing used for measuing the estimate and the ledger:  
  * The estimate is the recovery duration of the remediation hop: after the approval, the restore, the restart and the
 verification.   
