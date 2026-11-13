@@ -185,7 +185,7 @@ cannot see WAL that was never archived. Each estimate lists what it leaves out u
 the plan digest, so it can move while the plan waits for approval; `as_of` says when it was made. The result of the
 restore carries a `data_loss` figure measured when the restore ran, to compare with the one that was approved.
 
-**Transactions, counted from the WAL**   
+### **Transactions, counted from the WAL**   
 The plan also decodes the WAL it would discard with `pg_waldump` and says how many transactions committed after the point where recovery would stop (`data_loss_estimate.transactions` and in
 `Estimated loss` as "N transactions committed after the target would be discarded"). Where recovery stops follows
 PostgreSQL's own rules:  
@@ -202,7 +202,7 @@ above stand alone: it is never turned into "nothing lost".
 "Exact" means exact for the WAL that has been written: the read stops at the instance's own write position
 (`pg_current_wal_lsn()`), the furthest `pg_waldump` can read. A commit whose record is still in the WAL buffers is
 not in the count until the WAL writer writes it (`wal_writer_delay`, 200 ms by default). That is only a commit
-PostgreSQL reported as done before it was written: one under `synchronous_commit = off`, or a transaction that took
+PostgreSQL reported as done before it was written: one under `synchronous_commit = off` or a transaction that took
 an id and wrote nothing else. A commit that wrote data under the default setting is flushed before it returns, so it
 is always counted. (Found by a test whose "commits" were `SELECT txid_current()`: they are in the second group.)
 

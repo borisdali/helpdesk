@@ -422,11 +422,11 @@ What each clock leaves out or adds.
 There are two basic cases to consider: an instance can be alredy down or it can still be serving, but the clock
 needs to be reset back in-time. The table below presents what a real downtime, ledger and estimate count for both cases:
 
-| | Down instance (it crashed or was stopped) | Serving instance (a PITR on a live database) |
+| | DOWN instance (it crashed or was stopped) | SERVING instance (a PITR on a live database) |
 |---|---|---|
 | Real downtime | from the failure to the recovery, **including the time before anyone noticed** | only from the moment the restore stops it |
 | Ledger | misses the undetected time, so it **undercounts** | counts the triage and the wait, during which the service was up, so it **overcounts** |
-| Estimate | misses everything before the approval, so it undercounts | covers the hop, which also holds the model's reasoning, so it slightly **overcounts** the stop-to-serving time |
+| Estimate | misses everything before the approval, so it **undercounts** | covers the hop, which also holds the model's reasoning, so it slightly **overcounts** the stop-to-serving time |
 
 So the ledger is not simply "too long". It can be too short (a failure nobody saw for an hour is not in it) or too long
 (a wait for an approval while the database served is charged as downtime) and which one depends on whether the
