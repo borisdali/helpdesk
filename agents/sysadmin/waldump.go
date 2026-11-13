@@ -247,8 +247,8 @@ func parseWALTime(stamp, zone string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	var offset time.Duration
-	switch {
-	case zone == "UTC" || zone == "GMT":
+	switch zone {
+	case "UTC", "GMT":
 	default:
 		d, ok := parseNumericZone(zone)
 		if !ok {

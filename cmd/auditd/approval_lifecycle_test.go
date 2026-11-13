@@ -133,7 +133,7 @@ func newFakeSMTP(t *testing.T) *fakeSMTP {
 		t.Fatal(err)
 	}
 	f := &fakeSMTP{addr: ln.Addr().String(), msgs: make(chan string, 8), from: make(chan string, 8)}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()

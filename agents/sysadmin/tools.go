@@ -112,10 +112,8 @@ type resolvedHost struct {
 	Sensitivity []string
 }
 
-// connStrHost and connStrPort are infra.ConnStrHost and infra.ConnStrPort,
-// which target resolution shares with the gateway.
-func connStrHost(s string) string { return infra.ConnStrHost(s) }
-
+// connStrPort is infra.ConnStrPort, which target resolution shares with the
+// gateway.
 func connStrPort(s string) string { return infra.ConnStrPort(s) }
 
 // resolveHost looks up a DB server by ID and assembles the resolvedHost the
