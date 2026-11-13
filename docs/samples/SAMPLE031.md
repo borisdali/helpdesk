@@ -8,12 +8,17 @@ This sample is an expanded version of [Sample#30](SAMPLE030.md). If that sample 
 The setup:
 
 ```
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'printf "[global]\nrepo1-path=/var/lib/pgbackrest\nrepo1-retention-full=2\n\n[main]\npg1-path=/var/lib/postgresql/data\n" > /etc/         pgbackrest.conf'
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'printf "[global]\nrepo1-path=/var/lib/pgbackrest\nrepo1-retention-full=2\n\n[main]\npg1-path=/var/lib/postgresql/data\n" > /etc/pgbackrest.conf'
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'ls -l /etc/pgbackrest.conf'
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'ls -l /etc/pgbackrest.conf'
+
 -rw-r--r-- 1 root root 105 Nov 12 13:49 /etc/pgbackrest.conf
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'cat /etc/pgbackrest.conf'
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'cat /etc/pgbackrest.conf'
+
 [global]
 repo1-path=/var/lib/pgbackrest
 repo1-retention-full=2
@@ -21,38 +26,54 @@ repo1-retention-full=2
 [main]
 pg1-path=/var/lib/postgresql/data
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'mkdir -p /var/lib/pgbackrest && chown postgres:postgres /var/lib/pgbackrest'
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'ls -ld /var/lib/pgbackrest'
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'mkdir -p /var/lib/pgbackrest && chown postgres:postgres /var/lib/pgbackrest'
+
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'ls -ld /var/lib/pgbackrest'
+
 drwxr-xr-x 2 postgres postgres 4096 Nov 12 13:50 /var/lib/pgbackrest
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni pgbackrest --stanza=main --log-level-console=info stanza-create
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni \
+  pgbackrest --stanza=main --log-level-console=info stanza-create
+
 2026-11-12 13:51:26.821 P00   WARN: unable to open log file '/var/log/pgbackrest/main-stanza-create.log': No such file or directory
                                     NOTE: process will continue without log file.
 2026-11-12 13:51:26.825 P00   INFO: stanza-create command begin 2.55.1: --exec-id=73545-4a3bddc3 --log-level-console=info --log-level-file=off --pg1-path=/var/lib/postgresql/data --repo1-path=/var/lib/pgbackrest --stanza=main
 2026-11-12 13:51:26.953 P00   INFO: stanza-create for stanza 'main' on repo1
 2026-11-12 13:51:26.978 P00   INFO: stanza-create command end: completed successfully (178ms)
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni psql -U postgres -c "ALTER SYSTEM SET archive_mode = on" -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'"
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  psql -U postgres \
+  -c "ALTER SYSTEM SET archive_mode = on" \
+  -c "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=main archive-push %p'"
+
 ALTER SYSTEM
 ALTER SYSTEM
 
 [boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker restart alloydb-omni
 alloydb-omni
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni psql -U postgres -c "show archive_mode"
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  psql -U postgres -c "show archive_mode"
+
  archive_mode
 --------------
  on
 (1 row)
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni pgbackrest --stanza=main --log-level-console=info check
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni \
+  pgbackrest --stanza=main --log-level-console=info check
+
 2026-11-12 13:53:10.104 P00   INFO: check command begin 2.55.1: --exec-id=75-b77e0554 --log-level-console=info --pg1-path=/var/lib/postgresql/data --repo1-path=/var/lib/pgbackrest --stanza=main
 2026-11-12 13:53:10.152 P00   INFO: check repo1 configuration (primary)
 2026-11-12 13:53:10.177 P00   INFO: check repo1 archive for WAL (primary)
 2026-11-12 13:53:10.485 P00   INFO: WAL segment 000000010000000000000031 successfully archived to '/var/lib/pgbackrest/archive/main/17-1/0000000100000000/000000010000000000000031-01acdc1e3530ef4d6ea2c9483c18baee50d8c029.gz' on repo1
 2026-11-12 13:53:10.485 P00   INFO: check command end: completed successfully (383ms)
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni pgbackrest --stanza=main --type=full --log-level-console=info backup
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni \
+  pgbackrest --stanza=main --type=full --log-level-console=info backup
+
 2026-11-12 13:53:22.475 P00   WARN: unable to open log file '/var/log/pgbackrest/main-backup.log': No such file or directory
                                     NOTE: process will continue without log file.
 2026-11-12 13:53:22.475 P00   INFO: backup command begin 2.55.1: --exec-id=85-25219c4b --log-level-console=info --log-level-file=off --pg1-path=/var/lib/postgresql/data --repo1-path=/var/lib/pgbackrest --repo1-retention-full=2 --             stanza=main --type=full
@@ -70,10 +91,14 @@ alloydb-omni
 2026-11-12 13:55:39.508 P00   INFO: expire command begin 2.55.1: --exec-id=85-25219c4b --log-level-console=info --log-level-file=off --repo1-path=/var/lib/pgbackrest --repo1-retention-full=2 --stanza=main
 2026-11-12 13:55:39.509 P00   INFO: expire command end: completed successfully (1ms)
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni sh -c 'ls -ld /var/lib/pgbackrest'
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
+  sh -c 'ls -ld /var/lib/pgbackrest'
+
 drwxr-xr-x 4 postgres postgres 4096 Nov 12 13:51 /var/lib/pgbackrest
 
-[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni pgbackrest --stanza=main --type=full --log-level-console=info info
+[boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec -u postgres alloydb-omni \
+  pgbackrest --stanza=main --type=full --log-level-console=info info
+
 stanza: main
     status: ok
     cipher: none
@@ -135,7 +160,7 @@ INSERT 0 1
 (1 row)
 ```
 
-And here's the plan:
+And here's the full plan in a raw JSON format (lightly formatted for ease of reading to minimize scrolling):
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ curl -s -X POST "$HELPDESK_SYSADMIN_URL/tool/plan_point_in_time_recovery" \
@@ -145,7 +170,10 @@ And here's the plan:
   | jq -r .output | jq '{status, detail, data_loss_estimate, availability_budget}'
 {
   "status": "feasible",
-  "detail": "backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse and recovery can still run    out of WAL before the target",
+  "detail": "backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; 
+             the target is inside the archive. 
+             This is plausible, not certain: 
+             the archive's times are coarse and recovery can still run out of WAL before the target",
   "data_loss_estimate": {
     "basis": "live_instance",
     "as_of": "2026-11-12T14:10:09Z",
@@ -162,13 +190,19 @@ And here's the plan:
       "segments_read": 2,
       "read_millis": 214,
       "decoder": "pg_waldump (PostgreSQL) 17.7",
-      "basis": "counted by decoding the WAL with pg_waldump from segment 000000010000000000000036, the first to reach the repository at or after the target time: a commit later than the target cannot be in one that arrived before it;         recovery stops before the first commit or abort later than the target time (LSN 0/36024480); read up to the running instance's own position; it grows until the instance is stopped"
+      "basis": "counted by decoding the WAL with pg_waldump from segment 000000010000000000000036, 
+                the first to reach the repository at or after the target time: 
+                a commit later than the target cannot be in one that arrived before it;
+                recovery stops before the first commit or abort later than the target time (LSN 0/36024480); 
+                read up to the running instance's own position; it grows until the instance is stopped"
     },
     "unmeasured": [
       "which of the discarded writes were wanted: everything after the target counts",
       "the WAL volume (a time has no position until the WAL is read)"
     ],
-    "summary": "2m 46s of history discarded, up to the running instance's position at 2026-11-12T14:10:09Z; it grows until the instance is stopped. 5 transactions committed after the target would be discarded (counted from the WAL).",
+    "summary": "2m 46s of history discarded, up to the running instance's position at 2026-11-12T14:10:09Z; 
+                it grows until the instance is stopped. 
+                5 transactions committed after the target would be discarded (counted from the WAL).",
     "objective": {
       "status": "exceeds",
       "rpo_seconds": 1,
@@ -220,17 +254,29 @@ If you find that JSON a bit unwiedly... yeah, we won't be surprised if it offend
 [+] Running 1/1
  ✔ Container helpdesk-auditd-1  Healthy                                                                                                                                                                                                      1.0s
 Plan status        : feasible
-Detail             : backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; the target is inside the archive. This is plausible, not certain: the archive's times are coarse and recovery can      still run out of WAL before the target
+Detail             : backup 20261112-135620F can be restored and the WAL from it to the end of the archive is continuous; 
+                     the target is inside the archive. 
+                     This is plausible, not certain: 
+                     the archive's times are coarse and recovery can still run out of WAL before the target
 Backup to restore  : 20261112-135620F
 Recovery target    : 2026-11-12 14:07:23+00
 Archive ends       : 2026-11-12T14:08:42Z
-Will be discarded  : everything committed after 2026-11-12 14:07:23+00, up to the moment the instance is stopped, is discarded
-Estimated loss     : 27m 00s of history discarded, up to the running instance's position at 2026-11-12T14:34:23Z; it grows until the instance is stopped. 5 transactions committed after the target would be discarded (counted from the WAL).
-Not counted        : which of the discarded writes were wanted: everything after the target counts; the WAL volume (a time has no position until the WAL is read)
-RPO CHECK (!)      : exceeds: 27m 00s discarded against an RPO of 1s (database): exceeds it by 26m 59s
+Will be discarded  : everything committed after 2026-11-12 14:07:23+00, 
+                     up to the moment the instance is stopped, is discarded
+Estimated loss     : 27m 00s of history discarded, up to the running instance's position at 2026-11-12T14:34:23Z; 
+                     it grows until the instance is stopped. 
+                     5 transactions committed after the target would be discarded (counted from the WAL).
+Not counted        : which of the discarded writes were wanted: everything after the target counts; 
+                     the WAL volume (a time has no position until the WAL is read)
+
+RPO CHECK (!)      : exceeds: 27m 00s discarded against an RPO of 1s (database): 
+                     exceeds it by 26m 59s
+
 Approving needs    : --acknowledge-objective-breach (this database's enforcement is acknowledge)
-Budget check       : within: 0s of the 43m12s budget over 30d already spent, 43m12s left: enough for a restore that takes up to the rto of 30m
-Past restores      : no resolved restore of this server in the last 90d among real incidents: nothing to estimate from
+Budget check       : within: 0s of the 43m12s budget over 30d already spent, 
+                     43m12s left: enough for a restore that takes up to the rto of 30m
+Past restores      : no resolved restore of this server in the last 90d among real incidents: 
+                     nothing to estimate from
 Instance           : SERVING (the restore must stop it: --allow-stop-serving)
 Plan digest        : b90b851df7ea22ba
 

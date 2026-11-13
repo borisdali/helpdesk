@@ -58,5 +58,5 @@ service control is `systemctl` or the container runtime or `kubectl`. You still 
 takes your backups on a schedule. aiHelpDesk acts when there is an incident or a person asks, through a gate, within the objectives
 you declared ([who this is for, section 3](FOR_WHOM.md#3-is-the-next-step-a-general-purpose-database-agent)).
 
-Instead of replacing your current tooling, aiHelpDesk makes it adaptable, flexible and multiplatform. aiHelpDesk amplifies your existing investment in building and mastering your tools rather than wasting it.
+Instead of replacing your current tooling, aiHelpDesk makes it adaptable, flexible and consistent across different platforms. aiHelpDesk amplifies your existing investment in building and mastering your tools rather than wasting it.
 
