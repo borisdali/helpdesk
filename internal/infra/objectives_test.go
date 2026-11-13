@@ -52,7 +52,7 @@ func load(t *testing.T, body string) *Config {
 const fleetConfig = `{
   "defaults": {"objectives": {"rpo": "1h", "rto": "4h", "availability_slo": 99.0}},
   "environments": {
-    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "availability_slo": 99.95}},
+    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "availability_slo": 99.95, "availability_window": "90d"}},
     "staging": {"objectives": {"rpo": "1d"}},
     "dev":     {}
   },

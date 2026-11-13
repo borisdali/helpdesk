@@ -180,6 +180,26 @@ type pitrPlan struct {
 			Enforcement string `json:"enforcement"`
 		} `json:"objective"`
 	} `json:"data_loss_estimate"`
+	// AvailabilityBudget sets the downtime the restore costs against what is
+	// left of the database's downtime budget, and what approving will demand
+	// because of it.
+	AvailabilityBudget *struct {
+		Status           string `json:"status"`
+		Detail           string `json:"detail"`
+		Gate             string `json:"gate"`
+		GateNote         string `json:"gate_note"`
+		Enforcement      string `json:"enforcement"`
+		RemainingSeconds *int64 `json:"remaining_seconds"`
+		DurationBasis    string `json:"duration_basis"`
+		// RecoveryEstimate is how long this database's restores have taken, from
+		// real incidents, and how that stands against its declared rto.
+		RecoveryEstimate *struct {
+			Status      string `json:"status"`
+			Basis       string `json:"basis"`
+			VsRTO       string `json:"vs_rto"`
+			VsRTODetail string `json:"vs_rto_detail"`
+		} `json:"recovery_estimate"`
+	} `json:"availability_budget"`
 }
 
 // formatPITRPlan renders the plan for a person, ending with the exact command
@@ -223,6 +243,37 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			}
 		}
 	}
+	// The restore also costs downtime, which the SLO allows only so much of. Said
+	// as loudly as the loss is, and apart from it: the two are different breaches.
+	if bd := p.AvailabilityBudget; bd != nil && bd.Status != "" {
+		label := "Budget check       "
+		if bd.Status == "exceeds" || bd.Status == "may_exceed" || bd.Gate != "" {
+			label = "BUDGET CHECK (!)   "
+		}
+		fmt.Fprintf(&b, "%s: %s: %s\n", label, bd.Status, bd.Detail)
+		switch bd.Gate {
+		case "acknowledge":
+			fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's availability enforcement is %s)\n", bd.Enforcement)
+		case "refuse":
+			fmt.Fprintf(&b, "Approving          : REFUSED (this database's availability enforcement is refuse, and the instance is serving)\n")
+		}
+		if bd.GateNote != "" {
+			fmt.Fprintf(&b, "Note               : %s\n", bd.GateNote)
+		}
+	}
+	// How long this database's restores have taken, and against its declared rto.
+	// Shown with or without an SLO: it is what has been demonstrated, from real
+	// incidents, and it says what it rests on. Information; it holds nothing.
+	if bd := p.AvailabilityBudget; bd != nil && bd.RecoveryEstimate != nil && bd.RecoveryEstimate.Basis != "" {
+		e := bd.RecoveryEstimate
+		fmt.Fprintf(&b, "Past restores      : %s\n", e.Basis)
+		switch e.VsRTO {
+		case "exceeds":
+			fmt.Fprintf(&b, "RTO CHECK (!)      : exceeds: %s\n", e.VsRTODetail)
+		case "within":
+			fmt.Fprintf(&b, "RTO check          : within: %s\n", e.VsRTODetail)
+		}
+	}
 	state := "down"
 	if p.InstanceServing {
 		state = "SERVING (the restore must stop it: --allow-stop-serving)"
@@ -240,6 +291,10 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	if e := p.DataLossEstimate; e != nil && e.Objective != nil {
 		gate, enforcement = e.Objective.Gate, e.Objective.Enforcement
 	}
+	budgetGate, budgetEnforcement := "", ""
+	if bd := p.AvailabilityBudget; bd != nil {
+		budgetGate, budgetEnforcement = bd.Gate, bd.Enforcement
+	}
 	if gate == "refuse" {
 		// The restore measures the loss again just before it stops anything and
 		// would refuse this one. Offering a command that is known to fail would
@@ -248,11 +303,17 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			"Plan a later target (less to discard), or change the configured enforcement if the objective is not meant to bind.\n", enforcement)
 		return b.String()
 	}
+	if budgetGate == "refuse" {
+		fmt.Fprintf(&b, "Not approvable as it stands: restoring would take a serving instance down when the downtime budget is already spent, and availability enforcement is %s. "+
+			"Wait for incidents to age out of the window, or change availability_enforcement if the SLO is not meant to bind.\n", budgetEnforcement)
+		return b.String()
+	}
 	stop := ""
 	if p.InstanceServing {
 		stop = " --allow-stop-serving"
 	}
-	if gate == "acknowledge" {
+	// One acknowledgement covers every breach shown above.
+	if gate == "acknowledge" || budgetGate == "acknowledge" {
 		stop += " --acknowledge-objective-breach"
 	}
 	fmt.Fprintf(&b, "To approve exactly this plan:\n  helpdesk-client --pitr-approve <run_id> --recovery-target-type %s --recovery-target %q \\\n    --plan-digest %s --acknowledge-data-loss%s\n",

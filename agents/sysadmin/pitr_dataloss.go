@@ -18,9 +18,10 @@ package main
 // died is not in the archive at all).
 //
 // Not measured here: the number of transactions. That needs the WAL decoded
-// (pg_waldump over the discarded segments), which is a later tier; the
-// estimate says so rather than leaving it out silently. It also cannot tell
-// the bad writes from the good ones: it counts everything after the target.
+// (pg_waldump over the discarded segments), which is walread.go: it is added
+// to the estimate by withTransactions when it could be made, and when it could
+// not the estimate says so rather than leaving it out silently. Neither can
+// tell the bad writes from the good ones: it counts everything after the target.
 
 import (
 	"fmt"
@@ -69,6 +70,11 @@ type DataLossEstimate struct {
 	// UpperBound says the figures are at most this much, not exactly this
 	// much (the archive basis).
 	UpperBound bool `json:"upper_bound"`
+	// Transactions is the number of transactions discarded, counted by decoding the
+	// WAL with pg_waldump (walread.go). Absent when no attempt was made (the
+	// estimate was made without an instance to ask); when it was made and failed
+	// it says why, and the figures above stand alone.
+	Transactions *TransactionLoss `json:"transactions,omitempty"`
 	// Unmeasured lists what the estimate does not count.
 	Unmeasured []string `json:"unmeasured,omitempty"`
 	// Summary is the estimate in one sentence a person can read at the gate.
@@ -251,12 +257,40 @@ func (e *DataLossEstimate) summarize() string {
 		parts = append(parts, "at least "+humanSpan(*e.WindowAtLeastSeconds)+" of history")
 	}
 	what := strings.Join(parts, " and ")
+	txns := "Transactions are not counted."
+	if e.Transactions != nil {
+		txns = e.Transactions.Sentence()
+	}
 	switch e.Basis {
 	case lossBasisLive:
-		return fmt.Sprintf("%s discarded, up to the running instance's position at %s; it grows until the instance is stopped. Transactions are not counted.", what, e.AsOf)
+		return fmt.Sprintf("%s discarded, up to the running instance's position at %s; it grows until the instance is stopped. %s", what, e.AsOf, txns)
 	default:
-		return fmt.Sprintf("%s discarded, up to the end of the archive; WAL the instance had not archived is not counted. Transactions are not counted.", what)
+		return fmt.Sprintf("%s discarded, up to the end of the archive; WAL the instance had not archived is not counted. %s", what, txns)
 	}
+}
+
+// withTransactions attaches the count of discarded transactions and brings the
+// rest of the estimate into line with it: a count that was made is no longer
+// "unmeasured", and the summary says it. A nil count changes nothing.
+func (e *DataLossEstimate) withTransactions(t *TransactionLoss) *DataLossEstimate {
+	if e == nil || t == nil {
+		return e
+	}
+	e.Transactions = t
+	if t.Status == TxLossMeasured {
+		kept := e.Unmeasured[:0:0]
+		for _, u := range e.Unmeasured {
+			if !strings.HasPrefix(u, "the number of transactions") {
+				kept = append(kept, u)
+			}
+		}
+		if t.AtLeast {
+			kept = append(kept, "all of the transactions (the count is a lower bound: see transactions.basis)")
+		}
+		e.Unmeasured = kept
+	}
+	e.Summary = e.summarize()
+	return e
 }
 
 // humanSpan renders seconds as "1h 05m 12s".

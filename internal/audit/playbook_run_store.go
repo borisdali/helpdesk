@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -417,6 +418,109 @@ func (s *PlaybookRunStore) ListByPlaybook(ctx context.Context, playbookID string
 	}
 	defer rows.Close()
 	return scanPlaybookRuns(rows)
+}
+
+// SeriesByEntryRun returns, for each given incident entry run, the series of
+// every run of that incident, the entry run itself first (a run with no prior
+// run is its own entry run) and then each hop chained from it, without
+// duplicates and in the order they started. A run with no series is left out,
+// and so is an id that matches nothing. It is one query per batch, not one per
+// incident.
+func (s *PlaybookRunStore) SeriesByEntryRun(ctx context.Context, entryRunIDs []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	const batch = 200
+	for start := 0; start < len(entryRunIDs); start += batch {
+		end := start + batch
+		if end > len(entryRunIDs) {
+			end = len(entryRunIDs)
+		}
+		ids := entryRunIDs[start:end]
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT entry_run_id, series_id
+			FROM playbook_runs
+			WHERE entry_run_id IN (`+marks+`) AND series_id != ''
+			ORDER BY started_at ASC, run_id ASC`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var entry, series string
+			if err := rows.Scan(&entry, &series); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !slices.Contains(out[entry], series) {
+				out[entry] = append(out[entry], series)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// RunSpan is one playbook run of an incident and how long it took: what a
+// recovery-time estimate is made from.
+type RunSpan struct {
+	RunID    string `json:"run_id"`
+	SeriesID string `json:"series_id"`
+	Outcome  string `json:"outcome"`
+	// StartedAt and CompletedAt bound the run; CompletedAt is zero while it runs.
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+// SpansByEntryRun returns, for each given incident entry run, every run of that
+// incident with its series, outcome and times, the entry run first and then each
+// hop, in the order they started. A run with no series is left out, and so is an
+// id that matches nothing. It is one query per batch, not one per incident.
+func (s *PlaybookRunStore) SpansByEntryRun(ctx context.Context, entryRunIDs []string) (map[string][]RunSpan, error) {
+	out := map[string][]RunSpan{}
+	const batch = 200
+	for start := 0; start < len(entryRunIDs); start += batch {
+		end := start + batch
+		if end > len(entryRunIDs) {
+			end = len(entryRunIDs)
+		}
+		ids := entryRunIDs[start:end]
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT entry_run_id, run_id, series_id, outcome, started_at, completed_at
+			FROM playbook_runs
+			WHERE entry_run_id IN (`+marks+`) AND series_id != ''
+			ORDER BY started_at ASC, run_id ASC`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var entry, startedStr, completedStr string
+			var sp RunSpan
+			if err := rows.Scan(&entry, &sp.RunID, &sp.SeriesID, &sp.Outcome, &startedStr, &completedStr); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			sp.StartedAt, sp.CompletedAt = parseFlexTime(startedStr), parseFlexTime(completedStr)
+			out[entry] = append(out[entry], sp)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // ListByPriorRunID returns runs whose prior_run_id matches the given triage run_id,

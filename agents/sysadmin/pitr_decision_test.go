@@ -8,12 +8,56 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
 
 // decisions returns the recovery_decision events in the store, by stage.
+// The execution record keeps the size of the cluster the restore wrote back, so
+// restore times can later be compared across a server's growth. A plan with no
+// size records none: nothing is made up.
+func TestRecordExecutionDecision_KeepsTheSizeOfTheRestoredCluster(t *testing.T) {
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	args := RestoreToPITArgs{Target: "pgbackrest_db", PlanDigest: "0123456789abcdef"}
+	if err := recordExecutionDecision(context.Background(), args, PITRPlan{BackupDatabaseBytes: 31048775}, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordExecutionDecision(context.Background(), args, PITRPlan{}, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	got := decisions(t, store)[audit.RecoveryStageExecution]
+	if len(got) != 2 {
+		t.Fatalf("decisions = %+v", got)
+	}
+	sized, unsized := got[0], got[1]
+	if sized.RestoreBytes == nil {
+		sized, unsized = got[1], got[0]
+	}
+	if sized.RestoreBytes == nil || *sized.RestoreBytes != 31048775 {
+		t.Errorf("sized = %+v", sized.RestoreBytes)
+	}
+	if unsized.RestoreBytes != nil {
+		t.Errorf("a size was recorded for a plan with none: %d", *unsized.RestoreBytes)
+	}
+}
+
+// The plan carries the size of the backup it selected, under the name the record
+// and the CLI read, and leaves it out when pgBackRest reported none.
+func TestAssessPITRPlan_CarriesTheSelectedBackupsSize(t *testing.T) {
+	plan := assessPITRPlan("main", RecoveryTarget{}, "2026-10-28 14:05:00+00", PgBackRestBackup{Label: "L", DatabaseBytes: 31048775}, nil)
+	raw, _ := json.Marshal(plan)
+	if !strings.Contains(string(raw), `"backup_database_bytes":31048775`) {
+		t.Errorf("plan json = %s", raw)
+	}
+	raw, _ = json.Marshal(assessPITRPlan("main", RecoveryTarget{}, "x", PgBackRestBackup{Label: "L"}, nil))
+	if strings.Contains(string(raw), "backup_database_bytes") {
+		t.Errorf("a size was invented: %s", raw)
+	}
+}
+
 func decisions(t *testing.T, store *audit.Store) map[string][]audit.RecoveryDecision {
 	t.Helper()
 	events, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeRecoveryDecision})
@@ -28,6 +72,44 @@ func decisions(t *testing.T, store *audit.Store) map[string][]audit.RecoveryDeci
 		out[ev.RecoveryDecision.Stage] = append(out[ev.RecoveryDecision.Stage], *ev.RecoveryDecision)
 	}
 	return out
+}
+
+// The record shows the window and budget the approver saw, including a window
+// that was only the built-in default, and nothing when no budget could be
+// computed (never a default laid over a setting that could not be read).
+func TestSnapshotOf_RecordsTheAvailabilityBudget(t *testing.T) {
+	declared := infra.ResolvedObjectives{
+		RTO:                infra.ResolvedDuration{Set: true, Value: 30 * time.Minute, Source: "environment:prod"},
+		AvailabilitySLO:    infra.ResolvedPercent{Set: true, Value: 99.9, Source: "environment:prod"},
+		AvailabilityWindow: infra.ResolvedDuration{Set: true, Value: 90 * 24 * time.Hour, Source: "environment:prod"},
+	}
+	s := snapshotOf(declared, "")
+	if s.AvailabilityWindowSeconds == nil || *s.AvailabilityWindowSeconds != 90*24*3600 ||
+		s.AvailabilityWindowSource != "environment:prod" ||
+		s.AvailabilityBudgetSeconds == nil || *s.AvailabilityBudgetSeconds != 129*60+36 {
+		t.Errorf("declared window: %+v", s)
+	}
+
+	// No window set anywhere: the default is recorded, and called what it is.
+	defaulted := declared
+	defaulted.AvailabilityWindow = infra.ResolvedDuration{}
+	s = snapshotOf(defaulted, "")
+	if s.AvailabilityWindowSeconds == nil || *s.AvailabilityWindowSeconds != 30*24*3600 ||
+		s.AvailabilityWindowSource != infra.SourceBuiltin ||
+		*s.AvailabilityBudgetSeconds != 43*60+12 {
+		t.Errorf("default window: %+v", s)
+	}
+
+	// An unreadable window, or an unreadable slo, leaves no budget in the record.
+	bad := declared
+	bad.AvailabilityWindow, bad.AvailabilityWindowInvalid = infra.ResolvedDuration{}, true
+	if s = snapshotOf(bad, ""); s.AvailabilityWindowSeconds != nil || s.AvailabilityBudgetSeconds != nil || s.AvailabilityWindowSource != "" {
+		t.Errorf("an unreadable window was recorded: %+v", s)
+	}
+	noSLO := infra.ResolvedObjectives{RTO: declared.RTO}
+	if s = snapshotOf(noSLO, ""); s.AvailabilityWindowSeconds != nil || s.AvailabilityBudgetSeconds != nil {
+		t.Errorf("a budget was recorded with no slo: %+v", s)
+	}
 }
 
 func TestSnapshotOf_RecordsWhatWasInForceAndWhereItCameFrom(t *testing.T) {
@@ -109,6 +191,63 @@ func TestPlanDecision_IsRecordedForEveryPlanShown(t *testing.T) {
 	if status, err := store.VerifyIntegrity(context.Background()); err != nil || !status.Valid {
 		t.Errorf("chain = %+v, %v", status, err)
 	}
+}
+
+// The budget reaches the record through the real path: the config the agent
+// loaded, the plan the operator is shown, the event the plan writes. A unit
+// test of snapshotOf alone would not notice if the plan stopped passing it.
+func TestPlanDecision_RecordsTheAvailabilityBudgetFromTheLoadedConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		window     *infra.Duration
+		wantWindow int64
+		wantBudget int64 // 99.9% of the window, to the nearest second
+		wantSource string
+	}{
+		{"a window the database sets", &infra.Duration{Duration: 7 * 24 * time.Hour}, 7 * 86400, 605, "database"}, // 604.8s
+		{"no window: the built-in default, called that", nil, 30 * 86400, 2592, infra.SourceBuiltin},              // 43m12s
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objectiveInfra(t, "15m", func(db *infra.DBServer, _ *infra.Config) {
+				db.Objectives = &infra.Objectives{
+					RTO:                &infra.Duration{Duration: 30 * time.Minute},
+					AvailabilitySLO:    &infra.Percent{Value: 99.9},
+					AvailabilityWindow: tc.window,
+				}
+			})
+			_, _ = liveEnv(t)
+			store, cleanup := withRealToolAuditor(t)
+			defer cleanup()
+
+			if _, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+				RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget}); err != nil {
+				t.Fatal(err)
+			}
+			got := decisions(t, store)[audit.RecoveryStagePlan]
+			if len(got) != 1 || got[0].Objectives == nil {
+				t.Fatalf("plan decisions = %+v", got)
+			}
+			o := got[0].Objectives
+			wantBudget := tc.wantBudget
+			if o.AvailabilityWindowSeconds == nil || *o.AvailabilityWindowSeconds != tc.wantWindow ||
+				o.AvailabilityWindowSource != tc.wantSource ||
+				o.AvailabilityBudgetSeconds == nil || *o.AvailabilityBudgetSeconds != wantBudget {
+				t.Errorf("recorded window/budget = %v / %v from %q, want %d / %d from %q",
+					deref(o.AvailabilityWindowSeconds), deref(o.AvailabilityBudgetSeconds), o.AvailabilityWindowSource,
+					tc.wantWindow, wantBudget, tc.wantSource)
+			}
+			if status, err := store.VerifyIntegrity(context.Background()); err != nil || !status.Valid {
+				t.Errorf("chain = %+v, %v", status, err)
+			}
+		})
+	}
+}
+
+func deref(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // A plan that cannot be restored is on record too, with why.
@@ -266,7 +405,7 @@ func TestDecisionRecords_NeverCarryAPasswordInTheTarget(t *testing.T) {
 	if err := recordPlanDecision(context.Background(), dsn, PITRPlan{Status: PITRNotFeasible, Detail: "could not connect: " + dsn}); err != nil {
 		t.Fatalf("recording the plan decision: %v", err)
 	}
-	if err := recordExecutionDecision(context.Background(), RestoreToPITArgs{Target: dsn, PlanDigest: "0123456789abcdef"}, PITRPlan{}, nil, "refusing to restore — "+dsn); err != nil {
+	if err := recordExecutionDecision(context.Background(), RestoreToPITArgs{Target: dsn, PlanDigest: "0123456789abcdef"}, PITRPlan{}, nil, nil, "refusing to restore — "+dsn); err != nil {
 		t.Fatalf("recording the execution decision: %v", err)
 	}
 

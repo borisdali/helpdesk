@@ -128,17 +128,29 @@ func Load(path string) (*Config, error) {
 // service that reads objectives makes the typo loud instead.
 //
 // LogProblems logs every problem in the recovery objectives at error level and
-// returns how many lines it logged. Call it right after a successful Load.
+// returns how many lines it logged. It also logs the databases whose declared
+// availability objectives contradict each other (an rto longer than the whole
+// downtime budget), which are not unreadable values, so nothing is treated as
+// unset for them, and the entries that reach one and the same server (see
+// SharedServers). Call it right after a successful Load.
 func (c *Config) LogProblems(log func(msg string, args ...any)) int {
-	err := c.Validate()
-	if err == nil {
-		return 0
+	n := 0
+	if err := c.Validate(); err != nil {
+		lines := strings.Split(err.Error(), "\n")
+		for _, l := range lines {
+			log("infrastructure config: recovery objective problem (the affected objective is treated as unset)", "problem", l)
+		}
+		n += len(lines)
 	}
-	lines := strings.Split(err.Error(), "\n")
-	for _, l := range lines {
-		log("infrastructure config: recovery objective problem (the affected objective is treated as unset)", "problem", l)
+	for _, l := range c.Consistency() {
+		log("infrastructure config: availability objectives contradict each other (nothing is blocked; the declared numbers cannot all be met)", "problem", l)
+		n++
 	}
-	return len(lines)
+	for _, l := range c.SharedServers() {
+		log("infrastructure config: several db_servers entries reach one PostgreSQL server (nothing is blocked; objectives, budget and restore history are kept per entry)", "problem", l)
+		n++
+	}
+	return n
 }
 
 // DBInfo returns a formatted description of a database server with its hosting info expanded.

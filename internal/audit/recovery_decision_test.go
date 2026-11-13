@@ -17,6 +17,7 @@ import (
 func rdI64(n int64) *int64     { return &n }
 func rdU64(n uint64) *uint64   { return &n }
 func rdF64(n float64) *float64 { return &n }
+func rdInt(n int) *int         { return &n }
 
 func sampleDecision() RecoveryDecision {
 	return RecoveryDecision{
@@ -24,13 +25,16 @@ func sampleDecision() RecoveryDecision {
 		Reason: "the data this restore discards exceeds the recovery objective",
 		Tool:   "restore_to_point_in_time", Target: "pgbackrest-db",
 		RecoveryTarget: "time=2026-11-04T01:39:07Z", PlanDigest: "0123456789abcdef", PlanStatus: "feasible",
+		RestoreBytes: rdU64(31048775),
 		Objectives: &ObjectivesInForce{
 			Environment: "prod",
 			RPOSeconds:  rdI64(900), RPOSource: "environment:prod",
 			RTOSeconds: rdI64(1800), RTOSource: "environment:prod",
 			AvailabilitySLO: rdF64(99.95), AvailabilitySource: "environment:prod",
+			AvailabilityWindowSeconds: rdI64(7776000), AvailabilityWindowSource: "environment:prod", AvailabilityBudgetSeconds: rdI64(3888),
 			RecoveryPreference: "data_first", PreferenceSource: "environment:prod",
 			Enforcement: "acknowledge", EnforcementSource: "environment:prod",
+			AvailabilityEnforcement: "refuse", AvailabilityEnforcementSource: "database",
 			Problems:     []string{"defaults.objectives: rto must be greater than zero"},
 			ConfigDigest: "ab12cd34ef56ab12",
 		},
@@ -40,9 +44,14 @@ func sampleDecision() RecoveryDecision {
 			LossUnmeasured:     []string{"the number of transactions"},
 			LossAtLeastSeconds: rdI64(1000), LossAtLeastBasis: "the segment holding the target reached the repository at 2026-11-04T01:40:12Z",
 			Verdict: "exceeds", VerdictDetail: "18h 12m 43s discarded against an RPO of 15m 00s", Gate: "acknowledge",
+			BudgetVerdict: "may_exceed", BudgetVerdictDetail: "only 23m12s left", BudgetGate: "acknowledge", BudgetRemainingSeconds: rdI64(1392),
+			BudgetDurationSeconds: rdI64(3000), BudgetDurationBasis: "history_longest",
+			EstimateStatus: "estimated", EstimateSamples: rdInt(5), EstimateP50Seconds: rdI64(2400), EstimateP90Seconds: rdI64(3000), EstimateMaxSeconds: rdI64(3000),
+			EstimateVsRTO: "exceeds", EstimateOverRTO: rdInt(3),
+			LossCommitsStatus: "measured", LossCommits: rdInt(41), LossCommitsAtLeast: true, LossCommitsReason: "none",
 		}},
 		DurationSeconds: rdI64(2472),
-		Approval:        &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true},
+		Approval:        &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, Breaches: []string{BreachRPO, BreachAvailabilityBudget}},
 	}
 }
 
@@ -114,6 +123,29 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the loss", func(d *RecoveryDecision) { *d.Options[0].LossSeconds = 1 }},
 		{"the configuration used", func(d *RecoveryDecision) { d.Objectives.ConfigDigest = "0000000000000000" }},
 		{"the recovery duration", func(d *RecoveryDecision) { *d.DurationSeconds = 1 }},
+		{"the size restored", func(d *RecoveryDecision) { *d.RestoreBytes = 1 }},
+		{"how many transactions were at stake", func(d *RecoveryDecision) { *d.Options[0].LossCommits = 1 }},
+		{"that the count was a lower bound", func(d *RecoveryDecision) { d.Options[0].LossCommitsAtLeast = false }},
+		{"whether the count was made", func(d *RecoveryDecision) { d.Options[0].LossCommitsStatus = "unavailable" }},
+		{"why it was not", func(d *RecoveryDecision) { d.Options[0].LossCommitsReason = "edited" }},
+		{"how long the restore was taken to last", func(d *RecoveryDecision) { *d.Options[0].BudgetDurationSeconds = 1 }},
+		{"what that rested on", func(d *RecoveryDecision) { d.Options[0].BudgetDurationBasis = "declared_rto" }},
+		{"the estimate's status", func(d *RecoveryDecision) { d.Options[0].EstimateStatus = "no_history" }},
+		{"how many restores the estimate rested on", func(d *RecoveryDecision) { *d.Options[0].EstimateSamples = 99 }},
+		{"the estimate's median", func(d *RecoveryDecision) { *d.Options[0].EstimateP50Seconds = 1 }},
+		{"the estimate's p90", func(d *RecoveryDecision) { *d.Options[0].EstimateP90Seconds = 1 }},
+		{"the estimate's longest", func(d *RecoveryDecision) { *d.Options[0].EstimateMaxSeconds = 1 }},
+		{"what history said of the rto", func(d *RecoveryDecision) { d.Options[0].EstimateVsRTO = "within" }},
+		{"how many past restores broke the rto", func(d *RecoveryDecision) { *d.Options[0].EstimateOverRTO = 0 }},
+		{"the budget verdict", func(d *RecoveryDecision) { d.Options[0].BudgetVerdict = "within" }},
+		{"the budget gate", func(d *RecoveryDecision) { d.Options[0].BudgetGate = "" }},
+		{"what was left of the budget", func(d *RecoveryDecision) { *d.Options[0].BudgetRemainingSeconds = 99999 }},
+		{"why the budget verdict was reached", func(d *RecoveryDecision) { d.Options[0].BudgetVerdictDetail = "plenty left" }},
+		{"which objectives stood in the way", func(d *RecoveryDecision) { d.Approval.Breaches = []string{BreachRPO} }},
+		{"the availability enforcement in force", func(d *RecoveryDecision) { d.Objectives.AvailabilityEnforcement = "warn" }},
+		{"the availability window", func(d *RecoveryDecision) { *d.Objectives.AvailabilityWindowSeconds = 1 }},
+		{"where the window came from", func(d *RecoveryDecision) { d.Objectives.AvailabilityWindowSource = "built-in default" }},
+		{"the availability budget", func(d *RecoveryDecision) { *d.Objectives.AvailabilityBudgetSeconds = 1 }},
 		{"the lower bound", func(d *RecoveryDecision) { *d.Options[0].LossAtLeastSeconds = 1 }},
 		{"what the lower bound rests on", func(d *RecoveryDecision) { d.Options[0].LossAtLeastBasis = "something else" }},
 		{"who decided", func(d *RecoveryDecision) { d.DecidedBy = "mallory" }},

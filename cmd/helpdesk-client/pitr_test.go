@@ -225,6 +225,119 @@ func TestFormatPITRPlan_SaysWhatApprovingWillDemand(t *testing.T) {
 	}
 }
 
+// The budget check is its own line, loud when it matters, and its gate shapes the
+// approval command alone or together with the loss verdict's.
+func TestFormatPITRPlan_ShowsTheBudgetCheckAndWhatItDemands(t *testing.T) {
+	plan := func(lossGate, budgetStatus, budgetGate string, serving bool) pitrPlan {
+		var p pitrPlan
+		loss := ""
+		if lossGate != "" {
+			loss = `,"data_loss_estimate":{"summary":"s","objective":{"status":"exceeds","detail":"d","gate":"` + lossGate + `","enforcement":"acknowledge"}}`
+		}
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":` + map[bool]string{true: "true", false: "false"}[serving] + loss +
+			`,"availability_budget":{"status":"` + budgetStatus + `","detail":"only 23m12s left","gate":"` + budgetGate + `","enforcement":"acknowledge","remaining_seconds":1392}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// It may be exceeded and acknowledgement is demanded: loud, and the command carries the flag.
+	got := formatPITRPlan(plan("", "may_exceed", "acknowledge", true), goodOpts())
+	for _, want := range []string{"BUDGET CHECK (!)   : may_exceed: only 23m12s left",
+		"Approving needs    : --acknowledge-objective-breach (this database's availability enforcement is acknowledge)",
+		"--acknowledge-data-loss --allow-stop-serving --acknowledge-objective-breach"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "RPO CHECK") {
+		t.Errorf("a plan with no loss estimate shows an RPO check:\n%s", got)
+	}
+
+	// Room in the budget: said quietly, and the command is the usual one.
+	got = formatPITRPlan(plan("", "within", "", true), goodOpts())
+	if !strings.Contains(got, "Budget check       : within") || strings.Contains(got, "BUDGET CHECK (!)") || strings.Contains(got, "objective-breach") {
+		t.Errorf("room in the budget:\n%s", got)
+	}
+
+	// Both breach: one flag, shown once on the command, and both checks are on the page.
+	got = formatPITRPlan(plan("acknowledge", "exceeds", "acknowledge", true), goodOpts())
+	if strings.Count(got, "--acknowledge-objective-breach") < 1 || !strings.Contains(got, "RPO CHECK (!)") || !strings.Contains(got, "BUDGET CHECK (!)") {
+		t.Errorf("both:\n%s", got)
+	}
+	cmd := got[strings.Index(got, "To approve exactly this plan"):]
+	if strings.Count(cmd, "--acknowledge-objective-breach") != 1 {
+		t.Errorf("the flag should appear once on the command:\n%s", cmd)
+	}
+
+	// Refused for the budget: no command, and it says why, in the budget's words.
+	got = formatPITRPlan(plan("", "exceeds", "refuse", true), pitrOpts{TargetType: "time", Target: "2026-10-28T14:05:00Z"})
+	if strings.Contains(got, "--pitr-approve") || !strings.Contains(got, "Approving          : REFUSED (this database's availability enforcement is refuse") ||
+		!strings.Contains(got, "downtime budget is already spent") {
+		t.Errorf("a budget refusal still offers a command:\n%s", got)
+	}
+	// An already-down instance asks instead, and the note says why.
+	var down pitrPlan
+	if err := json.Unmarshal([]byte(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":false,"availability_budget":{"status":"exceeds","detail":"spent","gate":"acknowledge","enforcement":"refuse","gate_note":"the instance is already down"}}`), &down); err != nil {
+		t.Fatal(err)
+	}
+	got = formatPITRPlan(down, goodOpts())
+	if !strings.Contains(got, "Note               : the instance is already down") || !strings.Contains(got, "--acknowledge-objective-breach") || strings.Contains(got, "REFUSED") {
+		t.Errorf("down instance:\n%s", got)
+	}
+	// A plan from an agent that reports no budget reads as it always did.
+	var old pitrPlan
+	_ = json.Unmarshal([]byte(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9"}`), &old)
+	if got := formatPITRPlan(old, goodOpts()); strings.Contains(got, "udget") {
+		t.Errorf("an older plan mentions a budget:\n%s", got)
+	}
+}
+
+// What this database's past restores have taken is shown, with the basis, and
+// against the declared rto; it is information and holds nothing.
+func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T) {
+	plan := func(estimate string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,"availability_budget":{"status":"within","detail":"d","gate":"","enforcement":"warn","recovery_estimate":` + estimate + `}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	basis := `"basis":"5 resolved restores of this database in the last 90d (real incidents): p50 20m, p90 40m, longest 45m"`
+
+	got := formatPITRPlan(plan(`{"status":"estimated",`+basis+`,"vs_rto":"exceeds","vs_rto_detail":"2 of the 5 past restores took longer than the rto of 30m (the longest took 45m)"}`), goodOpts())
+	for _, want := range []string{
+		"Past restores      : 5 resolved restores of this database in the last 90d (real incidents): p50 20m, p90 40m, longest 45m",
+		"RTO CHECK (!)      : exceeds: 2 of the 5 past restores took longer than the rto of 30m",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// It does not stand in the way of approving: the command is still offered.
+	if !strings.Contains(got, "--pitr-approve") || strings.Contains(got, "acknowledge-objective-breach") {
+		t.Errorf("history held the approval:\n%s", got)
+	}
+
+	got = formatPITRPlan(plan(`{"status":"estimated",`+basis+`,"vs_rto":"within","vs_rto_detail":"none of the 5 past restores took longer than the rto of 45m"}`), goodOpts())
+	if !strings.Contains(got, "RTO check          : within: none of the 5") || strings.Contains(got, "RTO CHECK (!)") {
+		t.Errorf("within:\n%s", got)
+	}
+	// Too little history, or none: said, with no comparison.
+	got = formatPITRPlan(plan(`{"status":"insufficient_history","basis":"only 2 resolved restore(s) of this database in the last 90d (real incidents): 3 are needed for an estimate"}`), goodOpts())
+	if !strings.Contains(got, "Past restores      : only 2 resolved restore(s)") || strings.Contains(got, "RTO check") || strings.Contains(got, "RTO CHECK") {
+		t.Errorf("too few:\n%s", got)
+	}
+	// An agent that sends no estimate reads as it always did.
+	var old pitrPlan
+	_ = json.Unmarshal([]byte(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d"}}`), &old)
+	if got := formatPITRPlan(old, goodOpts()); strings.Contains(got, "Past restores") {
+		t.Errorf("a plan with no estimate mentions one:\n%s", got)
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {

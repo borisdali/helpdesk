@@ -36,6 +36,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 	"helpdesk/internal/policy"
 )
 
@@ -82,6 +83,10 @@ type RestoreToPITResult struct {
 	// of the archive. It is the figure to compare with the one the human
 	// approved, and the one to record against the incident.
 	DataLoss *DataLossEstimate `json:"data_loss,omitempty"`
+	// AvailabilityBudget is the downtime this restore costs, set against what was
+	// left of the downtime budget when it ran: read again just before the stop,
+	// as the data loss is, because the ledger moves while a plan waits.
+	AvailabilityBudget *availability.BudgetVerdict `json:"availability_budget,omitempty"`
 	// DecisionUnrecorded is set when the decision to proceed (or the refusal)
 	// could not be written to the audit trail. The restore is not held for it,
 	// as no tool call is held for its audit write, but the result says so: a
@@ -212,7 +217,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 	decided := false
 	defer func() {
 		if retErr != nil && !decided && isRefusal(retErr) {
-			if werr := recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, retErr.Error()); werr != nil {
+			if werr := recordExecutionDecision(ctx, args, result.Plan, result.DataLoss, result.AvailabilityBudget, retErr.Error()); werr != nil {
 				// The result was already copied into the named result: set it there.
 				namedResult.DecisionUnrecorded = unrecordedNote(werr)
 			}
@@ -288,10 +293,15 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 		measured = &p
 	}
 	result.DataLoss = withObjective(estimateDataLoss(target, normalized, plan.WALContinuity, measured, stopAt), args.Target)
-	var gerr error
+	// And what it costs in downtime, read now for the same reason: the ledger
+	// moves while a plan waits. A serving instance is what this restore takes
+	// down; one that is already down is accruing the downtime anyway.
+	result.AvailabilityBudget = budgetCheckFor(ctx, args.Target, live)
+	var rpo *RPOComparison
 	if result.DataLoss != nil {
-		gerr = result.DataLoss.Objective.objectiveGate(args.AcknowledgeObjectiveBreach)
+		rpo = result.DataLoss.Objective
 	}
+	gerr := restoreGate(rpo, result.AvailabilityBudget, args.AcknowledgeObjectiveBreach)
 	// The decision is recorded here, with what it was made from, whichever way
 	// it goes: this is the last point before anything is stopped.
 	decided = true
@@ -301,12 +311,12 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 			untouched = "The instance was not stopped."
 		}
 		refusal := fmt.Errorf("restore_to_point_in_time: refusing to restore — %w. %s", gerr, untouched)
-		result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, refusal.Error()))
+		result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, result.AvailabilityBudget, refusal.Error()))
 		return result, refusal
 	}
 	// Going ahead is not held for the record either; if it cannot be written the
 	// result says so, and the log carries the error.
-	result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, ""))
+	result.DecisionUnrecorded = unrecordedNote(recordExecutionDecision(ctx, args, plan, result.DataLoss, result.AvailabilityBudget, ""))
 
 	// Stop it. From here the instance is down whatever happens next.
 	var stopOut string

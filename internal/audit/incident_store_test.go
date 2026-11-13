@@ -362,6 +362,115 @@ func TestIncidentStore_List_SeriesIDFilter(t *testing.T) {
 	}
 }
 
+func TestIncidentStore_TargetKey_RoundTripsAndFilters(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+
+	seed := []*Incident{
+		{EntryRunID: "plr_a", TargetKey: "prod-main", TargetInput: "host=db1 port=5432 password=***"},
+		{EntryRunID: "plr_b", TargetKey: "prod-main", TargetInput: "prod-main"},
+		{EntryRunID: "plr_c", TargetKey: "vm-pg", TargetInput: "vm-pg"},
+		{EntryRunID: "plr_d", TargetInput: "no-such-server"}, // unresolved
+	}
+	for _, inc := range seed {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	got, err := s.GetByEntryRunID(ctx, "plr_a")
+	if err != nil {
+		t.Fatalf("GetByEntryRunID: %v", err)
+	}
+	if got.TargetKey != "prod-main" || got.TargetInput != "host=db1 port=5432 password=***" {
+		t.Errorf("round trip lost the target: %+v", got)
+	}
+	byTrace := &Incident{TraceID: "tr_t", EntryRunID: "plr_e", TargetKey: "vm-pg"}
+	if err := s.Create(ctx, byTrace); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetByTraceID(ctx, "tr_t"); err != nil || got.TargetKey != "vm-pg" {
+		t.Errorf("GetByTraceID target = %+v, %v", got, err)
+	}
+
+	prod, err := s.List(ctx, IncidentListFilter{TargetKey: "prod-main"})
+	if err != nil || len(prod) != 2 {
+		t.Fatalf("List(target_key=prod-main) = %d, %v; want 2", len(prod), err)
+	}
+	for _, inc := range prod {
+		if inc.TargetKey != "prod-main" {
+			t.Errorf("a %q incident came back for prod-main", inc.TargetKey)
+		}
+	}
+	// No filter returns the unresolved incident too: it is never dropped.
+	all, err := s.List(ctx, IncidentListFilter{})
+	if err != nil || len(all) != 5 {
+		t.Fatalf("List() = %d, %v; want 5", len(all), err)
+	}
+}
+
+// A window keeps the incidents that overlap it: open ones, and ones resolved at
+// or after its start, including an incident detected long before it began.
+func TestIncidentStore_List_SinceKeepsWhatOverlapsTheWindow(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+	since := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) time.Time { return since.Add(d) }
+
+	seed := map[string]*Incident{
+		"still open":                {EntryRunID: "open", DetectedAt: at(-72 * time.Hour)},
+		"resolved before":           {EntryRunID: "before", DetectedAt: at(-48 * time.Hour), ResolvedAt: at(-time.Second)},
+		"resolved exactly at start": {EntryRunID: "at", DetectedAt: at(-time.Hour), ResolvedAt: at(0)},
+		"began before, ended in":    {EntryRunID: "straddle", DetectedAt: at(-time.Hour), ResolvedAt: at(time.Hour)},
+		"inside":                    {EntryRunID: "inside", DetectedAt: at(time.Hour), ResolvedAt: at(2 * time.Hour)},
+	}
+	for name, inc := range seed {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	got, err := s.List(ctx, IncidentListFilter{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, inc := range got {
+		have[inc.EntryRunID] = true
+	}
+	for run, want := range map[string]bool{"open": true, "before": false, "at": true, "straddle": true, "inside": true} {
+		if have[run] != want {
+			t.Errorf("incident %q kept = %v, want %v", run, have[run], want)
+		}
+	}
+	// Without Since nothing is dropped.
+	if all, _ := s.List(ctx, IncidentListFilter{}); len(all) != 5 {
+		t.Errorf("unfiltered = %d, want 5", len(all))
+	}
+}
+
+func TestIncidentStore_List_UnattributedWinsOverTargetKey(t *testing.T) {
+	s := newIncidentStore(t)
+	ctx := context.Background()
+	for _, inc := range []*Incident{
+		{EntryRunID: "a", TargetKey: "prod-main"},
+		{EntryRunID: "b", TargetInput: "no-such-server"},
+		{EntryRunID: "c", TargetInput: "5432"},
+	} {
+		if err := s.Create(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.List(ctx, IncidentListFilter{Unattributed: true, TargetKey: "prod-main"})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("unattributed = %d, %v; want the 2 with no key", len(got), err)
+	}
+	for _, inc := range got {
+		if inc.TargetKey != "" {
+			t.Errorf("an attributed incident came back: %+v", inc)
+		}
+	}
+}
+
 func TestIncidentStore_List_MostRecentFirst(t *testing.T) {
 	s := newIncidentStore(t)
 	ctx := context.Background()
@@ -456,6 +565,14 @@ func TestIncidentStore_MigrateAddsSeriesID(t *testing.T) {
 	}
 	if got.SeriesID != "" {
 		t.Errorf("SeriesID = %q, want empty-string default for a pre-existing row", got.SeriesID)
+	}
+	// An incident from before v0.35 has no database: empty, not an error, and
+	// it is not matched by any target_key filter.
+	if got.TargetKey != "" || got.TargetInput != "" {
+		t.Errorf("a pre-existing row has target (%q, %q), want empty", got.TargetKey, got.TargetInput)
+	}
+	if listed, err := s.List(context.Background(), IncidentListFilter{TargetKey: "prod-main"}); err != nil || len(listed) != 0 {
+		t.Errorf("target_key filter matched a pre-existing row: %d, %v", len(listed), err)
 	}
 
 	// New rows can set series_id without collision.

@@ -19,7 +19,7 @@ import (
 const objectivesInfrastructure = `{
   "defaults": {"objectives": {"rpo": "1h", "rto": "4h", "availability_slo": 99.0}},
   "environments": {
-    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "recovery_preference": "data_first", "enforcement": "acknowledge"}},
+    "prod":    {"description": "customer-facing", "objectives": {"rpo": "5m", "rto": "30m", "availability_slo": 99.9, "availability_window": "30d", "recovery_preference": "data_first", "enforcement": "acknowledge", "availability_enforcement": "acknowledge"}},
     "staging": {"objectives": {"rpo": "1d"}}
   },
   "db_servers": {
@@ -79,7 +79,27 @@ func TestInfrastructureObjectivesSurviveTheChart(t *testing.T) {
 		orders.EffectiveEnforcement() != infra.EnforceAcknowledge {
 		t.Errorf("orders = %+v", orders)
 	}
+	// The availability window and the budget it gives survive the chart too: a
+	// 30m rto in 43m12s of downtime, tolerating one recovery, and no contradiction.
+	if !orders.AvailabilityWindow.Set || orders.AvailabilityWindow.Value != 30*24*time.Hour || orders.AvailabilityWindow.Source != "environment:prod" {
+		t.Errorf("orders window = %+v", orders.AvailabilityWindow)
+	}
+	if b := orders.Budget(); !b.Computed || b.Allowed != 43*time.Minute+12*time.Second || b.Tolerated != 1 || b.Contradictory {
+		t.Errorf("orders budget = %+v", b)
+	}
+	if got := cfg.Consistency(); len(got) != 0 {
+		t.Errorf("the rendered objectives contradict each other: %v", got)
+	}
+	// The budget's own enforcement survives the chart, and is not the rpo's: the
+	// ledger database sets enforcement: refuse for itself and says nothing about
+	// the budget, so the budget stays at the environment's acknowledge.
+	if orders.EffectiveAvailabilityEnforcement() != infra.EnforceAcknowledge {
+		t.Errorf("orders availability enforcement = %q", orders.EffectiveAvailabilityEnforcement())
+	}
 	ledger, _ := cfg.ResolveObjectives("ledger")
+	if ledger.EffectiveEnforcement() != infra.EnforceRefuse || ledger.EffectiveAvailabilityEnforcement() != infra.EnforceAcknowledge {
+		t.Errorf("ledger: rpo enforcement %q, availability enforcement %q", ledger.EffectiveEnforcement(), ledger.EffectiveAvailabilityEnforcement())
+	}
 	// A zero rpo is a value (no loss tolerated), and a database's own enforcement wins.
 	if !ledger.RPO.Set || ledger.RPO.Value != 0 || ledger.RPO.Source != "database" || ledger.EffectiveEnforcement() != infra.EnforceRefuse {
 		t.Errorf("ledger = %+v", ledger)

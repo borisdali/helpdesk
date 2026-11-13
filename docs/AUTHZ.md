@@ -168,6 +168,7 @@ Roles not in this table are valid for policy governance purposes (e.g. `develope
 | `POST /api/v1/research` | Research query |
 | `GET /api/v1/infrastructure` | List registered infrastructure |
 | `GET /api/v1/databases` | List registered databases |
+| `GET /api/v1/availability-ledger` | Downtime budget spent by one database's incidents |
 | `GET /api/v1/governance/*` | All governance read endpoints |
 | `POST /api/v1/fleet/plan` | Fleet dry-run planner |
 | `GET /api/v1/fleet/jobs/*` | Fleet job read endpoints |

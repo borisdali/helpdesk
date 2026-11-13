@@ -80,6 +80,12 @@ type RecoveryDecision struct {
 	PlanDigest     string `json:"plan_digest,omitempty"`
 	// PlanStatus is feasible, not_feasible or unverified.
 	PlanStatus string `json:"plan_status,omitempty"`
+	// RestoreBytes is, for the execution stage, the size of the cluster in the
+	// backup the restore used (pgBackRest's own figure for it): what the restore
+	// writes back, and so what its duration mostly depends on. It is kept so that
+	// restore times can later be compared across a server's growth. Absent when
+	// pgBackRest did not report a size, and on a record from before v0.35.
+	RestoreBytes *uint64 `json:"restore_bytes,omitempty"`
 	// Objectives is what was required of this database when the stage ran.
 	Objectives *ObjectivesInForce `json:"objectives,omitempty"`
 	// Options are the courses of action the stage had in front of it, each
@@ -103,6 +109,13 @@ type ObjectivesInForce struct {
 
 	AvailabilitySLO    *float64 `json:"availability_slo,omitempty"`
 	AvailabilitySource string   `json:"availability_source,omitempty"`
+	// The window the SLO was read over and the downtime budget that gives, as
+	// they were when the decision was made. The window source is a config level,
+	// or "built-in default" when no level set one. Absent on events recorded
+	// before v0.35 and when no budget could be computed.
+	AvailabilityWindowSeconds *int64 `json:"availability_window_seconds,omitempty"`
+	AvailabilityWindowSource  string `json:"availability_window_source,omitempty"`
+	AvailabilityBudgetSeconds *int64 `json:"availability_budget_seconds,omitempty"`
 
 	RecoveryPreference string `json:"recovery_preference,omitempty"`
 	PreferenceSource   string `json:"preference_source,omitempty"`
@@ -112,6 +125,11 @@ type ObjectivesInForce struct {
 	// configured one came from, empty when it was not configured.
 	Enforcement       string `json:"enforcement,omitempty"`
 	EnforcementSource string `json:"enforcement_source,omitempty"`
+	// AvailabilityEnforcement is the effective enforcement of the availability
+	// budget (warn when none is set, acknowledge when it could not be trusted),
+	// and its source where one was configured. Absent before v0.35.
+	AvailabilityEnforcement       string `json:"availability_enforcement,omitempty"`
+	AvailabilityEnforcementSource string `json:"availability_enforcement_source,omitempty"`
 
 	// Problems are the configuration problems that affected the resolution.
 	Problems []string `json:"problems,omitempty"`
@@ -138,6 +156,15 @@ type DecisionOption struct {
 	// rests on. A breach of the rpo proven by it is recorded as the verdict.
 	LossAtLeastSeconds *int64 `json:"loss_at_least_seconds,omitempty"`
 	LossAtLeastBasis   string `json:"loss_at_least_basis,omitempty"`
+	// The transactions the restore would discard, counted from the WAL with
+	// pg_waldump. LossCommitsStatus is measured or unavailable (absent when no
+	// attempt was made, and on a record from before v0.35). LossCommits is the
+	// count, LossCommitsAtLeast says it is a lower bound, and LossCommitsReason
+	// says why there is none.
+	LossCommitsStatus  string `json:"loss_commits_status,omitempty"`
+	LossCommits        *int   `json:"loss_commits,omitempty"`
+	LossCommitsAtLeast bool   `json:"loss_commits_at_least,omitempty"`
+	LossCommitsReason  string `json:"loss_commits_reason,omitempty"`
 
 	// Verdict is the loss set against the rpo (within, exceeds, may_exceed,
 	// not_comparable, no_objective, objective_invalid); Gate what approving
@@ -145,7 +172,46 @@ type DecisionOption struct {
 	Verdict       string `json:"verdict,omitempty"`
 	VerdictDetail string `json:"verdict_detail,omitempty"`
 	Gate          string `json:"gate,omitempty"`
+
+	// The restore set against the availability budget (the downtime the SLO
+	// allows in its window): what is left of it, as the restore stood to use it.
+	// BudgetVerdict is within, exceeds, may_exceed, not_comparable, no_objective,
+	// objective_invalid or ledger_unavailable; BudgetGate what approving demands
+	// because of it. BudgetRemainingSeconds is negative when the budget is
+	// overspent. Absent on a record from before v0.35.
+	BudgetVerdict          string `json:"budget_verdict,omitempty"`
+	BudgetVerdictDetail    string `json:"budget_verdict_detail,omitempty"`
+	BudgetGate             string `json:"budget_gate,omitempty"`
+	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
+	// How long the budget verdict took the restore to last, and on what:
+	// "history_p90" (the p90 of this server's past restores, from ten of them),
+	// "history_longest" (the longest of three to nine, too few for a p90) or
+	// "declared_rto" (an upper bound). Absent when it was not compared. Records
+	// from before this naming say "history", which meant the p90.
+	BudgetDurationSeconds *int64 `json:"budget_duration_seconds,omitempty"`
+	BudgetDurationBasis   string `json:"budget_duration_basis,omitempty"`
+
+	// What this server's past restores have taken, from real incidents, as the
+	// plan or the restore saw it. EstimateStatus is estimated, insufficient_history,
+	// no_history or unavailable; the figures are present only when estimated.
+	// EstimateP90Seconds only from ten samples (below that it would be the longest
+	// under another name), EstimateMaxSeconds always, when estimated.
+	// EstimateVsRTO is "within" or "exceeds" (some past restore took longer than the
+	// declared rto), with EstimateOverRTO how many.
+	EstimateStatus     string `json:"estimate_status,omitempty"`
+	EstimateSamples    *int   `json:"estimate_samples,omitempty"`
+	EstimateP50Seconds *int64 `json:"estimate_p50_seconds,omitempty"`
+	EstimateP90Seconds *int64 `json:"estimate_p90_seconds,omitempty"`
+	EstimateMaxSeconds *int64 `json:"estimate_max_seconds,omitempty"`
+	EstimateVsRTO      string `json:"estimate_vs_rto,omitempty"`
+	EstimateOverRTO    *int   `json:"estimate_over_rto,omitempty"`
 }
+
+// The objectives a restore can breach, as named in ApprovalFacts.Breaches.
+const (
+	BreachRPO                = "rpo"
+	BreachAvailabilityBudget = "availability_budget"
+)
 
 // ApprovalFacts is what an approval carried.
 type ApprovalFacts struct {
@@ -153,6 +219,12 @@ type ApprovalFacts struct {
 	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
 	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
 	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+	// Breaches are the objectives that stood in the way of this restore (each one
+	// demanded the acknowledgement), so that a person who acknowledged an rpo
+	// breach is not taken to have acknowledged a budget breach too. One
+	// acknowledgement covers every breach shown at the gate; this says which
+	// there were. Empty when nothing demanded it.
+	Breaches []string `json:"breaches,omitempty"`
 }
 
 var (

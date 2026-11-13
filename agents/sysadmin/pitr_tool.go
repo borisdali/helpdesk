@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 )
 
 // Plan statuses.
@@ -58,6 +59,9 @@ type PITRPlan struct {
 	NormalizedTarget string         `json:"normalized_target,omitempty"`
 	BackupLabel      string         `json:"backup_label,omitempty"`
 	BackupStopTime   string         `json:"backup_stop_time,omitempty"`
+	// BackupDatabaseBytes is the size of the cluster in the selected backup: what
+	// the restore would write back. Absent when pgBackRest did not report it.
+	BackupDatabaseBytes uint64 `json:"backup_database_bytes,omitempty"`
 	// TargetTimeline is the timeline the restore would pin; ExpectedTimeline
 	// the one PostgreSQL should create. v1 uses the archive's newest timeline.
 	TargetTimeline   uint32 `json:"target_timeline,omitempty"`
@@ -70,6 +74,12 @@ type PITRPlan struct {
 	// Not part of the plan digest: on a serving instance it grows while the
 	// plan waits for approval.
 	DataLossEstimate *DataLossEstimate `json:"data_loss_estimate,omitempty"`
+	// AvailabilityBudget sets the downtime this restore costs against what is
+	// left of the database's downtime budget (the SLO over its window), and says
+	// what approving will demand because of it. Not part of the plan digest, as
+	// what is left of a budget changes while the plan waits for approval: the
+	// restore reads it again just before it stops anything.
+	AvailabilityBudget *availability.BudgetVerdict `json:"availability_budget,omitempty"`
 	// DecisionUnrecorded is set when this plan could not be written to the
 	// audit trail. The plan stands; it just is not on record.
 	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
@@ -111,6 +121,8 @@ func assessPITRPlanFor(stanza string, target RecoveryTarget, normalized string, 
 		BackupLabel:      backup.Label,
 		BackupStopTime:   backup.StopTime.UTC().Format(time.RFC3339),
 		WALContinuity:    wal,
+
+		BackupDatabaseBytes: backup.DatabaseBytes,
 	}
 	notFeasible := func(format string, args ...any) PITRPlan {
 		plan.Status, plan.Detail = PITRNotFeasible, fmt.Sprintf(format, args...)
@@ -252,14 +264,20 @@ func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 		return plan, err
 	}
 	var live *LivePreState
-	if plan.InstanceServing {
-		if inst, ierr := instanceFor(args.Target); ierr == nil && !inst.local {
-			if pre, perr := livePreflight(ctx, inst); perr == nil {
-				live = &pre
-			}
+	inst, ierr := instanceFor(args.Target)
+	if plan.InstanceServing && ierr == nil && !inst.local {
+		if pre, perr := livePreflight(ctx, inst); perr == nil {
+			live = &pre
 		}
 	}
-	plan.DataLossEstimate = withObjective(estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now()), args.Target)
+	est := estimateDataLoss(plan.Target, plan.NormalizedTarget, plan.WALContinuity, live, time.Now())
+	// The transactions the discarded WAL holds, counted from the WAL itself. It
+	// always says something: a count, or why there is none.
+	if est != nil && ierr == nil {
+		est.withTransactions(measureTransactionLoss(ctx, inst, plan, live))
+	}
+	plan.DataLossEstimate = withObjective(est, args.Target)
+	plan.AvailabilityBudget = budgetCheckFor(ctx, args.Target, plan.InstanceServing)
 	return plan, nil
 }
 

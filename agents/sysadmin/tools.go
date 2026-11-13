@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -111,69 +112,9 @@ type resolvedHost struct {
 	Sensitivity []string
 }
 
-// connStrPort extracts the port number from a libpq connection string or
-// "host:port" address. Returns "" when no port is found.
-func connStrHost(s string) string {
-	// A bare port number (digits only, e.g. the caller passed just "58989")
-	// carries no host information at all — return empty, not the digits
-	// themselves, so callers can tell "no host known" apart from a real host
-	// that happens to parse oddly.
-	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
-		return ""
-	}
-	// libpq keyword format: "... host=myhost ..."
-	for _, field := range strings.Fields(s) {
-		if strings.HasPrefix(field, "host=") {
-			h := strings.TrimPrefix(field, "host=")
-			if h != "" {
-				return h
-			}
-		}
-	}
-	// "host:port" / URI format (after stripping scheme and userinfo)
-	s = strings.TrimPrefix(s, "postgresql://")
-	s = strings.TrimPrefix(s, "postgres://")
-	if idx := strings.LastIndex(s, "@"); idx >= 0 {
-		s = s[idx+1:]
-	}
-	if idx := strings.LastIndex(s, ":"); idx >= 0 {
-		return s[:idx]
-	}
-	if sl := strings.IndexAny(s, "/?"); sl >= 0 {
-		s = s[:sl]
-	}
-	return s
-}
-
-func connStrPort(s string) string {
-	// libpq keyword format: "... port=5432 ..."
-	for _, field := range strings.Fields(s) {
-		if strings.HasPrefix(field, "port=") {
-			p := strings.TrimPrefix(field, "port=")
-			if p != "" {
-				return p
-			}
-		}
-	}
-	// "host:port" format (after stripping any scheme prefix)
-	s = strings.TrimPrefix(s, "postgresql://")
-	s = strings.TrimPrefix(s, "postgres://")
-	if idx := strings.LastIndex(s, ":"); idx >= 0 {
-		p := s[idx+1:]
-		// strip any trailing path/query
-		if sl := strings.IndexAny(p, "/?"); sl >= 0 {
-			p = p[:sl]
-		}
-		if p != "" && p != s {
-			return p
-		}
-	}
-	// bare port (digits only)
-	if strings.TrimFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }) == "" && s != "" {
-		return s
-	}
-	return ""
-}
+// connStrPort is infra.ConnStrPort, which target resolution shares with the
+// gateway.
+func connStrPort(s string) string { return infra.ConnStrPort(s) }
 
 // resolveHost looks up a DB server by ID and assembles the resolvedHost the
 // sysadmin tools need. It handles both VM-hosted (docker/podman/systemd) and
@@ -205,73 +146,21 @@ func resolveHost(serverID string) (resolvedHost, error) {
 // match on its own.
 func lookupServer(ic *infra.Config, serverID string) (string, infra.DBServer, error) {
 	serverID = strings.TrimSpace(serverID)
-	db, ok := ic.DBServers[serverID]
-	if !ok {
-		// Fallback 1: treat target as a connection string and match by host+port.
-		// This allows the LLM to pass the connection string from triage findings
-		// when it doesn't know the server ID (e.g. ephemeral auto-DB containers).
-		// Matches on host+port together, not port alone: 5432 is Postgres's own
-		// default and collides constantly across unrelated registered servers —
-		// found live (2026-10-10): a real VM target and two unrelated Docker
-		// servers all shared port 5432 in the same infra config. Port-only
-		// matching silently picked whichever candidate came first in Go's own
-		// randomized map iteration order — non-deterministic across runs, and it
-		// genuinely resolved to the wrong real server during a live diagnosis.
-		// If host+port still matches more than one server, refuse rather than
-		// guess, the same "don't guess, report and escalate" principle every
-		// other resolution failure in this function already follows.
-		// Note this is NOT the same control as the gateway's own
-		// checkTargetScope (docs/MUTATION_TOOLS.md §5.6): that one compares the
-		// connection_string a tool call *declared* against the intended target
-		// and cannot see resolution at all, so it stayed (correctly) silent
-		// while this bug silently dispatched to the wrong server. See that
-		// section for why both layers exist and what still isn't covered.
-		if port := connStrPort(serverID); port != "" {
-			// A bare port number (host == "") carries no host info to match
-			// on — fall back to port-only matching in that case specifically,
-			// still collecting every match and refusing on ambiguity exactly
-			// like the host+port path below.
-			host := connStrHost(serverID)
-			var matches []string
-			for id, candidate := range ic.DBServers {
-				if connStrPort(candidate.ConnectionString) != port {
-					continue
-				}
-				if host != "" && connStrHost(candidate.ConnectionString) != host {
-					continue
-				}
-				matches = append(matches, id)
-			}
-			switch len(matches) {
-			case 0:
-				// no match — fall through to Fallback 2
-			case 1:
-				db = ic.DBServers[matches[0]]
-				serverID = matches[0]
-				ok = true
-			default:
-				sort.Strings(matches)
-				return "", infra.DBServer{}, fmt.Errorf(
-					"target %q matches multiple registered servers by host+port (%s) — refusing to guess which one; use the exact server ID instead",
-					serverID, strings.Join(matches, ", "))
-			}
+	// The matching rules (key, host+port, container name, ...) and why a bare
+	// port or a shared name is refused rather than guessed live in
+	// infra.ResolveTarget, so the gateway's incident ledger resolves the same
+	// way. Found live (2026-10-10): matching on the port alone silently picked
+	// whichever of three servers sharing port 5432 came first in Go's random
+	// map order, and resolved to the wrong real server during a diagnosis.
+	// (This is not the gateway's checkTargetScope, docs/MUTATION_TOOLS.md §5.6:
+	// that compares the connection_string a call declared and cannot see
+	// resolution at all.)
+	key, err := ic.ResolveTarget(serverID)
+	if err != nil {
+		var amb *infra.AmbiguousTargetError
+		if errors.As(err, &amb) {
+			return "", infra.DBServer{}, err
 		}
-	}
-	if !ok {
-		// Fallback 2: match by container name. The LLM often extracts the
-		// container name from prior-run findings instead of using the server ID
-		// or connection string. Scanning for a matching ContainerName lets it
-		// succeed without knowing the server ID.
-		for id, candidate := range ic.DBServers {
-			if candidate.ContainerName == serverID {
-				db = candidate
-				serverID = id
-				ok = true
-				break
-			}
-		}
-	}
-	if !ok {
 		known := make([]string, 0, len(ic.DBServers))
 		for id := range ic.DBServers {
 			known = append(known, id)
@@ -280,7 +169,7 @@ func lookupServer(ic *infra.Config, serverID string) (string, infra.DBServer, er
 		return "", infra.DBServer{}, fmt.Errorf("server %q not found in infrastructure config. Known servers: %s",
 			serverID, strings.Join(known, ", "))
 	}
-	return serverID, db, nil
+	return key, ic.DBServers[key], nil
 }
 
 // resolveHostFor turns a found db_servers entry into the host it runs on.
@@ -1412,6 +1301,9 @@ type PgBackRestBackup struct {
 	WALStop  string `json:"wal_stop,omitempty"`
 	LSNStart string `json:"lsn_start,omitempty"`
 	LSNStop  string `json:"lsn_stop,omitempty"`
+	// DatabaseBytes is the size of the cluster when this backup was taken: what a
+	// restore of it writes back. Zero when pgBackRest did not report one.
+	DatabaseBytes uint64 `json:"database_bytes,omitempty"`
 	// archiveID is the repo archive directory (e.g. "16-1") holding this
 	// backup's WAL, matched through the backup's database id.
 	archiveID string
@@ -1470,6 +1362,16 @@ type GetPgBackRestStatusResult struct {
 	// never hinge on whether the model correctly reconstructs a boolean from
 	// its absence.
 	BackupStale bool `json:"backup_stale"`
+	// ObjectiveExposure sets the backup posture against the server's declared rpo
+	// and rto (see objective_exposure.go). Absent for a target that is not a
+	// configured database and for one that declares neither objective. It is
+	// information, separate from BackupStale, which keeps its meaning.
+	//
+	// It sits BEFORE the bulky fields on purpose: the audit trail cuts a tool
+	// result at 8 KB, a long list of backups is what reaches that, and what the
+	// model quotes from this block must still be in the trail. A test pins the
+	// position.
+	ObjectiveExposure *ObjectiveExposure `json:"objective_exposure,omitempty"`
 	// WALContinuity says whether the latest backup can actually be restored
 	// to the end of the archived WAL — see walcheck.go. Nil only when the
 	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
@@ -1629,6 +1531,11 @@ type pgBackRestRawBackup struct {
 	Database struct {
 		ID int `json:"id"`
 	} `json:"database"`
+	// Info.Size is the size of the database cluster when the backup was taken
+	// (the bytes a restore of it puts back), not the size the repository holds.
+	Info struct {
+		Size int64 `json:"size"`
+	} `json:"info"`
 }
 
 // jsonArrayPrefix strips any non-JSON preamble before the first `[`,
@@ -1728,6 +1635,9 @@ func parsePgBackRestInfo(output, wantStanza string, maxAge time.Duration) (GetPg
 			LSNStop:   b.LSN.Stop,
 			archiveID: archiveIDs[b.Database.ID],
 		})
+		if b.Info.Size > 0 {
+			result.Backups[len(result.Backups)-1].DatabaseBytes = uint64(b.Info.Size)
+		}
 	}
 
 	// Most recent by StopTime, not array position — pgBackRest's own
@@ -1861,6 +1771,11 @@ func readPgBackRestStatus(ctx context.Context, args GetPgBackRestStatusArgs, wit
 			return runPgBackRestOnTarget(ctx, "get_pgbackrest_status", args.Target, walArgs)
 		})
 		result.WALContinuity = &wal
+	}
+	// The objectives are only read for the full status (not for the callers that
+	// only need the stanza name), after the WAL it is set against.
+	if withWAL {
+		withObjectiveExposure(ctx, &result, args.Target)
 	}
 
 	if toolAuditor != nil {

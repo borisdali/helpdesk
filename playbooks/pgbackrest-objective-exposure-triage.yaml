@@ -1,0 +1,148 @@
+series_id: pbs_pgbackrest_objective_exposure_triage
+name: "pgBackRest — Objective Exposure Check"
+version: "1.5"
+playbook_type: triage
+entry_point: true
+execution_mode: agent
+agent_name: sysadmin_agent
+approval_mode: manual
+# Nothing follows this check on its own. It never restores and never takes a
+# backup: when a server is exposed the finding goes to a person, who decides
+# (a fresh backup, the archiving triage, a restore rehearsal).
+transitions_to: []
+problem_class: availability
+author: aiHelpDesk
+description: |
+  Is this server's backup posture enough for the recovery objectives declared
+  for it? Read-only. Reads the objective_exposure block of
+  get_pgbackrest_status: the age of the newest archived WAL set against the
+  rpo, and the longest restore of this server in the history (real incidents
+  only) set against the rto. Meant to be started on a schedule from outside
+  the product (a CronJob calling the gateway) or by hand; nothing inside the
+  product schedules it. A run records one incident, so a schedule should be
+  daily, not every few minutes.
+root_cause_classes:
+  version: "1.2"
+  classes:
+    - objectives-within
+    - objectives-not-assessed
+    - rto-exceeded-by-history
+    - rpo-exposure-possible
+    - status-not-readable
+  descriptions:
+    status-not-readable: >
+      get_pgbackrest_status returned an error or could not reach the host, so
+      there was nothing to read. Nothing is known about the server's exposure;
+      the check did not run.
+    objectives-within: >
+      Every check that could be made is within its declared objective. At least
+      one check was made and none is exceeded or may be exceeded: typically the
+      archive is no older than the rpo. The other check may be not comparable
+      (for example, not enough restore history to compare with the rto); that
+      does not change this class.
+    objectives-not-assessed: >
+      Neither check could be made: no rpo or rto is declared for this server,
+      its environment or the fleet, or the declared values could not be used,
+      or there is no usable archive age and no restore history. If either check
+      was made and is within its objective, the class is objectives-within, not
+      this one. This is a statement about what is known, not a finding that
+      anything is wrong.
+    rto-exceeded-by-history: >
+      At least one past restore of this server, from a real incident, took
+      longer than the declared rto. A future restore can be expected to run
+      over it again. Nothing is wrong with the backups; the objective and the
+      measured recovery time disagree.
+    rpo-exposure-possible: >
+      The newest archived WAL is older than the declared rpo. This is an
+      upper bound: an idle server writes no WAL, so an old archive can mean
+      nothing is waiting to be archived. It can also mean archiving has
+      stopped, which this check alone cannot tell apart.
+symptoms:
+  - "scheduled check: are this server's backups enough for its declared rpo and rto?"
+  - "get_pgbackrest_status reports objective_exposure.status=exposed"
+  - "a restore of this server took longer than its rto"
+guidance: |
+  Call get_pgbackrest_status with the connection_string (target) as your
+  first and only tool call: do not call check_host or anything else first,
+  nothing else is needed to answer this. Do not
+  pass a staleness bound of your own: backup_stale answers a different
+  question (is the backup job on schedule?) and this check does not use it.
+
+  Read objective_exposure. It has status (within | exposed | not_assessed),
+  and rpo and rto checks, each with a status, objective_seconds,
+  measured_seconds and a detail sentence. It is absent when no rpo or rto is
+  declared for this server.
+  - rpo.status may_exceed means the newest archived WAL is older than the
+    rpo. It is never a proven breach (see rpo-exposure-possible).
+  - rto.status exceeds means a past restore of this server really did take
+    longer than the rto. measured_seconds is the longest one; detail says how
+    many restores it is based on.
+  - not_comparable and no_objective say why a check could not be made.
+
+  Write exactly one hypothesis line, HYPOTHESIS_1, in every ending. The rpo
+  and rto checks are two readings of the same result, not competing
+  explanations: the one that decides the ending is the hypothesis, and the
+  other goes in FINDINGS. Never add a HYPOTHESIS_2 only to reject it.
+
+  Every EVIDENCE quote must be ONE sentence copied word for word from a
+  detail field (rpo.detail, rto.detail, or the tool's error), inside the
+  quotation marks, with nothing added. Do not build a quote by joining field
+  names and values with semicolons: that text is not in the tool output and
+  is flagged as unverified.
+
+  Quote the numbers from the tool output; do not recompute them and do not
+  compare anything to a time you were not given. You have no tool here that
+  can tell an idle server from one whose archiving has stopped, so say that
+  plainly instead of choosing.
+
+  Five mutually exclusive endings, pick exactly one:
+
+  Ending A — within (objective_exposure.status=within):
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=within; rpo=<rpo.status> (<rpo.detail>); rto=<rto.status> (<rto.detail>); recommended=no_changes_needed
+  ESCALATE_TO: none
+
+  Ending B — not assessed (objective_exposure absent, or status=not_assessed):
+  Say which of the two it is and why, from the detail fields. This is not a
+  failure and nothing needs doing about this run; the configuration gap, if
+  there is one, is in the findings.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=not_assessed; reason=<no objective declared | objective unusable | not enough restore history | block absent>; recommended=no_changes_needed
+  ESCALATE_TO: none
+
+  Ending C — the history breaks the rto (rto.status=exceeds):
+  If the rpo check is also may_exceed, still pick this ending and report the
+  rpo check in the same FINDINGS line.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=exposed; rto=exceeds; rto_seconds=<rto.objective_seconds>; longest_restore_seconds=<rto.measured_seconds>; rto_detail=<rto.detail>; rpo=<rpo.status>; recommended=a person decides: raise the rto, make restores faster, or rehearse a restore to measure it
+  ESCALATE_TO: none
+
+  Ending D — the archive is older than the rpo (rpo.status=may_exceed, rto not exceeds):
+  The hypothesis is the measurement, nothing more: the archive is older than
+  the rpo, by how much. Do not write that the server "has not generated WAL"
+  or that archiving "has stopped" or "failed", and do not add a second
+  hypothesis for either: you cannot tell them apart and a hypothesis you
+  cannot test is not a finding. Say so in cannot_tell.
+  HYPOTHESIS_1: The newest archived WAL is <archive age> old, older than the rpo of <rpo>; whether the server is idle or archiving has stopped is not known | CONFIDENCE: <0.0–1.0, for the measurement itself> | EVIDENCE: "<verbatim quote from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=exposed; rpo=may_exceed; rpo_seconds=<rpo.objective_seconds>; archive_age_seconds=<rpo.measured_seconds>; rpo_detail=<rpo.detail>; wal_continuity=<wal_continuity.status>; cannot_tell=idle server or archiving stopped; recommended=run the archiving triage (pbs_db_backup_health_triage) if the server is not idle
+  ESCALATE_TO: none
+
+  Ending E — the status could not be read (get_pgbackrest_status returned an
+  error, or could not reach the host, so there is no objective_exposure to
+  read):
+  This is different from not assessed: nothing is known about the server's
+  objectives either way, so a person needs to know the check did not run.
+  Quote the tool's error and do not guess at exposure.
+  HYPOTHESIS_1: <primary hypothesis> | CONFIDENCE: <0.0–1.0> | EVIDENCE: "<verbatim quote of the error from tool output>"
+  ROOT_CAUSE: HYPOTHESIS_1
+  FINDINGS: exposure=unknown; reason=<the tool's error, in one sentence>; the check did not run
+  ESCALATE_TO: none
+escalation:
+  - "get_pgbackrest_status could not be read — the check did not run"
+  - "objective_exposure.status=exposed — the declared rpo or rto may not be met"
+  - "rto.status=exceeds — a past restore of this server took longer than the rto"
+target_hints: []

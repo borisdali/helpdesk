@@ -184,6 +184,9 @@ func TestCheckFixModeViolations_InfraConfigSet_NoViolation(t *testing.T) {
 
 func TestCheckFixModeViolations_MultipleViolations(t *testing.T) {
 	setFixModeEnv(t)
+	// The explainability warning depends on this variable, which a developer's
+	// shell often exports.
+	t.Setenv("HELPDESK_INFRA_CONFIG", "")
 	// Bare config: nothing enabled.
 	violations := CheckFixModeViolations(Config{})
 

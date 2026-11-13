@@ -360,6 +360,7 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/research", auth("POST /api/v1/research", g.handleResearch))
 	mux.HandleFunc("GET /api/v1/infrastructure", auth("GET /api/v1/infrastructure", g.handleListInfrastructure))
 	mux.HandleFunc("GET /api/v1/databases", auth("GET /api/v1/databases", g.handleListDatabases))
+	mux.HandleFunc("GET /api/v1/availability-ledger", auth("GET /api/v1/availability-ledger", g.handleAvailabilityLedger))
 	mux.HandleFunc("POST /api/v1/admin/infra/register-db", auth("POST /api/v1/admin/infra/register-db", g.handleRegisterEphemeralDB))
 	mux.HandleFunc("GET /api/v1/governance", auth("GET /api/v1/governance", g.handleGovernance))
 	mux.HandleFunc("GET /api/v1/governance/policies", auth("GET /api/v1/governance/policies", g.handleGovernancePolicies))

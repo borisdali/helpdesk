@@ -143,8 +143,8 @@ Any modification to a **hashed field** of a stored event breaks the chain at tha
 subsequent event. `GET /v1/verify` reports the first broken link.
 
 **What the hash covers.** `event_id`, `timestamp`, `event_type`, `trace_id`, `parent_id`, `action_class`,
-`prev_hash`, `session`, `input`, `output`, `tool`, `approval`, `decision` and `outcome`, and, since v0.34, the
-`recovery_decision` payload. It does **not** cover `principal`, `purpose`, `purpose_note`, `origin`, or the typed
+`prev_hash`, `session`, `input`, `output`, `tool`, `approval`, `decision` and `outcome` and, since v0.34, the
+`recovery_decision` payload. It does **not** cover `principal`, `purpose`, `purpose_note`, `origin` or the typed
 payloads that were added after the hash was defined (`policy_decision`, `agent_reasoning`,
 `governance_violation`, `delegation_verification`, `rollback_execution`, `objective_evidence`): they are stored
 whole, but editing one afterwards would not break the chain. Adding them to the hash now would invalidate the
@@ -325,9 +325,9 @@ curl "http://localhost:1199/v1/events?trace_id=dt_abc12345&origin=direct_tool"
 
 ### 4.6 recovery_decision fields
 
-A restore is decided in stages by different parties, and each stage leaves a `recovery_decision` event. Together
+A restore is decided in stages by different parties and each stage leaves a `recovery_decision` event. Together
 they answer, after the fact and without parsing tool-output text: what was required of this database, what was
-known, what was offered, who accepted what, and what was done. Today they are written for a point-in-time
+known, what was offered, who accepted what and what was done. Today they are written for a point-in-time
 restore ([PITR.md](PITR.md)).
 
 | Stage | Recorded by | `decision` | Trace |
@@ -341,24 +341,25 @@ The payload (`recovery_decision`):
 
 | Field | Meaning |
 |-------|---------|
-| `stage`, `decision`, `reason` | the stage, what it decided, and why (a refusal, a denial) |
+| `stage`, `decision`, `reason` | the stage, what it decided and why (a refusal, a denial) |
 | `decided_by` | the person, for the gate stage |
-| `duration_seconds` | for the `outcome` stage, how long the remediation hop ran: from its start, which is after the gate approval, to its completion (restore, restart, verification; not the wait for a person). It is the **recovery duration, not the downtime**: the instance may have been down before the hop began, and the hop includes the agent's own reasoning time |
-| `tool`, `target`, `run_id` | the tool, the database (as the config names it), and the run (gate stage) |
-| `recovery_target`, `plan_digest`, `plan_status` | where the restore stops, the plan approved, and whether it was feasible |
-| `objectives` | what was in force: `rpo_seconds`, `rto_seconds`, `availability_slo`, `recovery_preference` and `enforcement`, each with the level it came from (`*_source`: `database`, `environment:<name>`, `default`), the `environment`, any config `problems`, and the `config_digest` of the `infrastructure.json` they were read from |
-| `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured`, and for an LSN target `loss_at_least_seconds` with the `loss_at_least_basis` it rests on), the `verdict` against the `rpo` and the `gate` it demands |
-| `approval` | what the approval carried: `approved_by`, `acknowledged_data_loss`, `allowed_stop_serving`, `acknowledged_breach` |
+| `duration_seconds` | for the `outcome` stage, how long the remediation hop ran: from its start, which is after the gate approval, to its completion (restore, restart, verification; not the wait for a person). It is the **recovery duration, not the downtime**: the instance may have been down before the hop began and the hop includes the agent's own reasoning time |
+| `tool`, `target`, `run_id` | the tool, the database (as the config names it) and the run (gate stage) |
+| `recovery_target`, `plan_digest`, `plan_status` | where the restore stops, the plan approved and whether it was feasible |
+| `restore_bytes` | execution stage: the size of the cluster in the backup the restore used (pgBackRest's `info.size`, not the repository's), what the restore writes back and so mostly what its duration depends on. Kept so restore times can later be compared across a server's growth; absent when pgBackRest reported none and before v0.35 |
+| `objectives` | what was in force: `rpo_seconds`, `rto_seconds`, `availability_slo`, the `availability_window_seconds` and `availability_budget_seconds` it gave (`availability_window_source` is `built-in default` when no level set a window; absent on events recorded before v0.35), `recovery_preference`, `enforcement` and `availability_enforcement` (the effective one: `warn` when none is set, `acknowledge` when it could not be trusted; absent before v0.35), each with the level it came from (`*_source`: `database`, `environment:<name>`, `default`), the `environment`, any config `problems` and the `config_digest` of the `infrastructure.json` they were read from |
+| `options[]` | the courses of action in front of the stage: `name`, `chosen`, the measured loss (`loss_seconds`, `loss_bytes`, `loss_basis`, `loss_upper_bound`, `loss_as_of`, `loss_unmeasured` and for an LSN target `loss_at_least_seconds` with the `loss_at_least_basis` it rests on), the `verdict` against the `rpo` and the `gate` it demands and for the downtime budget `budget_verdict`, `budget_verdict_detail`, `budget_gate` and `budget_remaining_seconds` (negative when overspent; absent on a record from before v0.35), `budget_duration_seconds` with its `budget_duration_basis` (`history_p90`, the p90 of this server's past restores, from ten of them; `history_longest`, the longest of three to nine, too few for a p90; or `declared_rto`, an upper bound; records from before this say `history`, which meant the p90) and the recovery-time estimate the plan or restore saw: `estimate_status` (`estimated`, `insufficient_history`, `no_history` or `unavailable`) and when estimated `estimate_samples`, `estimate_p50_seconds`, `estimate_p90_seconds` (only from ten samples), `estimate_max_seconds` (the longest), `estimate_vs_rto` and `estimate_over_rto`, and the transactions the restore would discard, counted from the WAL: `loss_commits_status` (`measured` or `unavailable`; absent when no attempt was made and before v0.35), `loss_commits`, `loss_commits_at_least` (a lower bound) and `loss_commits_reason` (why there is none) |
+| `approval` | what the approval carried: `approved_by`, `acknowledged_data_loss`, `allowed_stop_serving`, `acknowledged_breach` and `breaches`, the objectives (`rpo`, `availability_budget`) that stood in the way of the restore, so that one acknowledgement is not taken to cover a breach it did not name |
 
 **A decision that could not be written.** Recording is best-effort at runtime, like every other tool's audit write
 (governed modes require auditing to be *configured*; they do not hold a tool for each write). A restore is not held
 up if its decision cannot be recorded, but it is not allowed to look as though it were on record: the failure is
-logged at error level (`recovery decision NOT recorded in the audit trail`), and the plan and the restore result
+logged at error level (`recovery decision NOT recorded in the audit trail`) and the plan and the restore result
 carry a `decision_unrecorded` field saying that the decision is not in the audit trail and why, which the model
 reading the result can see. The same failure at the gateway (the gate and outcome stages) is logged at error level.
 
 `target` and `reason` are passed through a redaction before the event is built, for every emitter: the target is
-often a run's own connection string, which carries the real password, and a reason can quote one. Passwords in
+often a run's own connection string, which carries the real password and a reason can quote one. Passwords in
 `key=value` and URL forms are replaced with `***` and the rest is kept.
 
 What an approval did **not** acknowledge is recorded as absent, not omitted from the story: the `execution` event
@@ -368,13 +369,13 @@ so a later edit to `infrastructure.json` does not rewrite what applied to a deci
 ```bash
 # Every recovery decision, newest first
 curl "http://localhost:1199/v1/events?event_type=recovery_decision"
-# One incident's: the triage run's gate, and the agent's stages by their traces
+# One incident's: the triage run's gate and the agent's stages by their traces
 curl "http://localhost:1199/v1/events?event_type=recovery_decision&trace_id=plr_a3f7c1b2"
 ```
 
 The same events are read back in three places: the `recovery_decisions` list of the incident narrative
 (`GET /api/v1/incidents/{runID}`, shown by `vault incidents <run>`), the `recovery_decision` and
-`recovery_verdict` fields of a journey summary ([JOURNEYS.md](JOURNEYS.md)), and the RECOVERY DECISION block of
+`recovery_verdict` fields of a journey summary ([JOURNEYS.md](JOURNEYS.md)) and the RECOVERY DECISION block of
 `vault journey --detail`.
 
 ---
@@ -516,7 +517,7 @@ curl "http://localhost:1199/v1/events?trace_id=tr_rbk_a1b2c3d4"
 | `GET` | `/ready` | Readiness: pings the real database and confirms the schema is actually loaded. `503` with a `reason` field if either check fails. |
 
 These answer different questions and the difference is deliberate, not redundant. `/health` is
-intentionally dependency-free — a Kubernetes liveness-probe failure restarts the process and
+intentionally dependency-free — a K8s liveness-probe failure restarts the process and
 restarting does nothing to fix a broken database, so liveness has to stay simple enough to never
 itself be the thing that's broken. `/ready` is where a real check belongs instead: a live
 `PingContext` against the database, then a query against the most foundational table

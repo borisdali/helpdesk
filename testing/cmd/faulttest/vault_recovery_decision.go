@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 )
 
 // narrativeRecoveryDecision mirrors the gateway's RecoveryDecisionRecord.
@@ -67,6 +68,30 @@ func recoveryDecisionsFromEvents(events []journeyEvent) []narrativeRecoveryDecis
 	return out
 }
 
+// rdBudget states the availability budget that was in force, from the numbers
+// the event recorded (the same wording the config check uses). An event
+// recorded without a window (before v0.35, or when no budget could be
+// computed) gets no line: the default is not assumed after the fact.
+func rdBudget(o *audit.ObjectivesInForce) string {
+	if o.AvailabilitySLO == nil || o.AvailabilityWindowSeconds == nil {
+		return ""
+	}
+	var rto time.Duration
+	if o.RTOSeconds != nil {
+		rto = time.Duration(*o.RTOSeconds) * time.Second
+	}
+	b := infra.ComputeBudget(*o.AvailabilitySLO, time.Duration(*o.AvailabilityWindowSeconds)*time.Second,
+		o.AvailabilityWindowSource, rto, o.RTOSeconds != nil)
+	if !b.Computed {
+		return ""
+	}
+	prefix := "  budget: "
+	if b.Contradictory {
+		prefix = "  ⚠ budget: "
+	}
+	return prefix + b.Detail
+}
+
 // rdObjectives renders the objectives that were in force, with where each came
 // from. Nothing is shown for an objective that was not set.
 func rdObjectives(o *audit.ObjectivesInForce) []string {
@@ -93,6 +118,9 @@ func rdObjectives(o *audit.ObjectivesInForce) []string {
 		parts = append(parts, "no objective set")
 	}
 	lines = append(lines, "  "+strings.Join(parts, "   "))
+	if line := rdBudget(o); line != "" {
+		lines = append(lines, line)
+	}
 	policy := []string{}
 	if o.RecoveryPreference != "" {
 		policy = append(policy, fmt.Sprintf("preference %s [%s]", o.RecoveryPreference, o.PreferenceSource))
@@ -137,6 +165,18 @@ func rdOption(opt audit.DecisionOption) string {
 		}
 		fmt.Fprintf(&b, "%sat least %s of history", sep, rdSpan(*opt.LossAtLeastSeconds))
 	}
+	// The transactions counted from the WAL, in the same honesty: a lower bound is
+	// said to be one, and a count that could not be made says why.
+	switch {
+	case opt.LossCommitsStatus == "measured" && opt.LossCommits != nil:
+		lead := ""
+		if opt.LossCommitsAtLeast {
+			lead = "at least "
+		}
+		fmt.Fprintf(&b, "; %s%d transaction(s) discarded (counted from the WAL)", lead, *opt.LossCommits)
+	case opt.LossCommitsStatus == "unavailable":
+		fmt.Fprintf(&b, "; transactions not counted (%s)", opt.LossCommitsReason)
+	}
 	if opt.Verdict != "" {
 		fmt.Fprintf(&b, " → %s", opt.Verdict)
 	}
@@ -145,6 +185,46 @@ func rdOption(opt audit.DecisionOption) string {
 		b.WriteString("; needed the breach acknowledged")
 	case "refuse":
 		b.WriteString("; enforcement refuses it")
+	}
+	// The same restore set against the downtime budget, said apart from the loss
+	// verdict above so the two are never read as one.
+	if opt.BudgetVerdict != "" {
+		fmt.Fprintf(&b, "; budget → %s", opt.BudgetVerdict)
+		if opt.BudgetRemainingSeconds != nil {
+			taken := ""
+			if opt.BudgetDurationSeconds != nil {
+				basis := "from the declared rto"
+				switch opt.BudgetDurationBasis {
+				case "history_p90":
+					basis = "the p90 of past restores"
+				case "history_longest":
+					basis = "the longest past restore (too few for a p90)"
+				case "history": // records from before the p90 needed ten samples
+					basis = "the p90 of past restores"
+				}
+				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), basis)
+			}
+			fmt.Fprintf(&b, " (%s left%s)", ledgerSpan(*opt.BudgetRemainingSeconds), taken)
+		}
+		switch opt.BudgetGate {
+		case "acknowledge":
+			b.WriteString("; the budget needed the breach acknowledged")
+		case "refuse":
+			b.WriteString("; budget enforcement refuses it")
+		}
+	}
+	// What this database's past restores have taken, when that was known.
+	if opt.EstimateStatus == "estimated" && opt.EstimateSamples != nil && (opt.EstimateP90Seconds != nil || opt.EstimateMaxSeconds != nil) {
+		if opt.EstimateP90Seconds != nil {
+			fmt.Fprintf(&b, "; history: p90 %s over %d past restores", rdSpan(*opt.EstimateP90Seconds), *opt.EstimateSamples)
+		} else {
+			fmt.Fprintf(&b, "; history: longest %s of %d past restores (too few for a p90)", rdSpan(*opt.EstimateMaxSeconds), *opt.EstimateSamples)
+		}
+		if opt.EstimateVsRTO == "exceeds" && opt.EstimateOverRTO != nil {
+			fmt.Fprintf(&b, ", %d took longer than the rto", *opt.EstimateOverRTO)
+		}
+	} else if opt.EstimateStatus != "" && opt.EstimateStatus != "estimated" {
+		fmt.Fprintf(&b, "; history: %s", opt.EstimateStatus)
 	}
 	return b.String()
 }
@@ -213,6 +293,11 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		case audit.RecoveryStageExecution:
 			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
 				fmt.Fprintf(&b, " on %s's approval", a.ApprovedBy)
+			}
+			// Which objectives demanded the acknowledgement: one acknowledgement
+			// covers them all, and this says what it covered.
+			if a := rd.Approval; a != nil && len(a.Breaches) > 0 {
+				fmt.Fprintf(&b, "; objectives in the way: %s", strings.Join(a.Breaches, ", "))
 			}
 		case audit.RecoveryStageOutcome:
 			sawOutcome = true

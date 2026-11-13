@@ -124,6 +124,8 @@ all look ambiguous without a tool:
   - `backup_stale=true` with `status_code=0` (the repo is fine but the most recent successful backup is older than the expected schedule — a retention/scheduling problem, not a filesystem one) 
   - no backup ever recorded at all (a policy question for the customer, not a technical failure, which actually matches §1's own `archive_mode=off` precedent of never reporting a policy choice as a diagnosis)  
 
+For a server that declares an `rpo` or an `rto`, the result also carries `objective_exposure`: the age of the newest archived WAL against the `rpo` (an upper bound) and what past restores have taken against the `rto`, beside the unchanged `backup_stale`. See [OBJECTIVES.md §5.6](OBJECTIVES.md#56-is-the-backup-posture-enough-for-the-objectives).  
+
 This is deliberately SysAdmin-domain, not Database-domain: `pgbackrest info` is a host-level CLI
 invocation, not a SQL query, so it lives on the agent that already owns host-level command
 dispatch. And pgBackRest just so happened to be the first consumer of that agent's SSH-or-local remote-host-reach capability
@@ -723,7 +725,7 @@ triage and the entry hop told the DB agent to use `get_pod_logs`, a tool of the 
   exec into a pod that is crash-looping. Without the signature it falls back to
   `pbs_k8s_pod_crash_triage` as before.
 - `pbs_pgbackrest_restore_remediate` (v1.9) resumes the StatefulSet with `restart_container`. It expects its first
-  `check_host` after the restore to fail on Kubernetes (the restore scaled the StatefulSet to 0, so there is no pod
+  `check_host` after the restore to fail on K8s (the restore scaled the StatefulSet to 0, so there is no pod
   to inspect) and goes on to the restart; the audit trail of the verified run shows exactly that error.
 
 👉 Verified on K8s (2026-10-25) with the whole stack in-cluster, by `db-pgdata-corrupted-k8s`
@@ -752,7 +754,7 @@ Not yet built — tracked, not forgotten:
 
 - **Point-in-time recovery gaps ([PITR.md §7](PITR.md#7-limits)).**  
   Built in v0.33 for a single instance, to a time or LSN, down or serving. Not yet: a systemd VM run, routing the
-  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive, and named restore points
+  data-loss chain's `pitr_decided` into it, pushing the saved WAL tail to the archive and named restore points
   and transaction IDs.
 
 - **Multi-node volumes and remote repos for the Kubernetes restore (§3).**  

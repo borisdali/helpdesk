@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,6 +56,180 @@ func TestPlaybookRunStore_RecordAndList(t *testing.T) {
 	if runs[0].Operator != "alice@example.com" {
 		t.Errorf("operator = %q, want alice@example.com", runs[0].Operator)
 	}
+}
+
+// The series of every run of an incident, found for many incidents at once: the
+// entry run is its own entry run, hops carry it, and nothing leaks between
+// incidents.
+func TestPlaybookRunStore_SeriesByEntryRun(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	rec := func(id, series, prior, entry string, offset int) {
+		t.Helper()
+		if err := s.Record(ctx, &PlaybookRun{RunID: id, PlaybookID: "pb_" + id, SeriesID: series, PriorRunID: prior, EntryRunID: entry,
+			StartedAt: t0.Add(time.Duration(offset) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Incident 1: a triage, a restore, and a second run of the triage series.
+	rec("plr_e1", "pbs_db_restart_triage", "", "", 0)
+	rec("plr_h1", "pbs_pgbackrest_restore_remediate", "plr_e1", "plr_e1", 1)
+	rec("plr_h2", "pbs_db_restart_triage", "plr_h1", "plr_e1", 2)
+	// Incident 2: a lone run. Incident 3: a run with no series.
+	rec("plr_e2", "pbs_vacuum_triage", "", "", 3)
+	rec("plr_e3", "", "", "", 4)
+
+	got, err := s.SeriesByEntryRun(ctx, []string{"plr_e1", "plr_e2", "plr_e3", "plr_nothing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"pbs_db_restart_triage", "pbs_pgbackrest_restore_remediate"}; !equalStrings(got["plr_e1"], want) {
+		t.Errorf("incident 1 series = %v, want %v (entry first, in start order, no duplicate)", got["plr_e1"], want)
+	}
+	if want := []string{"pbs_vacuum_triage"}; !equalStrings(got["plr_e2"], want) {
+		t.Errorf("incident 2 series = %v, want %v", got["plr_e2"], want)
+	}
+	if _, ok := got["plr_e3"]; ok {
+		t.Errorf("a run with no series has an entry: %v", got["plr_e3"])
+	}
+	if _, ok := got["plr_nothing"]; ok {
+		t.Errorf("an unknown id has an entry: %v", got["plr_nothing"])
+	}
+
+	// No ids, no query.
+	if got, err := s.SeriesByEntryRun(ctx, nil); err != nil || len(got) != 0 {
+		t.Errorf("no ids: %v, %v", got, err)
+	}
+}
+
+// The runs of an incident with how long each took: what a recovery-time estimate
+// is made from. Times come back as the times they were, an unfinished run has no
+// completion, and nothing leaks between incidents.
+func TestPlaybookRunStore_SpansByEntryRun(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	rec := func(id, series, prior, entry, outcome string, start, took time.Duration) {
+		t.Helper()
+		r := &PlaybookRun{RunID: id, PlaybookID: "pb_" + id, SeriesID: series, PriorRunID: prior, EntryRunID: entry, Outcome: outcome, StartedAt: t0.Add(start)}
+		if took > 0 {
+			r.CompletedAt = t0.Add(start + took)
+		}
+		if err := s.Record(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec("plr_e1", "pbs_pgbackrest_pitr_triage", "", "", OutcomeTransitioned, 0, 3*time.Minute)
+	rec("plr_h1", "pbs_pgbackrest_pitr_remediate", "plr_e1", "plr_e1", OutcomeResolved, 4*time.Minute, 21*time.Minute)
+	rec("plr_h2", "pbs_pgbackrest_pitr_remediate", "plr_h1", "plr_e1", OutcomeUnknown, 30*time.Minute, 0) // still running
+	rec("plr_e2", "pbs_vacuum_triage", "", "", OutcomeResolved, time.Hour, time.Minute)
+	rec("plr_e3", "", "", "", OutcomeResolved, 2*time.Hour, time.Minute) // no series
+
+	got, err := s.SpansByEntryRun(ctx, []string{"plr_e1", "plr_e2", "plr_e3", "plr_nothing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spans := got["plr_e1"]
+	if len(spans) != 3 || spans[0].RunID != "plr_e1" || spans[1].RunID != "plr_h1" || spans[2].RunID != "plr_h2" {
+		t.Fatalf("incident 1 spans = %+v, want the entry run then each hop in start order", spans)
+	}
+	h1 := spans[1]
+	if h1.SeriesID != "pbs_pgbackrest_pitr_remediate" || h1.Outcome != OutcomeResolved || !h1.StartedAt.Equal(t0.Add(4*time.Minute)) ||
+		h1.CompletedAt.Sub(h1.StartedAt) != 21*time.Minute {
+		t.Errorf("h1 = %+v", h1)
+	}
+	if !spans[2].CompletedAt.IsZero() {
+		t.Errorf("a run that has not finished has a completion: %+v", spans[2])
+	}
+	if len(got["plr_e2"]) != 1 || got["plr_e2"][0].SeriesID != "pbs_vacuum_triage" {
+		t.Errorf("incident 2 = %+v", got["plr_e2"])
+	}
+	if _, ok := got["plr_e3"]; ok {
+		t.Error("a run with no series has an entry")
+	}
+	if _, ok := got["plr_nothing"]; ok {
+		t.Error("an unknown id has an entry")
+	}
+	if got, err := s.SpansByEntryRun(ctx, nil); err != nil || len(got) != 0 {
+		t.Errorf("no ids: %v, %v", got, err)
+	}
+}
+
+func TestPlaybookRunStore_SpansByEntryRun_ManyIncidentsAndADeadDatabase(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+	var ids []string
+	for i := 0; i < 450; i++ {
+		id := fmt.Sprintf("plr_s%03d", i)
+		ids = append(ids, id)
+		if err := s.Record(ctx, &PlaybookRun{RunID: id, PlaybookID: "pb_x", SeriesID: "pbs_vacuum_triage"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := s.SpansByEntryRun(ctx, ids); err != nil || len(got) != 450 {
+		t.Fatalf("got %d of 450, err = %v", len(got), err)
+	}
+
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "dead.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead, err := NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	if got, err := dead.SpansByEntryRun(ctx, []string{"plr_a"}); err == nil {
+		t.Errorf("a dead database answered %v with no error: an estimate would read it as no history", got)
+	}
+}
+
+// A database that cannot be read is an error, not an answer of "no series":
+// the ledger would read that as incidents that cost nothing.
+func TestPlaybookRunStore_SeriesByEntryRun_DatabaseFailureIsAnError(t *testing.T) {
+	store, err := NewStore(StoreConfig{DBPath: filepath.Join(t.TempDir(), "test.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewPlaybookRunStore(store.DB(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	if got, err := s.SeriesByEntryRun(context.Background(), []string{"plr_a"}); err == nil {
+		t.Errorf("a dead database answered %v with no error", got)
+	}
+}
+
+// More incidents than one query's batch still all come back.
+func TestPlaybookRunStore_SeriesByEntryRun_ManyIncidents(t *testing.T) {
+	s := newPlaybookRunStore(t)
+	ctx := context.Background()
+	var ids []string
+	for i := 0; i < 450; i++ {
+		id := fmt.Sprintf("plr_m%03d", i)
+		ids = append(ids, id)
+		if err := s.Record(ctx, &PlaybookRun{RunID: id, PlaybookID: "pb_x", SeriesID: "pbs_vacuum_triage"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.SeriesByEntryRun(ctx, ids)
+	if err != nil || len(got) != 450 {
+		t.Fatalf("got %d of 450 incidents, err = %v", len(got), err)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPlaybookRunStore_Purpose_RoundTrips(t *testing.T) {

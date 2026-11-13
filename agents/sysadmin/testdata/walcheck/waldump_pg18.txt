@@ -1,0 +1,19 @@
+rmgr: Transaction len (rec/tot):   1093/  1093, tx:       1226, lsn: 0/02020CE8, prev 0/02020BE0, desc: COMMIT 2026-11-07 05:10:50.548538 UTC; inval msgs: catcache 65 catcache 65 catcache 65 catcache
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1447, lsn: 0/021F4C88, prev 0/021F4C58, desc: COMMIT 2026-11-09 15:06:34.941088 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1448, lsn: 0/021F4CE0, prev 0/021F4CB0, desc: COMMIT 2026-11-09 15:06:34.941637 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1449, lsn: 0/021F53B8, prev 0/021F5388, desc: COMMIT 2026-11-09 15:06:35.008513 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1450, lsn: 0/021F5410, prev 0/021F53E0, desc: ABORT 2026-11-09 15:06:35.019668 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1451, lsn: 0/021F5468, prev 0/021F5438, desc: ABORT 2026-11-09 15:06:35.023125 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1452, lsn: 0/021F54C0, prev 0/021F5490, desc: ABORT 2026-11-09 15:06:35.023294 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1453, lsn: 0/021F5518, prev 0/021F54E8, desc: ABORT 2026-11-09 15:06:35.023404 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1454, lsn: 0/021F5570, prev 0/021F5540, desc: ABORT 2026-11-09 15:06:35.023534 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1455, lsn: 0/021F55C8, prev 0/021F5598, desc: ABORT 2026-11-09 15:06:35.023693 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1456, lsn: 0/021F5620, prev 0/021F55F0, desc: ABORT 2026-11-09 15:06:35.024180 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1457, lsn: 0/021F5678, prev 0/021F5648, desc: ABORT 2026-11-09 15:06:35.024612 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1458, lsn: 0/021F56D0, prev 0/021F56A0, desc: ABORT 2026-11-09 15:06:35.024806 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1459, lsn: 0/021F5728, prev 0/021F56F8, desc: ABORT 2026-11-09 15:06:35.024945 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1460, lsn: 0/021F5780, prev 0/021F5750, desc: ABORT 2026-11-09 15:06:35.025288 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1461, lsn: 0/021F57D8, prev 0/021F57A8, desc: ABORT 2026-11-09 15:06:35.025435 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1462, lsn: 0/021F5830, prev 0/021F5800, desc: ABORT 2026-11-09 15:06:35.025576 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1463, lsn: 0/021F5888, prev 0/021F5858, desc: ABORT 2026-11-09 15:06:35.026322 UTC
+rmgr: Transaction len (rec/tot):     38/    38, tx:       1464, lsn: 0/021F58E0, prev 0/021F58B0, desc: ABORT 2026-11-09 15:06:35.026493 UTC

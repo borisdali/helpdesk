@@ -165,6 +165,24 @@ type PITRPlanView struct {
 			Detail      string `json:"detail"`
 		} `json:"objective"`
 	} `json:"data_loss_estimate"`
+	// AvailabilityBudget carries the verdict against the database's downtime
+	// budget, and what approving will demand because of it.
+	AvailabilityBudget *struct {
+		Status      string `json:"status"`
+		Gate        string `json:"gate"`
+		Enforcement string `json:"enforcement"`
+		Detail      string `json:"detail"`
+	} `json:"availability_budget"`
+}
+
+// budgetGate is what approving this plan will demand because of the downtime
+// budget: "", "acknowledge" or "refuse". An agent that does not report one
+// demands nothing.
+func (p PITRPlanView) budgetGate() (gate, detail string) {
+	if p.AvailabilityBudget == nil {
+		return "", ""
+	}
+	return p.AvailabilityBudget.Gate, p.AvailabilityBudget.Detail
 }
 
 // objectiveGate is what approving this plan will demand: "", "acknowledge" or
@@ -251,12 +269,19 @@ func (r *Remediator) approvePITR(ctx context.Context, req *ProceedEscalationRequ
 	if gate == "refuse" {
 		return fmt.Errorf("the point-in-time plan would be refused by the restore (%s), so the gate is not approved", gateDetail)
 	}
+	// The same for the downtime budget: one that would refuse the restore is not
+	// approved around, and one that asks is acknowledged. One acknowledgement
+	// covers every breach the plan shows.
+	budgetGate, budgetDetail := plan.budgetGate()
+	if budgetGate == "refuse" {
+		return fmt.Errorf("the point-in-time plan would be refused by the restore for the downtime budget (%s), so the gate is not approved", budgetDetail)
+	}
 	target := r.pitr.target
 	req.RecoveryTarget = &target
 	req.PlanDigest = plan.PlanDigest
 	req.AcknowledgeDataLoss = true
 	req.AllowStopServing = r.pitr.allowStop
-	req.AcknowledgeObjectiveBreach = gate == "acknowledge"
+	req.AcknowledgeObjectiveBreach = gate == "acknowledge" || budgetGate == "acknowledge"
 	slog.Info("point-in-time gate: approving the reviewed plan",
 		"target_type", target.Type, "target", target.Value, "plan_digest", plan.PlanDigest,
 		"instance_serving", plan.InstanceServing, "archive_flush_required", plan.ArchiveFlushRequired, "allow_stop_serving", req.AllowStopServing,

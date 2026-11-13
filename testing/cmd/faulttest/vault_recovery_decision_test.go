@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 )
 
 func rdI(n int64) *int64     { return &n }
@@ -33,6 +34,61 @@ func rdOptionFixture(chosen bool) audit.DecisionOption {
 		Name: "point_in_time_restore", Chosen: chosen,
 		LossBasis: "live_instance", LossSeconds: rdI(65563), LossBytes: rdU(16 << 20),
 		Verdict: "exceeds", Gate: "acknowledge",
+	}
+}
+
+// The budget line comes from the numbers the event recorded, in the config
+// check's own words, and only when the event recorded a window: an event from
+// before v0.35 is not given the default after the fact.
+func TestRDBudget(t *testing.T) {
+	withBudget := func(slo float64, window int64, source string, rto *int64) *audit.ObjectivesInForce {
+		return &audit.ObjectivesInForce{
+			AvailabilitySLO: rdF(slo), AvailabilityWindowSeconds: rdI(window), AvailabilityWindowSource: source,
+			AvailabilityBudgetSeconds: rdI(1), RTOSeconds: rto,
+		}
+	}
+	const thirtyDays = 30 * 24 * 3600
+	tests := []struct {
+		name string
+		o    *audit.ObjectivesInForce
+		want string
+	}{
+		{"consistent", withBudget(99.9, thirtyDays, "environment:prod", rdI(1800)),
+			"  budget: availability 99.9% over 30d allows 43m12s of downtime per window; rto 30m uses 69% of it: tolerates 1 recovery per window at the rto"},
+		{"contradictory is flagged", withBudget(99.99, thirtyDays, "environment:prod", rdI(1800)),
+			"  ⚠ budget: availability 99.99% over 30d allows 4m19s of downtime per window; rto 30m is longer than the whole budget: one recovery that takes the full rto breaks the SLO"},
+		{"the default window is called a default", withBudget(99.9, thirtyDays, infra.SourceBuiltin, rdI(300)),
+			"  budget: availability 99.9% over 30d (default window) allows 43m12s of downtime per window; rto 5m uses 12% of it: tolerates 8 recoveries per window at the rto"},
+		{"no rto", withBudget(99.9, thirtyDays, "database", nil),
+			"  budget: availability 99.9% over 30d allows 43m12s of downtime per window; no rto is set, so the recoveries it absorbs are not computed"},
+		{"an event from before v0.35 has no window: no line, no assumed default",
+			&audit.ObjectivesInForce{AvailabilitySLO: rdF(99.95), RTOSeconds: rdI(1800)}, ""},
+		{"no slo", &audit.ObjectivesInForce{AvailabilityWindowSeconds: rdI(thirtyDays), RTOSeconds: rdI(1800)}, ""},
+		{"a recorded window that is nonsense", withBudget(99.9, 0, "database", rdI(1800)), ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rdBudget(tc.o); got != tc.want {
+				t.Errorf("\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRDObjectives_ShowsTheBudgetLineBeneathTheObjectives(t *testing.T) {
+	o := rdObjectivesFixture("0123456789abcdef")
+	o.AvailabilitySLO = rdF(99.9)
+	o.AvailabilityWindowSeconds, o.AvailabilityWindowSource = rdI(30*24*3600), "default"
+	out := strings.Join(rdObjectives(o), "\n")
+	objectives := strings.Index(out, "availability 99.9% [database]")
+	budget := strings.Index(out, "  budget: availability 99.9% over 30d allows 43m12s")
+	policy := strings.Index(out, "enforcement acknowledge")
+	if objectives < 0 || budget < objectives || policy < budget {
+		t.Errorf("want objectives, then the budget, then the policy:\n%s", out)
+	}
+	// The unchanged fixture has no window: its rendering is as it was.
+	if old := strings.Join(rdObjectives(rdObjectivesFixture("0123456789abcdef")), "\n"); strings.Contains(old, "budget") {
+		t.Errorf("an event with no recorded window got a budget line:\n%s", old)
 	}
 }
 
@@ -72,6 +128,133 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 	}
 	if strings.Contains(out, "⚠") {
 		t.Errorf("a clean decision carries a warning:\n%s", out)
+	}
+}
+
+// The budget verdict is on the option line, apart from the loss verdict, and an
+// older record (no budget fields) reads exactly as it did.
+func TestRDOption_ShowsTheBudgetVerdictApartFromTheLossVerdict(t *testing.T) {
+	spent := int64(-408)
+	left := int64(1392)
+	both := rdOptionFixture(true)
+	both.BudgetVerdict, both.BudgetGate, both.BudgetRemainingSeconds = "may_exceed", "acknowledge", &left
+	if got := rdOption(both); !strings.Contains(got, "→ exceeds; needed the breach acknowledged; budget → may_exceed (23m 12s left); the budget needed the breach acknowledged") {
+		t.Errorf("both verdicts: %q", got)
+	}
+	// A spent budget shows as negative, and a refusal as a refusal of the budget, not the loss.
+	over := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "exceeds", BudgetGate: "refuse", BudgetRemainingSeconds: &spent}
+	if got := rdOption(over); got != "point_in_time_restore; budget → exceeds (-6m 48s left); budget enforcement refuses it" {
+		t.Errorf("a spent budget: %q", got)
+	}
+	// Nothing demanded: the verdict alone, with no gate text.
+	room := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "within", BudgetRemainingSeconds: &left}
+	if got := rdOption(room); got != "point_in_time_restore; budget → within (23m 12s left)" {
+		t.Errorf("room: %q", got)
+	}
+	// A record from before v0.35 has no budget, and says nothing about one.
+	if got := rdOption(rdOptionFixture(false)); strings.Contains(got, "budget") {
+		t.Errorf("an old record mentions a budget: %q", got)
+	}
+}
+
+// The option line says what the budget verdict took the restore to last, and what
+// history said; with no history it says nothing about it.
+// The transactions counted from the WAL are said as what they are: a count, a lower
+// bound, or why there is none. Nothing is shown for a record that predates them.
+func TestRDOption_SaysHowManyTransactionsWereAtStake(t *testing.T) {
+	n := 41
+	o := audit.DecisionOption{Name: "point_in_time_restore", LossCommitsStatus: "measured", LossCommits: &n}
+	if got := rdOption(o); !strings.Contains(got, "; 41 transaction(s) discarded (counted from the WAL)") || strings.Contains(got, "at least") {
+		t.Errorf("exact: %q", got)
+	}
+	o.LossCommitsAtLeast = true
+	if got := rdOption(o); !strings.Contains(got, "; at least 41 transaction(s) discarded (counted from the WAL)") {
+		t.Errorf("a lower bound: %q", got)
+	}
+	zero := 0
+	o.LossCommits, o.LossCommitsAtLeast = &zero, false
+	if got := rdOption(o); !strings.Contains(got, "; 0 transaction(s) discarded") {
+		t.Errorf("none: %q", got)
+	}
+	o = audit.DecisionOption{Name: "point_in_time_restore", LossCommitsStatus: "unavailable", LossCommitsReason: "pg_waldump was not found on the instance"}
+	if got := rdOption(o); !strings.Contains(got, "; transactions not counted (pg_waldump was not found on the instance)") || strings.Contains(got, "discarded") {
+		t.Errorf("unavailable: %q", got)
+	}
+	// A record from before the count, and a measured one with no number, say nothing.
+	for _, o := range []audit.DecisionOption{{Name: "x"}, {Name: "x", LossCommitsStatus: "measured"}} {
+		if got := rdOption(o); strings.Contains(got, "transaction") {
+			t.Errorf("%+v said something about transactions: %q", o, got)
+		}
+	}
+}
+
+func TestRDOption_SaysWhatTheRestoreWasTakenToLastAndWhatHistorySaid(t *testing.T) {
+	left, dur := int64(1992), int64(3000)
+	n, over, p90, p50 := 5, 2, int64(3000), int64(1200)
+	o := audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "may_exceed", BudgetGate: "acknowledge", BudgetRemainingSeconds: &left,
+		BudgetDurationSeconds: &dur, BudgetDurationBasis: "history_p90",
+		EstimateStatus: "estimated", EstimateSamples: &n, EstimateP50Seconds: &p50, EstimateP90Seconds: &p90, EstimateVsRTO: "exceeds", EstimateOverRTO: &over}
+	got := rdOption(o)
+	for _, want := range []string{
+		"budget → may_exceed (33m 12s left; restore taken as 50m 00s, the p90 of past restores)",
+		"; the budget needed the breach acknowledged",
+		"; history: p90 50m 00s over 5 past restores, 2 took longer than the rto",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	// Too few restores for a p90: the longest is said as the longest, never as a p90.
+	max := int64(3000)
+	o.BudgetDurationBasis, o.EstimateP90Seconds, o.EstimateMaxSeconds = "history_longest", nil, &max
+	got = rdOption(o)
+	for _, want := range []string{
+		"restore taken as 50m 00s, the longest past restore (too few for a p90)",
+		"; history: longest 50m 00s of 5 past restores (too few for a p90), 2 took longer than the rto",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("longest: missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "history: p90") {
+		t.Errorf("a longest called a p90: %q", got)
+	}
+	// A record from before the p90 needed ten samples says "history", which meant the p90.
+	o.BudgetDurationBasis = "history"
+	if got := rdOption(o); !strings.Contains(got, "the p90 of past restores") {
+		t.Errorf("an old record's basis: %q", got)
+	}
+	// By the declared rto, and with history within it.
+	o.EstimateP90Seconds = &p90
+	o.BudgetDurationBasis, o.EstimateVsRTO, o.EstimateOverRTO = "declared_rto", "within", nil
+	got = rdOption(o)
+	if !strings.Contains(got, "restore taken as 50m 00s, from the declared rto") || strings.Contains(got, "took longer than the rto") {
+		t.Errorf("by the rto: %q", got)
+	}
+	// Too little history is said as it is; none at all says nothing.
+	o.EstimateStatus, o.EstimateSamples, o.EstimateP90Seconds = "insufficient_history", &n, nil
+	if got := rdOption(o); !strings.Contains(got, "; history: insufficient_history") || strings.Contains(got, "p90 50m") {
+		t.Errorf("too few: %q", got)
+	}
+	o.EstimateStatus = ""
+	if got := rdOption(o); strings.Contains(got, "history:") {
+		t.Errorf("no estimate: %q", got)
+	}
+}
+
+func TestFormatRecoveryDecisions_SaysWhichObjectivesStoodInTheWay(t *testing.T) {
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedBreach: true, Breaches: []string{"rpo", "availability_budget"}},
+	}}})
+	if !strings.Contains(out, "on alice's approval; objectives in the way: rpo, availability_budget") {
+		t.Errorf("%s", out)
+	}
+	none := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded", Approval: &audit.ApprovalFacts{ApprovedBy: "alice"},
+	}}})
+	if strings.Contains(none, "objectives in the way") {
+		t.Errorf("a restore with nothing in the way says so: %s", none)
 	}
 }
 

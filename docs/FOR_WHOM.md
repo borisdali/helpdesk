@@ -1,6 +1,6 @@
 # Who aiHelpDesk Is For
 
-This document answers five questions that come up repeatedly from people evaluating
+This document answers six questions that come up repeatedly from people evaluating
 aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platforms:
 
 1. [Who is the target audience?](#1-who-this-is-for)
@@ -8,6 +8,7 @@ aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platfo
 3. [Is the next step a general-purpose Database Agent?](#3-is-the-next-step-a-general-purpose-database-agent)
 4. [Where aiHelpDesk fits in the AI landscape](#4-where-aihelpdesk-fits-in-the-ai-landscape)
 5. [Why now, not later?](#5-why-now-not-later)
+6. [We already have scripts and automation. What would we gain?](#6-we-already-have-scripts-and-automation-what-would-we-gain)
 
 ---
 
@@ -120,10 +121,31 @@ permanent record instead of its blind spot — is.**
 
 No. Explicitly not.
 
-The roadmap goes deeper on governance and certification, not broader on database
-management capability.
+aiHelpDesk does not manage your databases. It does not provision, patch, tune, schedule backups,
+design schemas or author migrations. It is the **incident-time decision and accountability layer**
+on top of the tooling you already run: pgBackRest, Patroni or CloudNativePG, systemd, Kubernetes.
+That includes recovery. Restoring to a point in time or failing over are database operations, and they
+are in scope for one reason: they are what an incident asks for, and they are exactly the actions where
+someone has to be able to say what they cost and who agreed. Three tests decide what belongs:
+
+1. **It is triggered by an incident or by an explicit human request**, never by a schedule or a
+   steady-state need.
+2. **It acts through the tooling you already have.** The restore is `pgbackrest restore`, the failover is your
+   operator's. aiHelpDesk decides whether and when, within your objectives, and drives the tool. It does not
+   replace it, so you still need pgBackRest and Patroni.
+3. **Every action is gated, bounded by the objectives you declared and recorded.**
+
+Anything that fails those tests (scheduled backups, schema changes, query tuning, provisioning) stays out.
+
+The roadmap goes deeper on the incident path (recovery, governance, certification), not broader on
+authoring or lifecycle management.
 
 **What "deeper" means concretely:**
+
+- Recovery judged against your objectives: restore and point-in-time recovery weighed against the
+  declared `rpo`, `rto` and downtime budget before anyone approves them (shipped, see
+  [OBJECTIVES.md](OBJECTIVES.md)); failover and disaster-recovery decisions judged the same way
+  (planned).
 
 - More fault scenarios in the [catalog](FAULTTEST.md) (currently 33; targeting coverage
   of every class of production failure a DBA or SRE encounters in the first year of
@@ -233,10 +255,25 @@ building it into the operational workflow from the start.
 
 ---
 
+## 6. We Already Have Scripts and Automation. What Would We Gain?
+
+For the mechanics, nothing. A restore is a restore, and a good script is as fast or faster. What a script
+usually does not do is everything around the restore: tell you what it will throw away before it runs,
+know whether you can afford the downtime, refuse itself when you cannot, record who agreed and what the
+numbers were, and get better at predicting its own duration from this server's history. aiHelpDesk puts
+those in the path of the same restore, in code and not in a prompt, and uses a model only for the diagnosis
+around it. It does not decide the target, the approval or the gate.
+
+The detailed answer, with the questions to ask of your own automation and where we are **not**
+better, is in [aiHelpDesk and the automation you already have](VS_YOUR_SCRIPTS.md).
+
+---
+
 ## See Also
 
 | Document | What it covers |
 |----------|----------------|
+| [VS_YOUR_SCRIPTS.md](VS_YOUR_SCRIPTS.md) | What a restore script, runbook or operator already gives you and what aiHelpDesk adds in the path of the same action; where it does not help |
 | [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | The three categories of irreplaceable DBA/SRE judgment; the manual improvement path when AI proposals regress |
 | [CUSTOMER_RIGHTS.md](CUSTOMER_RIGHTS.md) | Ten commitments aiHelpDesk makes to operators; the mechanisms that back each one |
 | [CONSISTENCY.md](CONSISTENCY.md) | The Triage Consistency Certificate; how stability is measured and what the three dimensions mean |

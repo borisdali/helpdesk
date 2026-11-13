@@ -1,0 +1,4 @@
+rmgr: Transaction len (rec/tot):     34/    34, tx:        785, lsn: 0/43000148, prev 0/43000110, desc: COMMIT 2026-11-10 23:40:24.510687 EST
+rmgr: Transaction len (rec/tot):     34/    34, tx:        786, lsn: 0/430001A8, prev 0/43000170, desc: COMMIT 2026-11-10 23:40:25.533544 EST
+rmgr: Transaction len (rec/tot):     34/    34, tx:        787, lsn: 0/430001D0, prev 0/430001A8, desc: COMMIT 2026-11-10 23:40:26.555079 EST
+pg_waldump: error: error in WAL record at 0/430001D0: invalid record length at 0/430001F8: expected at least 24, got 0

@@ -1,0 +1,310 @@
+package availability
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"helpdesk/internal/audit"
+)
+
+const restoreSeries = "pbs_pgbackrest_pitr_remediate"
+
+// restoreRun is a run of the restore series that took d, ended `endedAgo` ago.
+func restoreRun(outcome string, d, endedAgo time.Duration) audit.RunSpan {
+	end := now.Add(-endedAgo)
+	sp := audit.RunSpan{RunID: "plr_x", SeriesID: restoreSeries, Outcome: outcome, StartedAt: end.Add(-d)}
+	if d > 0 {
+		sp.CompletedAt = end
+	}
+	return sp
+}
+
+// listingOf is a listing with one incident per run set.
+func listingOf(origin string, runSets ...[]audit.RunSpan) *audit.IncidentListing {
+	l := &audit.IncidentListing{}
+	for _, runs := range runSets {
+		l.Incidents = append(l.Incidents, audit.IncidentWithSeries{Incident: &audit.Incident{IncidentID: "inc", Origin: origin}, Runs: runs})
+	}
+	return l
+}
+
+func resolved(minutes ...int) *audit.IncidentListing {
+	var sets [][]audit.RunSpan
+	for _, m := range minutes {
+		sets = append(sets, []audit.RunSpan{restoreRun(audit.OutcomeResolved, time.Duration(m)*time.Minute, 24*time.Hour)})
+	}
+	return listingOf("real", sets...)
+}
+
+func rto(d time.Duration) *time.Duration { return &d }
+
+func TestEstimateRecovery_PercentilesAreNearestRank(t *testing.T) {
+	tests := []struct {
+		name               string
+		minutes            []int
+		p50, p90, min, max int64
+	}{
+		{"three", []int{30, 10, 20}, 20 * 60, 30 * 60, 10 * 60, 30 * 60}, // unsorted in: median rank 2 of 3; p90 is rank 3, the longest
+		{"ten", []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, 50 * 60, 90 * 60, 10 * 60, 100 * 60},
+		{"one value repeated", []int{25, 25, 25, 25}, 25 * 60, 25 * 60, 25 * 60, 25 * 60},
+		{"a long tail is the p90 and the max, not the p50", []int{10, 11, 12, 13, 14, 15, 16, 17, 18, 120}, 14 * 60, 18 * 60, 10 * 60, 120 * 60},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := EstimateRecovery(resolved(tc.minutes...), []string{restoreSeries}, now, EstimateWindow, nil)
+			if e.Status != EstimateEstimated || e.Samples != len(tc.minutes) {
+				t.Fatalf("status %s, samples %d (%s)", e.Status, e.Samples, e.Basis)
+			}
+			if *e.P50Seconds != tc.p50 || *e.MinSeconds != tc.min || *e.MaxSeconds != tc.max {
+				t.Errorf("p50 %d min %d max %d; want %d %d %d", *e.P50Seconds, *e.MinSeconds, *e.MaxSeconds, tc.p50, tc.min, tc.max)
+			}
+			// A p90 only from ten samples; below that it would be the longest by another name.
+			if len(tc.minutes) >= MinP90Samples {
+				if e.P90Seconds == nil || *e.P90Seconds != tc.p90 || *e.PlanningSeconds != tc.p90 || e.PlanningBasis != PlanningP90 {
+					t.Errorf("p90 %v planning %v/%s; want %d from the p90", e.P90Seconds, e.PlanningSeconds, e.PlanningBasis, tc.p90)
+				}
+			} else if e.P90Seconds != nil || *e.PlanningSeconds != tc.max || e.PlanningBasis != PlanningLongest {
+				t.Errorf("fewer than %d samples offered a p90 (%v) or planned for %v/%s, not the longest %d", MinP90Samples, e.P90Seconds, e.PlanningSeconds, e.PlanningBasis, tc.max)
+			}
+		})
+	}
+}
+
+// Nine samples are summarised by their longest and ten by a p90: the line where
+// the p90 stops being the longest under another name. It is pinned exactly, so a
+// change to MinP90Samples is a decision and not an accident.
+func TestEstimateRecovery_P90StartsAtTenSamples(t *testing.T) {
+	nine := EstimateRecovery(resolved(10, 11, 12, 13, 14, 15, 16, 17, 90), []string{restoreSeries}, now, EstimateWindow, nil)
+	if nine.P90Seconds != nil || nine.PlanningBasis != PlanningLongest || *nine.PlanningSeconds != 90*60 {
+		t.Errorf("nine: p90 %v, planning %v/%s", nine.P90Seconds, nine.PlanningSeconds, nine.PlanningBasis)
+	}
+	if !strings.Contains(nine.Basis, "median 14m, longest 1h30m (too few for a p90, which needs 10)") || strings.Contains(nine.Basis, "p50") {
+		t.Errorf("nine basis = %q", nine.Basis)
+	}
+	ten := EstimateRecovery(resolved(10, 11, 12, 13, 14, 15, 16, 17, 18, 90), []string{restoreSeries}, now, EstimateWindow, nil)
+	if ten.P90Seconds == nil || *ten.P90Seconds != 18*60 || ten.PlanningBasis != PlanningP90 {
+		t.Errorf("ten: p90 %v, planning %v/%s: one outlier among ten is not the p90", ten.P90Seconds, ten.PlanningSeconds, ten.PlanningBasis)
+	}
+	// The estimate that is not estimated plans for nothing.
+	few := EstimateRecovery(resolved(10, 20), []string{restoreSeries}, now, EstimateWindow, nil)
+	if few.PlanningSeconds != nil || few.PlanningBasis != "" {
+		t.Errorf("a planning figure from two samples: %+v", few)
+	}
+}
+
+// Below three samples a percentile is just the one or two numbers there are,
+// and is not offered as an estimate.
+func TestEstimateRecovery_NeedsEnoughHistory(t *testing.T) {
+	for n, want := range map[int]string{0: EstimateNone, 1: EstimateTooFew, 2: EstimateTooFew, 3: EstimateEstimated, 4: EstimateEstimated} {
+		var mins []int
+		for i := 0; i < n; i++ {
+			mins = append(mins, 10+i)
+		}
+		e := EstimateRecovery(resolved(mins...), []string{restoreSeries}, now, EstimateWindow, nil)
+		if e.Status != want || e.Samples != n {
+			t.Errorf("%d samples = %s (%d)", n, e.Status, e.Samples)
+		}
+		if want != EstimateEstimated && (e.P50Seconds != nil || e.P90Seconds != nil || e.MaxSeconds != nil || e.PlanningSeconds != nil) {
+			t.Errorf("%d samples: a summary was offered: %+v", n, e)
+		}
+	}
+	none := EstimateRecovery(nil, []string{restoreSeries}, now, EstimateWindow, nil)
+	if none.Status != EstimateNone || !strings.Contains(none.Basis, "no resolved restore of this server in the last 90d among real incidents") {
+		t.Errorf("nil listing: %+v", none)
+	}
+	few := EstimateRecovery(resolved(10, 20), []string{restoreSeries}, now, EstimateWindow, nil)
+	if !strings.Contains(few.Basis, "only 2 resolved restore(s)") || !strings.Contains(few.Basis, "3 are needed for an estimate") {
+		t.Errorf("too few: %q", few.Basis)
+	}
+}
+
+// Only what was a recovery counts, and what was left out is said.
+func TestEstimateRecovery_CountsOnlyRealResolvedFinishedRunsOfTheSeries(t *testing.T) {
+	r := func(outcome string, minutes int) []audit.RunSpan {
+		return []audit.RunSpan{restoreRun(outcome, time.Duration(minutes)*time.Minute, 24*time.Hour)}
+	}
+	l := listingOf("real",
+		r(audit.OutcomeResolved, 10), r(audit.OutcomeResolved, 20), r(audit.OutcomeResolved, 30),
+		r(audit.OutcomeAbandoned, 99), // failed: took a time, was not a recovery
+		r(audit.OutcomeNoAction, 98),  // did nothing
+		r(audit.OutcomeResolved, 0),   // has not finished (no completion)
+		[]audit.RunSpan{{SeriesID: "pbs_vacuum_triage", Outcome: audit.OutcomeResolved, StartedAt: now.Add(-48 * time.Hour), CompletedAt: now.Add(-47 * time.Hour)}}, // another series
+	)
+	// A faulttest incident and an entry with no incident are not counted either.
+	l.Incidents = append(l.Incidents,
+		audit.IncidentWithSeries{Incident: &audit.Incident{Origin: audit.IncidentOriginFaulttest}, Runs: r(audit.OutcomeResolved, 77)},
+		audit.IncidentWithSeries{Runs: r(audit.OutcomeResolved, 66)})
+
+	e := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, nil)
+	if e.Samples != 3 || *e.MaxSeconds != 30*60 {
+		t.Fatalf("samples %d max %v: %s", e.Samples, e.MaxSeconds, e.Basis)
+	}
+	if e.Excluded != 3 {
+		t.Errorf("excluded = %d, want the 3 runs of the series that did not recover or had not finished", e.Excluded)
+	}
+	if !strings.Contains(e.Basis, "3 other run(s) did not recover or had not finished and are not counted") {
+		t.Errorf("basis = %q", e.Basis)
+	}
+	// A restore to the latest backup is the same kind of recovery.
+	both := EstimateRecovery(listingOf("real", []audit.RunSpan{{SeriesID: "pbs_pgbackrest_restore_remediate", Outcome: audit.OutcomeResolved,
+		StartedAt: now.Add(-3 * time.Hour), CompletedAt: now.Add(-3*time.Hour + 5*time.Minute)}}), RestoreSeries, now, EstimateWindow, nil)
+	if both.Samples != 1 {
+		t.Errorf("restore-to-latest was not counted with RestoreSeries: %+v", both)
+	}
+}
+
+func TestEstimateRecovery_OnlyLooksBackAsFarAsTheWindow(t *testing.T) {
+	r := func(d, endedAgo time.Duration) []audit.RunSpan {
+		return []audit.RunSpan{restoreRun(audit.OutcomeResolved, d, endedAgo)}
+	}
+	l := listingOf("real",
+		r(10*time.Minute, 24*time.Hour), r(20*time.Minute, 24*time.Hour), r(30*time.Minute, 24*time.Hour),
+		r(500*time.Minute, 100*24*time.Hour), // finished 100 days ago: outside 90
+		r(500*time.Minute, 91*24*time.Hour),
+	)
+	e := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, nil)
+	if e.Samples != 3 || *e.MaxSeconds != 30*60 {
+		t.Errorf("samples %d max %v: an old restore was counted", e.Samples, e.MaxSeconds)
+	}
+	if e.Excluded != 0 {
+		t.Errorf("a restore outside the window was reported as excluded: %d", e.Excluded)
+	}
+	// A narrower window sees fewer.
+	if e := EstimateRecovery(l, []string{restoreSeries}, now, 12*time.Hour, nil); e.Samples != 0 {
+		t.Errorf("a 12h window counted %d", e.Samples)
+	}
+}
+
+// The declared rto against what has been demonstrated: a count of the restores
+// that took longer, not an inference from a percentile.
+func TestEstimateRecovery_SetAgainstTheDeclaredRTO(t *testing.T) {
+	l := resolved(10, 20, 30, 40)
+	within := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, rto(40*time.Minute))
+	if within.VsRTO != "within" || *within.OverRTO != 0 || *within.RTOSeconds != 2400 ||
+		!strings.Contains(within.VsRTODetail, "none of the 4 past restores took longer than the rto of 40m (the longest took 40m)") {
+		t.Errorf("an rto equal to the longest: %+v", within)
+	}
+	over := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, rto(25*time.Minute))
+	if over.VsRTO != "exceeds" || *over.OverRTO != 2 || !strings.Contains(over.VsRTODetail, "2 of the 4 past restores took longer than the rto of 25m (the longest took 40m)") {
+		t.Errorf("an rto two restores broke: %+v", over)
+	}
+	// No rto declared, or no estimate: no comparison.
+	if none := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, nil); none.VsRTO != "" || none.OverRTO != nil || none.RTOSeconds != nil {
+		t.Errorf("a comparison with no rto: %+v", none)
+	}
+	few := EstimateRecovery(resolved(10), []string{restoreSeries}, now, EstimateWindow, rto(time.Minute))
+	if few.VsRTO != "" || few.OverRTO != nil {
+		t.Errorf("a comparison from one sample: %+v", few)
+	}
+}
+
+// A restore that began before the window and finished inside it is counted: the
+// window is about when recoveries happened, and this one ended inside it. One that
+// began and ended before it is not.
+func TestEstimateRecovery_ARunStraddlingTheWindowStartCountsIfItFinishedInside(t *testing.T) {
+	window := 90 * 24 * time.Hour
+	straddle := audit.RunSpan{SeriesID: restoreSeries, Outcome: audit.OutcomeResolved,
+		StartedAt: now.Add(-window - time.Hour), CompletedAt: now.Add(-window + time.Hour)}
+	before := audit.RunSpan{SeriesID: restoreSeries, Outcome: audit.OutcomeResolved,
+		StartedAt: now.Add(-window - 3*time.Hour), CompletedAt: now.Add(-window - time.Hour)}
+	l := listingOf("real", []audit.RunSpan{straddle}, []audit.RunSpan{before}, []audit.RunSpan{restoreRun(audit.OutcomeResolved, 10*time.Minute, time.Hour)})
+	e := EstimateRecovery(l, []string{restoreSeries}, now, window, nil)
+	if e.Samples != 2 || e.Excluded != 0 {
+		t.Errorf("samples %d excluded %d: the run that finished inside the window should count, and the one wholly before it should not", e.Samples, e.Excluded)
+	}
+}
+
+// When the history cannot be read, what is reported says so in words, and carries
+// the reason, so it is never taken for there being no history.
+func TestUnavailableEstimate(t *testing.T) {
+	e := UnavailableEstimate(errors.New("auditd returned 503: starting"))
+	if e.Status != EstimateUnavailable || e.Samples != 0 || e.WindowSeconds != 90*86400 {
+		t.Errorf("%+v", e)
+	}
+	if !strings.Contains(e.Basis, "could not be read (auditd returned 503: starting)") || !strings.Contains(e.Basis, "no estimate") {
+		t.Errorf("basis = %q", e.Basis)
+	}
+	if e.Status == EstimateNone || e.P90Seconds != nil || e.PlanningSeconds != nil || e.VsRTO != "" {
+		t.Errorf("an unreadable history looks like an estimate or like none: %+v", e)
+	}
+}
+
+func TestEstimateRecovery_SaysWhenTheListingWasCutOff(t *testing.T) {
+	l := resolved(10, 20, 30)
+	l.Truncated = true
+	e := EstimateRecovery(l, []string{restoreSeries}, now, EstimateWindow, nil)
+	if !e.Truncated || !strings.Contains(e.Basis, "cut off at its page limit, so older restores may be missing") {
+		t.Errorf("%+v", e)
+	}
+}
+
+func TestEstimateRecovery_BasisReadsAsASentence(t *testing.T) {
+	e := EstimateRecovery(resolved(10, 20, 30, 40, 50, 60, 70, 80, 90, 100), []string{restoreSeries}, now, EstimateWindow, nil)
+	want := "10 resolved restores of this server in the last 90d (real incidents): p50 50m, p90 1h30m, longest 1h40m"
+	if e.Basis != want {
+		t.Errorf("\n got  %q\n want %q", e.Basis, want)
+	}
+}
+
+func TestPercentile(t *testing.T) {
+	s := []time.Duration{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	for p, want := range map[float64]time.Duration{0: 1, 0.1: 1, 0.5: 5, 0.9: 9, 0.95: 10, 1: 10, 2: 10} {
+		if got := percentile(s, p); got != want {
+			t.Errorf("percentile(%v) = %v, want %v", p, got, want)
+		}
+	}
+	if got := percentile([]time.Duration{7}, 0.9); got != 7 {
+		t.Errorf("one value = %v", got)
+	}
+}
+
+// ── the client ────────────────────────────────────────────────────────────────
+
+func TestClient_RecoveryEstimateAsksForRealRunsOfTheDatabaseOverTheWindow(t *testing.T) {
+	end := func(m int) string { return now.Add(-time.Duration(m) * time.Hour).Format(time.RFC3339) }
+	start := func(m, took int) string {
+		return now.Add(-time.Duration(m)*time.Hour - time.Duration(took)*time.Minute).Format(time.RFC3339)
+	}
+	run := func(h, took int) string {
+		return `{"series_id": "` + restoreSeries + `", "outcome": "resolved", "started_at": "` + start(h, took) + `", "completed_at": "` + end(h) + `"}`
+	}
+	aud := &recordingAuditd{mine: `{"count": 3, "incidents": [
+	  {"incident_id": "a", "origin": "real", "runs": [` + run(30, 10) + `]},
+	  {"incident_id": "b", "origin": "real", "runs": [` + run(60, 20) + `]},
+	  {"incident_id": "c", "origin": "real", "runs": [` + run(90, 30) + `]}]}`}
+	srv := aud.serve(t)
+	c := &Client{URL: srv.URL, APIKey: "svc-key"}
+
+	e, err := c.RecoveryEstimate(context.Background(), "prod-orders", []string{restoreSeries}, rto(25*time.Minute), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Status != EstimateEstimated || e.Samples != 3 || *e.P50Seconds != 20*60 || e.VsRTO != "exceeds" || *e.OverRTO != 1 {
+		t.Errorf("estimate = %+v", e)
+	}
+	q := aud.queries[0]
+	if q.Get("target_key") != "prod-orders" || q.Get("origin") != "real" || q.Get("include") != "runs" || q.Get("unattributed") != "" {
+		t.Errorf("query = %v", q)
+	}
+	since, err := time.Parse(time.RFC3339, q.Get("since"))
+	if err != nil || now.Add(-EstimateWindow).Sub(since) > time.Second || since.Sub(now.Add(-EstimateWindow)) > time.Second {
+		t.Errorf("since = %q (%v), want %s before now", q.Get("since"), err, EstimateWindow)
+	}
+	if aud.auth[0] != "Bearer svc-key" {
+		t.Errorf("authorization = %q", aud.auth[0])
+	}
+}
+
+func TestClient_RecoveryEstimateErrors(t *testing.T) {
+	if _, err := (&Client{}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now); err == nil {
+		t.Error("no audit service: no error, an estimate would read as no history")
+	}
+	bad := &recordingAuditd{status: 500}
+	srv := bad.serve(t)
+	if _, err := (&Client{URL: srv.URL}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now); err == nil {
+		t.Error("an auditd failure read as an estimate")
+	}
+}
