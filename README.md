@@ -55,7 +55,7 @@ The [Vault](docs/VAULT.md) is the mechanism that closes this loop. It holds ever
 - **Incident diagnostics** — the incident agent collects database, K8s, OS and storage layers into a timestamped support bundle. On resolution, it automatically synthesises a playbook draft from the audit trace.
 - **A2A protocol** — built on Google ADK and the Agent-to-Agent protocol. Expert agents (Database, Kubernetes, Sysadmin, Incident, Orchestrator) can be swapped or extended independently.
 
-See [design principles](docs/PRINCIPLES.md), the [FAQ](docs/FAQ.md) and [who is it for](docs/FOR_WHOM.md) before diving in.
+See [design principles](docs/PRINCIPLES.md), the [FAQ](docs/FAQ.md) and [who is it for](docs/FOR_WHOM.md) before diving in. Already have restore scripts or runbooks? See [what aiHelpDesk adds and where it does not help](docs/VS_YOUR_SCRIPTS.md).
 
 ---
 
