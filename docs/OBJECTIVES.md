@@ -395,12 +395,44 @@ to replay, so a history from when the server was half its size is optimistic and
 a restore to three days ago; both kinds are counted together and the restored size is not recorded yet (v0.36).
 
 #### **Two clocks**   
-This is a note on a timing used for measuing the estimate and the ledger:  
+This is a note on a timing used for measuring the estimate and the ledger:  
  * The estimate is the recovery duration of the remediation hop: after the approval, the restore, the restart and the
 verification.   
  * The ledger ([§5.3](#53-the-availability-ledger)) charges the incident, from the start of the triage run
 to the end of the last run, so it also holds the triage, the model's reasoning and any wait for a person at the gate.  
-  
+
+Neither is the downtime.   
+The downtime is the time during which the service was not available to the users, from the
+moment it stopped serving to the moment it served again. aiHelpDesk does not observe that directly (it has no probe of
+the users' view), so both clocks are stand-ins and it helps to see where each one sits:
+
+```
+ service stops serving                                              service serves again
+        |                                                                            |
+        |  undetected  |  triage + model  |  wait at the gate   |  remediation hop   |
+        |              |<------------------ ledger charges ------------------------->|
+        |                                                       |<---- estimate ---->|
+        |<----------------------- downtime of a DOWN instance ---------------------->|
+                                                                        |<-serving-->|  
+                                                               downtime of a SERVING instance
+                                                   (starts when the restore stops it, partway into the hop)
+```
+
+What each clock leaves out or adds.  
+There are two basic cases to consider: an instance can be alredy down or it can still be serving, but the clock
+needs to be reset back in-time. The table below presents what a real downtime, ledger and estimate count for both cases:
+
+| | Down instance (it crashed or was stopped) | Serving instance (a PITR on a live database) |
+|---|---|---|
+| Real downtime | from the failure to the recovery, **including the time before anyone noticed** | only from the moment the restore stops it |
+| Ledger | misses the undetected time, so it **undercounts** | counts the triage and the wait, during which the service was up, so it **overcounts** |
+| Estimate | misses everything before the approval, so it undercounts | covers the hop, which also holds the model's reasoning, so it slightly **overcounts** the stop-to-serving time |
+
+So the ledger is not simply "too long". It can be too short (a failure nobody saw for an hour is not in it) or too long
+(a wait for an approval while the database served is charged as downtime) and which one depends on whether the
+instance was down while the incident was open. Treat it as a record of how much of the budget the incident
+consumed on aiHelpDesk's clock, which is the clock a person at the gate can act on and not as an uptime report. The
+undetected time is the part only monitoring can supply.
 
 The budget check puts the two side by side: what the ledger has left against how long the next restore is planned to
 last. On the smaller databases they differ a lot: on the Ubuntu VM a restore took 33 to 36 seconds and
@@ -512,7 +544,7 @@ it spends.
 | A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
 | A ledger of the downtime budget already spent in the window, from recorded real incidents, charged by availability impact, with unconfirmed outages listed apart ([§5.3](#53-the-availability-ledger)) | Built (run live on the Docker fixture: three charged restores, one unconfirmed run, the budget overspent; on the Ubuntu VM over SSH and on a K8s Pod: three charged restores and one unconfirmed run on each) |
 | The remaining budget shown to the person at the gate (`helpdesk-client --pitr-plan` and recorded on the plan and execution decisions) | Built |
-| A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built (run live on the Docker fixture with `acknowledge`: refused without the acknowledgement, the instance not stopped, and ran with it, on the Docker fixture, the Ubuntu VM and a K8s Pod; the `refuse` mode not yet) |
+| A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built (run live on the Docker fixture with `acknowledge`: refused without the acknowledgement, the instance not stopped and ran with it, on the Docker fixture, the Ubuntu VM and a K8s Pod; the `refuse` mode not yet) |
 | The budget check applied to any tool declared `impact: outage` in the tool registry (planned restarts, scale-downs, failover), not only the restore: a spent budget argues against voluntary downtime, never against recovery | Not built (v0.36) |
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only; run live on the Docker fixture: `no_history` with none, `insufficient_history` with 1 and 2 samples, `estimated` at 3 with the longest as the planning figure, on the Docker fixture (longest 1m41s), on the Ubuntu VM (longest 36 s) and on a K8s Pod (longest 55 s)) |
