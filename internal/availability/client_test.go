@@ -137,6 +137,10 @@ func TestClient_LedgerUsesTheBudgetsWindowAndMapsTheListing(t *testing.T) {
 	if mine.Get("target_key") != "prod-orders" || mine.Get("include") != "series" || loose.Get("target_key") != "" {
 		t.Errorf("mine = %v, loose = %v", mine, loose)
 	}
+	// Only real incidents can be missing from a ledger: faulttest ones never count.
+	if loose.Get("origin") != "real" {
+		t.Errorf("the unattributed count asked for origin %q, want real", loose.Get("origin"))
+	}
 	since, err := time.Parse(time.RFC3339, mine.Get("since"))
 	if err != nil || now.Add(-7*24*time.Hour).Sub(since) > time.Second || since.Sub(now.Add(-7*24*time.Hour)) > time.Second {
 		t.Errorf("since = %q (%v), want 7 days before now", mine.Get("since"), err)

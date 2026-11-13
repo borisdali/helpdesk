@@ -91,8 +91,11 @@ func (c *Client) Ledger(ctx context.Context, key string, budget infra.Availabili
 		return nil, err
 	}
 	// Incidents that could not be tied to any database are in no ledger. Say how
-	// many there are, so a ledger is not read as the whole picture.
-	loose, err := c.Incidents(ctx, url.Values{"unattributed": {"true"}, "since": {since}})
+	// many there are, so a ledger is not read as the whole picture. Real incidents
+	// only: a faulttest incident never counts against a budget, so one without a
+	// database is no gap in any ledger (a cluster reinstalled over an audit store
+	// that outlived it reported 8 such leftovers from earlier test runs as missing).
+	loose, err := c.Incidents(ctx, url.Values{"unattributed": {"true"}, "origin": {"real"}, "since": {since}})
 	if err != nil {
 		return nil, err
 	}
