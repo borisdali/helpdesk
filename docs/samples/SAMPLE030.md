@@ -1,6 +1,25 @@
 # aiHelpDesk Sample#30 (from source, on host/VM): What a restore would cost, in downtime and in data, before anyone approves it (availability budget, ledger, recovery-time estimate)
 
-This sample is similar to [Sample#29](SAMPLE029.md): there is no AI in it. The plan is `plan_point_in_time_recovery` called directly on the SysAdmin Agent with `curl` (R/O, nothing is restored yet) and the ledger is read from the Gateway. What follows is what we declared, what came back and, as importantly, what this run could not show.
+The raw transcript of the sample commands and deliberations presented below complements this blog post:
+
+- **[How do RPO, RTO and SLO relate to each other and why on earth would you add AI to the mix?](https://itnext.io/how-do-rpo-rto-and-slo-relate-to-each-other-and-why-on-earth-would-you-add-ai-to-the-mix-cae68db8bbfb?)**  
+  RPO is what you can lose. RTO is how long you can wait. The SLO is how much downtime you can afford in total. This aiHelpDesk release adds them all up and puts the sum in front of the human operator at the gate
+
+
+If you are new to aiHelpDesk, start with the Customer [Bill of Rights](../CUSTOMER_RIGHTS.md). 10 specific entitlements. Verifiable on a live system. Your system.
+Next, review another aiHelpDesk pioneering concept: the [Operational SRE/DBA Flywheel](../VAULT.md#the-operational-sredba-flywheel).
+
+How do the former (rights/entitlements) map to the latter (the flywheel, which is essentially a loop)? Chek out [this doc page](../RIGHTS_AND_THE_FLYWHEEL.md).
+
+Finally, take aiHelpDesk for a spin! Here's a link to the 10-minute demo: [this page](../../deploy/docker-compose/DEMO.md).
+
+---
+
+As with all sample pages, each one is using the syntax from one of the supported platforms: running commands from the source code, on VM/Bare Metal, on Docker/Podman or on K8s. This sample transcript can be considered as an abbridged preview. See [SAMPLE031.md](SAMPLE031.md) for more indepth details for all three platforms.
+
+The goal of this transcript is simple: give a taste of the actual commands behind [aiHelpDesk v0.35](https://github.com/borisdali/helpdesk/releases/tag/v0.35.0) release: the budget, the ledger, the approval at the gate and what happens when the budget runs out.
+
+We start off with configuring the objectives, move on to the plan and then jump to the ledger. The plan is the `$HELPDESK_SYSADMIN_URL/tool/plan_point_in_time_recovery` API call that pokes the SysAdmin Agent directly with the `curl` command (R/O, nothing is restored yet) and the ledger is a read from the Gateway. What follows is what we declared, what came back and, as importantly, what this run could not show.
 
 Here is the skinny:
 
