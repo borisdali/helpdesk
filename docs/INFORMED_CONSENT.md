@@ -47,7 +47,7 @@ Consent is not a binary. aiHelpDesk offers four approval modes so operators can 
 | `session` | A named session token pre-authorises a scoped set of actions |
 | `auto` | Fully autonomous within the playbook's `permitted_tools` whitelist |
 
-In all modes, the Decision Hub (`GET /api/v1/decisions`) gives a non-interactive path to the same gate — curl, webhook, or CI pipeline can resolve it. The operator is never forced to be at a terminal.
+In all modes, the Decision Hub (`GET /api/v1/decisions`) gives a non-interactive path to the same gate — curl, webhook or CI pipeline can resolve it. The operator is never forced to be at a terminal.
 
 The consent is also **time-bounded**: a gate that is not resolved within the configured timeout transitions to `abandoned`, not silently approved.
 
@@ -64,6 +64,53 @@ The right to refuse also applies to individual steps in `agent_approve` mode: an
 
 ---
 
+## Informed in numbers: the objectives, the budget and the ledger
+
+The three parts above are about a diagnosis and a plan. For a **restore** there is a second thing a person should be
+informed of before consenting: what it will cost. A PITR throws away data and takes a service down and a team has
+already said how much of *each* it can afford, in three numbers: the **RPO** (how much it can lose), the **RTO** (how long
+it can wait) and the availability **SLO** (how much downtime it can afford in total). Before v0.35 those lived in three
+places and the gate knew about none of them. Now the gate puts them next to each other, in front of the approver, in the
+plan (`plan_point_in_time_recovery`, printed by `helpdesk-client --pitr-plan`):
+
+- **Data**:   
+  The history and the number of transactions, the restore would discard, against the `rpo`.
+
+- **Time**:   
+  How long this server's restores really take (from its own past restores, not a guess), against the `rto`.
+
+- **Downtime**:   
+  The cost of the restore against the **availability budget**, which is the SLO converted into minutes
+  (99.9% over 30 days is 43m 12s). What is left of it is read from the **ledger**: the record of what each real outage
+  already spent. The budget is the allowance and the ledger is the receipt.
+
+What this adds to each part:
+
+| Part | What the objectives, budget and ledger add |
+|---|---|
+| **Informed** | The consequence is a number set against a declared limit, not an adjective. It also says what it could not measure (no transaction count, no history) instead of leaving a gap that reads as "nothing". |
+| **Consent** | When the restore would exceed an objective, approving it is not enough: a second, separate acknowledgement (`--acknowledge-objective-breach`) is required and it names the breach it covers. It is bound to the plan digest, so it is consent to this plan. Only the human's approval at the gateway can give it, never the model and the restore tool itself refuses without it, before it stops anything. It is recorded in the hash-chained `recovery_decision` event with who gave it. |
+| **Right to refuse** | An objective can be set to `refuse` in advance, by whoever owns it, so refusing is a decision made calmly and not under pressure at 2am. A refused restore leaves the instance untouched. A down instance is asked and not refused, because refusing would keep it down and spend the budget faster. |
+
+Two things are different from the diagnosis case and are worth stating:
+
+- **The consent is cumulative**   
+  The budget is shared by every incident in the window, so a "yes" spends something that
+  every later decision also draws on. The ledger is what lets an approver see what is already gone.
+
+- **The numbers need the same proof as the diagnosis**   
+  Part 1 says the claim is only worth something if the diagnosis
+  is shown to be correct and the flywheel checks that. The budget's figures are only an informed basis if they are
+  shown to match what restores really take. That check is not built yet: the plan's estimate and the actual duration
+  are recorded, but not yet compared and the estimate needs real restores to learn from (planned for v0.36, with
+  rehearsals on a clone). Until then the estimate says how many samples stand behind it and the ledger's clock
+  is not the downtime ([the two clocks](OBJECTIVES.md#two-clocks)).
+
+Two limits stay as they are: the acknowledgement records who gave it, not why (a justification and a ticket number
+are slated for v0.36) and the audit record is tamper-evident, not signed yet.
+
+---
+
 ## How the three parts map to aiHelpDesk features
 
 | Informed Consent part | Where it happens | How to operate it |
@@ -73,6 +120,8 @@ The right to refuse also applies to individual steps in `agent_approve` mode: an
 | Informed: accuracy verified | `vault accuracy`, `vault calibration` | [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md#vault-command-reference) |
 | Consent: approval mode | `approval_mode` field on playbook | [PLAYBOOKS.md](PLAYBOOKS.md) |
 | Consent: gate resolution | Decision Hub or interactive gate | [DECISIONS.md](DECISIONS.md), [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) |
+| Informed: the cost of a restore | RPO, RTO and BUDGET CHECK in the plan; the ledger | [OBJECTIVES.md](OBJECTIVES.md), `helpdesk-client --pitr-plan`, `faulttest vault budget <db>` |
+| Consent: a named second yes | `--acknowledge-objective-breach`, bound to the plan digest | [PITR.md](PITR.md), [OBJECTIVES.md](OBJECTIVES.md) |
 | Right to Refuse: deny | `POST /api/v1/decisions/gate:{runID}/resolve` with `resolution=denied` | [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) |
 | Right to Refuse: audit trail | Hash-chained audit log | [AUDIT.md](AUDIT.md) |
 | Right to Refuse: feedback tagged | `verdict_correct=false` at gate | [VAULT_FEEDBACK_FLOW.md §Feedback reference](VAULT_FEEDBACK_FLOW.md#feedback-reference) |
@@ -99,6 +148,8 @@ See also the [Operational Guide](VAULT_FEEDBACK_FLOW.md) on how we turn Informed
 ## Related docs
 
 - [Blog post: You let AI operate on a production database without your consent](https://medium.com/google-cloud/you-let-ai-operate-on-production-database-without-your-consent-bd4ffb954266) — the external reference that motivated this framework
+- [OBJECTIVES.md](OBJECTIVES.md) — the RPO, RTO and availability SLO, the budget, the ledger and the recovery-time estimate that make the gate informed about a restore's cost
+- [VS_YOUR_SCRIPTS.md](VS_YOUR_SCRIPTS.md) — why a script that restores cleanly does not give an approver this
 - [PRINCIPLES.md §8](PRINCIPLES.md#8-informed-consent-human-in-the-loop-is-not-optional) — design principle
 - [PLAYBOOK_OPS.md §2.4](PLAYBOOK_OPS.md#24-step-4-provide-an-informed-consent-aka-reviewapprove-the-gate) — step-by-step gate operations with curl commands
 - [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md) — how feedback enters the flywheel and what each `vault` command measures

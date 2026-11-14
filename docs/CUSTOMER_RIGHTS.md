@@ -24,8 +24,15 @@ see: the root-cause hypothesis with supporting evidence, the confidence level, t
 steps, the blast-radius estimate and the rollback risk for any session with uncommitted
 writes. Nothing executes until you have reviewed and approved this picture.
 
-*Mechanism:* The [triage gate](INFORMED_CONSENT.md), `approval_mode` controls, Decision Hub.
-*Status:* Solid. No gaps.
+For a restore, that picture also carries the cost in your own terms: the data it would discard against your
+RPO, how long this database server's restores really take against your RTO and the downtime against what is left of your
+availability budget, read from a ledger of what earlier outages already spent. Exceeding one of those needs a second,
+named acknowledgement, which nothing but a person's approval can supply.
+
+*Mechanism:* The [triage gate](INFORMED_CONSENT.md), [the objectives, budget and ledger](INFORMED_CONSENT.md#informed-in-numbers-the-objectives-the-budget-and-the-ledger), `approval_mode` controls, Decision Hub.  
+*Status:* Solid. No gaps in the gate. One named gap in the restore's cost figures: they state how many past restores
+stand behind them, but they are not yet checked against what restores actually took (planned for v0.36, with
+rehearsals on a clone).
 
 ---
 
@@ -40,8 +47,7 @@ independent [LLM judge](LLM_AS_JUDGE.md) before they reach you. Confidence score
 bands against historical accuracy. Stability is checked by repeated runs, not single
 results.
 
-*Mechanism:* [Second Opition](SECOND_OPINION.md): five layers, each documented with its
-verification mechanism.
+*Mechanism:* [Second Opition](SECOND_OPINION.md): five layers, each documented with its verification mechanism.  
 *Status:* Solid. The three gaps that used to sit here — model-specific calibration
 (Right IV), alert capture for diagnosis comparison (Right IX) and judge track record
 measurement — all closed in v0.20.0. Judge track record is queryable via
@@ -59,9 +65,10 @@ it formed, the evidence it cited, the confidence it reported). For every run, fo
 WHAT and WHY are stored separately and cross-linked. From an incident, you can navigate
 to the reasoning chain. From a reasoning chain, you can navigate to the incident outcome.
 The audit log is hash-chained: any deletion or modification of a past record is detectable.
+For a restore, each stage of the decision (the plan, the gate, the execution and the outcome) is its own record, with
+the objectives that were in force and who acknowledged what, so "who agreed we could exceed it?" has an answer.
 
-*Mechanism:* [Audit](AUDIT.md), [Journeys](JOURNEYS.md), tamper-evident hash chain
-in `audit_events`.
+*Mechanism:* [Audit](AUDIT.md), [Journeys](JOURNEYS.md), tamper-evident hash chain in `audit_events`.  
 *Status:* Solid. No gaps.
 
 ---
@@ -77,7 +84,7 @@ a data provenance chain.**
 accuracy is improving across playbook versions. All three are queryable at any time against
 the live audit store.
 
-*Mechanism:* `vault calibration`, `vault accuracy`, `vault versions` in [Vault](VAULT.md).
+*Mechanism:* `vault calibration`, `vault accuracy`, `vault versions` in [Vault](VAULT.md).  
 *Status:* Solid. `diagnosis_model` is part of the fault stability cert's primary key
 (`fault_id, diagnosis_model`), so certs no longer blend across model versions — a new
 model gets its own cert rather than overwriting the old one. When human feedback is
@@ -96,10 +103,10 @@ after the fact.**
 When you deny a gate, remediation does not execute. The denial reason is stored in the
 tamper-proof audit log alongside the run ID, operator identity and timestamp. In
 `agent_approve` mode, you can deny individual steps: approving step 1 (read) does not
-commit you to step 2 (write). Denial is a first-class outcome, not an error.
+commit you to step 2 (write). Denial is a first-class outcome, not an error. You can also refuse in advance: an
+objective set to `refuse` stops a restore that would break it, before anything is stopped.
 
-*Mechanism:* Gate denial in [Informed Consent](INFORMED_CONSENT.md#the-three-parts),
-`verdict_notes` in audit trail.
+*Mechanism:* Gate denial in [Informed Consent](INFORMED_CONSENT.md#the-three-parts), `verdict_notes` in audit trail.  
 *Status:* Solid. No gaps.
 
 ---
@@ -114,8 +121,7 @@ verdict routes the decision to you. Not to the next automated step. The system i
 so that the most sophisticated error mode (AI proposes a confident, coherent change that
 would worsen performance) is caught and escalated rather than shipped.
 
-*Mechanism:* [Judgement Layer](JUDGMENT_LAYER.md) — the manual improvement path, the
-three categories of irreplaceable human judgment, the workflow when `suggest-update` fails.
+*Mechanism:* [Judgement Layer](JUDGMENT_LAYER.md) — the manual improvement path, the three categories of irreplaceable human judgment, the workflow when `suggest-update` fails.  
 *Status:* Solid. No gaps.
 
 ---
@@ -131,7 +137,7 @@ System playbooks are versioned and readable in the `playbooks/` directory of the
 source repository. Custom playbooks are stored in the audit database and exportable via
 `GET /api/v1/fleet/playbooks/{id}`. The format is documented and stable.
 
-*Mechanism:* [Playbooks](PLAYBOOKS.md), `playbooks/` directory, open schema.
+*Mechanism:* [Playbooks](PLAYBOOKS.md), `playbooks/` directory, open schema.  
 *Status:* Solid. No gaps.
 
 ---
@@ -148,7 +154,7 @@ explicit: `STABLE(5) [claude-sonnet-4-6]` is a different cert from `STABLE(5)
 [claude-opus-4-8]`. You choose when to re-certify; the system does not do it for you
 silently.
 
-*Mechanism:* [Consistency](CONSISTENCY.md), [Principles](PRINCIPLES.md#11-model-neutral-by-design).
+*Mechanism:* [Consistency](CONSISTENCY.md), [Principles](PRINCIPLES.md#11-model-neutral-by-design).  
 *Status:* Solid. `diagnosis_model` is a real primary-key column on the fault stability
 cert (`PRIMARY KEY (fault_id, diagnosis_model)`), not just an annotation. Running with a
 new model creates a new cert; the old one is untouched and remains queryable.
@@ -165,7 +171,7 @@ line that prompted the investigation — is stored alongside the run record and 
 `vault incidents <run-id>`. The second opinion is only meaningful when the first opinion
 is visible.
 
-*Mechanism:* `trigger_context` field on `PlaybookRun`, surfaced in `vault incidents`.
+*Mechanism:* `trigger_context` field on `PlaybookRun`, surfaced in `vault incidents`.  
 *Status:* Solid. `trigger_context` is a persisted column on `playbook_runs`, accepted as
 a field on the trigger request and stored at run start — not just passed through to the
 agent transcript.
@@ -182,8 +188,7 @@ The tool implementations are in the open source repository. There is no propriet
 lock-in format, no vendor-held operational knowledge, no feature that requires the managed
 service to remain accessible.
 
-*Mechanism:* [Principles](PRINCIPLES.md#1-aiHelpDesk-is-oss), open source repository,
-documented schemas.
+*Mechanism:* [Principles](PRINCIPLES.md#1-aiHelpDesk-is-oss), open source repository, documented schemas.  
 *Status:* Solid. No gaps.
 
 ---
@@ -196,32 +201,52 @@ running deployment. If you don't have aiHelpDesk installed yet, consider this
 
 ```bash
 # Right I — the gate exists and is mandatory
-curl -X POST $GW/api/v1/fleet/playbooks/$PB_ID/run \
-  -H "Authorization: Bearer $KEY" \
+curl -X POST $HELPDESK_GATEWAY_URL/api/v1/fleet/playbooks/$PB_ID/run \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   -d '{"connection_string": "prod-db-1", "approval_mode": "manual"}' \
   | jq '{run_id, status}'
 # → status should be "pending_approval", not "completed"
 
+# Right I — a restore shows its cost against your objectives (read-only, restores nothing)
+helpdesk-client --pitr-plan \
+  --pitr-server <db> \
+  --recovery-target-type time \
+  --recovery-target <RFC3339 time> \
+  --sysadmin-url $SYSADMIN_URL
+# → RPO CHECK, BUDGET CHECK and "Past restores" lines and what approving needs
+
+faulttest vault budget <db> \
+  --gateway $HELPDESK_GATEWAY_URL \
+  --api-key $HELPDESK_CLIENT_API_KEY
+# → the budget, what the ledger has spent and what is left
+
 # Right III — the audit trail exists and is hash-chained
-curl $GW/api/v1/audit/events?limit=5 -H "Authorization: Bearer $KEY" \
+curl $HELPDESK_GATEWAY_URL/api/v1/audit/events?limit=5 \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   | jq '.[].hash'
 # → every event has a non-empty hash
 
 # Right IV — calibration is queryable
-faulttest vault calibration --gateway $GW --api-key $KEY
+faulttest vault calibration \
+  --gateway $HELPDESK_GATEWAY_URL \
+  --api-key $HELPDESK_CLIENT_API_KEY
 # → table shows bands; check Sources: line for human vs. auto_judge ratio
 
 # Right VII — playbooks are exportable YAML
-curl $GW/api/v1/fleet/playbooks/$PB_ID -H "Authorization: Bearer $KEY" \
+curl $HELPDESK_GATEWAY_URL/api/v1/fleet/playbooks/$PB_ID \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   | jq -r '.guidance'
 # → plain text, no proprietary encoding
 
 # Right VIII — cert shows diagnosis_model
-faulttest vault accuracy db-max-connections --gateway $GW --api-key $KEY
+faulttest vault accuracy db-max-connections \
+  --gateway $HELPDESK_GATEWAY_URL \
+  --api-key $HELPDESK_CLIENT_API_KEY
 # → "Diagnosis model: claude-sonnet-4-6" appears in output
 
 # Right IX — trigger_context on runs
-curl $GW/api/v1/fleet/playbook-runs/$RUN_ID -H "Authorization: Bearer $KEY" \
+curl $HELPDESK_GATEWAY_URL/api/v1/fleet/playbook-runs/$RUN_ID \
+  -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   | jq '.trigger_context'
 # → alert text that initiated the run
 ```
