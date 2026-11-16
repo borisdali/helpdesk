@@ -236,9 +236,9 @@ What it must not do is let them accept it unaware, so every case says something:
 
 `exceeds` and `may_exceed` print as `RPO CHECK (!)`. The comparison also appears on the restore result's `data_loss`.
 
-**What approving demands**   
+#### **What approving demands**   
 Whether a breach only needs showing or needs a separate acknowledgement or is
-refused, is the database's `enforcement` ([OBJECTIVES.md §3](OBJECTIVES.md#3-values)):
+refused effectively blocking a restore, is what the database's `enforcement` ([OBJECTIVES.md §3](OBJECTIVES.md#3-values)) setting dictates:
 
 | `enforcement` | Loss `exceeds` the `rpo` | Loss `may_exceed` it | Anything else |
 |---|---|---|---|
