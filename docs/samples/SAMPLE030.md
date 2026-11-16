@@ -231,7 +231,12 @@ Those four incidents are runs of the R/O [objective-exposure](../OBJECTIVES.md#5
 - **The budget as a gate**   
   With `warn` nothing blocks a restore. The path where an exhausted budget requires an acknowledgement was not run live.
 
-Each of these is covered by unit and integration tests (see [testing pyramid](../../testing/README.md#summary-aihelpdesk-testing-pyramid), which is a weaker kind of evidence than a run, but the list above is what to look for in the real restore.
+Each of these is covered by unit and integration tests (see [testing pyramid](../../testing/README.md#summary-aihelpdesk-testing-pyramid), which is a weaker kind of evidence than a run, but the list above is what to look for in the real restore. For the stronger, but much longer proof, please see our in-depth runs presented in [SAMPLE031.md](SAMPLE031.md): 
+* What happens when you actually run that destructive restore?
+* What happens when one of the objectives (e.g. RPO or SLO) is breached)?
+* How consistent these runs look like on diff platforms: containers, K8s and host/VM?
+
+etc. see that [SAMPLE031.md](SAMPLE031.md) to find out 😉.
 
 ## 5. Where to go from here
 
