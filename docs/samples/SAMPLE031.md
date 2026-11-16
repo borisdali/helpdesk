@@ -93,7 +93,9 @@ go run ./testing/cmd/faulttest vault budget pgbackrest-db --gateway $HELPDESK_GA
 ## 1/ Docker
 
 ### Manual Run on Docker
-Our script of seven parts automates the setup, the run and the reporting. We call it a "cycle" and that whole restore cycle is reduced to a single command. But, if you prefer to over the motions by hand, this section may help. Let's start with the manual setup (if not, feel free to skip to [the next section](SAMPLE031.md#automated-script-based-runs-on-docker) 😉):
+Our script of seven parts automates the setup, the run and the reporting. We call it a "cycle" and that whole restore cycle is reduced to a single command. But, if you prefer to do this the hard way and go to over the motions by hand, this section may help. Let's start with the manual setup (if not, feel free to skip to [the next section](SAMPLE031.md#automated-script-based-runs-on-docker) for a single-command setup/run 😉):
+
+It's been a long time since we used AlloyDB Omni last time for our demos (most of the interest appears to be around stock Postgres or CNPG on K8s), but aiHelpDesk is distro agnostic, so let's give Omni a whirl for a change:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ docker exec alloydb-omni \
@@ -208,7 +210,7 @@ stanza: main
 
 ```
 
-Let's use AlloyDB Omni as target database for this Docker demo:
+Here's the inventory entry for this database server for the Docker run:
 
 ```
 [boris@ /tmp/helpdesk/helpdesk-v0.35.0-deploy/docker-compose]$ grep -m1 -A16 alloydb-on-vm infrastructure.json
