@@ -175,7 +175,7 @@ step "the plan as the operator reads it now, while the gate waits (what putting 
 gate_plan() {
   HELPDESK_SYSADMIN_API_KEY=$SYSADMIN_KEY go run ./cmd/helpdesk-client --pitr-plan --pitr-server "$DBKEY" --pitr-stanza "$STANZA" \
     --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url "$SYSADMIN" \
-    | grep -E '^(RPO|BUDGET|Budget|Past restores|Waiting|  )' || true
+    | awk '/^$/ { keep = 0 } /^[^ ]/ { keep = ($0 ~ /^(RPO|BUDGET|Budget|Past restores|Waiting)/) } keep' || true
 }
 gate_plan
 if [ "${HOLD_GATE:-}" = 1 ]; then
