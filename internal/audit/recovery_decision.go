@@ -67,6 +67,11 @@ type RecoveryDecision struct {
 	// downtime: the instance may have been down before the hop began, and the
 	// hop includes the agent's own reasoning time.
 	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
+	// IncidentSeconds is, for the outcome stage, how long the incident had run
+	// when the hop finished: from the start of its entry run to the end of this
+	// one, which is what the availability ledger charges for it. It includes the
+	// wait for the approval (v0.36).
+	IncidentSeconds *int64 `json:"incident_seconds,omitempty"`
 	// Tool is the tool the stage belongs to (plan_point_in_time_recovery,
 	// restore_to_point_in_time); empty for the gate.
 	Tool string `json:"tool,omitempty"`
@@ -183,6 +188,12 @@ type DecisionOption struct {
 	BudgetVerdictDetail    string `json:"budget_verdict_detail,omitempty"`
 	BudgetGate             string `json:"budget_gate,omitempty"`
 	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
+	// BudgetPendingSeconds is, when the open incident was not charged to the ledger
+	// yet, how long it had been open: the verdict took that off the budget (the
+	// incident is charged in full, from its start, when the restore runs), so
+	// BudgetRemainingSeconds is what was left after it. The ledger's own figure is
+	// the two added. Absent when there was no such incident (v0.36).
+	BudgetPendingSeconds *int64 `json:"budget_pending_seconds,omitempty"`
 	// How long the budget verdict took the restore to last, and on what:
 	// "history_p90" (the p90 of this server's past restores, from ten of them),
 	// "history_longest" (the longest of three to nine, too few for a p90) or

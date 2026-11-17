@@ -84,6 +84,25 @@ type BudgetDelay struct {
 	PlannedBasis   string `json:"planned_basis,omitempty"`
 }
 
+// openIncidents says whether an open outage incident is already charged to the
+// ledger, and otherwise which open incidents are not charged yet: they become an
+// outage, and are charged in full, from their start, when the restore runs.
+func openIncidents(l *Ledger) (charging bool, pending []Entry) {
+	for _, e := range l.Charged {
+		if e.Ongoing {
+			return true, nil
+		}
+	}
+	for _, list := range [][]Entry{l.None, l.Unclassified, l.Degraded} {
+		for _, e := range list {
+			if e.Ongoing {
+				pending = append(pending, e)
+			}
+		}
+	}
+	return false, pending
+}
+
 // delayFor says what waiting costs against the budget the verdict was made from.
 // It is nil when there is nothing to say: no budget, or a ledger that could not be
 // read.
@@ -91,25 +110,7 @@ func delayFor(v *BudgetVerdict, l *Ledger, serving bool) *BudgetDelay {
 	if v == nil || l == nil || v.RemainingSeconds == nil {
 		return nil
 	}
-	charging := false
-	for _, e := range l.Charged {
-		if e.Ongoing {
-			charging = true
-			break
-		}
-	}
-	// Open incidents that are not charged (yet): they become an outage, and are
-	// charged in full, when the restore runs.
-	var pending []Entry
-	if !charging {
-		for _, list := range [][]Entry{l.None, l.Unclassified, l.Degraded} {
-			for _, e := range list {
-				if e.Ongoing {
-					pending = append(pending, e)
-				}
-			}
-		}
-	}
+	charging, pending := openIncidents(l)
 	span := func(s int64) string {
 		if s < 0 {
 			return "-" + infra.FormatSpan(secondsOf(-s))

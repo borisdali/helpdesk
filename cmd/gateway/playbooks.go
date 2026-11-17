@@ -2282,6 +2282,21 @@ func (g *Gateway) recordRecoveryOutcome(ctx context.Context, runID, outcome stri
 	if entry == "" {
 		entry = run.RunID
 	}
+	// How long the incident has run: from the start of its entry run, which is
+	// what the availability ledger charges for it, so a plan's budget check can be
+	// set against what the incident came to.
+	entryStart := run.StartedAt
+	if entry != run.RunID {
+		if er, err := g.fetchPlaybookRun(ctx, entry); err == nil && er != nil {
+			entryStart = er.StartedAt
+		} else {
+			entryStart = time.Time{}
+		}
+	}
+	if !entryStart.IsZero() && !completed.Before(entryStart) {
+		secs := int64(completed.Sub(entryStart).Round(time.Second) / time.Second)
+		d.IncidentSeconds = &secs
+	}
 	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(entry, "", d)); err != nil {
 		slog.Error("recovery outcome NOT recorded in the audit trail", "run_id", run.RunID, "outcome", outcome, "err", err)
 	}

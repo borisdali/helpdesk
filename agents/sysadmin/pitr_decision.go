@@ -84,7 +84,10 @@ func objectivesSnapshot(target string) *audit.ObjectivesInForce {
 func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chosen bool) audit.DecisionOption {
 	o := audit.DecisionOption{Name: pitrOptionName, Chosen: chosen}
 	if budget != nil {
-		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.RemainingSeconds
+		// What was left for the restore: the ledger's figure less the open incident
+		// that is charged when it runs, which is the number the verdict was made on.
+		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.LeftSeconds()
+		o.BudgetPendingSeconds = budget.PendingSeconds
 		o.BudgetDurationSeconds, o.BudgetDurationBasis = budget.DurationSeconds, budget.DurationBasis
 		if e := budget.RecoveryEstimate; e != nil {
 			n := e.Samples

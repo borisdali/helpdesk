@@ -445,8 +445,22 @@ So the latest start is `T0 + 25m12s`, which is `now + 20m12s`.
   when the count is exact. For an instance that is down nothing is being written, so the loss does not grow and waiting
   costs downtime, which is the budget line.
 
-Both are information for the approver, not a deadline: the restore measures again just before it stops anything and
-decides on that, as before.
+Both lines are information for the approver, not a deadline. The verdict is another matter: the `Budget check` (and
+the restore's own check just before it stops anything) is made on what is left **less the age of the open incident**
+that is charged when the restore runs. So a gate held open past its latest start no longer reads `within`: it reads
+`exceeds`, asks for `--acknowledge-objective-breach`, and under `refuse` a serving instance is refused. With several
+open incidents, where which is this restore's is not known, the ledger's own figure stands.
+
+After the incident, the report sets the plan against what happened (`PLAN VS ACTUAL`): the recovery time, the data
+lost at the stop, and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
+of the restore, against what the plan said was left:
+
+```
+═══ PLAN VS ACTUAL ═══  the plan of 21:47:14 against what happened
+recovery time  planned 2m 00s (from the declared rto); took 1m 27s (33s under)
+data loss      planned 9s → within; at the stop 5m 46s → within (5m 37s more)
+budget         planned 6m 23s left → within; the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed
+```
 
 #### **Saying why and under which ticket**   
 The approval can carry the reason it was given and the ticket it was given under:

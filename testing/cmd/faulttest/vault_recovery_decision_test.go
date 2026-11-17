@@ -439,7 +439,7 @@ func TestRDPlanVsActual(t *testing.T) {
 
 	got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, stage(2, "gate"), exec, outcome(5, rdI(89))}), "\n")
 	for _, want := range []string{
-		"plan vs actual (the plan of 14:01:00 against what happened):",
+		"═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened",
 		"recovery time  planned 1m 41s (the longest past restore (too few for a p90)); took 1m 29s (12s under)",
 		"data loss      planned 20s; at the stop 1m 05s (45s more)",
 		"transactions   planned 0; at the stop 3 (3 more)",
@@ -528,11 +528,65 @@ func TestRDPlanVsActual(t *testing.T) {
 
 	// And it is part of the section, under the downtime caveat.
 	full := formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(89))})
-	if strings.Index(full, "plan vs actual") < strings.Index(full, "it is not the downtime") {
+	if strings.Index(full, "PLAN VS ACTUAL") < strings.Index(full, "it is not the downtime") {
 		t.Errorf("plan vs actual should follow the caveat:\n%s", full)
 	}
-	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec}), "plan vs actual") {
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec}), "PLAN VS ACTUAL") {
 		t.Error("plan vs actual appears with no outcome")
+	}
+}
+
+// The downtime budget row sets what the plan said was left against what the
+// incident was charged: the wait at the gate is in the charge, so a plan that said
+// "within" can end overspent, and that is said as a changed verdict.
+func TestRDPlanVsActual_Budget(t *testing.T) {
+	planOpt := func(verdict string, left int64, pending *int64) audit.DecisionOption {
+		return audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: verdict,
+			BudgetRemainingSeconds: rdI(left), BudgetPendingSeconds: pending}
+	}
+	stages := func(plan audit.DecisionOption, incident *int64) []narrativeRecoveryDecision {
+		return []narrativeRecoveryDecision{
+			{At: rdAt(1), Decision: audit.RecoveryDecision{Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{plan}}},
+			{At: rdAt(3), Decision: audit.RecoveryDecision{Stage: "execution", Decision: "proceeded", Options: []audit.DecisionOption{{Name: "point_in_time_restore", Chosen: true}}}},
+			{At: rdAt(5), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: rdI(90), IncidentSeconds: incident}},
+		}
+	}
+	join := func(ds []narrativeRecoveryDecision) string { return strings.Join(rdPlanVsActual(ds), "\n") }
+
+	// The case found live: 6m 23s left at the plan, an incident that came to 7m 03s.
+	got := join(stages(planOpt("within", 383, nil), rdI(423)))
+	if !strings.Contains(got, "budget         planned 6m 23s left → within; the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed") {
+		t.Errorf("an overspent budget:\n%s", got)
+	}
+	// Within and staying within.
+	got = join(stages(planOpt("within", 1500, nil), rdI(200)))
+	if !strings.Contains(got, "planned 25m 00s left → within; the incident was charged 3m 20s, so 21m 40s left → within") || strings.Contains(got, "verdict changed") {
+		t.Errorf("a budget that held:\n%s", got)
+	}
+	// A plan that took the open incident off already: the ledger's own figure is
+	// what the charge is set against (5m 00s effective + 1m 00s pending = 6m 00s).
+	got = join(stages(planOpt("within", 300, rdI(60)), rdI(400)))
+	if !strings.Contains(got, "planned 6m 00s left → within; the incident was charged 6m 40s, so overspent by 40s → exceeds") {
+		t.Errorf("a plan with a pending incident:\n%s", got)
+	}
+	// "may exceed" that came to fit is not a changed verdict; one that did not is.
+	if got := join(stages(planOpt("may_exceed", 100, nil), rdI(50))); strings.Contains(got, "verdict changed") {
+		t.Errorf("may_exceed that fit:\n%s", got)
+	}
+	if got := join(stages(planOpt("may_exceed", 100, nil), rdI(150))); !strings.Contains(got, "verdict changed") {
+		t.Errorf("may_exceed that did not:\n%s", got)
+	}
+	// Nothing to set against: no incident length, no verdict (no SLO).
+	if got := join(stages(planOpt("within", 383, nil), nil)); strings.Contains(got, "budget  ") {
+		t.Errorf("a budget row with no incident length:\n%s", got)
+	}
+	if got := join(stages(planOpt("no_objective", 383, nil), rdI(423))); strings.Contains(got, "budget  ") {
+		t.Errorf("a budget row with no objective:\n%s", got)
+	}
+	// The open incident the verdict took off is said in the option.
+	opt := rdOption(audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "exceeds", BudgetRemainingSeconds: rdI(-40), BudgetPendingSeconds: rdI(423)})
+	if !strings.Contains(opt, "(-40s left after the 7m 03s the open incident had used, charged when the restore runs)") {
+		t.Errorf("pending incident in the option: %s", opt)
 	}
 }
 

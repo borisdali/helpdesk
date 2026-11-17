@@ -206,7 +206,13 @@ func rdOption(opt audit.DecisionOption) string {
 			if opt.BudgetDurationSeconds != nil {
 				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), rdBasisText(opt.BudgetDurationBasis))
 			}
-			fmt.Fprintf(&b, " (%s left%s)", ledgerSpan(*opt.BudgetRemainingSeconds), taken)
+			// An open incident that was not charged yet was already using the budget: the
+			// figure is what was left after it.
+			pending := ""
+			if opt.BudgetPendingSeconds != nil {
+				pending = fmt.Sprintf(" after the %s the open incident had used, charged when the restore runs", rdSpan(*opt.BudgetPendingSeconds))
+			}
+			fmt.Fprintf(&b, " (%s left%s%s)", ledgerSpan(*opt.BudgetRemainingSeconds), pending, taken)
 		}
 		switch opt.BudgetGate {
 		case "acknowledge":
@@ -457,14 +463,42 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 			lines = append(lines, line)
 		}
 	}
+	// The downtime budget: what the plan said was left against what the incident
+	// came to once it was charged. The ledger charges an incident from the start of
+	// its entry run to the end of its last, so a wait at the gate is in it; a plan
+	// that said "within" can end overspent, and that is the thing worth seeing. The
+	// figure is the plan's own, the ledger's as it stood then, with the incident
+	// taken off it; other incidents that were charged since are not counted.
+	if execOpt != nil && planOpt != nil && planOpt.BudgetRemainingSeconds != nil && ds[outcomeIdx].Decision.IncidentSeconds != nil &&
+		(planOpt.BudgetVerdict == "within" || planOpt.BudgetVerdict == "may_exceed" || planOpt.BudgetVerdict == "exceeds") {
+		atPlan := *planOpt.BudgetRemainingSeconds
+		if planOpt.BudgetPendingSeconds != nil {
+			atPlan += *planOpt.BudgetPendingSeconds // the ledger's own figure, before the incident
+		}
+		charged := *ds[outcomeIdx].Decision.IncidentSeconds
+		after := atPlan - charged
+		result := fmt.Sprintf("%s left", rdSpan(after))
+		verdict := "within"
+		if after < 0 {
+			result, verdict = fmt.Sprintf("overspent by %s", rdSpan(-after)), "exceeds"
+		} else if after == 0 {
+			result, verdict = "none left", "exceeds"
+		}
+		note := ""
+		if planOpt.BudgetVerdict != verdict && !(planOpt.BudgetVerdict == "may_exceed" && verdict == "within") {
+			note = "; the verdict changed"
+		}
+		lines = append(lines, fmt.Sprintf("  budget         planned %s left → %s; the incident was charged %s, so %s → %s%s",
+			ledgerSpan(atPlan), planOpt.BudgetVerdict, rdSpan(charged), result, verdict, note))
+	}
 	if len(lines) == 0 {
 		return nil
 	}
-	head := "  plan vs actual (the plan"
+	head := "  ═══ PLAN VS ACTUAL ═══  the plan"
 	if at := ds[planIdx].At; !at.IsZero() {
 		head += " of " + at.UTC().Format("15:04:05")
 	}
-	head += " against what happened):"
+	head += " against what happened"
 	return append(append([]string{head}, lines...),
 		"  \"at the stop\" is measured immediately before the restore stops the instance; what was",
 		"  discarded is not counted afterwards")

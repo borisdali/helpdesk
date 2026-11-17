@@ -44,14 +44,14 @@ func sampleDecision() RecoveryDecision {
 			LossUnmeasured:     []string{"the number of transactions"},
 			LossAtLeastSeconds: rdI64(1000), LossAtLeastBasis: "the segment holding the target reached the repository at 2026-11-04T01:40:12Z",
 			Verdict: "exceeds", VerdictDetail: "18h 12m 43s discarded against an RPO of 15m 00s", Gate: "acknowledge",
-			BudgetVerdict: "may_exceed", BudgetVerdictDetail: "only 23m12s left", BudgetGate: "acknowledge", BudgetRemainingSeconds: rdI64(1392),
+			BudgetVerdict: "may_exceed", BudgetVerdictDetail: "only 23m12s left", BudgetGate: "acknowledge", BudgetRemainingSeconds: rdI64(1392), BudgetPendingSeconds: rdI64(60),
 			BudgetDurationSeconds: rdI64(3000), BudgetDurationBasis: "history_longest",
 			EstimateStatus: "estimated", EstimateSamples: rdInt(5), EstimateP50Seconds: rdI64(2400), EstimateP90Seconds: rdI64(3000), EstimateMaxSeconds: rdI64(3000),
 			EstimateVsRTO: "exceeds", EstimateOverRTO: rdInt(3),
 			LossCommitsStatus: "measured", LossCommits: rdInt(41), LossCommitsAtLeast: true, LossCommitsReason: "none",
 		}},
-		DurationSeconds: rdI64(2472),
-		Approval:        &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, Breaches: []string{BreachRPO, BreachAvailabilityBudget}},
+		DurationSeconds: rdI64(2472), IncidentSeconds: rdI64(2900),
+		Approval: &ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, Breaches: []string{BreachRPO, BreachAvailabilityBudget}},
 	}
 }
 
@@ -140,6 +140,8 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the budget verdict", func(d *RecoveryDecision) { d.Options[0].BudgetVerdict = "within" }},
 		{"the budget gate", func(d *RecoveryDecision) { d.Options[0].BudgetGate = "" }},
 		{"what was left of the budget", func(d *RecoveryDecision) { *d.Options[0].BudgetRemainingSeconds = 99999 }},
+		{"how much of the budget the open incident had taken", func(d *RecoveryDecision) { *d.Options[0].BudgetPendingSeconds = 1 }},
+		{"how long the incident had run", func(d *RecoveryDecision) { *d.IncidentSeconds = 1 }},
 		{"why the budget verdict was reached", func(d *RecoveryDecision) { d.Options[0].BudgetVerdictDetail = "plenty left" }},
 		{"which objectives stood in the way", func(d *RecoveryDecision) { d.Approval.Breaches = []string{BreachRPO} }},
 		{"the availability enforcement in force", func(d *RecoveryDecision) { d.Objectives.AvailabilityEnforcement = "warn" }},

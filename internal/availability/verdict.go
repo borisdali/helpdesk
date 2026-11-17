@@ -111,6 +111,13 @@ type BudgetVerdict struct {
 	Gate string `json:"gate,omitempty"`
 	// GateNote explains a gate that is not what the enforcement alone would say.
 	GateNote string `json:"gate_note,omitempty"`
+	// PendingIncident and PendingSeconds are the open incident that is not charged
+	// to the ledger yet and how long it has been open, when exactly one is: the
+	// verdict took its age off what is left, because it is charged in full when
+	// the restore runs. RemainingSeconds is still the ledger's own figure; what the
+	// restore stood to use is LeftSeconds.
+	PendingIncident string `json:"pending_incident,omitempty"`
+	PendingSeconds  *int64 `json:"pending_seconds,omitempty"`
 	// DurationSeconds is how long the restore was taken to last, and
 	// DurationBasis what that rests on: DurationFromHistoryP90,
 	// DurationFromHistoryLongest or DurationFromRTO.
@@ -123,6 +130,20 @@ type BudgetVerdict struct {
 	// estimated latest start that stays within it, or why there is none. Absent
 	// when the budget could not be read.
 	Delay *BudgetDelay `json:"delay,omitempty"`
+}
+
+// LeftSeconds is what was left of the budget for the restore: the ledger's figure
+// less the age of the open incident that is about to be charged, when there is one.
+// Nil when the budget could not be read.
+func (v *BudgetVerdict) LeftSeconds() *int64 {
+	if v == nil || v.RemainingSeconds == nil {
+		return nil
+	}
+	left := *v.RemainingSeconds
+	if v.PendingSeconds != nil {
+		left -= *v.PendingSeconds
+	}
+	return &left
 }
 
 // NeedsAttention says the person approving should be told the restore is, or may
@@ -175,6 +196,21 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 		return infra.FormatSpan(secondsOf(s))
 	}
 	spent := fmt.Sprintf("%s of the %s budget over %s already spent", span(l.ChargedSeconds), span(allowed), infra.FormatSpan(secondsOf(l.WindowSeconds)))
+	// An open incident that is not charged to the ledger yet is charged in full,
+	// from its start, the moment the restore runs (delay.go says why). So what is
+	// left for the restore is what is left less its age: the wait at the gate has
+	// already used that much, and a verdict made without it would say "within" of a
+	// budget the restore is certain to overspend. Only with exactly one such
+	// incident: with several, which is this restore's is not known, and the
+	// ledger's figure stands (delay.go says so).
+	pendingNow := false
+	if _, pending := openIncidents(l); len(pending) == 1 {
+		age := pending[0].DurationSeconds
+		v.PendingIncident, v.PendingSeconds = pending[0].IncidentID, &age
+		rem -= age
+		pendingNow = true
+		spent += fmt.Sprintf(", and the open incident %s (open for %s, not charged yet) is charged in full when the restore runs", pending[0].IncidentID, span(age))
+	}
 	note := ""
 	if len(l.Unconfirmed) > 0 && l.RemainingWorstCaseSeconds != nil {
 		note = fmt.Sprintf("; %d outage(s) of unknown length are not counted, and if they count in full %s would be left",
@@ -204,6 +240,9 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 	case rem <= 0:
 		if allowed == 0 {
 			return BudgetExceeds, "the SLO allows no downtime, so any restore breaches it" + note
+		}
+		if pendingNow && *l.RemainingSeconds > 0 {
+			return BudgetExceeds, fmt.Sprintf("%s: once it is charged the budget is spent (%s left), so the restore breaches the SLO%s", spent, span(rem), note)
 		}
 		return BudgetExceeds, fmt.Sprintf("%s: the budget is spent (%s left), so any further downtime breaches the SLO%s", spent, span(rem), note)
 	case !haveDur:
