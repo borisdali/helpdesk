@@ -46,6 +46,8 @@
 #   ACK_BREACH               auto (default), yes or no: whether to approve with --acknowledge-objective-breach
 #   JUSTIFICATION, TICKET    approve with --justification / --ticket (the gateway can be set to require a
 #                            justification for a breach acknowledgement: HELPDESK_REQUIRE_BREACH_JUSTIFICATION)
+#   HOLD_GATE=1              keep the gate open after the first read of the plan: Enter reads the plan again
+#                            (to watch what waiting costs change), "a" approves
 #   YES=1                    do not ask before starting
 set -euo pipefail
 
@@ -170,9 +172,21 @@ echo "run $RUN: $(echo "$RESP" | jq -r .status)"
 step "the plan as the operator reads it now, while the gate waits (what putting the decision off costs)"
 # The triage incident is open and not charged yet: the plan should name it, with its age, and say
 # when the restore must start to stay within the budget.
-HELPDESK_SYSADMIN_API_KEY=$SYSADMIN_KEY go run ./cmd/helpdesk-client --pitr-plan --pitr-server "$DBKEY" --pitr-stanza "$STANZA" \
-  --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url "$SYSADMIN" \
-  | grep -E '^(RPO|BUDGET|Budget|Past restores|Waiting)' || true
+gate_plan() {
+  HELPDESK_SYSADMIN_API_KEY=$SYSADMIN_KEY go run ./cmd/helpdesk-client --pitr-plan --pitr-server "$DBKEY" --pitr-stanza "$STANZA" \
+    --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url "$SYSADMIN" \
+    | grep -E '^(RPO|BUDGET|Budget|Past restores|Waiting|  )' || true
+}
+gate_plan
+if [ "${HOLD_GATE:-}" = 1 ]; then
+  # Keep the gate open to watch the cost of waiting change: each Enter reads the plan again.
+  while true; do
+    echo
+    read -r -p "$(date +%H:%M:%S) gate open. [Enter] read the plan again, [a] approve now: " ans
+    [ "$ans" = a ] && break
+    gate_plan
+  done
+fi
 
 step "approve as $APPROVER"
 EXTRA=()
