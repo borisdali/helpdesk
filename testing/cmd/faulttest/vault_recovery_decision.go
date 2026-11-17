@@ -365,6 +365,11 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 	if outcomeIdx < 0 {
 		return nil
 	}
+	// A restore that was refused never stopped anything: there is no "at the stop"
+	// and the outcome's duration is not a restore time.
+	if execIdx >= 0 && ds[execIdx].Decision.Decision != audit.RecoveryDecisionProceeded {
+		return nil
+	}
 	planIdx := -1
 	for i, d := range ds {
 		if d.Decision.Stage == audit.RecoveryStagePlan && (execIdx < 0 || i < execIdx) {
@@ -402,16 +407,31 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 			break
 		}
 	}
-	if actual := ds[outcomeIdx].Decision.DurationSeconds; planned != nil && actual != nil {
+	// Only a restore that ended resolved has a restore time: the estimate itself is
+	// built from resolved restores, and a failed or escalated hop's duration is the
+	// time to give up, not to recover.
+	if actual := ds[outcomeIdx].Decision.DurationSeconds; planned != nil && actual != nil && ds[outcomeIdx].Decision.Decision == "resolved" {
 		lines = append(lines, fmt.Sprintf("  recovery time  planned %s (%s); took %s (%s)",
 			rdSpan(*planned), rdBasisText(basis), rdSpan(*actual), rdDelta(*actual, *planned, rdSpan, "over", "under")))
 	}
 
 	if planOpt != nil && execOpt != nil {
 		if planOpt.LossSeconds != nil && execOpt.LossSeconds != nil && planOpt.LossBasis == execOpt.LossBasis {
-			lines = append(lines, fmt.Sprintf("  data loss      planned %s; at the stop %s (%s)",
-				rdSpan(*planOpt.LossSeconds), rdSpan(*execOpt.LossSeconds),
-				rdDelta(*execOpt.LossSeconds, *planOpt.LossSeconds, rdSpan, "more", "less")))
+			// The verdict against the rpo, as each stage recorded it: a loss that grew
+			// while the approval waited can turn a plan that was within into one that
+			// exceeds, and that is the thing worth seeing.
+			verdict := func(o *audit.DecisionOption) string {
+				if o.Verdict == "" {
+					return ""
+				}
+				return " → " + o.Verdict
+			}
+			note := rdDelta(*execOpt.LossSeconds, *planOpt.LossSeconds, rdSpan, "more", "less")
+			if planOpt.Verdict != "" && execOpt.Verdict != "" && planOpt.Verdict != execOpt.Verdict {
+				note += "; the verdict changed"
+			}
+			lines = append(lines, fmt.Sprintf("  data loss      planned %s%s; at the stop %s%s (%s)",
+				rdSpan(*planOpt.LossSeconds), verdict(planOpt), rdSpan(*execOpt.LossSeconds), verdict(execOpt), note))
 		}
 		if planOpt.LossCommitsStatus == "measured" && planOpt.LossCommits != nil &&
 			execOpt.LossCommitsStatus == "measured" && execOpt.LossCommits != nil {

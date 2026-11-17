@@ -426,11 +426,13 @@ func TestRDPlanVsActual(t *testing.T) {
 			BudgetDurationSeconds: rdI(dur), BudgetDurationBasis: durBasis}
 	}
 	stage := func(m int, s string, opts ...audit.DecisionOption) narrativeRecoveryDecision {
-		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: s, Decision: "x", Options: opts}}
+		decision := map[string]string{"plan": "planned", "gate": "approved", "execution": "proceeded"}[s]
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: s, Decision: decision, Options: opts}}
 	}
-	outcome := func(m int, secs *int64) narrativeRecoveryDecision {
-		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: secs}}
+	outcomeAs := func(m int, decision string, secs *int64) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: decision, DurationSeconds: secs}}
 	}
+	outcome := func(m int, secs *int64) narrativeRecoveryDecision { return outcomeAs(m, "resolved", secs) }
 
 	plan := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 101, "history_longest"))
 	exec := stage(3, "execution", opt(true, 65, "live_instance", 3, false, 101, "history_longest"))
@@ -472,6 +474,38 @@ func TestRDPlanVsActual(t *testing.T) {
 	unknown := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, nil)}), "\n")
 	if strings.Contains(unknown, "recovery time") || !strings.Contains(unknown, "data loss") {
 		t.Errorf("unknown duration leaves the loss line only:\n%s", unknown)
+	}
+
+	// The verdict against the rpo is shown as each stage recorded it, and a verdict
+	// that changed is said to have; a stage with no verdict (an older record) shows none.
+	withVerdict := func(o audit.DecisionOption, v string) audit.DecisionOption { o.Verdict = v; return o }
+	flipPlan := stage(1, "plan", withVerdict(opt(false, 20, "live_instance", 0, false, 101, "history_longest"), "within"))
+	flipExec := stage(3, "execution", withVerdict(opt(true, 4000, "live_instance", 3, false, 101, "history_longest"), "exceeds"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{flipPlan, flipExec, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "data loss      planned 20s → within; at the stop 1h 06m → exceeds (1h 06m more; the verdict changed)") {
+		t.Errorf("a verdict that changed:\n%s", got)
+	}
+	same := stage(3, "execution", withVerdict(opt(true, 30, "live_instance", 3, false, 101, "history_longest"), "within"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{flipPlan, same, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "planned 20s → within; at the stop 30s → within (10s more)") || strings.Contains(got, "verdict changed") {
+		t.Errorf("an unchanged verdict:\n%s", got)
+	}
+	oneSided := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, flipExec, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(oneSided, "planned 20s; at the stop 1h 06m → exceeds (1h 06m more)") || strings.Contains(oneSided, "verdict changed") {
+		t.Errorf("a plan with no recorded verdict:\n%s", oneSided)
+	}
+
+	// A refused restore never stopped anything: no "at the stop", and the outcome's
+	// duration (the time to escalate) is not a restore time.
+	refused := exec
+	refused.Decision.Decision = "refused"
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{plan, refused, outcomeAs(5, "escalated", rdI(12))}); got != nil {
+		t.Errorf("a refused restore was compared: %v", got)
+	}
+	// A restore that ran but did not end resolved has a loss at the stop and no restore time.
+	failed := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcomeAs(5, "escalated", rdI(300))}), "\n")
+	if strings.Contains(failed, "recovery time") || !strings.Contains(failed, "data loss      planned 20s; at the stop 1m 05s") {
+		t.Errorf("an unresolved restore:\n%s", failed)
 	}
 
 	// A loss measured on a different basis is not compared, and a count that is a
