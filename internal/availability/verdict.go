@@ -119,6 +119,10 @@ type BudgetVerdict struct {
 	// RecoveryEstimate is how long this server's restores have taken, whatever
 	// the verdict: it is worth showing even when no SLO is set.
 	RecoveryEstimate *RecoveryEstimate `json:"recovery_estimate,omitempty"`
+	// Delay is what waiting to decide costs against the budget (delay.go): the
+	// estimated latest start that stays within it, or why there is none. Absent
+	// when the budget could not be read.
+	Delay *BudgetDelay `json:"delay,omitempty"`
 }
 
 // NeedsAttention says the person approving should be told the restore is, or may
@@ -132,6 +136,7 @@ func CompareToBudget(in BudgetInputs) *BudgetVerdict {
 	v := &BudgetVerdict{Enforcement: in.Enforcement, WindowSource: in.Budget.WindowSource, RecoveryEstimate: in.Estimate}
 	v.Status, v.Detail = verdict(in, v)
 	v.Gate, v.GateNote = gateFor(v.Status, in.Enforcement, in.Serving)
+	v.Delay = delayFor(v, in.Ledger, in.Serving)
 	return v
 }
 

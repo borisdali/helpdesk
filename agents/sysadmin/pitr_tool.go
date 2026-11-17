@@ -80,6 +80,11 @@ type PITRPlan struct {
 	// what is left of a budget changes while the plan waits for approval: the
 	// restore reads it again just before it stops anything.
 	AvailabilityBudget *availability.BudgetVerdict `json:"availability_budget,omitempty"`
+	// DataDelay says what waiting to decide does to the data this restore would
+	// discard: it grows while a serving instance keeps taking writes, and does not
+	// while an instance is down. The budget side is AvailabilityBudget.Delay. Not
+	// part of the plan digest: it is as old as the plan.
+	DataDelay *DataDelay `json:"data_delay,omitempty"`
 	// DecisionUnrecorded is set when this plan could not be written to the
 	// audit trail. The plan stands; it just is not on record.
 	DecisionUnrecorded string `json:"decision_unrecorded,omitempty"`
@@ -278,6 +283,7 @@ func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 	}
 	plan.DataLossEstimate = withObjective(est, args.Target)
 	plan.AvailabilityBudget = budgetCheckFor(ctx, args.Target, plan.InstanceServing)
+	plan.DataDelay = dataDelayFor(plan.DataLossEstimate, plan.InstanceServing)
 	return plan, nil
 }
 

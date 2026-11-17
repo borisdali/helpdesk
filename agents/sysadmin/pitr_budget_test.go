@@ -108,6 +108,25 @@ func TestBudgetCheckFor_ReadsTheLedgerOfTheDatabaseTheRestoreRunsOn(t *testing.T
 	}
 }
 
+// The verdict the plan carries says what waiting costs, from the same ledger and
+// the same planned duration the verdict was made with.
+func TestBudgetCheckFor_CarriesTheCostOfWaiting(t *testing.T) {
+	withLedger(t, 20*time.Minute, nil) // 23m12s left; the rto of 30m is what the restore is taken to need
+	budgetObjectives(t, "", "acknowledge")
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	if v.Delay == nil || v.Delay.State != availability.DelayProjectedBreach || !strings.Contains(v.Delay.Detail, "projected budget breach") {
+		t.Fatalf("delay = %+v", v.Delay)
+	}
+	if v.Delay.SlackSeconds == nil || *v.Delay.SlackSeconds != 2592-1200-1800 {
+		t.Errorf("slack = %v", v.Delay.SlackSeconds)
+	}
+	// With no SLO there is no budget, so nothing is said about waiting.
+	objectiveInfra(t, "15m", nil)
+	if v := budgetCheckFor(context.Background(), "pgbackrest_db", true); v.Delay != nil {
+		t.Errorf("a database with no budget has a cost of waiting: %+v", v.Delay)
+	}
+}
+
 func TestBudgetCheckFor_ServingDecidesWhetherARefuseRefuses(t *testing.T) {
 	withLedger(t, 50*time.Minute, nil) // spent: the budget is gone
 	budgetObjectives(t, "", "refuse")

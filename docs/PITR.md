@@ -342,6 +342,31 @@ refuses (nothing is stopped), but the gate is then used up and approving the sam
 (HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
 
+**What waiting costs**   
+The plan prices the restore, and also says what putting the decision off costs, on two lines, because the clock does
+not stop while the approval waits:
+
+```
+Waiting, budget    : estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s), assuming a restore of 8m (the longest of 3 past restores)
+Waiting, data      : the recovery target is fixed and the instance keeps taking writes, so the history a restore discards grows by a minute every minute: 18m 00s now, against an rpo of 30m 00s; estimated, under current assumptions, in 12m 00s it would exceed it
+```
+
+- **Budget.** The ledger charges an open outage incident up to now, so what is left of the budget shrinks second for
+  second while the gate waits. The restore is taken to last as long as the verdict took it to (history, or the
+  declared `rto` as an upper bound), so it fits if it starts no later than "now plus what is left minus that". The line
+  is one of four: an *estimated latest start* when there is margin; *no remaining margin* when what is left is exactly
+  what the restore needs; *projected budget breach* when the restore is taken to need more than is left (a forecast,
+  not yet a breach); and *budget already overspent* when it has happened. With no open incident being charged it says
+  the ledger is not charging anything as time passes, and does not invent a deadline. It is the ledger's clock, not
+  the downtime: for a serving instance the real downtime starts only when the restore stops it, and the line says so.
+- **Data.** For a serving instance the target is fixed and the instance keeps taking writes, so the loss grows by a
+  minute a minute, towards the `rpo`; the line says how long until it would pass it, and how fast commits are landing
+  when the count is exact. For an instance that is down nothing is being written, so the loss does not grow and waiting
+  costs downtime, which is the budget line.
+
+Both are information for the approver, not a deadline: the restore measures again just before it stops anything and
+decides on that, as before.
+
 **Saying why, and under which ticket**   
 The approval can carry the reason it was given and the ticket it was given under:
 

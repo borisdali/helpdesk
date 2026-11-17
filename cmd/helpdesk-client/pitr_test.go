@@ -334,6 +334,42 @@ func TestFormatPITRPlan_ShowsTheBudgetCheckAndWhatItDemands(t *testing.T) {
 
 // What this database's past restores have taken is shown, with the basis, and
 // against the declared rto; it is information and holds nothing.
+// What putting the decision off costs is on the plan, on its own lines, with the
+// text the agent gave and nothing added; a plan without it prints neither line.
+func TestFormatPITRPlan_ShowsWhatWaitingCosts(t *testing.T) {
+	parse := func(raw string) pitrPlan {
+		var p pitrPlan
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	got := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,`+
+		`"availability_budget":{"status":"within","detail":"d","delay":{"state":"latest_start","detail":"estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s)"}},`+
+		`"data_delay":{"state":"growing","detail":"the recovery target is fixed and the instance keeps taking writes"}}`), goodOpts())
+	for _, want := range []string{
+		"Waiting, budget    : estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s)",
+		"Waiting, data      : the recovery target is fixed and the instance keeps taking writes",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// They sit before the instance line, with the other things a person weighs.
+	if strings.Index(got, "Waiting, budget") > strings.Index(got, "Instance           :") {
+		t.Errorf("the cost of waiting is after the instance line:\n%s", got)
+	}
+
+	none := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d"}}`), goodOpts())
+	if strings.Contains(none, "Waiting") {
+		t.Errorf("a plan with no cost of waiting prints one:\n%s", none)
+	}
+	empty := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d","delay":{"state":"x","detail":""}},"data_delay":{"state":"x","detail":""}}`), goodOpts())
+	if strings.Contains(empty, "Waiting") {
+		t.Errorf("an empty detail prints a line:\n%s", empty)
+	}
+}
+
 func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T) {
 	plan := func(estimate string) pitrPlan {
 		var p pitrPlan

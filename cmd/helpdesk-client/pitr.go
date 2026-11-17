@@ -205,6 +205,12 @@ type pitrPlan struct {
 		Enforcement      string `json:"enforcement"`
 		RemainingSeconds *int64 `json:"remaining_seconds"`
 		DurationBasis    string `json:"duration_basis"`
+		// Delay is what putting the decision off costs against the budget: the
+		// estimated latest start that stays within it, or why there is none.
+		Delay *struct {
+			State  string `json:"state"`
+			Detail string `json:"detail"`
+		} `json:"delay"`
 		// RecoveryEstimate is how long this database's restores have taken, from
 		// real incidents, and how that stands against its declared rto.
 		RecoveryEstimate *struct {
@@ -214,6 +220,12 @@ type pitrPlan struct {
 			VsRTODetail string `json:"vs_rto_detail"`
 		} `json:"recovery_estimate"`
 	} `json:"availability_budget"`
+	// DataDelay is what putting the decision off does to the data the restore
+	// discards: it grows while a serving instance keeps taking writes.
+	DataDelay *struct {
+		State  string `json:"state"`
+		Detail string `json:"detail"`
+	} `json:"data_delay"`
 }
 
 // formatPITRPlan renders the plan for a person, ending with the exact command
@@ -287,6 +299,14 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		case "within":
 			fmt.Fprintf(&b, "RTO check          : within: %s\n", e.VsRTODetail)
 		}
+	}
+	// What putting the decision off costs. Information, not a deadline: the restore
+	// measures again just before it stops anything and decides on that.
+	if bd := p.AvailabilityBudget; bd != nil && bd.Delay != nil && bd.Delay.Detail != "" {
+		fmt.Fprintf(&b, "Waiting, budget    : %s\n", bd.Delay.Detail)
+	}
+	if d := p.DataDelay; d != nil && d.Detail != "" {
+		fmt.Fprintf(&b, "Waiting, data      : %s\n", d.Detail)
 	}
 	state := "down"
 	if p.InstanceServing {
