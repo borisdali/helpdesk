@@ -219,13 +219,13 @@ what was approved and the audit record keeps it (`loss_commits`, `loss_commits_a
 `loss_commits_reason` on the option). See [OBJECTIVES.md §6.3](OBJECTIVES.md#63-what-this-depends-on-and-what-could-mislead)
 for what was verified on a real host.
 
-**Against the objective**   
+#### **Against the objective**   
 The estimate is set against the database's `rpo` ([OBJECTIVES.md](OBJECTIVES.md)) in
 `data_loss_estimate.objective` and `helpdesk-client --pitr-plan` prints it as `RPO check`. It is a flag, not a
-refusal: a point-in-time restore loses data by choice and the person at the gate may accept more than the objective.
-What it must not do is let them accept it unaware, so every case says something:
+refusal: in a PITR case the loss of data is by choice and the person at the gate may accept more than the objective.
+What it must not do is let them accept it unaware, so every case says something concrete:
 
-| `status` | Means |
+| `status` | Meaning |
 |---|---|
 | `within` | The loss is within the `rpo` (for an upper-bound estimate, even at that bound) |
 | `exceeds` | The loss is more than the `rpo`; the detail says by how much. For an LSN target it is a loss proven to be *at least* that much, from a lower bound ([below](#lsn-targets-and-the-lower-bound)) |
