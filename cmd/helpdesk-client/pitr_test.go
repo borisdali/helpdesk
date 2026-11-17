@@ -370,6 +370,51 @@ func TestFormatPITRPlan_ShowsWhatWaitingCosts(t *testing.T) {
 	}
 }
 
+// A long line wraps under its text, not under its label, and says the same words.
+func TestFormatPITRPlan_WrapsUnderTheText(t *testing.T) {
+	pitrWrapWidth = 60
+	defer func() { pitrWrapWidth = 0 }()
+	text := "the recovery target is fixed and the instance keeps taking writes, so the history a restore discards grows by a minute every minute"
+	var b strings.Builder
+	field(&b, "Waiting, data      ", text)
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("a long line did not wrap:\n%s", b.String())
+	}
+	var words []string
+	for i, l := range lines {
+		if len(l) > 60 {
+			t.Errorf("line %d is %d wide: %q", i, len(l), l)
+		}
+		if i == 0 {
+			if !strings.HasPrefix(l, "Waiting, data      : ") {
+				t.Errorf("first line: %q", l)
+			}
+			l = strings.TrimPrefix(l, "Waiting, data      : ")
+		} else {
+			if !strings.HasPrefix(l, strings.Repeat(" ", pitrIndent)) || strings.TrimLeft(l, " ") == l {
+				t.Errorf("line %d does not start under the text: %q", i, l)
+			}
+		}
+		words = append(words, strings.Fields(l)...)
+	}
+	if strings.Join(words, " ") != text {
+		t.Errorf("wrapping changed the words: %q", strings.Join(words, " "))
+	}
+	// Short text stays on one line, and a width of 0 never wraps.
+	b.Reset()
+	field(&b, "Note               ", "short")
+	if b.String() != "Note               : short\n" {
+		t.Errorf("short: %q", b.String())
+	}
+	pitrWrapWidth = 0
+	b.Reset()
+	field(&b, "Note               ", text)
+	if strings.Count(b.String(), "\n") != 1 {
+		t.Errorf("wrapped with no width: %q", b.String())
+	}
+}
+
 func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T) {
 	plan := func(estimate string) pitrPlan {
 		var p pitrPlan

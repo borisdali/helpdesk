@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"helpdesk/internal/client"
 )
@@ -228,13 +231,42 @@ type pitrPlan struct {
 	} `json:"data_delay"`
 }
 
+// pitrWrapWidth is the line width the plan is wrapped to; 0 leaves lines as they
+// are. The plan command sets it from the terminal (or 100 when it is not one).
+var pitrWrapWidth int
+
+// pitrIndent is the width of a label and its ": ", where wrapped lines resume.
+const pitrIndent = 21
+
+// field writes "label: text" and, when a width is set, wraps the text at word
+// boundaries so that continuation lines start under the text, not under the label.
+func field(b *strings.Builder, label, text string) {
+	b.WriteString(label + ": ")
+	words := strings.Fields(text)
+	col := pitrIndent
+	for i, w := range words {
+		if i > 0 {
+			if pitrWrapWidth > 0 && col+1+len(w) > pitrWrapWidth {
+				b.WriteString("\n" + strings.Repeat(" ", pitrIndent))
+				col = pitrIndent
+			} else {
+				b.WriteString(" ")
+				col++
+			}
+		}
+		b.WriteString(w)
+		col += len(w)
+	}
+	b.WriteString("\n")
+}
+
 // formatPITRPlan renders the plan for a person, ending with the exact command
 // to approve it when it is feasible.
 func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan status        : %s\n", p.Status)
 	if p.Detail != "" {
-		fmt.Fprintf(&b, "Detail             : %s\n", p.Detail)
+		field(&b, "Detail             ", p.Detail)
 	}
 	if p.BackupLabel != "" {
 		fmt.Fprintf(&b, "Backup to restore  : %s\n", p.BackupLabel)
@@ -246,10 +278,10 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		fmt.Fprintf(&b, "Archive ends       : %s\n", p.ArchiveEndTime)
 	}
 	if p.DataLoss != "" {
-		fmt.Fprintf(&b, "Will be discarded  : %s\n", p.DataLoss)
+		field(&b, "Will be discarded  ", p.DataLoss)
 	}
 	if e := p.DataLossEstimate; e != nil && e.Summary != "" {
-		fmt.Fprintf(&b, "Estimated loss     : %s\n", e.Summary)
+		field(&b, "Estimated loss     ", e.Summary)
 		if len(e.Unmeasured) > 0 {
 			fmt.Fprintf(&b, "Not counted        : %s\n", strings.Join(e.Unmeasured, "; "))
 		}
@@ -260,7 +292,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			if o.Status == "exceeds" || o.Status == "may_exceed" || o.Gate != "" {
 				label = "RPO CHECK (!)      "
 			}
-			fmt.Fprintf(&b, "%s: %s: %s\n", label, o.Status, o.Detail)
+			field(&b, label, o.Status+": "+o.Detail)
 			switch o.Gate {
 			case "acknowledge":
 				fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's enforcement is %s)\n", o.Enforcement)
@@ -276,7 +308,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		if bd.Status == "exceeds" || bd.Status == "may_exceed" || bd.Gate != "" {
 			label = "BUDGET CHECK (!)   "
 		}
-		fmt.Fprintf(&b, "%s: %s: %s\n", label, bd.Status, bd.Detail)
+		field(&b, label, bd.Status+": "+bd.Detail)
 		switch bd.Gate {
 		case "acknowledge":
 			fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's availability enforcement is %s)\n", bd.Enforcement)
@@ -284,7 +316,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			fmt.Fprintf(&b, "Approving          : REFUSED (this database's availability enforcement is refuse, and the instance is serving)\n")
 		}
 		if bd.GateNote != "" {
-			fmt.Fprintf(&b, "Note               : %s\n", bd.GateNote)
+			field(&b, "Note               ", bd.GateNote)
 		}
 	}
 	// How long this database's restores have taken, and against its declared rto.
@@ -292,21 +324,21 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	// incidents, and it says what it rests on. Information; it holds nothing.
 	if bd := p.AvailabilityBudget; bd != nil && bd.RecoveryEstimate != nil && bd.RecoveryEstimate.Basis != "" {
 		e := bd.RecoveryEstimate
-		fmt.Fprintf(&b, "Past restores      : %s\n", e.Basis)
+		field(&b, "Past restores      ", e.Basis)
 		switch e.VsRTO {
 		case "exceeds":
-			fmt.Fprintf(&b, "RTO CHECK (!)      : exceeds: %s\n", e.VsRTODetail)
+			field(&b, "RTO CHECK (!)      ", "exceeds: "+e.VsRTODetail)
 		case "within":
-			fmt.Fprintf(&b, "RTO check          : within: %s\n", e.VsRTODetail)
+			field(&b, "RTO check          ", "within: "+e.VsRTODetail)
 		}
 	}
 	// What putting the decision off costs. Information, not a deadline: the restore
 	// measures again just before it stops anything and decides on that.
 	if bd := p.AvailabilityBudget; bd != nil && bd.Delay != nil && bd.Delay.Detail != "" {
-		fmt.Fprintf(&b, "Waiting, budget    : %s\n", bd.Delay.Detail)
+		field(&b, "Waiting, budget    ", bd.Delay.Detail)
 	}
 	if d := p.DataDelay; d != nil && d.Detail != "" {
-		fmt.Fprintf(&b, "Waiting, data      : %s\n", d.Detail)
+		field(&b, "Waiting, data      ", d.Detail)
 	}
 	state := "down"
 	if p.InstanceServing {
@@ -406,6 +438,10 @@ func runPITRPlan(ctx context.Context, cfg client.Config, o pitrOpts) error {
 	var plan pitrPlan
 	if err := json.Unmarshal([]byte(out.Output), &plan); err != nil {
 		return fmt.Errorf("the plan is unreadable: %w", err)
+	}
+	pitrWrapWidth = 100
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w >= 60 {
+		pitrWrapWidth = w - 1
 	}
 	fmt.Print(formatPITRPlan(plan, o))
 	return nil
