@@ -44,6 +44,8 @@
 #   FIXTURE_DB               database for the marker table (docker and k8s: testdb, ssh: postgres)
 #   STANZA                   pgBackRest stanza, default main
 #   ACK_BREACH               auto (default), yes or no: whether to approve with --acknowledge-objective-breach
+#   JUSTIFICATION, TICKET    approve with --justification / --ticket (the gateway can be set to require a
+#                            justification for a breach acknowledgement: HELPDESK_REQUIRE_BREACH_JUSTIFICATION)
 #   YES=1                    do not ask before starting
 set -euo pipefail
 
@@ -127,7 +129,8 @@ echo "$PLAN" | jq '{status, detail, backup_label, plan_digest,
   discarded: .data_loss_estimate.summary,
   rpo_check: .data_loss_estimate.objective.detail, rpo_gate: .data_loss_estimate.objective.gate,
   budget: .availability_budget.detail, budget_gate: .availability_budget.gate,
-  estimate: .availability_budget.recovery_estimate.status, estimate_samples: .availability_budget.recovery_estimate.samples}'
+  estimate: .availability_budget.recovery_estimate.status, estimate_samples: .availability_budget.recovery_estimate.samples,
+  waiting_budget: .availability_budget.delay.detail, waiting_data: .data_delay.detail}'
 if [ "$(echo "$PLAN" | jq -r '.data_loss_estimate.transactions.status // "absent"')" != measured ]; then
   # The count did not come out. Capture the state now: the first time this happened
   # (a fresh fixture, a plan made seconds after pg_switch_wal) it could not be
@@ -164,11 +167,21 @@ RUN=$(echo "$RESP" | jq -r '.run_id // empty')
 [ -n "$RUN" ] || { echo "no run_id in the response:" >&2; echo "$RESP" >&2; exit 1; }
 echo "run $RUN: $(echo "$RESP" | jq -r .status)"
 
+step "the plan as the operator reads it now, while the gate waits (what putting the decision off costs)"
+# The triage incident is open and not charged yet: the plan should name it, with its age, and say
+# when the restore must start to stay within the budget.
+HELPDESK_SYSADMIN_API_KEY=$SYSADMIN_KEY go run ./cmd/helpdesk-client --pitr-plan --pitr-server "$DBKEY" --pitr-stanza "$STANZA" \
+  --recovery-target-type time --recovery-target "$TARGET" --sysadmin-url "$SYSADMIN" \
+  | grep -E '^(RPO|BUDGET|Budget|Past restores|Waiting)' || true
+
 step "approve as $APPROVER"
+EXTRA=()
+[ -n "${JUSTIFICATION:-}" ] && EXTRA+=(--justification "$JUSTIFICATION")
+[ -n "${TICKET:-}" ] && EXTRA+=(--ticket "$TICKET")
 approve() {
   HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=$KEY go run ./cmd/helpdesk-client --user "$APPROVER" \
     --pitr-approve "$RUN" --recovery-target-type time --recovery-target "$TARGET" --plan-digest "$DIGEST" \
-    --acknowledge-data-loss --allow-stop-serving "$@"
+    --acknowledge-data-loss --allow-stop-serving ${EXTRA[@]+"${EXTRA[@]}"} "$@"
 }
 if [ "${ACK_BREACH:-auto}" = no ]; then
   # Show what the second yes does: this approval is expected to be refused (or the
@@ -187,7 +200,16 @@ if [ "${ACK_BREACH:-auto}" = no ]; then
     exit 0
   fi
 else
-  approve ${ACK[@]+"${ACK[@]}"}
+  if ! approve ${ACK[@]+"${ACK[@]}"}; then
+    # A refused approval (for example a missing justification) changes nothing: the gate is still open.
+    echo
+    echo "the gateway refused the approval (above). Nothing changed and the gate is still open; approve it again, for example:"
+    echo "  JUSTIFICATION='...' TICKET=INC-1 and the same command, or by hand:"
+    echo "  HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=... go run ./cmd/helpdesk-client --user $APPROVER --pitr-approve $RUN \\"
+    echo "    --recovery-target-type time --recovery-target $TARGET --plan-digest $DIGEST --acknowledge-data-loss --allow-stop-serving \\"
+    echo "    --acknowledge-objective-breach --justification '...' --ticket INC-1"
+    exit 1
+  fi
 fi
 
 step "wait for the incident to leave open"
