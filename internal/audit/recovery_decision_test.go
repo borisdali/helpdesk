@@ -149,6 +149,8 @@ func TestComputeEventHash_CoversTheRecoveryDecision(t *testing.T) {
 		{"the lower bound", func(d *RecoveryDecision) { *d.Options[0].LossAtLeastSeconds = 1 }},
 		{"what the lower bound rests on", func(d *RecoveryDecision) { d.Options[0].LossAtLeastBasis = "something else" }},
 		{"who decided", func(d *RecoveryDecision) { d.DecidedBy = "mallory" }},
+		{"the approver's justification", func(d *RecoveryDecision) { d.Approval.Justification = "edited after the fact" }},
+		{"the ticket the approval was given under", func(d *RecoveryDecision) { d.Approval.Ticket = "INC-0" }},
 	} {
 		ev := NewRecoveryDecisionEvent("trace_1", "sess_1", sampleDecision())
 		ev.EventID, ev.Timestamp = base.EventID, base.Timestamp

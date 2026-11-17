@@ -346,6 +346,9 @@ services:
       # incident agent's create_incident_bundle tool and record bundle_path
       # on the incidents row. Opt-in, default off. See docs/INCIDENTS.md.
       HELPDESK_AUTO_INCIDENT_BUNDLE: ${HELPDESK_AUTO_INCIDENT_BUNDLE:-}
+      # When "true", a point-in-time approval that acknowledges an objective breach
+      # must say why (reason, at least 10 characters). Off by default. See docs/PITR.md.
+      HELPDESK_REQUIRE_BREACH_JUSTIFICATION: ${HELPDESK_REQUIRE_BREACH_JUSTIFICATION:-}
       # Decision Hub — public base URL used to build absolute resolve_url links in
       # API responses and webhook notifications. Set to the externally reachable
       # gateway URL (e.g. https://helpdesk.example.com). Leave empty to use

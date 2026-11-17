@@ -219,6 +219,14 @@ type ApprovalFacts struct {
 	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
 	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
 	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+	// Justification is the operator's stated reason for approving (the gate
+	// request's "reason"), and Ticket the reference it was approved under (an
+	// incident or change ticket), kept apart from the prose so it can be looked up.
+	// Both are the operator's own words, recorded as given (the prose is redacted of
+	// anything that looks like a password): a claim, not something the system
+	// verified. Empty when none was given.
+	Justification string `json:"justification,omitempty"`
+	Ticket        string `json:"ticket,omitempty"`
 	// Breaches are the objectives that stood in the way of this restore (each one
 	// demanded the acknowledgement), so that a person who acknowledged an rpo
 	// breach is not taken to have acknowledged a budget breach too. One

@@ -1858,7 +1858,10 @@ type ProceedEscalationRequest struct {
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
 	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, forwarded to the remediation playbook (analogous to ConnectionString)
 	Purpose          string `json:"purpose,omitempty"`           // declared purpose, forwarded to the remediation playbook (analogous to ConnectionString); falls back to the triage run's own purpose when omitted
-	Reason           string `json:"reason,omitempty"`            // optional operator rationale
+	Reason           string `json:"reason,omitempty"`            // optional operator rationale; for a point-in-time restore that acknowledges an objective breach it is the justification (recorded in the recovery decision, and required when HELPDESK_REQUIRE_BREACH_JUSTIFICATION is set)
+	// Ticket is the reference (incident or change ticket) a point-in-time
+	// approval is given under, recorded in the recovery decision beside the reason.
+	Ticket string `json:"ticket,omitempty"`
 	// At-gate feedback — captured before remediation runs, while the hypothesis
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
@@ -2028,7 +2031,7 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	var carriedTarget *RecoveryTargetSpec
 	var recoveryAudit []string
 	if needsRecoveryApproval(nextSeriesID) {
-		ap, status, msg := recoveryApprovalFromGate(req, storedTarget, resolvedBy)
+		ap, status, msg := recoveryApprovalFromGate(req, storedTarget, resolvedBy, g.requireBreachJustification)
 		if msg != "" {
 			slog.Warn("playbook: gate approval refused — point-in-time restore not approved",
 				"run_id", runID, "leaf_run_id", leafRun.RunID, "resolved_by", resolvedBy, "detail", msg)
@@ -2234,6 +2237,7 @@ func (g *Gateway) recordRecoveryGateDecision(ctx context.Context, run *audit.Pla
 		d.Approval = &audit.ApprovalFacts{
 			ApprovedBy: ap.ApprovedBy, AcknowledgedDataLoss: ap.Acknowledged,
 			AllowedStopServing: ap.StopServing, AcknowledgedBreach: ap.BreachAcknowledged,
+			Justification: ap.Justification, Ticket: ap.Ticket,
 		}
 	}
 	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(run.RunID, "", d)); err != nil {

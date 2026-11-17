@@ -188,6 +188,11 @@ gateway:
   # the incidents row. Opt-in, default off. See docs/INCIDENTS.md.
   autoIncidentBundle: false
 
+  # When true, a point-in-time approval that acknowledges an objective breach
+  # must carry a justification (helpdesk-client --justification, at least 10
+  # characters), recorded in the recovery decision. Off by default. See docs/PITR.md.
+  requireBreachJustification: false
+
   # Public base URL of this gateway (e.g. "https://helpdesk.example.com").
   # Used to build absolute resolve_url links in Decision Hub API responses and
   # webhook notification payloads. Leave empty to use relative paths (fine for

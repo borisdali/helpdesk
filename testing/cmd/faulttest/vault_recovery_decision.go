@@ -291,6 +291,9 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 					acks = append(acks, "nothing beyond approving")
 				}
 				fmt.Fprintf(&b, "; acknowledged: %s", strings.Join(acks, ", "))
+				if a.Ticket != "" {
+					fmt.Fprintf(&b, "; ticket %s", a.Ticket)
+				}
 			}
 		case audit.RecoveryStageExecution:
 			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
@@ -320,6 +323,11 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		}
 		if rd.Reason != "" {
 			b.WriteString(under + "reason: " + wordWrap(rd.Reason, 60, under+"        ") + "\n")
+		}
+		// What the operator said about why they approved, in their words. It is
+		// their statement, recorded as given; the system did not verify it.
+		if a := rd.Approval; a != nil && a.Justification != "" && rd.Stage == audit.RecoveryStageGate {
+			b.WriteString(under + "justification (the approver's words): " + wordWrap(a.Justification, 60, under+"    ") + "\n")
 		}
 	}
 	if sawOutcome {

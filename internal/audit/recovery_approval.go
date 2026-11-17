@@ -33,6 +33,12 @@ type RecoveryApproval struct {
 	// the measured loss exceeds (or may exceed) its objective. Like StopServing
 	// it is never implied by Approved() or by Acknowledged.
 	BreachAcknowledged bool `json:"breach_acknowledged,omitempty"`
+	// Justification and Ticket are what the operator said at the gate about why
+	// (see ApprovalFacts). They are recorded by the gateway with the gate decision
+	// and are not part of what the agent is given: nothing about a restore depends
+	// on them, so they are not in the A2A metadata form.
+	Justification string `json:"justification,omitempty"`
+	Ticket        string `json:"ticket,omitempty"`
 }
 
 // Approved reports whether a restore may run on this: a target, the digest of

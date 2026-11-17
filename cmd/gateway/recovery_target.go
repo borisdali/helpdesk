@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"helpdesk/internal/audit"
 )
@@ -52,6 +53,17 @@ type RecoveryTargetSpec struct {
 var (
 	recoveryLSNRe    = regexp.MustCompile(`^[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}$`)
 	recoveryDigestRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	// A ticket reference (INC-1234, CHG0012345, org/repo#12): short and free of
+	// anything that is not part of one, so it can be looked up and cannot carry prose.
+	recoveryTicketRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:#/-]{0,63}$`)
+)
+
+const (
+	// The shortest justification accepted for acknowledging an objective breach when
+	// one is required: long enough that "ok" is not one.
+	minBreachJustificationRunes = 10
+	// The longest reason recorded.
+	maxJustificationRunes = 1000
 )
 
 // Validate checks the shape of the target. The agent re-validates it (and
@@ -105,7 +117,12 @@ func (s *RecoveryTargetSpec) planOnly() *audit.RecoveryApproval {
 //
 // stored is the target the run already has ("" if none): the approval may
 // restate it but not change it.
-func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy string) (*audit.RecoveryApproval, int, string) {
+//
+// requireJustification is the gateway's HELPDESK_REQUIRE_BREACH_JUSTIFICATION
+// setting: when it is on, an approval that acknowledges an objective breach must
+// say why (the request's reason). The reason and the ticket are the operator's own
+// words: they are bounded and cleaned here and recorded, not verified.
+func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy string, requireJustification bool) (*audit.RecoveryApproval, int, string) {
 	if err := req.RecoveryTarget.Validate(); err != nil {
 		return nil, http.StatusBadRequest, "approving a point-in-time restore needs the recovery target: " + err.Error()
 	}
@@ -118,13 +135,28 @@ func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy s
 	if stored != "" && stored != req.RecoveryTarget.stored() {
 		return nil, http.StatusConflict, fmt.Sprintf("recovery_target %s is not the target this run was started with (%s): a recovery target cannot be changed once set. Start a new run for the other target", req.RecoveryTarget.stored(), stored)
 	}
+	justification := strings.TrimSpace(req.Reason)
+	if n := utf8.RuneCountInString(justification); n > maxJustificationRunes {
+		return nil, http.StatusBadRequest, fmt.Sprintf("reason is too long (%d characters, at most %d)", n, maxJustificationRunes)
+	}
+	if req.AcknowledgeObjectiveBreach && requireJustification && utf8.RuneCountInString(justification) < minBreachJustificationRunes {
+		return nil, http.StatusBadRequest, fmt.Sprintf("acknowledging an objective breach needs a justification: pass reason (at least %d characters) saying why exceeding the objective is acceptable", minBreachJustificationRunes)
+	}
+	ticket := strings.TrimSpace(req.Ticket)
+	if ticket != "" && !recoveryTicketRe.MatchString(ticket) {
+		return nil, http.StatusBadRequest, fmt.Sprintf("ticket %q is not a ticket reference: use letters, digits and . _ : # / - only, at most 64 characters (e.g. INC-1234)", req.Ticket)
+	}
 	return &audit.RecoveryApproval{
-		Type:         req.RecoveryTarget.Type,
-		Value:        req.RecoveryTarget.Value,
-		PlanDigest:   strings.TrimSpace(req.PlanDigest),
-		ApprovedBy:   resolvedBy,
-		Acknowledged: true,
-		StopServing:  req.AllowStopServing,
+		// The prose is run through the same redaction as a connection string: people
+		// paste what is on their screen.
+		Justification: audit.RedactConnString(justification),
+		Ticket:        ticket,
+		Type:          req.RecoveryTarget.Type,
+		Value:         req.RecoveryTarget.Value,
+		PlanDigest:    strings.TrimSpace(req.PlanDigest),
+		ApprovedBy:    resolvedBy,
+		Acknowledged:  true,
+		StopServing:   req.AllowStopServing,
 		// Passed on as given. Whether the loss exceeds the objective is only
 		// known to the agent, at the moment before the instance is stopped, so
 		// the gateway neither requires nor checks it: the restore tool does.
@@ -146,6 +178,11 @@ func recoveryAuditLines(ap *audit.RecoveryApproval) []string {
 	}
 	if ap.BreachAcknowledged {
 		lines = append(lines, "operator acknowledged that the restore may lose more data than the recovery objective allows")
+	}
+	// The justification is the gate's reason, which the gate_acknowledged event
+	// already carries; the ticket is new, so it is said here.
+	if ap.Ticket != "" {
+		lines = append(lines, "ticket: "+ap.Ticket)
 	}
 	return lines
 }

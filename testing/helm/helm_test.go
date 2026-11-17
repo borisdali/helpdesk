@@ -1298,6 +1298,21 @@ func TestAutoIncidentBundle_SetWhenEnabled(t *testing.T) {
 	}
 }
 
+// TestRequireBreachJustification verifies the v0.36 opt-in (a point-in-time
+// approval that acknowledges an objective breach must say why) is absent from
+// the gateway Deployment by default, so an upgrade changes nothing, and set when
+// enabled.
+func TestRequireBreachJustification(t *testing.T) {
+	env := containerEnvMap(containerByName(t, render(t)["Deployment/test-gateway"], "gateway"))
+	if _, ok := env["HELPDESK_REQUIRE_BREACH_JUSTIFICATION"]; ok {
+		t.Error("HELPDESK_REQUIRE_BREACH_JUSTIFICATION should be absent by default (gateway.requireBreachJustification=false)")
+	}
+	env = containerEnvMap(containerByName(t, render(t, "gateway.requireBreachJustification=true")["Deployment/test-gateway"], "gateway"))
+	if env["HELPDESK_REQUIRE_BREACH_JUSTIFICATION"] != "true" {
+		t.Errorf("HELPDESK_REQUIRE_BREACH_JUSTIFICATION = %q, want \"true\" when gateway.requireBreachJustification=true", env["HELPDESK_REQUIRE_BREACH_JUSTIFICATION"])
+	}
+}
+
 // TestAuditdPostgresDSN_AbsentByDefault verifies auditd still defaults to
 // SQLite-on-PVC when governance.auditd.dsnSecret is unset (v0.30 Postgres
 // backend support must not change existing deployments' behavior).

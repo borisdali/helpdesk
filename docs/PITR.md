@@ -342,6 +342,24 @@ refuses (nothing is stopped), but the gate is then used up and approving the sam
 (HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
 
+**Saying why, and under which ticket**   
+The approval can carry the reason it was given and the ticket it was given under:
+
+```
+helpdesk-client --pitr-approve <run_id> ... --acknowledge-objective-breach \
+  --justification "batch corrupted the ledger; the on-call lead accepted the loss on the incident call" \
+  --ticket INC-1234
+```
+
+Both are recorded in the gate's `recovery_decision` event, so they are inside the audit hash, and `vault incidents`
+prints the ticket on the gate line and the justification under it as the approver's words. The ticket is its own field
+(letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose; the
+justification is free text of up to 1000 characters, with anything that looks like a password redacted. Neither is
+required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the gateway (Helm:
+`gateway.requireBreachJustification`) and an approval that acknowledges an objective breach is refused, with nothing
+changed, unless it carries a justification of at least 10 characters. Two limits: both are the operator's own words,
+recorded and not verified, and the Decision Hub takes them too (`reason`, `ticket`).
+
 **The loss is measured again just before the instance is stopped**   
 Not taken from the plan. A plan that said `within` can be approved minutes or hours later and a serving instance has gone on committing since, so the
 restore carries the instance's clock forward by the time that has passed since it last asked (the archive flush

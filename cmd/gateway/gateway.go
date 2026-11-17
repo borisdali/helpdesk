@@ -67,6 +67,10 @@ type Gateway struct {
 	entryPointCache    entryPointPlaybookCache // cached list for query-time playbook auto-selection
 	diagnosisModel     string                  // HELPDESK_MODEL_NAME, used by trustNotYetEarnedForceGate's cert lookup; empty = check disabled, not "fail closed"
 	autoIncidentBundle bool                    // when true, auto-trigger create_incident_bundle on a resolved/escalated entry-point run (v0.29 Phase 3); opt-in, default off
+
+	// requireBreachJustification: a gate approval that acknowledges an objective
+	// breach must say why (HELPDESK_REQUIRE_BREACH_JUSTIFICATION).
+	requireBreachJustification bool
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -138,6 +142,13 @@ func (g *Gateway) SetIdentityProvider(p identity.Provider) {
 // SetOperatingMode sets the operating mode.
 func (g *Gateway) SetOperatingMode(mode string) {
 	g.operatingMode = mode
+}
+
+// SetRequireBreachJustification makes a point-in-time approval that acknowledges
+// an objective breach carry a justification (the request's reason). Off by default,
+// so nothing changes for anyone on upgrade.
+func (g *Gateway) SetRequireBreachJustification(on bool) {
+	g.requireBreachJustification = on
 }
 
 // SetAuthorizer sets the central authorizer for per-route access control.

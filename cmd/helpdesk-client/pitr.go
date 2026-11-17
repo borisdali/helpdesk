@@ -37,9 +37,14 @@ type pitrOpts struct {
 	// AckBreach acknowledges that the loss exceeds the database's recovery
 	// objective. Only a database whose enforcement is acknowledge needs it, and
 	// only when the loss measured at the stop does.
-	AckBreach    bool
-	ResolvedBy   string
-	ApprovalMode string
+	AckBreach bool
+	// Justification is why the approval is given (sent as the gate's reason) and
+	// Ticket the reference it is given under. Both optional here; the gateway can
+	// be set to require a justification for a breach acknowledgement.
+	Justification string
+	Ticket        string
+	ResolvedBy    string
+	ApprovalMode  string
 
 	// plan only
 	SysadminURL string
@@ -54,6 +59,7 @@ type pitrFlagValues struct {
 	TargetType, Target, PlanDigest string
 	AckDataLoss, AllowStop         bool
 	AckBreach                      bool
+	Justification, Ticket          string
 	User, SysadminURL, SysadminKey string
 	Server, Stanza                 string
 }
@@ -66,6 +72,7 @@ func newPITROpts(f pitrFlagValues) pitrOpts {
 	return pitrOpts{
 		RunID: f.ApproveRunID, TargetType: f.TargetType, Target: f.Target,
 		PlanDigest: f.PlanDigest, AckDataLoss: f.AckDataLoss, AllowStop: f.AllowStop, AckBreach: f.AckBreach,
+		Justification: f.Justification, Ticket: f.Ticket,
 		ResolvedBy: f.User, ApprovalMode: "auto",
 		SysadminURL: f.SysadminURL, SysadminKey: f.SysadminKey, Server: f.Server, Stanza: f.Stanza,
 	}
@@ -110,6 +117,13 @@ func (o pitrOpts) approvalBody(purpose string) ([]byte, error) {
 	}
 	if o.AckBreach {
 		body["acknowledge_objective_breach"] = true
+	}
+	// The justification is the gate's own "reason" field; the ticket is its own.
+	if j := strings.TrimSpace(o.Justification); j != "" {
+		body["reason"] = j
+	}
+	if t := strings.TrimSpace(o.Ticket); t != "" {
+		body["ticket"] = t
 	}
 	if o.ResolvedBy != "" {
 		body["resolved_by"] = o.ResolvedBy

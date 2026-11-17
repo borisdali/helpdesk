@@ -536,6 +536,43 @@ func TestRDPlanVsActual(t *testing.T) {
 	}
 }
 
+// The gate line carries the ticket the approval was given under, and the
+// approver's justification sits under it as their own words.
+func TestFormatRecoveryDecisions_GateShowsTicketAndJustification(t *testing.T) {
+	gate := func(a audit.ApprovalFacts) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(2), Decision: audit.RecoveryDecision{
+			Stage: "gate", Decision: "approved", DecidedBy: "alice", Approval: &a}}
+	}
+	const why = "batch corrupted the ledger; the on-call lead accepted the loss on the incident call at 14:10"
+	got := formatRecoveryDecisions([]narrativeRecoveryDecision{gate(audit.ApprovalFacts{
+		AcknowledgedDataLoss: true, AcknowledgedBreach: true, Justification: why, Ticket: "INC-1234"})})
+	for _, want := range []string{
+		"by alice; acknowledged: data loss, exceeding the objective; ticket INC-1234",
+		"justification (the approver's words): batch corrupted the ledger;",
+		"incident call at 14:10",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(strings.Join(strings.Fields(got), " "), "the on-call lead accepted the loss on the incident call at 14:10") {
+		t.Errorf("the justification was cut:\n%s", got)
+	}
+
+	// With neither, the gate line is what it was.
+	plain := formatRecoveryDecisions([]narrativeRecoveryDecision{gate(audit.ApprovalFacts{AcknowledgedDataLoss: true})})
+	if strings.Contains(plain, "ticket") || strings.Contains(plain, "justification") {
+		t.Errorf("a ticket or justification is shown when none was given:\n%s", plain)
+	}
+	// A justification is shown on the gate stage only: an execution event that
+	// happens to carry one does not repeat it.
+	exec := narrativeRecoveryDecision{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded", Approval: &audit.ApprovalFacts{Justification: why}}}
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{exec}), "justification") {
+		t.Error("the justification is repeated on the execution stage")
+	}
+}
+
 func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
 	render := func(opt audit.DecisionOption) string {
 		return formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{

@@ -67,6 +67,44 @@ func TestRunPITRApprove_SendsWhatTheGatewayReads(t *testing.T) {
 	}
 }
 
+// The justification goes to the gateway as the gate's own "reason" and the ticket
+// as its own field, only when given: an approval with neither sends neither.
+func TestPITRApprovalBody_JustificationAndTicket(t *testing.T) {
+	body := func(o pitrOpts) map[string]any {
+		t.Helper()
+		raw, err := o.approvalBody("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	o := goodOpts()
+	o.Justification, o.Ticket = "  batch corrupted the ledger; accepted by the on-call lead  ", " INC-1234 "
+	got := body(o)
+	if got["reason"] != "batch corrupted the ledger; accepted by the on-call lead" || got["ticket"] != "INC-1234" {
+		t.Errorf("body = %v", got)
+	}
+	if _, ok := got["justification"]; ok {
+		t.Errorf("the gateway reads reason, not justification: %v", got)
+	}
+	none := body(goodOpts())
+	if _, ok := none["reason"]; ok {
+		t.Errorf("a reason was sent with none given: %v", none)
+	}
+	if _, ok := none["ticket"]; ok {
+		t.Errorf("a ticket was sent with none given: %v", none)
+	}
+	blank := goodOpts()
+	blank.Justification, blank.Ticket = "   ", "  "
+	if got := body(blank); got["reason"] != nil || got["ticket"] != nil {
+		t.Errorf("blank values were sent: %v", got)
+	}
+}
+
 func TestRunPITRApprove_GatewayRefusalIsAnError(t *testing.T) {
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
@@ -395,12 +433,13 @@ func TestRunPITRPlan_AgentErrorSurfaces(t *testing.T) {
 func TestNewPITROpts_MapsEveryFlag(t *testing.T) {
 	got := newPITROpts(pitrFlagValues{
 		ApproveRunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, AckBreach: true, User: "ops@example.com",
-		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, Justification: "the on-call lead accepted it", Ticket: "INC-9",
+		User: "ops@example.com", SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	})
 	want := pitrOpts{
 		RunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, AckBreach: true, ResolvedBy: "ops@example.com", ApprovalMode: "auto",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, Justification: "the on-call lead accepted it", Ticket: "INC-9",
+		ResolvedBy: "ops@example.com", ApprovalMode: "auto",
 		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	}
 	if got != want {
