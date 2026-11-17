@@ -136,6 +136,17 @@ func rdObjectives(o *audit.ObjectivesInForce) []string {
 	return lines
 }
 
+// rdBasisText says what a restore's assumed duration rested on.
+func rdBasisText(basis string) string {
+	switch basis {
+	case "history_p90", "history": // "history" is a record from before the p90 needed ten samples
+		return "the p90 of past restores"
+	case "history_longest":
+		return "the longest past restore (too few for a p90)"
+	}
+	return "from the declared rto"
+}
+
 func rdOption(opt audit.DecisionOption) string {
 	var b strings.Builder
 	b.WriteString(opt.Name)
@@ -193,16 +204,7 @@ func rdOption(opt audit.DecisionOption) string {
 		if opt.BudgetRemainingSeconds != nil {
 			taken := ""
 			if opt.BudgetDurationSeconds != nil {
-				basis := "from the declared rto"
-				switch opt.BudgetDurationBasis {
-				case "history_p90":
-					basis = "the p90 of past restores"
-				case "history_longest":
-					basis = "the longest past restore (too few for a p90)"
-				case "history": // records from before the p90 needed ten samples
-					basis = "the p90 of past restores"
-				}
-				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), basis)
+				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), rdBasisText(opt.BudgetDurationBasis))
 			}
 			fmt.Fprintf(&b, " (%s left%s)", ledgerSpan(*opt.BudgetRemainingSeconds), taken)
 		}
@@ -324,8 +326,120 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		// Said once, so the figure is not mistaken for downtime.
 		b.WriteString("\n  recovery duration is the remediation hop after the approval (restore, restart, verify);\n" +
 			"  it is not the downtime, which began earlier and also includes the wait for the approval\n")
+		if lines := rdPlanVsActual(ds); len(lines) > 0 {
+			b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
+		}
 	}
 	return b.String()
+}
+
+// rdDelta says how an actual figure stands against the planned one.
+func rdDelta(actual, planned int64, show func(int64) string, more, less string) string {
+	switch {
+	case actual > planned:
+		return show(actual-planned) + " " + more
+	case actual < planned:
+		return show(planned-actual) + " " + less
+	}
+	return "as planned"
+}
+
+func rdCount(n int64) string { return fmt.Sprintf("%d", n) }
+
+// rdPlanVsActual sets what the plan said against what happened, for a restore
+// that has an outcome: the recovery time the budget was checked with against the
+// time the remediation took, and the loss and transactions the plan counted
+// against the ones measured immediately before the stop. The plan is the last one
+// made before the execution, the one an approver would have seen. A line appears
+// only when both sides were recorded on the same basis; nothing is estimated here.
+func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
+	execIdx, outcomeIdx := -1, -1
+	for i, d := range ds {
+		switch d.Decision.Stage {
+		case audit.RecoveryStageExecution:
+			execIdx = i
+		case audit.RecoveryStageOutcome:
+			outcomeIdx = i
+		}
+	}
+	if outcomeIdx < 0 {
+		return nil
+	}
+	planIdx := -1
+	for i, d := range ds {
+		if d.Decision.Stage == audit.RecoveryStagePlan && (execIdx < 0 || i < execIdx) {
+			planIdx = i
+		}
+	}
+	if planIdx < 0 {
+		return nil
+	}
+	pick := func(rd audit.RecoveryDecision) *audit.DecisionOption {
+		for i := range rd.Options {
+			if rd.Options[i].Chosen {
+				return &rd.Options[i]
+			}
+		}
+		if len(rd.Options) > 0 {
+			return &rd.Options[0]
+		}
+		return nil
+	}
+	planOpt := pick(ds[planIdx].Decision)
+	var execOpt *audit.DecisionOption
+	if execIdx >= 0 {
+		execOpt = pick(ds[execIdx].Decision)
+	}
+	var lines []string
+
+	// Recovery time: what the budget check assumed, against what the hop took.
+	// Both are the remediation hop after the approval, so they are comparable.
+	var planned *int64
+	basis := ""
+	for _, o := range []*audit.DecisionOption{execOpt, planOpt} {
+		if o != nil && o.BudgetDurationSeconds != nil {
+			planned, basis = o.BudgetDurationSeconds, o.BudgetDurationBasis
+			break
+		}
+	}
+	if actual := ds[outcomeIdx].Decision.DurationSeconds; planned != nil && actual != nil {
+		lines = append(lines, fmt.Sprintf("  recovery time  planned %s (%s); took %s (%s)",
+			rdSpan(*planned), rdBasisText(basis), rdSpan(*actual), rdDelta(*actual, *planned, rdSpan, "over", "under")))
+	}
+
+	if planOpt != nil && execOpt != nil {
+		if planOpt.LossSeconds != nil && execOpt.LossSeconds != nil && planOpt.LossBasis == execOpt.LossBasis {
+			lines = append(lines, fmt.Sprintf("  data loss      planned %s; at the stop %s (%s)",
+				rdSpan(*planOpt.LossSeconds), rdSpan(*execOpt.LossSeconds),
+				rdDelta(*execOpt.LossSeconds, *planOpt.LossSeconds, rdSpan, "more", "less")))
+		}
+		if planOpt.LossCommitsStatus == "measured" && planOpt.LossCommits != nil &&
+			execOpt.LossCommitsStatus == "measured" && execOpt.LossCommits != nil {
+			atLeast := func(o *audit.DecisionOption) string {
+				if o.LossCommitsAtLeast {
+					return "at least "
+				}
+				return ""
+			}
+			line := fmt.Sprintf("  transactions   planned %s%d; at the stop %s%d",
+				atLeast(planOpt), *planOpt.LossCommits, atLeast(execOpt), *execOpt.LossCommits)
+			if !planOpt.LossCommitsAtLeast && !execOpt.LossCommitsAtLeast {
+				line += " (" + rdDelta(int64(*execOpt.LossCommits), int64(*planOpt.LossCommits), rdCount, "more", "fewer") + ")"
+			}
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	head := "  plan vs actual (the plan"
+	if at := ds[planIdx].At; !at.IsZero() {
+		head += " of " + at.UTC().Format("15:04:05")
+	}
+	head += " against what happened):"
+	return append(append([]string{head}, lines...),
+		"  \"at the stop\" is measured immediately before the restore stops the instance; what was",
+		"  discarded is not counted afterwards")
 }
 
 // rdRTOVerdict sets a recovery duration against the rto that was in force, for

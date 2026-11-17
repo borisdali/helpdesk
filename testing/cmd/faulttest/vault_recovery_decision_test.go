@@ -414,6 +414,94 @@ func TestFormatRecoveryDecisions_OutcomeAgainstTheRTO(t *testing.T) {
 }
 
 // A lower bound is said as one: never labelled exact, and never lost.
+// The section sets what the plan said against what happened, from the figures the
+// events recorded, and says nothing for a figure that was not recorded on both
+// sides on the same basis.
+func TestRDPlanVsActual(t *testing.T) {
+	commits := func(n int, atLeast bool) (string, *int, bool) { return "measured", &n, atLeast }
+	opt := func(chosen bool, loss int64, basis string, n int, atLeast bool, dur int64, durBasis string) audit.DecisionOption {
+		st, c, al := commits(n, atLeast)
+		return audit.DecisionOption{Name: "point_in_time_restore", Chosen: chosen,
+			LossBasis: basis, LossSeconds: rdI(loss), LossCommitsStatus: st, LossCommits: c, LossCommitsAtLeast: al,
+			BudgetDurationSeconds: rdI(dur), BudgetDurationBasis: durBasis}
+	}
+	stage := func(m int, s string, opts ...audit.DecisionOption) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: s, Decision: "x", Options: opts}}
+	}
+	outcome := func(m int, secs *int64) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: secs}}
+	}
+
+	plan := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 101, "history_longest"))
+	exec := stage(3, "execution", opt(true, 65, "live_instance", 3, false, 101, "history_longest"))
+
+	got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, stage(2, "gate"), exec, outcome(5, rdI(89))}), "\n")
+	for _, want := range []string{
+		"plan vs actual (the plan of 14:01:00 against what happened):",
+		"recovery time  planned 1m 41s (the longest past restore (too few for a p90)); took 1m 29s (12s under)",
+		"data loss      planned 20s; at the stop 1m 05s (45s more)",
+		"transactions   planned 0; at the stop 3 (3 more)",
+		"not counted afterwards",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+
+	// The declared rto is an upper bound, and the section says that is what it was.
+	declared := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 1800, "declared_rto"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{declared, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "planned 30m 00s (from the declared rto); took 1m 29s (28m 31s under)") {
+		t.Errorf("declared rto:\n%s", got)
+	}
+	// Slower than planned, and exactly as planned.
+	if got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(150))}), "\n"); !strings.Contains(got, "took 2m 30s (49s over)") {
+		t.Errorf("over:\n%s", got)
+	}
+	if got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(101))}), "\n"); !strings.Contains(got, "took 1m 41s (as planned)") {
+		t.Errorf("as planned:\n%s", got)
+	}
+
+	// Nothing to compare: no outcome, no plan, an unknown duration.
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{plan, exec}); got != nil {
+		t.Errorf("no outcome: %v", got)
+	}
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{exec, outcome(5, rdI(89))}); got != nil {
+		t.Errorf("no plan: %v", got)
+	}
+	unknown := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, nil)}), "\n")
+	if strings.Contains(unknown, "recovery time") || !strings.Contains(unknown, "data loss") {
+		t.Errorf("unknown duration leaves the loss line only:\n%s", unknown)
+	}
+
+	// A loss measured on a different basis is not compared, and a count that is a
+	// lower bound on either side is not given a difference.
+	archive := stage(1, "plan", opt(false, 20, "archive_end", 4, true, 101, "history_longest"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{archive, exec, outcome(5, rdI(89))}), "\n")
+	if strings.Contains(got, "data loss") {
+		t.Errorf("loss on different bases was compared:\n%s", got)
+	}
+	if !strings.Contains(got, "transactions   planned at least 4; at the stop 3") || strings.Contains(got, "fewer)") || strings.Contains(got, "more)") {
+		t.Errorf("a lower bound is not given a difference:\n%s", got)
+	}
+
+	// The plan is the one made before the execution, not a later diagnostic one.
+	later := stage(9, "plan", opt(false, 999, "live_instance", 99, false, 7, "history_longest"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(89)), later}), "\n")
+	if strings.Contains(got, "999") || !strings.Contains(got, "planned 20s") {
+		t.Errorf("used a plan made after the execution:\n%s", got)
+	}
+
+	// And it is part of the section, under the downtime caveat.
+	full := formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(89))})
+	if strings.Index(full, "plan vs actual") < strings.Index(full, "it is not the downtime") {
+		t.Errorf("plan vs actual should follow the caveat:\n%s", full)
+	}
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec}), "plan vs actual") {
+		t.Error("plan vs actual appears with no outcome")
+	}
+}
+
 func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
 	render := func(opt audit.DecisionOption) string {
 		return formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{
