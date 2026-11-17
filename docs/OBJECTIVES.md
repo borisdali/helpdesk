@@ -444,6 +444,9 @@ does not shrink with the data and is charged in full, whether or not the instanc
 instance is not down until the restore stops it). Neither figure is the downtime and a gate that compares one with
 the other is on the optimistic side by about the difference.
 
+For a point-in-time restore specifically, when the ledger charges the wait and what that means for how long a decision
+can be put off, see the timeline in [PITR.md, What waiting costs](PITR.md#what-waiting-costs).
+
 ### 5.6 Is the backup posture enough for the objectives?
 
 `backup_stale` in `get_pgbackrest_status` answers a question about the backup **job**: is the newest backup older than

@@ -339,7 +339,7 @@ REFUSED`) and adds the flag to the approve command it offers.
 
 Read it before approving. A gate can be approved once: if the approval lacks a required acknowledgement the restore
 refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the gateway
-(HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
+(HTTP 409, "not in `gate_pending` state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
 
 #### **What waiting costs**   
@@ -357,6 +357,64 @@ Waiting, data      : the recovery target is fixed and the instance keeps
 		     estimated, under current assumptions, in 12m 00s it would exceed it
 ```
 
+The budget line follows from when the ledger charges an incident, which for a PITR is not obvious:
+ * `T0` is when the triage started
+ * `now` is when an approver at the gate reads the plan
+ * `approve` is when the gate is approved (the restore starts then)
+ * `end` is when the restore's run completes and the incident closes
+ * `restore` is how long the restore is planned to take, that is `end - approve`:
+
+Here's how all of these points in time look together on a timeline:
+
+```
+                T0                    now                 approve                  end
+                |-- triage + model ---|-- wait at gate ---|------ restore ----------|
+
+the ledger
+ -while waiting |.. nothing charged: not an outage yet ...|
+ -once it ends  |============== charged in full: T0 -> end =========================|
+
+real downtime                                                     |-- downtime -----|
+(serving instance)
+```
+
+While the approval waits, nothing is charged, because the triage is not an outage (the restore is).   
+
+When the restore runs and the incident ends, the ledger charges the whole span from `T0`, so the time already spent and any further wait
+count in full.   
+
+The `real` row is the downtime of a **serving** instance, which starts only when the restore stops it
+(for an instance that is already down it began before `T0`, see [the two clocks](OBJECTIVES.md#two-clocks)).  
+
+The quantities in the diagram are different measurements that share an endpoint:
+
+| Quantity | Formula | Notes |
+|---|---|---|
+| Ledger charge | `end - T0` | The whole incident, charged only when it ends resolved as an outage (and counted from the start of the budget window if `T0` is before it). |
+| Estimate (what past restores measure) | `end - approve` | The remediation hop. The plan uses it as the planned `restore` time. |
+| Wait at the gate | `approve - (end of the triage)` | Inside the ledger charge, not inside the estimate. |
+| Real downtime, serving instance | `serving again - stop` | At most `end - stop`. For a down instance it is `serving again - failure`, which starts before `T0`. |
+
+The ledger and the estimate end at the same moment, the completion of the restore's run and differ only in where they
+start: `T0` for the ledger, `approve` for the estimate. The restore fits in the budget when the ledger charge, `end -
+T0`, plus what the other incidents have already spent, is no more than the budget. With the restore starting at `approve`
+and lasting `restore`, that is, so the latest it can start is:
+
+```
+latest start = T0 + left - restore
+```
+
+where `left` is the budget less the other incidents, not counting this one.   
+
+The worked example from the tests: 
+- the incident is 5m old
+- `left` is 33m12s 
+- the restore is planned at 8m
+
+So the latest start is `T0 + 25m12s`, which is `now + 20m12s`.
+
+   
+
 - **Budget**  
   An incident is charged from the start of its first run to the end of its last and counts as an outage
   only once a run has started. The triage that waits at the gate is not one (the restore is), so while the
@@ -364,7 +422,7 @@ Waiting, data      : the recovery target is fixed and the instance keeps
 
   Instead, it is charged in full, from its start, the moment the restore runs, so the time already spent and any further wait both count. The margin
   is therefore what is left, less the age of that incident, less how long the restore is taken to last (history or the
-  declared `rto` as an upper bound) and the restore fits if it starts no later than "now plus that".   
+  declared `rto` as an upper bound) and the restore fits if it starts no later than `T0 + left - restore`.   
 
   The plan reads the open incident from the ledger: with exactly one that is not charged yet it takes that to be the one this restore
   is for and names it (so that an approver can check). Now, with several it says it does not know which and gives only an upper bound. An
