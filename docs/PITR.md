@@ -354,7 +354,8 @@ helpdesk-client --pitr-approve <run_id> ... --acknowledge-objective-breach \
 Both are recorded in the gate's `recovery_decision` event, so they are inside the audit hash, and `vault incidents`
 prints the ticket on the gate line and the justification under it as the approver's words. The ticket is its own field
 (letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose; the
-justification is free text of up to 1000 characters, with anything that looks like a password redacted. Neither is
+justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
+and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike. Neither is
 required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the gateway (Helm:
 `gateway.requireBreachJustification`) and an approval that acknowledges an objective breach is refused, with nothing
 changed, unless it carries a justification of at least 10 characters. Two limits: both are the operator's own words,

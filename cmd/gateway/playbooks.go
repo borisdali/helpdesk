@@ -2058,7 +2058,13 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	}
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason, recoveryAudit...)
+	// For a point-in-time approval the reason is the justification, which has been
+	// put on one line and redacted: that, not the raw text, is what is recorded.
+	gateReason := req.Reason
+	if needsRecoveryApproval(nextSeriesID) && recoveryApproval != nil {
+		gateReason = recoveryApproval.Justification
+	}
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", gateReason, recoveryAudit...)
 	if needsRecoveryApproval(nextSeriesID) {
 		g.recordRecoveryGateDecision(r.Context(), run, recoveryApproval, resolvedBy, req.Reason)
 	}

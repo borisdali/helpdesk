@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"helpdesk/internal/audit"
@@ -111,6 +112,14 @@ func (s *RecoveryTargetSpec) planOnly() *audit.RecoveryApproval {
 	return &audit.RecoveryApproval{Type: s.Type, Value: s.Value}
 }
 
+// cleanOperatorText puts text an operator typed on one line: a control character
+// (a newline, a tab, a terminal escape) becomes a space and a run of whitespace
+// one space. It is shown in incident narratives and terminals, so it must not be
+// able to forge a line of one or drive the other.
+func cleanOperatorText(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
+}
+
 // recoveryApprovalFromGate validates a gate approval for the hop that
 // restores to a recovery target and returns what the agent will be given. A
 // non-zero status is a refusal, with the message for the caller.
@@ -135,7 +144,7 @@ func recoveryApprovalFromGate(req ProceedEscalationRequest, stored, resolvedBy s
 	if stored != "" && stored != req.RecoveryTarget.stored() {
 		return nil, http.StatusConflict, fmt.Sprintf("recovery_target %s is not the target this run was started with (%s): a recovery target cannot be changed once set. Start a new run for the other target", req.RecoveryTarget.stored(), stored)
 	}
-	justification := strings.TrimSpace(req.Reason)
+	justification := cleanOperatorText(req.Reason)
 	if n := utf8.RuneCountInString(justification); n > maxJustificationRunes {
 		return nil, http.StatusBadRequest, fmt.Sprintf("reason is too long (%d characters, at most %d)", n, maxJustificationRunes)
 	}
