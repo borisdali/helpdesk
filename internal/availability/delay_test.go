@@ -121,7 +121,7 @@ func TestDelay_NothingIsBeingCharged(t *testing.T) {
 	if d.State != DelayNotCharging || d.Charging || d.LatestStart != nil {
 		t.Fatalf("%s charging=%v latest=%v: %s", d.State, d.Charging, d.LatestStart, d.Detail)
 	}
-	for _, want := range []string{"no open incident is being charged", "waiting does not use the budget", "the downtime is accruing regardless"} {
+	for _, want := range []string{"no open incident is in the ledger", "no time already spent to count", "that incident is charged from its start", "the downtime is accruing regardless"} {
 		if !strings.Contains(d.Detail, want) {
 			t.Errorf("missing %q in %q", want, d.Detail)
 		}
@@ -130,6 +130,113 @@ func TestDelay_NothingIsBeingCharged(t *testing.T) {
 	stale := delayOf(t, false, planned(480, PlanningLongest, 3), openOutage("stuck", 30*time.Hour))
 	if stale.State != DelayNotCharging {
 		t.Errorf("a stale open incident was treated as charging: %s", stale.State)
+	}
+}
+
+// An open triage that is waiting at the gate is not an outage yet (the restore is),
+// so it is not charged and what is left does not shrink. It is charged in full, from
+// its start, once the restore runs, so its age comes off the margin.
+func openTriage(id string, detectedAgo time.Duration) Incident {
+	return Incident{ID: id, Status: audit.IncidentStatusOpen, Origin: audit.IncidentOriginReal,
+		SeriesIDs: []string{"pbs_pgbackrest_pitr_triage"}, DetectedAt: ago(detectedAgo)}
+}
+
+func TestDelay_AnOpenTriageIsCountedFromItsStartOnceTheRestoreRuns(t *testing.T) {
+	// 10m spent by a resolved outage: 33m12s left. The triage has been open for 5m,
+	// so 28m12s is the margin before the restore; a restore of 8m leaves 20m12s.
+	d := delayOf(t, false, planned(480, PlanningLongest, 3), outage("spent", 10*time.Minute, time.Hour), openTriage("inc_pitr_1", 5*time.Minute))
+	if d.State != DelayLatestStart || d.Charging || d.Incident != "inc_pitr_1" || d.IncidentSeconds == nil || *d.IncidentSeconds != 300 {
+		t.Fatalf("state %s charging %v incident %q %v: %s", d.State, d.Charging, d.Incident, d.IncidentSeconds, d.Detail)
+	}
+	if d.SlackSeconds == nil || *d.SlackSeconds != 33*60+12-5*60-8*60 {
+		t.Errorf("slack = %v", d.SlackSeconds)
+	}
+	if want := now.Add(20*time.Minute + 12*time.Second); d.LatestStart == nil || !d.LatestStart.Equal(want) {
+		t.Errorf("latest start = %v, want %v", d.LatestStart, want)
+	}
+	for _, want := range []string{"under current assumptions: 12:20:12Z", "incident inc_pitr_1 has been open for 5m and is not charged to the ledger yet",
+		"charged in full, from its start, when the restore runs", "assuming it is the incident this restore is for"} {
+		if !strings.Contains(d.Detail, want) {
+			t.Errorf("missing %q in %q", want, d.Detail)
+		}
+	}
+}
+
+// The latest start is what the ledger will actually say: starting at it leaves the
+// budget exactly used, and a second later breaches it. Checked against the ledger's
+// own arithmetic, with the incident closed as it would be.
+func TestDelay_LatestStartIsWhereTheLedgerWillRunOut(t *testing.T) {
+	spent := outage("spent", 10*time.Minute, time.Hour)
+	d := delayOf(t, false, planned(480, PlanningLongest, 3), spent, openTriage("inc_pitr_1", 5*time.Minute))
+	if d.SlackSeconds == nil {
+		t.Fatalf("no slack: %s", d.Detail)
+	}
+	remainingIfStartedAfter := func(wait int64) int64 {
+		closeAt := now.Add(secondsOf(wait + 480))
+		restored := Incident{ID: "inc_pitr_1", Status: audit.IncidentStatusResolved, Origin: audit.IncidentOriginReal,
+			SeriesIDs:  []string{"pbs_pgbackrest_pitr_triage", "pbs_pgbackrest_pitr_remediate"},
+			DetectedAt: ago(5 * time.Minute), ResolvedAt: closeAt}
+		p := params(spent, restored)
+		p.Now = closeAt
+		l := Compute(p)
+		if l.RemainingSeconds == nil {
+			t.Fatal("no remaining")
+		}
+		return *l.RemainingSeconds
+	}
+	if got := remainingIfStartedAfter(*d.SlackSeconds); got != 0 {
+		t.Errorf("starting at the latest start leaves %ds, want exactly none", got)
+	}
+	if got := remainingIfStartedAfter(*d.SlackSeconds + 1); got != -1 {
+		t.Errorf("a second later leaves %ds, want -1", got)
+	}
+	if got := remainingIfStartedAfter(0); got != *d.SlackSeconds {
+		t.Errorf("starting now leaves %ds, want the slack %d", got, *d.SlackSeconds)
+	}
+}
+
+// The age can be what pushes it over: a forecast, not a breach that has happened,
+// and the ledger itself does not show it as spent.
+func TestDelay_AnOpenTriageCanPushTheBudgetPast(t *testing.T) {
+	// 40m spent: 3m12s left. A triage open for 5m is more than that.
+	d := delayOf(t, false, planned(480, PlanningLongest, 3), outage("spent", 40*time.Minute, time.Hour), openTriage("inc_pitr_1", 5*time.Minute))
+	if d.State != DelayProjectedBreach || d.LatestStart != nil {
+		t.Fatalf("%s %v: %s", d.State, d.LatestStart, d.Detail)
+	}
+	for _, want := range []string{"projected budget breach: 3m12s is left", "once the open incident is charged", "overspends it by 1m48s whatever the restore takes"} {
+		if !strings.Contains(d.Detail, want) {
+			t.Errorf("missing %q in %q", want, d.Detail)
+		}
+	}
+	if strings.Contains(d.Detail, "already overspent") {
+		t.Errorf("a forecast is called a breach that has happened: %q", d.Detail)
+	}
+}
+
+// Several open incidents that are not charged: which is this one is not known, so
+// the latest start is only an upper bound and says so.
+func TestDelay_SeveralOpenIncidentsGiveOnlyAnUpperBound(t *testing.T) {
+	d := delayOf(t, true, planned(480, PlanningLongest, 3), outage("spent", 10*time.Minute, time.Hour), openTriage("inc_a", 5*time.Minute), openTriage("inc_b", 9*time.Minute))
+	if d.State != DelayUncertain || d.Incident != "" || d.LatestStart == nil {
+		t.Fatalf("%s incident %q: %s", d.State, d.Incident, d.Detail)
+	}
+	// The ledger's own figure, with nothing taken off: 33m12s left, less 8m.
+	if want := now.Add(25*time.Minute + 12*time.Second); !d.LatestStart.Equal(want) {
+		t.Errorf("upper bound = %v, want %v", d.LatestStart, want)
+	}
+	for _, want := range []string{"at the latest and under current assumptions", "2 open incidents on this database are not charged to the ledger yet",
+		"which of them this restore is for is not known", "The instance is serving"} {
+		if !strings.Contains(d.Detail, want) {
+			t.Errorf("missing %q in %q", want, d.Detail)
+		}
+	}
+}
+
+// With no open incident (a plan asked for outside an incident) nothing is taken off.
+func TestDelay_NoOpenIncidentTakesNothingOff(t *testing.T) {
+	d := delayOf(t, false, planned(480, PlanningLongest, 3), outage("spent", 10*time.Minute, time.Hour))
+	if d.State != DelayNotCharging || d.Incident != "" || d.SlackSeconds == nil || *d.SlackSeconds != 33*60+12-8*60 {
+		t.Errorf("%s incident %q slack %v: %s", d.State, d.Incident, d.SlackSeconds, d.Detail)
 	}
 }
 

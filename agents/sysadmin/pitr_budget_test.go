@@ -232,6 +232,47 @@ func TestBudgetCheckFor_ReadsTheLedgerThroughTheRealClient(t *testing.T) {
 	}
 }
 
+// What waiting costs is worked out from what the real client reads: an open triage
+// waiting at the gate comes through the listing as an incident that is not charged
+// yet, and its age (not its absence from the ledger) is taken off the margin.
+func TestBudgetCheckFor_CostOfWaitingFromAnOpenTriageThroughTheRealClient(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	listing := audit.IncidentListing{Count: 2, Incidents: []audit.IncidentWithSeries{
+		{Incident: &audit.Incident{IncidentID: "inc_spent", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusResolved, TargetKey: "pgbackrest_db",
+			DetectedAt: now.Add(-3 * time.Hour), ResolvedAt: now.Add(-3*time.Hour + 20*time.Minute)},
+			SeriesIDs: []string{"pbs_pgbackrest_restore_remediate"}},
+		{Incident: &audit.Incident{IncidentID: "inc_pitr_open", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusOpen, TargetKey: "pgbackrest_db",
+			DetectedAt: now.Add(-5 * time.Minute)},
+			SeriesIDs: []string{"pbs_pgbackrest_pitr_triage"}},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		out := listing
+		if r.URL.Query().Get("unattributed") == "true" {
+			out = audit.IncidentListing{Incidents: []audit.IncidentWithSeries{}}
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+	oldClient, oldFn := ledgerClient, budgetLedgerFn
+	t.Cleanup(func() { ledgerClient, budgetLedgerFn = oldClient, oldFn })
+	ledgerClient, budgetLedgerFn = &availability.Client{URL: srv.URL, APIKey: "svc-key"}, readLedger
+	budgetObjectives(t, "", "acknowledge")
+
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	// What is left is the ledger's own: the open triage is not charged.
+	if v.RemainingSeconds == nil || *v.RemainingSeconds != 2592-1200 {
+		t.Fatalf("remaining = %v", v.RemainingSeconds)
+	}
+	d := v.Delay
+	if d == nil || d.Incident != "inc_pitr_open" || d.IncidentSeconds == nil || *d.IncidentSeconds < 300 || *d.IncidentSeconds > 330 {
+		t.Fatalf("delay = %+v", d)
+	}
+	// The restore is taken to need the rto (30m): 23m12s left, 5m of it spent on the incident.
+	if d.State != availability.DelayProjectedBreach || !strings.Contains(d.Detail, "inc_pitr_open has been open for") {
+		t.Errorf("state %s: %s", d.State, d.Detail)
+	}
+}
+
 // The ledger is read as of the restore's own clock, the one the data loss is
 // measured against, not some other moment.
 func TestBudgetCheckFor_ReadsTheLedgerAsOfTheRestoresClock(t *testing.T) {

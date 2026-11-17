@@ -342,32 +342,55 @@ refuses (nothing is stopped), but the gate is then used up and approving the sam
 (HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
 
-**What waiting costs**   
-The plan prices the restore, and also says what putting the decision off costs, on two lines, because the clock does
+#### **What waiting costs**   
+The plan prices the restore and also says what putting the decision off costs, on two lines, because the clock does
 not stop while the approval waits:
 
 ```
-Waiting, budget    : estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s), assuming a restore of 8m (the longest of 3 past restores)
-Waiting, data      : the recovery target is fixed and the instance keeps taking writes, so the history a restore discards grows by a minute every minute: 18m 00s now, against an rpo of 30m 00s; estimated, under current assumptions, in 12m 00s it would exceed it
+Waiting, budget    : estimated latest start to remain within budget, 
+  		     under current assumptions: 14:17:00Z (in 4m12s), 
+		     assuming a restore of 8m (the longest of 3 past restores)
+
+Waiting, data      : the recovery target is fixed and the instance keeps 
+		     taking writes, so the history a restore discards grows by 
+		     a minute every minute: 18m 00s now, against an rpo of 30m 00s; 
+		     estimated, under current assumptions, in 12m 00s it would exceed it
 ```
 
-- **Budget.** The ledger charges an open outage incident up to now, so what is left of the budget shrinks second for
-  second while the gate waits. The restore is taken to last as long as the verdict took it to (history, or the
-  declared `rto` as an upper bound), so it fits if it starts no later than "now plus what is left minus that". The line
-  is one of four: an *estimated latest start* when there is margin; *no remaining margin* when what is left is exactly
-  what the restore needs; *projected budget breach* when the restore is taken to need more than is left (a forecast,
-  not yet a breach); and *budget already overspent* when it has happened. With no open incident being charged it says
-  the ledger is not charging anything as time passes, and does not invent a deadline. It is the ledger's clock, not
-  the downtime: for a serving instance the real downtime starts only when the restore stops it, and the line says so.
-- **Data.** For a serving instance the target is fixed and the instance keeps taking writes, so the loss grows by a
-  minute a minute, towards the `rpo`; the line says how long until it would pass it, and how fast commits are landing
+- **Budget**  
+  An incident is charged from the start of its first run to the end of its last and counts as an outage
+  only once a run has started. The triage that waits at the gate is not one (the restore is), so while the
+  approval waits the open incident is not charged and what is left of the budget does not shrink.   
+
+  Instead, it is charged in full, from its start, the moment the restore runs, so the time already spent and any further wait both count. The margin
+  is therefore what is left, less the age of that incident, less how long the restore is taken to last (history or the
+  declared `rto` as an upper bound) and the restore fits if it starts no later than "now plus that".   
+
+  The plan reads the open incident from the ledger: with exactly one that is not charged yet it takes that to be the one this restore
+  is for and names it (so that an approver can check). Now, with several it says it does not know which and gives only an upper bound. An
+  incident already charged as an outage is already in what is left and is not taken off twice.   
+
+  The line is one of these: 
+	 * an *estimated latest start* when there is margin
+	 * *no remaining margin* when what is left is exactly what the restore needs
+	 * *projected budget breach* when the restore or the open incident once charged, is taken to need more than is left (a forecast, not yet a breach)
+	 * and *budget already overspent* when the ledger itself shows it  
+
+  With no open incident in the ledger (a plan asked for outside an incident) it says there is no time already spent to count,
+  and does not invent a deadline. It is the ledger's clock, not the downtime: for a serving instance the real downtime
+  starts only when the restore stops it and the line says so. The latest start was checked against the ledger's own
+  arithmetic: starting at it leaves the budget exactly used and one second later breaches it.
+
+- **Data**   
+  For a serving instance the target is fixed and the instance keeps taking writes, so the loss grows by a
+  minute towards the `rpo`. The line says how long until it would pass it and how fast commits are landing
   when the count is exact. For an instance that is down nothing is being written, so the loss does not grow and waiting
   costs downtime, which is the budget line.
 
 Both are information for the approver, not a deadline: the restore measures again just before it stops anything and
 decides on that, as before.
 
-**Saying why, and under which ticket**   
+#### **Saying why and under which ticket**   
 The approval can carry the reason it was given and the ticket it was given under:
 
 ```
@@ -376,15 +399,17 @@ helpdesk-client --pitr-approve <run_id> ... --acknowledge-objective-breach \
   --ticket INC-1234
 ```
 
-Both are recorded in the gate's `recovery_decision` event, so they are inside the audit hash, and `vault incidents`
-prints the ticket on the gate line and the justification under it as the approver's words. The ticket is its own field
-(letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose; the
-justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
-and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike. Neither is
-required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the gateway (Helm:
+Both are recorded in the gate's `recovery_decision` event, so they are inside the audit hash and `vault incidents`
+prints the ticket on the gate line and the justification under it as the approver's words.   
+
+The ticket is its own field (letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose. 
+The justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
+and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike.   
+
+Neither is required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the gateway (Helm:
 `gateway.requireBreachJustification`) and an approval that acknowledges an objective breach is refused, with nothing
 changed, unless it carries a justification of at least 10 characters. Two limits: both are the operator's own words,
-recorded and not verified, and the Decision Hub takes them too (`reason`, `ticket`).
+recorded and not verified and the Decision Hub takes them too (`reason`, `ticket`).
 
 **The loss is measured again just before the instance is stopped**   
 Not taken from the plan. A plan that said `within` can be approved minutes or hours later and a serving instance has gone on committing since, so the
@@ -393,19 +418,22 @@ alone can take a minute and a half) and compares that. If the loss now breaches 
 **before stopping anything** and the refusal says so and how to proceed. A down instance is checked too.
 
 **What is recorded**   
-Every stage of the decision leaves a typed `recovery_decision` audit event: each plan that
-was shown, the gate approval or denial (who and which acknowledgements it carried) and the restore's decision to
-proceed or refuse just before it stops anything, with the reason and, when the remediation hop finishes, how it
-ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the
-verification; not the downtime). Each carries a snapshot of the objectives that
+Every stage of the decision leaves a typed `recovery_decision` audit event:   
+ * each plan that was shown
+ * the gate approval or denial (who and which acknowledgements it carried) 
+ * the restore's decision to proceed or refuse just before it stops anything
+   *  with the reason and 
+   * when the remediation hop finishes, how it ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the verification; not the downtime).   
+
+Each carries a snapshot of the objectives that
 were in force, with where each value came from and a digest of the `infrastructure.json` they were read from and
 the option it was weighing with its measured loss and verdict. Refusals are recorded too, including the ones that
-have nothing to do with the objective (the approved plan no longer matches, a standby, no room). The events are
-covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
+have nothing to do with the objective (the approved plan no longer matches, a standby, no room).   
+
+The events are covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
 is down) the restore is not held up for it, but the plan or result says `decision_unrecorded` and the log carries
 an error, so a restore that ran without its decision on record cannot be mistaken for one that has it. They are
-read back in
-`vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail` and in the incident
+read back in `vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail` and in the incident
 narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 
 `acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
