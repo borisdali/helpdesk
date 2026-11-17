@@ -22,6 +22,9 @@ const (
 	DataDelayFixed = "fixed"
 )
 
+// minRateWindowSeconds is the shortest span a commit rate is given for.
+const minRateWindowSeconds = 60
+
 // DataDelay is what waiting does to the data a restore would discard.
 type DataDelay struct {
 	State string `json:"state"`
@@ -66,7 +69,9 @@ func dataDelayFor(est *DataLossEstimate, serving bool) *DataDelay {
 	}
 	// How fast it is growing in transactions, when the count is exact and there is a
 	// span to divide it by.
-	if t := est.Transactions; t != nil && t.Status == "measured" && t.Commits != nil && !t.AtLeast && window > 0 && *t.Commits > 0 {
+	// A short span says nothing about a rate: three commits in four seconds are not
+	// "45 a minute".
+	if t := est.Transactions; t != nil && t.Status == "measured" && t.Commits != nil && !t.AtLeast && window >= minRateWindowSeconds && *t.Commits > 0 {
 		rate := float64(*t.Commits) * 60 / float64(window)
 		d.CommitsPerMinute = &rate
 		detail += fmt.Sprintf(" (about %s commits a minute have been landing after the target)", rateText(rate))
