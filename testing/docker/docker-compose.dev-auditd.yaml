@@ -1,0 +1,41 @@
+# The audit database of a locally running (host-process) stack: the incidents,
+# approvals, recovery decisions and ledger history that a developer's auditd
+# accumulates across runs and keeps for weeks.
+#
+# It is a Compose project of its own (the `name:` below), with its own volume,
+# so nothing that tears down the test infrastructure can reach it. The test
+# project (docker-compose.yaml, project "docker") has a postgres-auditd service
+# on 15434 too, but that one is disposable: `make integration*` and
+# `make faulttest*` end with `down -v` over it. On 2026-11-18 a running auditd
+# pointed at that service lost all its data to `make integration-nocache`.
+#
+#   make dev-auditd-up      # start it (port 15440), data kept between runs
+#   make dev-auditd-down    # stop it, data kept
+#   make dev-auditd-wipe    # delete the data (asks first)
+#
+# Point auditd at it:
+#   HELPDESK_AUDIT_DB="postgres://postgres:auditddevpass@localhost:15440/auditd?sslmode=disable" go run ./cmd/auditd
+name: helpdesk-dev
+
+services:
+  postgres-auditd-dev:
+    image: postgres:18
+    container_name: helpdesk-dev-pg-auditd
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: auditddevpass
+      POSTGRES_DB: auditd
+    ports:
+      # 15432-15436 belong to the test projects; 15440 keeps clear of them.
+      - "15440:5432"
+    volumes:
+      # postgres:18+ expects a single mount at /var/lib/postgresql.
+      - pgdata-auditd-dev:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata-auditd-dev:

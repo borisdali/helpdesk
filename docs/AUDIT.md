@@ -712,6 +712,14 @@ HELPDESK_AUDIT_DB="postgres://user:pass@auditd-db.internal:5432/auditd?sslmode=r
   go run ./cmd/auditd/
 ```
 
+For a stack running on a developer's machine, `make dev-auditd-up` starts a Postgres for it (port 15440, its own
+Compose project and volume, `testing/docker/docker-compose.dev-auditd.yaml`) and prints the DSN to use. Keep it apart
+from the test infrastructure: the `postgres-auditd` service on 15434 in `testing/docker/docker-compose.yaml` is
+disposable, and `make integration*` and `make faulttest*` end with `down -v` over it, which deletes the volume under a
+running auditd (the next queries fail with `relation "audit_events" does not exist` until auditd is restarted, and
+then the history is gone). `make dev-auditd-down` stops the dev database and keeps its data; `make dev-auditd-wipe`
+deletes it, after asking.
+
 On Helm, set `governance.auditd.dsnSecret` to a Secret name containing the
 DSN (key `dsn` by default, overridable via `governance.auditd.dsnSecretKey`)
 instead of setting `HELPDESK_AUDIT_DB` directly:
