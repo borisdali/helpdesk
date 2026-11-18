@@ -97,6 +97,10 @@ func TestDataDelay_NoObjectiveAndNoRate(t *testing.T) {
 	if d := dataDelayFor(liveEstimate(60, i64(600), RPOWithin, ptrInt(3), false), true); d.CommitsPerMinute == nil || *d.CommitsPerMinute != 3 {
 		t.Errorf("a rate from 60 seconds: %+v", d)
 	}
+	// Found live: three commits over an hour printed as "about 0.0 commits a minute".
+	if d := dataDelayFor(liveEstimate(4000, i64(600), RPOExceeds, ptrInt(3), false), true); d.CommitsPerMinute != nil || strings.Contains(d.Detail, "commits a minute") {
+		t.Errorf("a rate that prints as 0.0: %+v", d)
+	}
 	// A small rate keeps a decimal; a large one does not.
 	if d := dataDelayFor(liveEstimate(600, nil, "", ptrInt(15), false), true); !strings.Contains(d.Detail, "about 1.5 commits a minute") {
 		t.Errorf("small rate: %q", d.Detail)

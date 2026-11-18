@@ -199,13 +199,16 @@ approve() {
 }
 if [ "${ACK_BREACH:-auto}" = no ]; then
   # Show what the second yes does: this approval is expected to be refused (or the
-  # restore refused) when the plan asks for an acknowledgement. The gate stays open.
+  # restore refused) when the plan asks for an acknowledgement. The gateway cannot
+  # tell: it accepts the approval, and the restore tool refuses at the moment it would
+  # stop the instance. That uses the gate up (a gate is approved once), so the incident
+  # ends needs_human and a new triage, with a new gate, is the way on.
   if approve; then
     echo
     echo "the gateway accepted the approval. When the plan asks for the acknowledgement the restore tool is expected to refuse"
-    echo "it (see the incident below); the instance is not stopped. To approve again with the acknowledgement:"
-    echo "  HELPDESK_GATEWAY_URL=$GW HELPDESK_CLIENT_API_KEY=... go run ./cmd/helpdesk-client --user $APPROVER --pitr-approve $RUN \\"
-    echo "    --recovery-target-type time --recovery-target $TARGET --plan-digest $DIGEST --acknowledge-data-loss --allow-stop-serving --acknowledge-objective-breach"
+    echo "it (see the incident below) and the instance is not stopped. The gate is then USED UP (a gate is approved once):"
+    echo "start the triage again for a new gate and approve that one with --acknowledge-objective-breach, for example by"
+    echo "running this script again with ACK_BREACH=yes."
   else
     echo
     echo "refused, as expected when the plan asks for the acknowledgement. The gate is still open; approve it with:"
