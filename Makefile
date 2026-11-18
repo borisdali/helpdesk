@@ -151,7 +151,7 @@ faulttest-gateway-pgbackrest:       FAULTTEST_LOG = /tmp/helpdesk-faulttest-gate
 faulttest-pitr:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-pitr.log
 
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
-SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
+SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- SKIP:/{s++; k=$$0; sub(/^[[:space:]]*--- SKIP: /,"",k); skips=skips"\n    "k} /^SKIP:/{pk++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:   %d\n  Passed:  %d\n  Failed:  %d\n  Skipped: %d\n",p+f+s,p,f,s; if(f>0){print "  Failing tests:"fails}; if(s>0){print "  Skipped tests (a skip is not a pass; check each ran where you expect):"skips}; if(pk>0){print "  WARNING: "pk" package(s) skipped entirely (see the SKIP: lines above); none of their tests ran"}}'
 
 integration:
 	@echo "Starting test infrastructure..."
@@ -168,7 +168,9 @@ integration:
 	# testing/docker/docker-compose.yaml's own comment for why they must stay
 	# separate. Exercises internal/audit's Postgres backend, otherwise never
 	# run anywhere.
-	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+	# HELPDESK_REQUIRE_INFRA: this target brings the infrastructure up, so a test
+	# that cannot find it fails instead of skipping (a bare `go test` still skips).
+	-HELPDESK_REQUIRE_INFRA=1 POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
 		go test -tags integration -timeout 900s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
@@ -183,7 +185,7 @@ integration-nocache:
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
 	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
-	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+	-HELPDESK_REQUIRE_INFRA=1 POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
 		go test --count=1 -tags integration -timeout 900s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
