@@ -16,6 +16,9 @@ func rdI(n int64) *int64     { return &n }
 func rdU(n uint64) *uint64   { return &n }
 func rdF(n float64) *float64 { return &n }
 
+// rdUnwrap reads wrapped text as the one line it was before it was wrapped.
+func rdUnwrap(s string) string { return strings.Join(strings.Fields(s), " ") }
+
 func rdAt(m int) time.Time { return time.Date(2026, 11, 4, 14, m, 0, 0, time.UTC) }
 
 func rdObjectivesFixture(digest string) *audit.ObjectivesInForce {
@@ -68,7 +71,7 @@ func TestRDBudget(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rdBudget(tc.o); got != tc.want {
+			if got := rdBudget(tc.o); rdUnwrap(got) != rdUnwrap(tc.want) {
 				t.Errorf("\n got  %q\n want %q", got, tc.want)
 			}
 		})
@@ -104,6 +107,7 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 			Approval:   &audit.ApprovalFacts{ApprovedBy: "alice"}, Options: []audit.DecisionOption{rdOptionFixture(true)}}},
 	})
 	t.Log("\n" + out) // shown with -v: how the section reads
+	flat := rdUnwrap(out)
 	for _, want := range []string{
 		"Objectives in force (environment prod), config 0123456789abcdef:",
 		"rpo 15m 00s [environment:prod]", "rto 30m 00s [default]", "availability 99.95% [database]",
@@ -114,7 +118,7 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 		"point_in_time_restore (chosen): loss 18h 12m, 16.0 MiB of WAL (live_instance, exact) → exceeds; needed the breach acknowledged",
 		"[time=2026-11-04T01:39:07Z]",
 	} {
-		if !strings.Contains(out, want) {
+		if !strings.Contains(flat, rdUnwrap(want)) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
@@ -634,6 +638,7 @@ func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
 	}
 	withBytes := render(audit.DecisionOption{Name: "point_in_time_restore", LossBasis: "live_instance", LossBytes: rdU(448 << 20),
 		LossAtLeastSeconds: rdI(16*86400 + 13*3600 + 28*60), Verdict: "exceeds", Gate: "refuse"})
+	withBytes = rdUnwrap(withBytes)
 	for _, want := range []string{"loss 448.0 MiB of WAL (live_instance, exact); at least 16d 13h 28m of history", "→ exceeds", "enforcement refuses it"} {
 		if !strings.Contains(withBytes, want) {
 			t.Errorf("missing %q in:\n%s", want, withBytes)
@@ -734,6 +739,32 @@ func TestIncidentNarrative_DecodesRecoveryDecisionsFromTheGateway(t *testing.T) 
 	}
 }
 
+// A duration is never split across lines, and a long stage line continues under
+// its own text.
+func TestRDWrap_KeepsDurationsWhole(t *testing.T) {
+	got := rdWrap("took 1m 29s (3s under) and then 11m 55s the open incident had used, 1h 06m more", 20, "  ")
+	for _, bad := range []string{"1m\n", "11m\n", "1h\n"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("a duration was split (%q):\n%s", bad, got)
+		}
+	}
+	if rdUnwrap(got) != "took 1m 29s (3s under) and then 11m 55s the open incident had used, 1h 06m more" {
+		t.Errorf("text changed:\n%s", got)
+	}
+
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(2), Decision: audit.RecoveryDecision{
+		Stage: "gate", Decision: "approved", DecidedBy: "alice@example.com", RecoveryTarget: "time=2026-11-18T02:49:55Z",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, AcknowledgedBreach: true, Ticket: "INC-1239"}}}})
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if len([]rune(l)) > 29+1+80 {
+			t.Errorf("stage line too wide (%d): %q", len([]rune(l)), l)
+		}
+	}
+	if !strings.Contains(out, "\n                              ") {
+		t.Errorf("no continuation under the text:\n%s", out)
+	}
+}
+
 // A long row continues under its own text, never back under the label.
 func TestRDPlanVsActual_RowsWrapUnderTheText(t *testing.T) {
 	ds := []narrativeRecoveryDecision{
@@ -765,7 +796,7 @@ func TestRDPlanVsActual_RowsWrapUnderTheText(t *testing.T) {
 	}
 	// The footnote and the header are not touched.
 	out := strings.Join(lines, "\n")
-	if !strings.Contains(out, "\n  discarded is not counted afterwards") || !strings.Contains(out, "  ═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened") {
+	if !strings.Contains(out, "\n                 \"at the stop\" is measured") || !strings.Contains(out, "\n                 instance; what was discarded is not counted afterwards") || !strings.Contains(out, "  ═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened") {
 		t.Errorf("header or footnote changed:\n%s", out)
 	}
 }

@@ -6,12 +6,49 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
+
+var (
+	rdSpanHead = regexp.MustCompile(`\d+[dhm]$`)
+	rdSpanTail = regexp.MustCompile(`^\d+[hms]`)
+)
+
+// rdWrap wraps text at width characters, continuing under indent, like wordWrap,
+// but never between the parts of a duration: "1m 29s" stays on one line.
+func rdWrap(text string, width int, indent string) string {
+	const glue = " "
+	var words []string
+	for _, w := range strings.Fields(text) {
+		if n := len(words); n > 0 && rdSpanHead.MatchString(words[n-1]) && rdSpanTail.MatchString(w) {
+			words[n-1] += glue + w
+			continue
+		}
+		words = append(words, w)
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		switch {
+		case cur == "":
+			cur = w
+		case len([]rune(cur))+1+len([]rune(w)) <= width:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return strings.ReplaceAll(strings.Join(lines, "\n"+indent), glue, " ")
+}
 
 // narrativeRecoveryDecision mirrors the gateway's RecoveryDecisionRecord.
 type narrativeRecoveryDecision struct {
@@ -89,7 +126,8 @@ func rdBudget(o *audit.ObjectivesInForce) string {
 	if b.Contradictory {
 		prefix = "  ⚠ budget: "
 	}
-	return prefix + b.Detail
+	// A long detail continues under itself, not under the label.
+	return prefix + rdWrap(b.Detail, 80, strings.Repeat(" ", len([]rune(prefix))))
 }
 
 // rdObjectives renders the objectives that were in force, with where each came
@@ -274,7 +312,9 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		if !d.At.IsZero() {
 			stamp = d.At.UTC().Format("15:04:05")
 		}
+		lineStart := b.Len()
 		fmt.Fprintf(&b, "%s  %-9s %-9s", stamp, rd.Stage, rd.Decision)
+		textStart := b.Len()
 		switch rd.Stage {
 		case audit.RecoveryStageGate:
 			who := rd.DecidedBy
@@ -321,11 +361,18 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		if rd.RecoveryTarget != "" && rd.Stage != audit.RecoveryStageExecution {
 			fmt.Fprintf(&b, "  [%s]", rd.RecoveryTarget)
 		}
+		// The stage line continues under its own text, not under the stamp.
+		if all := b.String(); strings.TrimSpace(all[textStart:]) != "" {
+			head, text := all[:textStart], strings.TrimSpace(all[textStart:])
+			b.Reset()
+			b.WriteString(head + " ")
+			b.WriteString(rdWrap(text, 80, strings.Repeat(" ", len([]rune(all[lineStart:textStart]))+1)))
+		}
 		b.WriteString("\n")
 		// Detail lines sit under the decision column (stamp, stage, decision).
 		const under = "                    "
 		for _, opt := range rd.Options {
-			b.WriteString(under + rdOption(opt) + "\n")
+			b.WriteString(under + rdWrap(rdOption(opt), 80, under+"  ") + "\n")
 		}
 		if rd.Reason != "" {
 			b.WriteString(under + "reason: " + wordWrap(rd.Reason, 60, under+"        ") + "\n")
@@ -499,9 +546,10 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 		head += " of " + at.UTC().Format("15:04:05")
 	}
 	head += " against what happened"
-	return append(append([]string{head}, lines...),
-		"  \"at the stop\" is measured immediately before the restore stops the instance; what was",
-		"  discarded is not counted afterwards")
+	// The note sits under the rows' text, not under their labels.
+	note := rdRowIndent + rdWrap("\"at the stop\" is measured immediately before the restore stops the instance; "+
+		"what was discarded is not counted afterwards", 70, rdRowIndent)
+	return append(append([]string{head}, lines...), note)
 }
 
 // rdRowIndent is where a row's text starts: two spaces and a label of 13.
@@ -516,7 +564,7 @@ func rdWrapRows(lines []string) []string {
 		// A row has its label in columns 2-14 and two spaces before the text.
 		n := len(rdRowIndent)
 		if len(l) > n && strings.HasPrefix(l, "  ") && l[2] != ' ' && l[n-2:n] == "  " && !strings.HasPrefix(l, "  ═") {
-			out = append(out, l[:len(rdRowIndent)]+wordWrap(l[len(rdRowIndent):], 70, rdRowIndent))
+			out = append(out, l[:len(rdRowIndent)]+rdWrap(l[len(rdRowIndent):], 70, rdRowIndent))
 			continue
 		}
 		out = append(out, l)
