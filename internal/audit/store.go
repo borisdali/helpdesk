@@ -217,6 +217,7 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		purpose TEXT,
 		purpose_note TEXT,
 		origin TEXT,
+		ticket TEXT,
 		tool_name TEXT,
 		tool_json TEXT,
 		approval_status TEXT,
@@ -258,10 +259,12 @@ func createTables(db *sql.DB, isPostgres bool) error {
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "purpose_note TEXT",
 		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "origin TEXT",
+		"ALTER TABLE audit_events ADD COLUMN " + ifNotExists + "ticket TEXT",
 	}
 	for _, m := range migrations {
 		db.Exec(m) //nolint:errcheck
 	}
+	backfillTickets(db, isPostgres)
 
 	// Create indexes (safe to run multiple times with IF NOT EXISTS).
 	indexes := `
