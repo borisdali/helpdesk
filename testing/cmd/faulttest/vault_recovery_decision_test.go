@@ -765,6 +765,40 @@ func TestRDWrap_KeepsDurationsWhole(t *testing.T) {
 	}
 }
 
+func TestRDWrap_EdgeCases(t *testing.T) {
+	// A word longer than the width is kept whole on a line of its own.
+	long := strings.Repeat("x", 30)
+	if got := rdWrap("a "+long+" b", 10, "  "); got != "a\n  "+long+"\n  b" {
+		t.Errorf("long word: %q", got)
+	}
+	// A unit followed by a number with no unit of its own is not a duration.
+	if got := rdWrap("after 5m 12 commits", 4, ""); got != "after\n5m\n12\ncommits" {
+		t.Errorf("a number that is not a duration was glued: %q", got)
+	}
+	// Three-part spans and a span with trailing punctuation stay whole.
+	if got := rdWrap("lost 16d 13h 28m, then", 12, ""); got != "lost\n16d 13h 28m,\nthen" {
+		t.Errorf("a long span was split: %q", got)
+	}
+	// Nothing, and only spaces.
+	if rdWrap("", 10, "  ") != "" || rdWrap("   ", 10, "  ") != "" {
+		t.Error("empty text is not empty")
+	}
+
+	// An event with no time is stamped "–", one column narrower than a time; the
+	// continuation still sits under the text.
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{Decision: audit.RecoveryDecision{
+		Stage: "gate", Decision: "approved", DecidedBy: "alice@example.com",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, AcknowledgedBreach: true, Ticket: "INC-1239"}}}})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "      –  gate") {
+		t.Fatalf("unexpected rendering:\n%s", out)
+	}
+	textCol := len([]rune("      –  gate      approved ")) // the text starts after this and a space
+	if want := strings.Repeat(" ", textCol+1); !strings.HasPrefix(lines[1], want) || strings.TrimSpace(lines[1][len(want)-1:]) == "" {
+		t.Errorf("continuation is not under the text:\n%s", out)
+	}
+}
+
 // A long row continues under its own text, never back under the label.
 func TestRDPlanVsActual_RowsWrapUnderTheText(t *testing.T) {
 	ds := []narrativeRecoveryDecision{

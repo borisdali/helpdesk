@@ -54,7 +54,10 @@ func TestRecoveryDecision_Postgres(t *testing.T) {
 		Objectives: &audit.ObjectivesInForce{RPOSeconds: i64(900), RPOSource: "environment:prod", Enforcement: "acknowledge", ConfigDigest: "ab12cd34ef56ab12"},
 		Options: []audit.DecisionOption{{Name: "point_in_time_restore", LossBasis: "archive_end", LossUpperBound: true,
 			LossBytes: u64(5 << 40), LossAtLeastSeconds: i64(16*86400 + 13*3600), LossAtLeastBasis: "the segment holding the target reached the repository at …",
-			Verdict: "exceeds", Gate: "acknowledge"}},
+			Verdict: "exceeds", Gate: "acknowledge",
+			// The budget as the plan saw it: spent already (negative) with the open
+			// incident's age taken off.
+			BudgetVerdict: "exceeds", BudgetRemainingSeconds: i64(-428), BudgetPendingSeconds: i64(711)}},
 	}
 	exec := audit.RecoveryDecision{
 		Stage: audit.RecoveryStageExecution, Decision: audit.RecoveryDecisionRefused, Tool: "restore_to_point_in_time",
@@ -72,8 +75,9 @@ func TestRecoveryDecision_Postgres(t *testing.T) {
 	secs := int64(41*60 + 12)
 	for _, d := range []audit.RecoveryDecision{
 		{Stage: audit.RecoveryStageGate, Decision: audit.RecoveryDecisionApproved, DecidedBy: "alice", RunID: run,
-			Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true}},
-		{Stage: audit.RecoveryStageOutcome, Decision: audit.OutcomeResolved, RunID: run, DurationSeconds: &secs},
+			Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true,
+				Justification: "testing the cost of waiting", Ticket: "INC-1239"}},
+		{Stage: audit.RecoveryStageOutcome, Decision: audit.OutcomeResolved, RunID: run, DurationSeconds: &secs, IncidentSeconds: i64(798)},
 	} {
 		if err := store.Record(ctx, audit.NewRecoveryDecisionEvent(run, "", d)); err != nil {
 			t.Fatalf("recording %s: %v", d.Stage, err)
@@ -97,8 +101,17 @@ func TestRecoveryDecision_Postgres(t *testing.T) {
 		p.Objectives.ConfigDigest != "ab12cd34ef56ab12" || p.PlanDigest != "0123456789abcdef" {
 		t.Errorf("plan payload changed on the way: %+v", p)
 	}
-	if o := byStage[audit.RecoveryStageOutcome]; o.DurationSeconds == nil || *o.DurationSeconds != 41*60+12 {
+	if o := byStage[audit.RecoveryStageOutcome]; o.DurationSeconds == nil || *o.DurationSeconds != 41*60+12 ||
+		o.IncidentSeconds == nil || *o.IncidentSeconds != 798 {
 		t.Errorf("outcome payload: %+v", o)
+	}
+	// The budget figures, a negative one among them, and the approver's own words.
+	if b := p.Options[0]; b.BudgetRemainingSeconds == nil || *b.BudgetRemainingSeconds != -428 ||
+		b.BudgetPendingSeconds == nil || *b.BudgetPendingSeconds != 711 || b.BudgetVerdict != "exceeds" {
+		t.Errorf("budget fields changed on the way: %+v", b)
+	}
+	if g := byStage[audit.RecoveryStageGate]; g.Approval == nil || g.Approval.Ticket != "INC-1239" || g.Approval.Justification != "testing the cost of waiting" {
+		t.Errorf("gate approval changed on the way: %+v", g.Approval)
 	}
 	byRun, err := store.Query(ctx, audit.QueryOptions{TraceIDPrefix: run, EventType: audit.EventTypeRecoveryDecision})
 	if err != nil || len(byRun) != 2 {
@@ -134,6 +147,27 @@ func TestRecoveryDecision_Postgres(t *testing.T) {
 	status, err := store.VerifyIntegrity(ctx)
 	if err != nil || !status.Valid || status.TotalEvents != 5 {
 		t.Fatalf("chain = %+v, %v", status, err)
+	}
+
+	// The incident length is covered by the hash: lengthening it at rest breaks the
+	// chain, and putting it back mends it.
+	var outID, outRaw string
+	if err := store.DB().QueryRowContext(ctx,
+		`SELECT event_id, raw_json FROM audit_events WHERE event_type = 'recovery_decision' AND raw_json LIKE '%"incident_seconds":798%' LIMIT 1`).Scan(&outID, &outRaw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE audit_events SET raw_json = ? WHERE event_id = ?`,
+		strings.Replace(outRaw, `"incident_seconds":798`, `"incident_seconds":1`, 1), outID); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := store.VerifyIntegrity(ctx); err != nil || status.Valid {
+		t.Errorf("an edited incident length verified on Postgres: %+v, %v", status, err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE audit_events SET raw_json = ? WHERE event_id = ?`, outRaw, outID); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := store.VerifyIntegrity(ctx); err != nil || !status.Valid {
+		t.Fatalf("the chain did not mend when the edit was undone: %+v, %v", status, err)
 	}
 
 	// And editing a recovery decision at rest breaks it, on this backend too.
