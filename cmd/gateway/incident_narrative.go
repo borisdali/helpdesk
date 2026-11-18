@@ -312,7 +312,7 @@ func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 			return
 		case err != nil:
 			slog.Error("handleGetIncident: failed to resolve incident", "incident_id", runID, "err", err)
-			writeError(w, http.StatusInternalServerError, "failed to look up the incident")
+			writeError(w, http.StatusBadGateway, "could not look up the incident in the audit service: "+err.Error())
 			return
 		case entry == "":
 			writeError(w, http.StatusNotFound, "incident "+runID+" has no entry run to show a narrative for")
