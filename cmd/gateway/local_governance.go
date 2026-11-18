@@ -106,6 +106,9 @@ func localHandleEvents(store *audit.Store) http.HandlerFunc {
 				opts.Since = t
 			}
 		}
+		if v := q.Get("ticket"); v != "" {
+			opts.Ticket = v
+		}
 		if v := q.Get("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				opts.Limit = n

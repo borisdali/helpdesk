@@ -2405,7 +2405,8 @@ func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
 	var details, summary bool
-	var origin, status, attribution string
+	var origin, status, attribution, ticket string
+	fs.StringVar(&ticket, "ticket", "", "List the approvals given under this ticket (e.g. INC-1234) instead of incidents")
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
 	fs.BoolVar(&summary, "summary", false, "Deep-dive mode only: print one line per hop instead of the full breakdown")
@@ -2417,6 +2418,10 @@ func vaultIncidents(args []string) {
 	if cfg.GatewayURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents")
 		os.Exit(1)
+	}
+	if ticket != "" {
+		vaultIncidentsByTicket(cfg, strings.TrimSpace(ticket), limit)
+		return
 	}
 	if len(fs.Args()) == 0 {
 		vaultIncidentsRecent(cfg, limit, details, origin, status, attribution)

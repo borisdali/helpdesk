@@ -277,9 +277,48 @@ func createTables(db *sql.DB, isPostgres bool) error {
 	CREATE INDEX IF NOT EXISTS idx_events_action_class ON audit_events(action_class);
 	CREATE INDEX IF NOT EXISTS idx_events_tool ON audit_events(tool_name);
 	CREATE INDEX IF NOT EXISTS idx_events_approval ON audit_events(approval_status);
+	CREATE INDEX IF NOT EXISTS idx_events_ticket ON audit_events(ticket);
 	`
 	_, err := db.Exec(indexes)
 	return err
+}
+
+// eventTicket is the ticket an event was recorded under: the reference a
+// point-in-time approval was given under, on the recovery decision that carries
+// the approval. Kept in its own column so events can be found by it; the
+// authoritative copy stays in the event's JSON, which the hash chain covers.
+func eventTicket(e *Event) string {
+	if e != nil && e.RecoveryDecision != nil && e.RecoveryDecision.Approval != nil {
+		return e.RecoveryDecision.Approval.Ticket
+	}
+	return ""
+}
+
+// backfillTickets sets the ticket column of recovery decisions recorded before
+// the column existed. A row it has looked at gets "" if it has no ticket, so it
+// is not looked at again; a failure leaves the rest for the next start.
+func backfillTickets(db *sql.DB, isPostgres bool) {
+	rows, err := db.Query(`SELECT event_id, raw_json FROM audit_events WHERE event_type = 'recovery_decision' AND ticket IS NULL`)
+	if err != nil {
+		return
+	}
+	type pending struct{ id, ticket string }
+	var todo []pending
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			continue
+		}
+		var e Event
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			continue
+		}
+		todo = append(todo, pending{id, eventTicket(&e)})
+	}
+	rows.Close()
+	for _, p := range todo {
+		db.Exec(rebind(isPostgres, `UPDATE audit_events SET ticket = ? WHERE event_id = ?`), p.ticket, p.id) //nolint:errcheck
+	}
 }
 
 // Record persists an audit event and notifies listeners.
@@ -399,12 +438,12 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 			event_id, timestamp, event_type, trace_id, parent_id, action_class,
 			prev_hash, event_hash,
 			session_id, session_agent, user_id, user_query,
-			purpose, purpose_note, origin,
+			purpose, purpose_note, origin, ticket,
 			tool_name, tool_json,
 			approval_status, approval_json,
 			decision_agent, decision_category, decision_confidence, decision_json,
 			outcome_status, outcome_error, outcome_duration_ms, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`),
 		event.EventID,
 		event.Timestamp.UTC().Format(sqliteTimeFormat),
@@ -421,6 +460,7 @@ func (s *Store) Record(ctx context.Context, event *Event) error {
 		purposeVal,
 		purposeNoteVal,
 		event.Origin,
+		eventTicket(event),
 		toolName,
 		string(toolJSON),
 		approvalStatus,
@@ -530,6 +570,10 @@ func (s *Store) Query(ctx context.Context, opts QueryOptions) ([]Event, error) {
 		query += " AND origin = ?"
 		args = append(args, opts.Origin)
 	}
+	if opts.Ticket != "" {
+		query += " AND ticket = ?"
+		args = append(args, opts.Ticket)
+	}
 
 	// Chronological order for trace/prefix queries, reverse chronological otherwise
 	if opts.TraceID != "" || opts.TraceIDPrefix != "" {
@@ -584,6 +628,7 @@ type QueryOptions struct {
 	ApprovalStatus ApprovalStatus // filter by approval status
 	OutcomeStatus  string         // filter by outcome_status (e.g. "error", "denied", "allow")
 	Origin         string         // filter by origin (e.g. "direct_tool", "agent", "gateway")
+	Ticket         string         // filter by the ticket a point-in-time approval was given under (exact match)
 }
 
 // JourneyOptions specifies filters for QueryJourneys.

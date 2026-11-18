@@ -166,6 +166,9 @@ func (r *RemoteStore) Query(ctx context.Context, opts QueryOptions) ([]Event, er
 	if opts.Origin != "" {
 		q.Set("origin", opts.Origin)
 	}
+	if opts.Ticket != "" {
+		q.Set("ticket", opts.Ticket)
+	}
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
 	}

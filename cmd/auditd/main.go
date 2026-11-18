@@ -579,6 +579,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("tool_name"); v != "" {
 		opts.ToolName = v
 	}
+	if v := r.URL.Query().Get("ticket"); v != "" {
+		opts.Ticket = v
+	}
 
 	events, err := s.store.Query(r.Context(), opts)
 	if err != nil {

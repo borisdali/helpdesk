@@ -113,6 +113,15 @@ func TestRecoveryDecision_Postgres(t *testing.T) {
 	if g := byStage[audit.RecoveryStageGate]; g.Approval == nil || g.Approval.Ticket != "INC-1239" || g.Approval.Justification != "testing the cost of waiting" {
 		t.Errorf("gate approval changed on the way: %+v", g.Approval)
 	}
+	// The ticket is a column of its own on this backend too: found by exact match,
+	// and not by a prefix of it.
+	if byTicket, err := store.Query(ctx, audit.QueryOptions{Ticket: "INC-1239"}); err != nil || len(byTicket) != 1 ||
+		byTicket[0].RecoveryDecision == nil || byTicket[0].RecoveryDecision.Stage != audit.RecoveryStageGate {
+		t.Errorf("by ticket: %d events, %v", len(byTicket), err)
+	}
+	if byPrefix, err := store.Query(ctx, audit.QueryOptions{Ticket: "INC-123"}); err != nil || len(byPrefix) != 0 {
+		t.Errorf("a prefix of the ticket matched: %d events, %v", len(byPrefix), err)
+	}
 	byRun, err := store.Query(ctx, audit.QueryOptions{TraceIDPrefix: run, EventType: audit.EventTypeRecoveryDecision})
 	if err != nil || len(byRun) != 2 {
 		t.Errorf("by the run's key: %d events, %v", len(byRun), err)
