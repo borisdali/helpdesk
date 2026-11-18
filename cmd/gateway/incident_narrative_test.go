@@ -138,6 +138,17 @@ func (m *mockIncidentAuditd) server(t *testing.T) *httptest.Server {
 				"playbooks": []map[string]any{{"series_id": seriesID, "playbook_type": pbType}},
 			})
 
+		// Incidents-table lookup by incident ID — GET /v1/incidents/{incidentID}.
+		case strings.HasPrefix(path, "/v1/incidents/inc_"):
+			id := strings.TrimPrefix(path, "/v1/incidents/")
+			for _, inc := range m.incidentRecordByRunID {
+				if inc.IncidentID == id {
+					json.NewEncoder(w).Encode(inc) //nolint:errcheck
+					return
+				}
+			}
+			http.NotFound(w, r)
+
 		// Incidents-table lookup by entry_run_id — GET /v1/incidents/by-run/{runID}.
 		case strings.Contains(path, "/v1/incidents/by-run/"):
 			runID := strings.TrimPrefix(path, "/v1/incidents/by-run/")
@@ -223,6 +234,44 @@ func TestHandleGetIncident_BasicNarrative(t *testing.T) {
 	}
 	if n.IncidentRecord != nil {
 		t.Errorf("IncidentRecord should be nil when no incidents-table row exists for this run, got %+v", n.IncidentRecord)
+	}
+}
+
+// An incident ID is accepted where a run ID is: the narrative is the one of its
+// entry run, and an unknown incident, or one with no entry run, is a 404.
+func TestHandleGetIncident_AcceptsAnIncidentID(t *testing.T) {
+	run := &audit.PlaybookRun{RunID: "plr_byinc01", SeriesID: "pbs_db_lock", FindingsSummary: "Lock chain",
+		Outcome: audit.OutcomeResolved, Operator: "alice", StartedAt: time.Now().UTC()}
+	mock := &mockIncidentAuditd{
+		triageRun: run,
+		incidentRecordByRunID: map[string]*audit.Incident{
+			"plr_byinc01": {IncidentID: "inc_with_run", EntryRunID: "plr_byinc01", Origin: "real", Status: "resolved"},
+			"":            {IncidentID: "inc_no_run", Origin: "real", Status: "open"},
+		},
+	}
+	gw := &Gateway{auditURL: mock.server(t).URL}
+
+	rec := getIncident(t, gw, "inc_with_run")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var n IncidentNarrative
+	if err := json.NewDecoder(rec.Body).Decode(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n.IncidentID != "plr_byinc01" || n.Triage.RunID != "plr_byinc01" || n.Triage.Findings != "Lock chain" {
+		t.Errorf("narrative = %+v", n)
+	}
+	// The same narrative as by the run.
+	if byRun := getIncident(t, gw, "plr_byinc01"); byRun.Code != http.StatusOK {
+		t.Errorf("by run: %d", byRun.Code)
+	}
+
+	if rec := getIncident(t, gw, "inc_unknown"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "incident not found") {
+		t.Errorf("unknown incident: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := getIncident(t, gw, "inc_no_run"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "no entry run") {
+		t.Errorf("incident with no entry run: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

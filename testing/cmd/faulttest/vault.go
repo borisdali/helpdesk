@@ -2384,7 +2384,7 @@ func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, s
 		fmt.Println()
 	}
 	fmt.Println()
-	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
+	fmt.Println("  → vault incidents <plr_*|inc_*>     full incident narrative (by entry run or incident ID)")
 	fmt.Println("  → vault incidents <fault-id>        all runs for a fault (per-hop detail)")
 	fmt.Println("  → vault incidents --details         show JOURNEYS count")
 	fmt.Println("  → vault incidents --origin real     real incidents only (excludes faulttest)")
@@ -2430,8 +2430,9 @@ func vaultIncidents(args []string) {
 
 	arg := fs.Args()[0]
 
-	// Deep-dive mode: when arg is a run ID (plr_*), print the full incident journey.
-	if strings.HasPrefix(arg, "plr_") {
+	// Deep-dive mode: when arg is a run ID (plr_*) or an incident ID (inc_*, which
+	// the gateway resolves to its entry run), print the full incident journey.
+	if strings.HasPrefix(arg, "plr_") || strings.HasPrefix(arg, "inc_") {
 		if cfg.GatewayURL == "" {
 			fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents <run-id>")
 			os.Exit(1)
