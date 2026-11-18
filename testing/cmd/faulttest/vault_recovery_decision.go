@@ -341,7 +341,7 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		b.WriteString("\n  recovery duration is the remediation hop after the approval (restore, restart, verify);\n" +
 			"  it is not the downtime, which began earlier and also includes the wait for the approval\n")
 		if lines := rdPlanVsActual(ds); len(lines) > 0 {
-			b.WriteString("\n" + strings.Join(lines, "\n") + "\n")
+			b.WriteString("\n" + strings.Join(rdWrapRows(lines), "\n") + "\n")
 		}
 	}
 	return b.String()
@@ -502,6 +502,26 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 	return append(append([]string{head}, lines...),
 		"  \"at the stop\" is measured immediately before the restore stops the instance; what was",
 		"  discarded is not counted afterwards")
+}
+
+// rdRowIndent is where a row's text starts: two spaces and a label of 13.
+const rdRowIndent = "                 "
+
+// rdWrapRows wraps the plan-vs-actual rows that are a label and a text, so a long
+// text continues under itself and not under the label. The header and the
+// footnote lines have no label column and are left as they are.
+func rdWrapRows(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		// A row has its label in columns 2-14 and two spaces before the text.
+		n := len(rdRowIndent)
+		if len(l) > n && strings.HasPrefix(l, "  ") && l[2] != ' ' && l[n-2:n] == "  " && !strings.HasPrefix(l, "  ═") {
+			out = append(out, l[:len(rdRowIndent)]+wordWrap(l[len(rdRowIndent):], 70, rdRowIndent))
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // rdRTOVerdict sets a recovery duration against the rto that was in force, for

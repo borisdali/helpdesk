@@ -733,3 +733,39 @@ func TestIncidentNarrative_DecodesRecoveryDecisionsFromTheGateway(t *testing.T) 
 		t.Errorf("rendered:\n%s", out)
 	}
 }
+
+// A long row continues under its own text, never back under the label.
+func TestRDPlanVsActual_RowsWrapUnderTheText(t *testing.T) {
+	ds := []narrativeRecoveryDecision{
+		{At: rdAt(1), Decision: audit.RecoveryDecision{Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{{
+			Name: "point_in_time_restore", BudgetVerdict: "within", BudgetRemainingSeconds: rdI(287)}}}},
+		{At: rdAt(3), Decision: audit.RecoveryDecision{Stage: "execution", Decision: "proceeded", Options: []audit.DecisionOption{{Name: "point_in_time_restore", Chosen: true}}}},
+		{At: rdAt(5), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: rdI(89), IncidentSeconds: rdI(798)}},
+	}
+	var lines []string
+	for _, l := range rdWrapRows(rdPlanVsActual(ds)) {
+		lines = append(lines, strings.Split(l, "\n")...)
+	}
+	rows := 0
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "  budget         ") {
+			continue
+		}
+		rows++
+		if len(l) > 17+70 {
+			t.Errorf("row too wide (%d): %q", len(l), l)
+		}
+		next := lines[i+1]
+		if !strings.HasPrefix(next, strings.Repeat(" ", 17)) || strings.TrimSpace(next) == "" {
+			t.Errorf("continuation is not under the text: %q", next)
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("budget rows = %d:\n%s", rows, strings.Join(lines, "\n"))
+	}
+	// The footnote and the header are not touched.
+	out := strings.Join(lines, "\n")
+	if !strings.Contains(out, "\n  discarded is not counted afterwards") || !strings.Contains(out, "  ═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened") {
+		t.Errorf("header or footnote changed:\n%s", out)
+	}
+}
