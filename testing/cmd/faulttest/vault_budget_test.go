@@ -30,6 +30,31 @@ func lInc(id, status string, series []string, start, end time.Duration) availabi
 	return inc
 }
 
+// The ticket a restore was approved under shows on its incident's line, charged
+// or not, and a line with none has no trailing label.
+func TestFormatLedger_ShowsTheTicketOnTheIncident(t *testing.T) {
+	restart := []string{"pbs_db_restart_triage", "pbs_pgbackrest_restore_remediate"}
+	a := lInc("inc_ticketed", audit.IncidentStatusResolved, restart, 5*time.Hour, 5*time.Hour-20*time.Minute)
+	a.EntryRunID = "plr_a"
+	b := lInc("inc_plain", audit.IncidentStatusResolved, restart, 3*time.Hour, 3*time.Hour-10*time.Minute)
+	b.EntryRunID = "plr_b"
+	c := lInc("inc_human", audit.IncidentStatusNeedsHuman, restart, 2*time.Hour, 2*time.Hour-10*time.Minute)
+	c.EntryRunID = "plr_c"
+	l := ledgerFixture(a, b, c)
+	l.AttachTickets(map[string]string{"plr_a": "INC-1239", "plr_c": "CHG-7"})
+	out := formatLedger(l)
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "inc_ticketed") && !strings.HasSuffix(line, "20m 00s  ticket INC-1239"):
+			t.Errorf("charged line: %q", line)
+		case strings.Contains(line, "inc_human") && !strings.HasSuffix(line, "ticket CHG-7"):
+			t.Errorf("unconfirmed line: %q", line)
+		case strings.Contains(line, "inc_plain") && strings.Contains(line, "ticket"):
+			t.Errorf("a line with no ticket has a label: %q", line)
+		}
+	}
+}
+
 func TestFormatLedger_Layout(t *testing.T) {
 	restart := []string{"pbs_db_restart_triage", "pbs_pgbackrest_restore_remediate"}
 	out := formatLedger(ledgerFixture(

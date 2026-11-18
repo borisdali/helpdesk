@@ -104,7 +104,11 @@ func formatLedger(l availability.Ledger) string {
 			if e.Ongoing {
 				state += ", still open"
 			}
-			fmt.Fprintf(&b, "  %-14s %s  %-22s %s\n", e.IncidentID, e.DetectedAt.UTC().Format("2006-01-02 15:04"), state, rdSpan(e.DurationSeconds))
+			line := fmt.Sprintf("  %-14s %s  %-22s %s", e.IncidentID, e.DetectedAt.UTC().Format("2006-01-02 15:04"), state, rdSpan(e.DurationSeconds))
+			if e.Ticket != "" {
+				line += "  ticket " + e.Ticket
+			}
+			b.WriteString(line + "\n")
 			if why && e.Why != "" {
 				fmt.Fprintf(&b, "                 %s\n", e.Why)
 			}

@@ -56,6 +56,9 @@ type Incident struct {
 	// ResolvedAt is when the last run ended; zero while the incident is open.
 	ResolvedAt  time.Time
 	TargetInput string
+	// EntryRunID is the incident's entry playbook run: the run an approval at its
+	// gate is recorded under.
+	EntryRunID string
 }
 
 // Classify gives a playbook series' declared impact. playbooks.AvailabilityImpact
@@ -90,6 +93,12 @@ type Entry struct {
 	DetectedAt time.Time `json:"detected_at"`
 	// Why is set when the entry is not charged although it is an outage.
 	Why string `json:"why,omitempty"`
+	// EntryRunID is the incident's entry run, to open it with.
+	EntryRunID string `json:"entry_run_id,omitempty"`
+	// Ticket is the reference a point-in-time restore of this incident was
+	// approved under, when it was approved under one. It is what the approver
+	// typed, filled in by AttachTickets; the ledger does not compute it.
+	Ticket string `json:"ticket,omitempty"`
 }
 
 // Ledger is the result. Durations are in whole seconds.
@@ -188,7 +197,8 @@ func Compute(p Params) Ledger {
 			dur = 0
 		}
 		e := Entry{IncidentID: inc.ID, Impact: impact, Status: inc.Status,
-			DurationSeconds: int64(dur.Round(time.Second) / time.Second), Ongoing: isOpen, DetectedAt: inc.DetectedAt}
+			DurationSeconds: int64(dur.Round(time.Second) / time.Second), Ongoing: isOpen, DetectedAt: inc.DetectedAt,
+			EntryRunID: inc.EntryRunID}
 
 		switch impact {
 		case string(playbooks.ImpactOutage):
@@ -231,6 +241,22 @@ func Compute(p Params) Ledger {
 
 	l.Notes = notes(l, p, ongoing, oddities)
 	return l
+}
+
+// AttachTickets sets the ticket of every entry whose entry run has one in
+// byRun (run ID to ticket). An entry with no run, or a run with no ticket, is
+// left as it is.
+func (l *Ledger) AttachTickets(byRun map[string]string) {
+	if len(byRun) == 0 {
+		return
+	}
+	for _, list := range [][]Entry{l.Charged, l.Unconfirmed, l.Degraded, l.None, l.Unclassified} {
+		for i := range list {
+			if t := byRun[list[i].EntryRunID]; t != "" && list[i].EntryRunID != "" {
+				list[i].Ticket = t
+			}
+		}
+	}
 }
 
 // impactOf is the worst declared impact among the series, or unclassified.

@@ -76,6 +76,57 @@ func (c *Client) Incidents(ctx context.Context, query url.Values) (*audit.Incide
 	return &out, nil
 }
 
+// ticketEventLimit is how many recovery decisions one ticket lookup reads. A
+// window with more than that loses the tickets of the oldest ones.
+const ticketEventLimit = 1000
+
+// ApprovalTickets reads the tickets point-in-time approvals were given under
+// since a moment, by the run each approval belongs to. A run approved under no
+// ticket is not in the result. It reads the gate-stage recovery decisions from
+// auditd, which is the one place the ticket is recorded.
+func (c *Client) ApprovalTickets(ctx context.Context, since time.Time) (map[string]string, error) {
+	if c == nil || c.URL == "" {
+		return nil, ErrNoAudit
+	}
+	q := url.Values{}
+	q.Set("event_type", string(audit.EventTypeRecoveryDecision))
+	q.Set("since", since.UTC().Format(time.RFC3339))
+	q.Set("limit", fmt.Sprint(ticketEventLimit))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(c.URL, "/")+"/v1/events?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("auditd returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var events []audit.Event
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, e := range events {
+		d := e.RecoveryDecision
+		if d == nil || d.Stage != audit.RecoveryStageGate || d.RunID == "" || d.Approval == nil || d.Approval.Ticket == "" {
+			continue
+		}
+		out[d.RunID] = d.Approval.Ticket
+	}
+	return out, nil
+}
+
 // Ledger builds the ledger of the database with this infrastructure key at now,
 // over the window the budget gives (the default window when it gives none): its
 // real incidents, and a count of the ones no database could be found for.
@@ -112,6 +163,7 @@ func (c *Client) Ledger(ctx context.Context, key string, budget infra.Availabili
 		incs = append(incs, Incident{
 			ID: i.IncidentID, SeriesIDs: series, Status: i.Status, Origin: i.Origin,
 			DetectedAt: i.DetectedAt, ResolvedAt: i.ResolvedAt, TargetInput: i.TargetInput,
+			EntryRunID: i.EntryRunID,
 		})
 	}
 	l := Compute(Params{

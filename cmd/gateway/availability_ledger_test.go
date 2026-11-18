@@ -22,6 +22,8 @@ type ledgerAuditd struct {
 	loose      string // JSON of the unattributed incidents
 	status     int    // non-zero: answer with this instead
 	looseFails bool   // only the unattributed query fails
+	events     string // JSON of the recovery decisions the tickets are read from; none when empty
+	eventsFail bool   // the events read fails
 }
 
 func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
@@ -30,6 +32,19 @@ func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
 		a.mu.Lock()
 		a.queries = append(a.queries, r.URL.Query())
 		a.mu.Unlock()
+		if r.URL.Path == "/v1/events" {
+			if a.eventsFail {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if a.events == "" {
+				w.Write([]byte(`[]`)) //nolint:errcheck
+				return
+			}
+			w.Write([]byte(a.events)) //nolint:errcheck
+			return
+		}
 		if r.URL.Path != "/v1/incidents" {
 			http.NotFound(w, r)
 			return
@@ -140,16 +155,23 @@ func TestAvailabilityLedger_AsksAuditdForTheRightIncidents(t *testing.T) {
 	if rec, _ := getLedger(t, gw, "?database=prod-orders"); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
-	if len(aud.queries) != 2 {
+	// Two reads of incidents, and one of the approvals' tickets.
+	if len(aud.queries) != 3 {
 		t.Fatalf("auditd was asked %d times: %v", len(aud.queries), aud.queries)
 	}
-	var mine, loose url.Values
+	var mine, loose, events url.Values
 	for _, q := range aud.queries {
-		if q.Get("unattributed") == "true" {
+		switch {
+		case q.Get("unattributed") == "true":
 			loose = q
-		} else {
+		case q.Get("event_type") != "":
+			events = q
+		default:
 			mine = q
 		}
+	}
+	if events.Get("event_type") != "recovery_decision" || events.Get("since") == "" {
+		t.Errorf("the tickets query = %v", events)
 	}
 	if mine.Get("target_key") != "prod-orders" || mine.Get("origin") != "real" || mine.Get("include") != "series" || mine.Get("limit") != "200" {
 		t.Errorf("the database's query = %v", mine)
@@ -262,8 +284,36 @@ func TestAvailabilityLedger_SendsTheAuditKey(t *testing.T) {
 	if rec, _ := getLedger(t, &Gateway{auditURL: srv.URL, auditAPIKey: "svc-key", infra: ledgerInfra()}, "?database=prod-orders"); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
-	if len(got) != 2 || got[0] != "Bearer svc-key" || got[1] != "Bearer svc-key" {
+	// Both incident reads and the tickets read.
+	if len(got) != 3 || got[0] != "Bearer svc-key" || got[1] != "Bearer svc-key" || got[2] != "Bearer svc-key" {
 		t.Errorf("authorization headers = %v", got)
+	}
+}
+
+// The ticket a restore was approved under is on its incident's entry; a failure
+// to read the tickets leaves the ledger as it is, without them.
+func TestAvailabilityLedger_AttachesTheTicketOfTheApproval(t *testing.T) {
+	mine := `{"count": 1, "incidents": [
+	  {"incident_id": "inc_restore", "entry_run_id": "plr_gate1", "origin": "real", "status": "resolved",
+	   "series_ids": ["pbs_pgbackrest_pitr_triage", "pbs_pgbackrest_pitr_remediate"],
+	   "detected_at": "` + hoursAgo(5) + `", "resolved_at": "` + hoursAgo(5-0.25) + `"}]}`
+	events := `[{"event_type": "recovery_decision", "recovery_decision": {"stage": "gate", "decision": "approved", "run_id": "plr_gate1",
+	   "approval": {"approved_by": "alice", "ticket": "INC-1239"}}}]`
+	loose := `{"incidents": [], "count": 0}`
+
+	aud := &ledgerAuditd{mine: mine, loose: loose, events: events}
+	srv := aud.server(t)
+	rec, l := getLedger(t, &Gateway{auditURL: srv.URL, infra: ledgerInfra()}, "?database=prod-orders")
+	if rec.Code != http.StatusOK || len(l.Charged) != 1 || l.Charged[0].Ticket != "INC-1239" || l.Charged[0].EntryRunID != "plr_gate1" {
+		t.Fatalf("%d charged = %+v", rec.Code, l.Charged)
+	}
+
+	// The tickets are a label: when they cannot be read the ledger is still served.
+	bad := &ledgerAuditd{mine: mine, loose: loose, eventsFail: true}
+	srv2 := bad.server(t)
+	rec, l = getLedger(t, &Gateway{auditURL: srv2.URL, infra: ledgerInfra()}, "?database=prod-orders")
+	if rec.Code != http.StatusOK || len(l.Charged) != 1 || l.Charged[0].Ticket != "" || l.ChargedSeconds != 900 {
+		t.Errorf("without the tickets: %d charged = %+v, %ds", rec.Code, l.Charged, l.ChargedSeconds)
 	}
 }
 

@@ -492,6 +492,13 @@ Both are recorded in the gate's `recovery_decision` event, so they are inside th
 prints the ticket on the gate line and the justification under it as the approver's words.   
 
 The ticket is its own field (letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose. 
+
+To look it up from the ticket side, `faulttest vault incidents --ticket INC-1234` lists the approvals given under it (time,
+run, approver, target, justification), and `vault budget` prints `ticket INC-1234` on the line of the incident whose restore
+was approved under one. Underneath, auditd takes `GET /v1/events?ticket=INC-1234` (an exact match: `INC-123` does not find
+`INC-1234`) and the gateway's availability ledger carries `ticket` and `entry_run_id` on each entry. Two limits: only the
+gate-stage decision carries the ticket, so the lookup returns the approval and the run to open next, and the ledger reads
+the last 1000 recovery decisions of its window, so in a very busy window the oldest tickets may be missing from `vault budget`.
 The justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
 and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike.   
 
