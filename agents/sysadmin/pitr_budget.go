@@ -103,6 +103,12 @@ func budgetCheckFor(ctx context.Context, target string, serving bool) *availabil
 		rto = &d
 	}
 	in.Estimate = recoveryEstimateOf(ctx, key, rto, now)
+	// When the restore runs under an approval, the gateway has said when its incident
+	// began: by now the ledger no longer reads that incident as open (approving the
+	// gate marked it escalated), so it could not be found there.
+	if ap := audit.RecoveryApprovalFromContext(ctx); ap != nil {
+		in.IncidentStart = ap.IncidentStartedAt
+	}
 	// Only a budget that can be computed has anything to read the spend against.
 	if budget.Computed && !in.Invalid {
 		in.Ledger, in.LedgerErr = budgetLedgerFn(ctx, key, budget, now)

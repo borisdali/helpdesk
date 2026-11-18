@@ -106,11 +106,13 @@ func openIncidents(l *Ledger) (charging bool, pending []Entry) {
 // delayFor says what waiting costs against the budget the verdict was made from.
 // It is nil when there is nothing to say: no budget, or a ledger that could not be
 // read.
-func delayFor(v *BudgetVerdict, l *Ledger, serving bool) *BudgetDelay {
+//
+// charging and pending are what pendingIncidents said of the ledger and of what the
+// caller knew of the restore's own incident.
+func delayFor(v *BudgetVerdict, l *Ledger, serving bool, charging bool, pending []Entry) *BudgetDelay {
 	if v == nil || l == nil || v.RemainingSeconds == nil {
 		return nil
 	}
-	charging, pending := openIncidents(l)
 	span := func(s int64) string {
 		if s < 0 {
 			return "-" + infra.FormatSpan(secondsOf(-s))
@@ -131,8 +133,14 @@ func delayFor(v *BudgetVerdict, l *Ledger, serving bool) *BudgetDelay {
 		age := e.DurationSeconds
 		d.Incident, d.IncidentSeconds = e.IncidentID, &age
 		rem -= age
-		context = fmt.Sprintf("incident %s has been open for %s and is not charged to the ledger yet: it is charged in full, from its start, when the restore runs, so that time and any further wait count (assuming it is the incident this restore is for)",
-			e.IncidentID, span(age))
+		if e.IncidentID == "" {
+			// Told by the caller which incident the restore is for: no assumption to state.
+			context = fmt.Sprintf("the incident this restore is for has been open for %s and is not charged to the ledger yet: it is charged in full, from its start, when the restore runs, so that time and any further wait count",
+				span(age))
+		} else {
+			context = fmt.Sprintf("incident %s has been open for %s and is not charged to the ledger yet: it is charged in full, from its start, when the restore runs, so that time and any further wait count (assuming it is the incident this restore is for)",
+				e.IncidentID, span(age))
+		}
 		grows = "every further minute the incident stays open adds a minute to it once it is charged"
 	case len(pending) > 1:
 		context = fmt.Sprintf("%d open incidents on this database are not charged to the ledger yet, and which of them this restore is for is not known; the one it is for is charged in full, from its start, when the restore runs, so the margin is smaller by its age",

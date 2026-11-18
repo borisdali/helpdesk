@@ -254,11 +254,11 @@ func TestDelay_DeclaredRTOIsSaidToBeAnUpperBound(t *testing.T) {
 
 // Nothing is said when there is nothing to say it from.
 func TestDelay_AbsentWithoutABudgetOrALedger(t *testing.T) {
-	if got := delayFor(nil, nil, false); got != nil {
+	if got := delayFor(nil, nil, false, false, nil); got != nil {
 		t.Errorf("nil verdict: %+v", got)
 	}
 	l := Compute(params())
-	if got := delayFor(&BudgetVerdict{}, &l, false); got != nil {
+	if got := delayFor(&BudgetVerdict{}, &l, false, false, nil); got != nil {
 		t.Errorf("no remaining: %+v", got)
 	}
 	// An SLO that could not be read: the verdict has no budget and no delay.

@@ -126,7 +126,7 @@ For a **running** instance the restore step expands ([§5](#5-a-running-instance
 ## 4. Operating it
 
 Steps 2 and 3 can be done with `helpdesk-client` ([the short way](#the-short-way-helpdesk-client)), with the
-API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
+API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the Gateway, `$KEY` a key that may
 approve gates.
 
 **1. Start the triage with the target**   
@@ -338,7 +338,7 @@ The plan prints what approving will demand (`Approving needs : --acknowledge-obj
 REFUSED`) and adds the flag to the approve command it offers.
 
 Read it before approving. A gate can be approved once: if the approval lacks a required acknowledgement the restore
-refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the gateway
+refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the Gateway
 (HTTP 409, "not in `gate_pending` state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
 
@@ -448,19 +448,36 @@ So the latest start is `T0 + 25m12s`, which is `now + 20m12s`.
 Both lines are information for the approver, not a deadline. The verdict is another matter: the `Budget check` (and
 the restore's own check just before it stops anything) is made on what is left **less the age of the open incident**
 that is charged when the restore runs. So a gate held open past its latest start no longer reads `within`: it reads
-`exceeds`, asks for `--acknowledge-objective-breach`, and under `refuse` a serving instance is refused. With several
+`exceeds`, asks for `--acknowledge-objective-breach` and under `refuse` a serving instance is refused. With several
 open incidents, where which is this restore's is not known, the ledger's own figure stands.
 
 After the incident, the report sets the plan against what happened (`PLAN VS ACTUAL`): the recovery time, the data
-lost at the stop, and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
+lost at the stop and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
 of the restore, against what the plan said was left:
 
 ```
 ═══ PLAN VS ACTUAL ═══  the plan of 21:47:14 against what happened
 recovery time  planned 2m 00s (from the declared rto); took 1m 27s (33s under)
 data loss      planned 9s → within; at the stop 5m 46s → within (5m 37s more)
-budget         planned 6m 23s left → within; the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed
+budget         planned 6m 23s left → within; the incident was charged 7m 03s, 
+  	       so overspent by 40s → exceeds; the verdict changed
 ```
+
+#### **A refused restore uses the gate up**   
+A gate is approved once. The Gateway cannot know, when it takes an approval, whether the plan will ask for
+`--acknowledge-objective-breach` (that depends on the loss and the budget measured at the moment before the stop), so
+it accepts the approval and the restore tool decides. If the restore tool refuses because the acknowledgement is missing,
+the instance is not stopped, but the gate is used up, the incident ends `needs_human` and a second approval of the same
+gate gets a 409. The way on is to start the triage again and approve its new gate with the acknowledgement.
+
+The plan says beforehand when the acknowledgement is needed (`Approving needs : --acknowledge-objective-breach` and
+`BUDGET CHECK (!)` / `RPO CHECK (!)`) and an approver who follows it does not meet this. It is left this way on purpose:
+the check that matters is the restore's own, made as the instance is about to stop and a pre-check at the Gateway would be
+made on a verdict that can be stale by then. The wait the new gate costs is real, though: the incident stays open and the
+new triage starts a new incident, which is another reason to read the plan before approving.
+
+The incident that ended `needs_human` is not charged to the availability ledger (its downtime is not known) and is listed
+under *Unconfirmed* in `vault budget`.
 
 #### **Saying why and under which ticket**   
 The approval can carry the reason it was given and the ticket it was given under:
@@ -478,7 +495,7 @@ The ticket is its own field (letters, digits and `. _ : # / -`, at most 64 chara
 The justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
 and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike.   
 
-Neither is required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the gateway (Helm:
+Neither is required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the Gateway (Helm:
 `gateway.requireBreachJustification`) and an approval that acknowledges an objective breach is refused, with nothing
 changed, unless it carries a justification of at least 10 characters. Two limits: both are the operator's own words,
 recorded and not verified and the Decision Hub takes them too (`reason`, `ticket`).
@@ -509,7 +526,7 @@ read back in `vault incidents <run>` (the RECOVERY DECISION section), in `vault 
 narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 
 `acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
-`acknowledge_data_loss` and does not imply it and the model has no argument for it. The gateway passes it on and
+`acknowledge_data_loss` and does not imply it and the model has no argument for it. The Gateway passes it on and
 records it in the `gate_acknowledged` event; the restore tool decides whether it was needed.
 
 **3. Approve the plan you read**
@@ -531,7 +548,7 @@ curl -sX POST "$GW/api/v1/decisions/gate:$RUN_ID/resolve" \
 The same body goes to `POST /api/v1/fleet/playbook-runs/$RUN_ID/proceed-escalation`. `allow_stop_serving` is
 needed only when the instance is serving. Leave it out for a database that is already down.
 
-| The gateway refuses with | Because |
+| The Gateway refuses with | Because |
 |---|---|
 | `400` needs the recovery target | the approval has none or it is malformed |
 | `400` needs plan_digest | missing or not the 16-hex-character digest |
@@ -572,7 +589,7 @@ helpdesk-client --user ops@example.com --pitr-approve plr_a3f7c1b2 \
 ```
 
 Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters or no
-`--acknowledge-data-loss` is refused before anything is sent and the gateway's own refusals are printed as
+`--acknowledge-data-loss` is refused before anything is sent and the Gateway's own refusals are printed as
 they come ([§4 table](#4-operating-it)). `--pitr-plan` prints no approve command for a plan that is not
 feasible. Denying a gate does not need any of this.
 
@@ -584,7 +601,7 @@ failure at any of them says so.
 
 1. **Ask the instance about itself** (`psql`, local socket).   
    It refuses a standby, any replica in `pg_stat_replication`, `archive_mode` other than `on` or `always`, a running HA manager (Patroni, repmgr,
-   pg_auto_failover, Stolon: matched by process name), an LSN target ahead of the instance's WAL position or
+   `pg_auto_failover`, Stolon: matched by process name), an LSN target ahead of the instance's WAL position or
    a time target ahead of its own clock. Its position, timeline and clock are recorded as `pre_stop` in the
    result.
 

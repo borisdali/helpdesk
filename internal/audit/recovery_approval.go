@@ -1,6 +1,9 @@
 package audit
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // RecoveryApproval is the recovery target a human supplied for a
 // point-in-time restore, and what they approved about it. It travels from the
@@ -39,6 +42,13 @@ type RecoveryApproval struct {
 	// on them, so they are not in the A2A metadata form.
 	Justification string `json:"justification,omitempty"`
 	Ticket        string `json:"ticket,omitempty"`
+	// IncidentStartedAt is when the incident this restore is for began: the start of
+	// its entry run, which is where the availability ledger starts charging it. By
+	// the time the restore runs the incident no longer reads as open in the ledger
+	// (approving the gate ends the triage hop and marks it escalated), so the
+	// restore's budget check cannot find it there: it is told here. Zero when not
+	// known (v0.36).
+	IncidentStartedAt time.Time `json:"incident_started_at,omitempty"`
 }
 
 // Approved reports whether a restore may run on this: a target, the digest of
@@ -59,6 +69,9 @@ func parseRecoveryApproval(v any) *RecoveryApproval {
 	a.Acknowledged, _ = m["acknowledged"].(bool)
 	a.StopServing, _ = m["stop_serving"].(bool)
 	a.BreachAcknowledged, _ = m["breach_acknowledged"].(bool)
+	if t, err := time.Parse(time.RFC3339Nano, str("incident_started_at")); err == nil {
+		a.IncidentStartedAt = t.UTC()
+	}
 	if a.Type == "" || a.Value == "" {
 		return nil
 	}

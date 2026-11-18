@@ -77,6 +77,12 @@ type BudgetInputs struct {
 	// from three to nine); without one, as long as the declared rto, as an upper
 	// bound.
 	Estimate *RecoveryEstimate
+	// IncidentStart is when the incident this restore is for began, when the
+	// caller knows it (the approval carries it). The ledger cannot always say: once
+	// the gate is approved the triage hop has ended and the incident is marked
+	// escalated, so it is no longer an open incident to find there, though it is
+	// charged in full when the restore completes. Zero when not known.
+	IncidentStart time.Time
 }
 
 // What a verdict took a restore's duration to be.
@@ -155,13 +161,48 @@ func (v *BudgetVerdict) NeedsAttention() bool {
 // CompareToBudget makes the verdict and the gate it implies.
 func CompareToBudget(in BudgetInputs) *BudgetVerdict {
 	v := &BudgetVerdict{Enforcement: in.Enforcement, WindowSource: in.Budget.WindowSource, RecoveryEstimate: in.Estimate}
-	v.Status, v.Detail = verdict(in, v)
+	charging, pending := pendingIncidents(in.Ledger, in.IncidentStart)
+	v.Status, v.Detail = verdict(in, v, pending)
 	v.Gate, v.GateNote = gateFor(v.Status, in.Enforcement, in.Serving)
-	v.Delay = delayFor(v, in.Ledger, in.Serving)
+	v.Delay = delayFor(v, in.Ledger, in.Serving, charging, pending)
 	return v
 }
 
-func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
+// pendingIncidents says whether an open outage incident is already charged and
+// otherwise which incidents are about to be charged in full when the restore runs.
+// The ledger's open incidents that are not charged yet are those; when the caller
+// knows when the restore's own incident began, that one is it, named by the ledger
+// if it is still there as an open incident and by its age alone if it is not (the
+// gate's approval marks it escalated, so at the moment of the restore it is not
+// open any more).
+func pendingIncidents(l *Ledger, start time.Time) (charging bool, pending []Entry) {
+	if l == nil {
+		return false, nil
+	}
+	charging, pending = openIncidents(l)
+	if charging || start.IsZero() {
+		return charging, pending
+	}
+	age := l.AsOf.Sub(start)
+	if age < 0 {
+		return false, pending // a start in the future: the clocks disagree, say nothing of it
+	}
+	e := Entry{DurationSeconds: int64(age.Round(time.Second) / time.Second), DetectedAt: start, Ongoing: true}
+	if len(pending) == 1 {
+		e.IncidentID = pending[0].IncidentID
+	}
+	return false, []Entry{e}
+}
+
+// openIncidentName is how the open incident is named in a sentence.
+func openIncidentName(id string) string {
+	if id == "" {
+		return "the incident this restore is for"
+	}
+	return "the open incident " + id
+}
+
+func verdict(in BudgetInputs, v *BudgetVerdict, pending []Entry) (status, detail string) {
 	switch {
 	case !in.Found:
 		return BudgetNoObjective, "the target is not a configured database, so there is no availability budget to compare with"
@@ -204,12 +245,12 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 	// incident: with several, which is this restore's is not known, and the
 	// ledger's figure stands (delay.go says so).
 	pendingNow := false
-	if _, pending := openIncidents(l); len(pending) == 1 {
+	if len(pending) == 1 {
 		age := pending[0].DurationSeconds
 		v.PendingIncident, v.PendingSeconds = pending[0].IncidentID, &age
 		rem -= age
 		pendingNow = true
-		spent += fmt.Sprintf(", and the open incident %s (open for %s, not charged yet) is charged in full when the restore runs", pending[0].IncidentID, span(age))
+		spent += fmt.Sprintf(", and %s (open for %s, not charged yet) is charged in full when the restore runs", openIncidentName(pending[0].IncidentID), span(age))
 	}
 	note := ""
 	if len(l.Unconfirmed) > 0 && l.RemainingWorstCaseSeconds != nil {

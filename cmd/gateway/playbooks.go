@@ -2038,6 +2038,11 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 			writeError(w, status, msg)
 			return
 		}
+		// The restore's budget check is told when this incident began: by then the
+		// triage hop has ended and the ledger no longer reads the incident as open.
+		if !run.StartedAt.IsZero() {
+			ap.IncidentStartedAt = run.StartedAt.UTC()
+		}
 		recoveryApproval = ap
 		carriedTarget = &RecoveryTargetSpec{Type: ap.Type, Value: ap.Value}
 		recoveryAudit = recoveryAuditLines(ap)

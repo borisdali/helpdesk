@@ -217,6 +217,9 @@ func recoveryApprovalMeta(a *audit.RecoveryApproval) map[string]any {
 	if a.BreachAcknowledged {
 		m["breach_acknowledged"] = true
 	}
+	if !a.IncidentStartedAt.IsZero() {
+		m["incident_started_at"] = a.IncidentStartedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return m
 }
 
