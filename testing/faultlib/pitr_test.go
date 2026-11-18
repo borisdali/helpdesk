@@ -377,6 +377,43 @@ func TestRemediator_BudgetBreachAtTheGate(t *testing.T) {
 	})
 }
 
+// An acknowledgement needs a reason when the gateway requires one: the harness
+// gives one that says it is the harness, keeps a reason the caller set, and gives
+// none when it acknowledges nothing.
+func TestRemediator_JustifiesTheAcknowledgement(t *testing.T) {
+	approve := func(fk *pitrFakes, reason string) {
+		r := fk.remediator()
+		if err := r.SetPITR(droppedTable, droppedTableOut); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ProceedEscalation(context.Background(), "plr_g", ProceedEscalationRequest{Resolution: "approved", Reason: reason}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asks := map[string]any{"status": "exceeds", "gate": "acknowledge", "enforcement": "acknowledge", "detail": "d"}
+
+	fk := newPITRFakes(t)
+	fk.planBudget = asks
+	approve(fk, "")
+	reason, _ := fk.gateBody["reason"].(string)
+	if !strings.HasPrefix(reason, "faulttest harness:") || !strings.Contains(reason, "db-pitr-dropped-table") || len(reason) < 10 {
+		t.Errorf("reason = %q", reason)
+	}
+
+	fk = newPITRFakes(t)
+	fk.planBudget = asks
+	approve(fk, "the caller's own reason")
+	if fk.gateBody["reason"] != "the caller's own reason" {
+		t.Errorf("the caller's reason was replaced: %v", fk.gateBody["reason"])
+	}
+
+	fk = newPITRFakes(t)
+	approve(fk, "")
+	if _, present := fk.gateBody["reason"]; present {
+		t.Errorf("a justification for nothing: %v", fk.gateBody["reason"])
+	}
+}
+
 func TestRemediator_PITRApprovalIsSeparateAndConditional(t *testing.T) {
 	t.Run("a fault that leaves the database down does not authorize a stop", func(t *testing.T) {
 		fk := newPITRFakes(t)

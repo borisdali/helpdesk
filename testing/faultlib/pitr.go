@@ -121,6 +121,8 @@ func PITRTargetFor(ctx context.Context, f Failure) (PITRTarget, bool, error) {
 type pitrState struct {
 	target    PITRTarget
 	allowStop bool
+	// faultID names the fault in the justification the harness gives.
+	faultID string
 	// server is the infrastructure alias the sysadmin agent's tools take as
 	// their target.
 	server string
@@ -142,7 +144,7 @@ func (r *Remediator) SetPITR(f Failure, injectOutput string) error {
 	if server == "" {
 		server = r.cfg.AgentConnStr
 	}
-	r.pitr = &pitrState{target: t, allowStop: f.PITR.AllowStopServing, server: server}
+	r.pitr = &pitrState{target: t, allowStop: f.PITR.AllowStopServing, faultID: f.ID, server: server}
 	return nil
 }
 
@@ -282,11 +284,27 @@ func (r *Remediator) approvePITR(ctx context.Context, req *ProceedEscalationRequ
 	req.AcknowledgeDataLoss = true
 	req.AllowStopServing = r.pitr.allowStop
 	req.AcknowledgeObjectiveBreach = gate == "acknowledge" || budgetGate == "acknowledge"
+	// An acknowledgement needs a reason when the gateway requires one
+	// (HELPDESK_REQUIRE_BREACH_JUSTIFICATION). The harness says plainly that it is
+	// the harness speaking; a caller that set its own reason keeps it.
+	if req.AcknowledgeObjectiveBreach && strings.TrimSpace(req.Reason) == "" {
+		req.Reason = breachJustification(r.pitr.faultID)
+	}
 	slog.Info("point-in-time gate: approving the reviewed plan",
 		"target_type", target.Type, "target", target.Value, "plan_digest", plan.PlanDigest,
 		"instance_serving", plan.InstanceServing, "archive_flush_required", plan.ArchiveFlushRequired, "allow_stop_serving", req.AllowStopServing,
 		"acknowledge_objective_breach", req.AcknowledgeObjectiveBreach)
 	return nil
+}
+
+// breachJustification is the reason the harness gives when it acknowledges a plan
+// that exceeds an objective: long enough for the gateway's minimum, and clear that
+// no operator wrote it.
+func breachJustification(faultID string) string {
+	if faultID == "" {
+		return "faulttest harness: acknowledged a plan that exceeds an objective"
+	}
+	return "faulttest harness: acknowledged a plan that exceeds an objective (fault " + faultID + ")"
 }
 
 // validatePITR checks a fault's pitr block at catalog load, so a mistake
