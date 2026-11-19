@@ -455,7 +455,8 @@ func TestBudgetCheckForRestore_TellsTheEstimateTheSizeOfTheRestore(t *testing.T)
 	if len(calls.drills) != 2 || calls.drills[0].RestoreBytes != 7<<30 || calls.drills[1].RestoreBytes != 0 {
 		t.Errorf("drill inputs: %+v", calls.drills)
 	}
-	// The source's system identifier is not read here, so drills are matched by name.
+	// Nothing read an identifier in this test (the package default reads none), so
+	// none is passed and the drills are matched by name.
 	if calls.drills[0].SystemID != "" {
 		t.Errorf("a system identifier was passed that nothing read: %q", calls.drills[0].SystemID)
 	}

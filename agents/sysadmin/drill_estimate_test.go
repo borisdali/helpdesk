@@ -38,6 +38,82 @@ func drillRecords(minutes ...int) []audit.DrillRecord {
 	return drills
 }
 
+// ── the system identifier ─────────────────────────────────────────────────────
+
+func TestParseSystemID(t *testing.T) {
+	for out, want := range map[string]string{
+		"system_id=7709662342314786857\n":           "7709662342314786857",
+		"noise\nsystem_id=42\nmore":                 "42",
+		"  system_id=  123  ":                       "123",
+		"system_id=\n":                              "",
+		"system_id=psql: error: connection refused": "", // an error message is not an identifier
+		"system_id=12abc":                           "",
+		"":                                          "",
+		"no such line":                              "",
+		"system_id=" + strings.Repeat("9", 40):      "", // longer than any identifier
+	} {
+		if got := parseSystemID(out); got != want {
+			t.Errorf("parseSystemID(%q) = %q, want %q", out, got, want)
+		}
+	}
+}
+
+// The restore estimate is told the identifier the instance reports, so drills are
+// tied to this server and not to its name.
+func TestBudgetCheckForRestore_ReadsTheSourceSystemID(t *testing.T) {
+	calls := withEstimate(t, restoresThatTook(10, 20, 30), nil)
+	withLedger(t, 0, nil)
+	objectiveInfra(t, "", func(db *infra.DBServer, _ *infra.Config) {
+		db.Objectives = &infra.Objectives{RTO: &infra.Duration{Duration: 45 * time.Minute}}
+	})
+	old := sourceSystemIDFn
+	t.Cleanup(func() { sourceSystemIDFn = old })
+	var asked []string
+	sourceSystemIDFn = func(_ context.Context, target string) string {
+		asked = append(asked, target)
+		return "7001"
+	}
+	budgetCheckForRestore(context.Background(), "helpdesk-test-pg-pgbackrest", true, 5<<30)
+	if len(calls.drills) != 1 || calls.drills[0].SystemID != "7001" || calls.drills[0].RestoreBytes != 5<<30 {
+		t.Errorf("drill inputs: %+v", calls.drills)
+	}
+	if len(asked) != 1 || asked[0] != "helpdesk-test-pg-pgbackrest" {
+		t.Errorf("the identifier was read for %v, want the target the call named", asked)
+	}
+	// A restore with no size in view and the check that has none read nothing.
+	budgetCheckFor(context.Background(), "helpdesk-test-pg-pgbackrest", true)
+	if len(asked) != 1 {
+		t.Errorf("budgetCheckFor read an identifier: %v", asked)
+	}
+	// When it cannot be read, drills are matched by name: an empty identifier.
+	sourceSystemIDFn = func(context.Context, string) string { return "" }
+	budgetCheckForRestore(context.Background(), "helpdesk-test-pg-pgbackrest", true, 5<<30)
+	if calls.drills[len(calls.drills)-1].SystemID != "" {
+		t.Errorf("an unreadable identifier was replaced by something: %+v", calls.drills[len(calls.drills)-1])
+	}
+}
+
+// Through the real estimate: a server rebuilt under the same name is told apart
+// from the one the drills were of, even before any drill of the new one exists.
+func TestDrillsOfARebuiltServerDoNotCountWhenItsIdentifierIsRead(t *testing.T) {
+	now := time.Now().UTC()
+	rto := 30 * time.Minute
+	e := availability.EstimateRecovery(nil, availability.RestoreSeries, now, availability.EstimateWindow, &rto)
+	availability.AddDrills(&e, drillRecords(10, 20, 25), availability.DrillInputs{RestoreBytes: 10 << 30, SystemID: "999-rebuilt"}, now, &rto)
+	if e.Drills.Samples != 0 || e.Drills.NotCounted["other_system"] != 3 || e.Drills.MatchedBy != "system_identifier" {
+		t.Errorf("the old server's drills counted for the rebuilt one: %+v", e.Drills)
+	}
+	if e.PlanningSeconds != nil {
+		t.Error("a plan was made from the drills of a server that no longer exists")
+	}
+	// By name alone they would have counted: this is what reading it buys.
+	e = availability.EstimateRecovery(nil, availability.RestoreSeries, now, availability.EstimateWindow, &rto)
+	availability.AddDrills(&e, drillRecords(10, 20, 25), availability.DrillInputs{RestoreBytes: 10 << 30}, now, &rto)
+	if e.Drills.Samples != 3 {
+		t.Errorf("matched by name: %+v", e.Drills)
+	}
+}
+
 // ── the plan and the record ───────────────────────────────────────────────────
 
 // A plan that rests on drills says so on the record, and says which drills: the

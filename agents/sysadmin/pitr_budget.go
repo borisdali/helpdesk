@@ -71,16 +71,24 @@ func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now
 // The objectives are resolved under the config lock and the lock is let go
 // before the ledger is read over the network.
 func budgetCheckFor(ctx context.Context, target string, serving bool) *availability.BudgetVerdict {
-	return budgetCheckForRestore(ctx, target, serving, 0)
+	return budgetCheckWith(ctx, target, serving, 0, func(context.Context, string) string { return "" })
 }
 
 // budgetCheckForRestore is budgetCheckFor for a restore whose size is known
 // (the selected backup's database size, in bytes; 0 when it is not). The size is
 // what a restore drill is compared against: a drill of a very different size
 // says little about this restore, so with no size no drill can count. The
-// source's system identifier is not read here, so drills are matched to this
-// server by name and the estimate says so.
+// source's system identifier is read too (system_id.go), so that drills are tied
+// to this server and not to a name a rebuilt server may have inherited; when it
+// cannot be read the estimate matches by name and says so.
 func budgetCheckForRestore(ctx context.Context, target string, serving bool, restoreBytes uint64) *availability.BudgetVerdict {
+	return budgetCheckWith(ctx, target, serving, restoreBytes, sourceSystemIDFn)
+}
+
+// budgetCheckWith is budgetCheckForRestore with the way of reading the source's
+// system identifier given. budgetCheckFor, which has no restore in view and is
+// what most tests call, reads none.
+func budgetCheckWith(ctx context.Context, target string, serving bool, restoreBytes uint64, systemID func(context.Context, string) string) *availability.BudgetVerdict {
 	infraConfigMu.RLock()
 	var (
 		res   infra.ResolvedObjectives
@@ -112,7 +120,10 @@ func budgetCheckForRestore(ctx context.Context, target string, serving bool, res
 		d := res.RTO.Value
 		rto = &d
 	}
-	in.Estimate = recoveryEstimateOf(ctx, key, rto, now, availability.DrillInputs{RestoreBytes: int64(restoreBytes)})
+	in.Estimate = recoveryEstimateOf(ctx, key, rto, now, availability.DrillInputs{
+		RestoreBytes: int64(restoreBytes),
+		SystemID:     systemID(ctx, target),
+	})
 	// When the restore runs under an approval, the gateway has said when its incident
 	// began: by now the ledger no longer reads that incident as open (approving the
 	// gate marked it escalated), so it could not be found there.

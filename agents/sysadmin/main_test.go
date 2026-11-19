@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -26,6 +27,10 @@ func TestMain(m *testing.M) {
 	}
 	pgbackrestEvidenceRules = rulesByTool["get_pgbackrest_status"]
 	restoreVerifyEvidenceRules = rulesByTool["verify_restore_recovery"]
+	// Reading the source's system identifier runs a command on the instance; with
+	// Docker and the fixture containers up it would reach the real ones. Tests
+	// that care say what is read.
+	sourceSystemIDFn = func(context.Context, string) string { return "" }
 	os.Exit(m.Run())
 }
 
