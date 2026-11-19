@@ -68,5 +68,10 @@ func (g *Gateway) handleAvailabilityLedger(w http.ResponseWriter, r *http.Reques
 	} else {
 		l.AttachTickets(tickets)
 	}
+	// Whether a restore drill is due is a reminder beside the budget. The gateway
+	// reads no database, so drills are matched to the server by name.
+	if res, ok := g.infra.ResolveObjectives(key); ok {
+		l.DrillCurrency = g.availabilityClient().DrillCurrency(r.Context(), key, res.DrillReminder(), availability.DrillInputs{}, time.Now().UTC())
+	}
 	writeJSON(w, http.StatusOK, l)
 }

@@ -141,6 +141,11 @@ type Ledger struct {
 	// ExcludedFaulttest counts the faulttest incidents left out.
 	ExcludedFaulttest int      `json:"excluded_faulttest,omitempty"`
 	Notes             []string `json:"notes,omitempty"`
+
+	// DrillCurrency is how recently this database's restore was drilled, set by
+	// the gateway for a database that has an objective (v0.36). A reminder beside
+	// the budget, never part of its arithmetic.
+	DrillCurrency *DrillCurrency `json:"drill_currency,omitempty"`
 }
 
 // Compute builds the ledger. It never fails: what it cannot place it lists.

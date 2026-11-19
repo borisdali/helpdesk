@@ -84,35 +84,66 @@ An environment does not imply a tag and a tag does not imply an environment. A d
 
 ## 3. Values
 
-- **Durations** are strings: `"15m"`, `"1h30m"`, `"90s"` and a days unit, `"1d"` or `"1d12h"`. A bare number is
+- **Durations**   
+  Are strings: `"15m"`, `"1h30m"`, `"90s"` and a days unit, `"1d"` or `"1d12h"`. A bare number is
   invalid: `900` would be seconds to one reader and minutes to another. So is a sign after the days (`"1d-5m"`).
-- **`rpo`** may be `"0s"`: no data loss tolerated. It is a value, not an absence and does not fall through to the
-  next level.
-- **`rto`** must be greater than zero.
-- **`availability_slo`** is a percentage greater than 0 and at most 100.
-- **`availability_window`** is a duration greater than zero: the rolling window the SLO is measured over. Unset
+
+- **`rpo`** 
+  May be `"0s"`: no data loss tolerated. It is a value, not an absence and does not fall through to the next level.
+
+- **`rto`** 
+  Must be greater than zero.
+
+- **`availability_slo`**   
+  Is a percentage greater than 0 and at most 100.
+
+- **`availability_window`**   
+  Is a duration greater than zero: the rolling window the SLO is measured over. Unset
   means 30 days and everything that shows a budget says when the window is that default. An unreadable window
   is never replaced by the default: no budget is computed and the problem is logged. Together with the SLO it
   gives the downtime budget ([§5.2](#52-the-availability-budget)).
-- **`recovery_preference`** is `availability_first` or `data_first`: what to favour when a recovery has to choose
+
+- **`recovery_preference`**   
+  Is `availability_first` or `data_first`: what to favour when a recovery has to choose
   between getting the database back sooner and losing less data. It will decide how a recommendation is ranked
   and how an option that breaches an objective is treated. It never decides to act. Unset means no preference.
-- **`enforcement`** is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
+
+- ##### **`enforcement`** 
+  Is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
   `warn` says so and blocks nothing; `acknowledge` makes the person approving acknowledge the breach separately;
   `refuse` refuses the recovery. Unset means `warn`, which is the behaviour from before it existed. An invalid
   value, inherited or not, is treated as `acknowledge`, not `warn`. So is a database that names an environment
   that is not declared and sets no enforcement of its own, because it cannot tell which enforcement its real
-  environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
-  honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
+  environment would have set. A typo must not quietly weaken the check.   
+
+  What a database sets itself is always honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
   restore before the instance is stopped. The downtime a restore costs has its own setting,
   `availability_enforcement`, below and the `rto` is shown against what a recovery took, after the fact.
-- **`availability_enforcement`** is `warn`, `acknowledge` or `refuse` and says what happens when a restore is
+
+- ##### **`availability_enforcement`** 
+  Is `warn`, `acknowledge` or `refuse` and says what happens when a restore is
   expected to breach the availability budget ([§5.4](#54-the-budget-at-the-gate)). It is its own setting and not
   `enforcement`'s, because an existing `enforcement: refuse` means "refuse a restore that loses too much data" and
-  must not start refusing restores for a budget it never named. Unset means `warn`. It follows the same rules as
-  `enforcement`: an invalid value, inherited or not and a database that names an environment that is not declared
+  must not start refusing restores for a budget it never named.   
+
+  Unset means `warn`. It follows the same rules as `enforcement`: an invalid value, inherited or not and a database that names an environment that is not declared
   and sets none of its own, are treated as `acknowledge`, never as `warn`.
-- Both are exact lowercase strings. `Refuse` is an error, not a guess.
+
+- ##### **`drill_interval`** 
+  Is how long a database may go without a *verified* restore drill before it is reported
+  as overdue for one: `"90d"` (a quarter) when unset, `"0d"` to turn the reminder off.   
+
+  It applies to a database that has an `rpo`, an `rto` or an `availability_slo`: nothing says a restore matters to one that has none and a
+  development database should not nag. Any verified drill resets the clock, whatever its method or size. A refused 
+  or unverifiable one does not and the report names it.   
+
+  It is a reminder and nothing else: the plan, the posture check (`get_pgbackrest_status`: `drill_currency`, `drill_overdue`) and `faulttest vault budget` say
+  "last verified drill 143 days ago (limit 90 days)" and nothing is blocked, held or refused because of it.   
+
+  An interval that cannot be read neither switches the reminder off nor goes unnoticed: the default applies and the
+  config problem is reported. It resolves like the objectives (database, environment, fleet default).
+
+- `enforcement` and `availability_enforcement` are exact lowercase strings. `Refuse` is an error, not a guess.
 
 Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
 production environment can be `data_first` with `acknowledge` while one database in it overrides to `refuse`.

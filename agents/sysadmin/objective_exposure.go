@@ -214,4 +214,9 @@ func withObjectiveExposure(ctx context.Context, res *GetPgBackRestStatusResult, 
 		est = recoveryEstimateOf(ctx, key, &d, now, availability.DrillInputs{SizeFromNewestDrill: true})
 	}
 	res.ObjectiveExposure = exposureOf(*res, now, obj, est)
+	// Whether a drill is due is a separate reminder, not part of the exposure
+	// verdict: it holds nothing and changes no status.
+	if c := drillCurrencyAt(ctx, key, obj.DrillReminder(), target, now); c != nil {
+		res.DrillCurrency, res.DrillOverdue = c, c.Overdue
+	}
 }

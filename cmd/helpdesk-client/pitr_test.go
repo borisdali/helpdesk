@@ -497,6 +497,45 @@ func TestFormatPITRPlan_ShowsRestoreDrillsBesideRealRestores(t *testing.T) {
 	}
 }
 
+func TestFormatPITRPlan_ShowsWhetherADrillIsDue(t *testing.T) {
+	plan := func(currency string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,"availability_budget":{"status":"within","detail":"d"}` + currency + `}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+	got := formatPITRPlan(plan(`,"drill_currency":{"state":"overdue","overdue":true,"detail":"last verified drill 143 days ago (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "DRILL OVERDUE (!) : last verified drill 143 days ago (limit 90 days). Record one with helpdesk-client --drill-record") {
+		t.Errorf("overdue:\n%s", got)
+	}
+	// It is a reminder: the approval command is still offered and nothing is demanded.
+	if !strings.Contains(got, "--pitr-approve") || strings.Contains(got, "acknowledge-objective-breach") || strings.Contains(got, "REFUSED") {
+		t.Errorf("an overdue drill held the approval:\n%s", got)
+	}
+	got = formatPITRPlan(plan(`,"drill_currency":{"state":"current","overdue":false,"detail":"last verified drill 12 days ago (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "Drill reminder : last verified drill 12 days ago (limit 90 days)") || strings.Contains(got, "OVERDUE") {
+		t.Errorf("current:\n%s", got)
+	}
+	// Never drilled is overdue too, and says so.
+	got = formatPITRPlan(plan(`,"drill_currency":{"state":"never","overdue":true,"detail":"no verified restore drill of this server is recorded (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "DRILL OVERDUE (!) : no verified restore drill of this server is recorded") {
+		t.Errorf("never:\n%s", got)
+	}
+	// Turned off, or absent: nothing about drills' currency.
+	for name, cur := range map[string]string{
+		"off":    `,"drill_currency":{"state":"off","detail":"the drill reminder is turned off for this database (drill_interval 0d)"}`,
+		"absent": ``,
+	} {
+		if got := formatPITRPlan(plan(cur), goodOpts()); strings.Contains(got, "Drill reminder") || strings.Contains(got, "DRILL OVERDUE") {
+			t.Errorf("%s:\n%s", name, got)
+		}
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {

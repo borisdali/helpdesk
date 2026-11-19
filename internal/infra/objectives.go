@@ -203,6 +203,11 @@ type Objectives struct {
 	// restore that loses too much data", and must not start refusing for a
 	// reason it never named. See budget.go.
 	AvailabilityEnforcement *Choice `json:"availability_enforcement,omitempty"`
+	// DrillInterval is how long may pass without a verified restore drill before
+	// the database is reported as overdue for one ("90d"; "0d" turns the reminder
+	// off). Unset means DefaultDrillInterval, for a database that has any other
+	// objective set. It only reminds: nothing is blocked by an overdue drill.
+	DrillInterval *Duration `json:"drill_interval,omitempty"`
 }
 
 // Environment is a named group of databases that share objectives.
@@ -253,6 +258,14 @@ func (o Objectives) problems() map[string]string {
 			out["availability_window"] = o.AvailabilityWindow.Invalid
 		case o.AvailabilityWindow.Duration <= 0:
 			out["availability_window"] = "availability_window must be greater than zero"
+		}
+	}
+	if o.DrillInterval != nil {
+		switch {
+		case o.DrillInterval.Invalid != "":
+			out["drill_interval"] = o.DrillInterval.Invalid
+		case o.DrillInterval.Duration < 0:
+			out["drill_interval"] = "drill_interval must not be negative (use \"0d\" to turn the reminder off)"
 		}
 	}
 	choice := func(key string, c *Choice, allowed []string) {
@@ -373,6 +386,12 @@ type ResolvedObjectives struct {
 	// EnforcementInvalid does for the rpo's.
 	AvailabilityEnforcement        ResolvedChoice `json:"availability_enforcement"`
 	AvailabilityEnforcementInvalid bool           `json:"availability_enforcement_invalid,omitempty"`
+	// DrillInterval is as declared (see DrillReminder for what applies).
+	// DrillIntervalInvalid says the setting could not be read: the default then
+	// applies and the reason is in Problems, so a typo neither switches the
+	// reminder off nor goes unnoticed.
+	DrillInterval        ResolvedDuration `json:"drill_interval"`
+	DrillIntervalInvalid bool             `json:"drill_interval_invalid,omitempty"`
 	// AvailabilitySLOInvalid and AvailabilityWindowInvalid say the setting
 	// cannot be trusted (unreadable, or the database names an undeclared
 	// environment and sets none of its own). Budget then computes nothing: a
@@ -478,6 +497,11 @@ func (c *Config) ResolveObjectives(dbID string) (ResolvedObjectives, bool) {
 				r.AvailabilityEnforcement = ResolvedChoice{Set: true, Value: o.AvailabilityEnforcement.Value, Source: s}
 			},
 			func(r *ResolvedObjectives) { r.AvailabilityEnforcementInvalid = true }},
+		{"drill_interval", func(o Objectives) bool { return o.DrillInterval != nil },
+			func(r *ResolvedObjectives, o Objectives, s string) {
+				r.DrillInterval = ResolvedDuration{Set: true, Value: o.DrillInterval.Duration, Source: s}
+			},
+			func(r *ResolvedObjectives) { r.DrillIntervalInvalid = true }},
 	}
 	for _, s := range settings {
 		for _, l := range levels {

@@ -240,6 +240,13 @@ type pitrPlan struct {
 		State  string `json:"state"`
 		Detail string `json:"detail"`
 	} `json:"data_delay"`
+	// DrillCurrency is how recently this database's restore was drilled, for a
+	// database that has an objective. A reminder: it holds nothing back.
+	DrillCurrency *struct {
+		State   string `json:"state"`
+		Overdue bool   `json:"overdue"`
+		Detail  string `json:"detail"`
+	} `json:"drill_currency"`
 }
 
 // pitrWrapWidth is the line width the plan is wrapped to; 0 leaves lines as they
@@ -356,6 +363,15 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			if d.VsRTO == "exceeds" && e.VsRTO != "exceeds" {
 				field(&b, "RTO CHECK (!)      ", "exceeds, by the drills: "+d.VsRTODetail)
 			}
+		}
+	}
+	// Whether a restore drill is due. A reminder, apart from the checks above: it
+	// holds nothing back, and says how to put it right when it is overdue.
+	if d := p.DrillCurrency; d != nil && d.Detail != "" && d.State != "off" {
+		if d.Overdue {
+			field(&b, "DRILL OVERDUE (!)  ", d.Detail+". Record one with helpdesk-client --drill-record (see docs/RESTORE_OPS.md)")
+		} else {
+			field(&b, "Drill reminder     ", d.Detail)
 		}
 	}
 	// What putting the decision off costs. Information, not a deadline: the restore

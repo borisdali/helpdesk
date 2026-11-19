@@ -55,6 +55,51 @@ func TestFormatLedger_ShowsTheTicketOnTheIncident(t *testing.T) {
 	}
 }
 
+func TestFormatLedger_SaysWhetherADrillIsDue(t *testing.T) {
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	restart := []string{"pbs_db_restart_triage", "pbs_pgbackrest_restore_remediate"}
+	with := func(c *availability.DrillCurrency) string {
+		l := ledgerFixture(lInc("inc_a", audit.IncidentStatusResolved, restart, 5*time.Hour, 5*time.Hour-20*time.Minute))
+		l.DrillCurrency = c
+		return formatLedger(l)
+	}
+	age := 143
+	out := with(&availability.DrillCurrency{State: availability.DrillOverdue, Overdue: true, AgeDays: &age,
+		Detail: "last verified drill 143 days ago (limit 90 days); the latest attempt, drl_bad (2 days ago), was refused on archive_guard and does not count"})
+	if !strings.Contains(flat(out), "Drills ⚠ DRILL OVERDUE: last verified drill 143 days ago (limit 90 days); the latest attempt, drl_bad (2 days ago), was refused on archive_guard and does not count") {
+		t.Errorf("overdue:\n%s", out)
+	}
+	// The drill lines wrap, and continue under the text, not under the label.
+	inDrills := false
+	for i, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "  Drills") {
+			inDrills = true
+		} else if !strings.HasPrefix(l, "                          ") {
+			inDrills = false
+		}
+		if inDrills && len([]rune(l)) > 90 {
+			t.Errorf("line %d is %d wide:\n%s", i, len([]rune(l)), l)
+		}
+	}
+	if !strings.Contains(out, "\n                          ") {
+		t.Errorf("a long reminder did not wrap under its text:\n%s", out)
+	}
+	a := 12
+	out = with(&availability.DrillCurrency{State: availability.DrillCurrent, AgeDays: &a, Detail: "last verified drill 12 days ago (limit 90 days)"})
+	if !strings.Contains(flat(out), "Drills last verified drill 12 days ago (limit 90 days)") || strings.Contains(out, "OVERDUE") {
+		t.Errorf("current:\n%s", out)
+	}
+	// Off, or none: no line, and the budget section reads as it always did.
+	for name, c := range map[string]*availability.DrillCurrency{
+		"off":  {State: availability.DrillReminderOff, Detail: "the drill reminder is turned off for this database (drill_interval 0d)"},
+		"none": nil,
+	} {
+		if out := with(c); strings.Contains(out, "Drills") {
+			t.Errorf("%s:\n%s", name, out)
+		}
+	}
+}
+
 func TestFormatLedger_Layout(t *testing.T) {
 	restart := []string{"pbs_db_restart_triage", "pbs_pgbackrest_restore_remediate"}
 	out := formatLedger(ledgerFixture(

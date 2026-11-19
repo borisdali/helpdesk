@@ -94,6 +94,17 @@ func formatLedger(l availability.Ledger) string {
 		}
 	}
 
+	// Whether a restore drill is due: a reminder, apart from the budget's figures.
+	if d := l.DrillCurrency; d != nil && d.State != availability.DrillReminderOff {
+		label := "  Drills   "
+		if d.Overdue {
+			label += "⚠ DRILL OVERDUE: "
+		}
+		// The text continues under itself, not under the label.
+		col := len([]rune(label))
+		fmt.Fprintln(&b, label+rdWrap(d.Detail, max(40, 88-col), strings.Repeat(" ", col)))
+	}
+
 	section := func(title string, entries []availability.Entry, why bool) {
 		if len(entries) == 0 {
 			return

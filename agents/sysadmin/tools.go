@@ -18,6 +18,7 @@ import (
 
 	"helpdesk/agentutil"
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 	"helpdesk/internal/evidence"
 	"helpdesk/internal/infra"
 	"helpdesk/internal/policy"
@@ -1372,6 +1373,12 @@ type GetPgBackRestStatusResult struct {
 	// model quotes from this block must still be in the trail. A test pins the
 	// position.
 	ObjectiveExposure *ObjectiveExposure `json:"objective_exposure,omitempty"`
+	// DrillCurrency is how recently this server's restore was last drilled against
+	// the interval its config gives, for a database that has an objective (v0.36).
+	// DrillOverdue is set when a drill is due, so a rule can test one field. It is
+	// a reminder: it is not part of ObjectiveExposure's verdict and blocks nothing.
+	DrillCurrency *availability.DrillCurrency `json:"drill_currency,omitempty"`
+	DrillOverdue  bool                        `json:"drill_overdue,omitempty"`
 	// WALContinuity says whether the latest backup can actually be restored
 	// to the end of the archived WAL — see walcheck.go. Nil only when the
 	// stanza itself is unhealthy (status_code != 0), where pgBackRest can't
