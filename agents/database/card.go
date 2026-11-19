@@ -74,6 +74,7 @@ func cardOptions(tools []tool.Tool) agentutil.CardOptions {
 			"postgres_database_agent-get_active_connections":     {toolregistry.CapActiveQueries},
 			"postgres_database_agent-get_session_info":           {toolregistry.CapSessionInspect},
 			"postgres_database_agent-get_backup_status":          {toolregistry.CapWALArchiving},
+			"postgres_database_agent-verify_restore_drill":       {toolregistry.CapRestoreDrill},
 			"postgres_database_agent-get_slow_queries":           {toolregistry.CapQueryStats},
 			"postgres_database_agent-explain_query":              {toolregistry.CapQueryPlan},
 			"postgres_database_agent-get_vacuum_status":          {toolregistry.CapVacuumStatus},

@@ -39,6 +39,7 @@ var ToolClassification = map[string]ActionClass{
 	"get_config_parameter":       ActionRead,
 	"get_replication_status":     ActionRead,
 	"get_backup_status":          ActionRead,
+	"verify_restore_drill":       ActionRead,
 	"get_lock_info":              ActionRead,
 	"get_table_stats":            ActionRead,
 	"get_session_info":           ActionRead,

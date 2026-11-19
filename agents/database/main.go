@@ -290,6 +290,14 @@ func createTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 
+	verifyRestoreDrillToolDef, err := functiontool.New(functiontool.Config{
+		Name:        "verify_restore_drill",
+		Description: "Read-only check of a restore-drill clone against its source: same system identifier (it is a copy of the source), not the source itself or a standby of it, archive guard (a clone that could push WAL into the source's archive is refused), out of recovery, comparable size, and an optional single SELECT that must return true. Returns verified, verified_with_warnings, refused or unverifiable with each check. It records nothing: a person records the drill at the gateway.",
+	}, verifyRestoreDrillTool)
+	if err != nil {
+		return nil, err
+	}
+
 	getLockInfoToolDef, err := functiontool.New(functiontool.Config{
 		Name:        "get_lock_info",
 		Description: "Find blocking locks and which queries are waiting on which other queries.",
@@ -508,6 +516,7 @@ func createTools() ([]tool.Tool, error) {
 		getConfigParameterToolDef,
 		getReplicationStatusToolDef,
 		getBackupStatusToolDef,
+		verifyRestoreDrillToolDef,
 		getLockInfoToolDef,
 		getTableStatsToolDef,
 		getSessionInfoToolDef,

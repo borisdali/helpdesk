@@ -2,7 +2,7 @@
 
 # Database agent tools
 
-The `database` agent (`postgres_database_agent`) publishes 35 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
+The `database` agent (`postgres_database_agent`) publishes 36 tools to the [Tool Registry](../TOOL_REGISTRY.md). This page is generated from the agent's code: names, descriptions and parameters come from the tool definitions, action classes from `audit.ToolClassification`, and capabilities and eligibility from the agent card options. Capability names are defined in the [capability vocabulary](capabilities.md).
 
 | Tool | Action class | Capabilities |
 |---|---|---|
@@ -41,6 +41,7 @@ The `database` agent (`postgres_database_agent`) publishes 35 tools to the [Tool
 | [`set_archive_command`](#set_archive_command) | write | `config_change` |
 | [`terminate_connection`](#terminate_connection) | destructive | `connection_terminate` |
 | [`terminate_idle_connections`](#terminate_idle_connections) | destructive | `connection_terminate` |
+| [`verify_restore_drill`](#verify_restore_drill) | read | `restore_drill` |
 
 ## `cancel_query`
 
@@ -561,3 +562,18 @@ Terminate all idle connections older than idle_minutes minutes. Use dry_run=true
 | `connection_string` | string | no | PostgreSQL connection string. If empty, uses environment defaults. |
 | `database` | string | no | Limit termination to connections in this specific database. If empty, targets all databases. |
 | `dry_run` | boolean | no | If true, only list connections that would be terminated without actually terminating them. Defaults to false. |
+
+## `verify_restore_drill`
+
+Read-only check of a restore-drill clone against its source: same system identifier (it is a copy of the source), not the source itself or a standby of it, archive guard (a clone that could push WAL into the source's archive is refused), out of recovery, comparable size, and an optional single SELECT that must return true. Returns verified, verified_with_warnings, refused or unverifiable with each check. It records nothing: a person records the drill at the gateway.
+
+- **Action class:** read
+- **Capabilities:** `restore_drill`
+- **Fleet eligible:** no
+- **Auto-remediation eligible:** no
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `clone` | string | yes | The clone the restore drill produced: its name in the infrastructure config, or its connection string. Must not be the source. |
+| `source` | string | yes | The source database: its name in the infrastructure config, or its connection string. |
+| `verify_sql` | string | no | Optional single SELECT, run on the clone, that must return true (for example a row count you expect). |

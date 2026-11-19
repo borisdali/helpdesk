@@ -41,6 +41,10 @@ func ComputeEventHash(event *Event) string {
 		// defined are not covered; adding them now would invalidate the chain
 		// for events already recorded with them.
 		RecoveryDecision *RecoveryDecision `json:"recovery_decision,omitempty"`
+		// RestoreDrill is covered for the same reason: the table row is the
+		// query path, this event is the authority on what was verified.
+		// Omitted when nil, so no existing event's hash changes.
+		RestoreDrill *DrillRecord `json:"restore_drill,omitempty"`
 	}{
 		EventID:     event.EventID,
 		Timestamp:   event.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"),
@@ -58,6 +62,7 @@ func ComputeEventHash(event *Event) string {
 		Outcome:     event.Outcome,
 
 		RecoveryDecision: event.RecoveryDecision,
+		RestoreDrill:     event.RestoreDrill,
 	}
 
 	data, err := json.Marshal(hashInput)

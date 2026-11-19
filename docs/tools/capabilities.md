@@ -26,6 +26,7 @@ Per-agent tool pages: [database](database.md), [Kubernetes](k8s.md), [sysadmin](
 | `extensions` | database | Installed extensions and versions. | [`get_baseline`](database.md#get_baseline), [`get_extensions`](database.md#get_extensions) |
 | `database_stats` | database | Database-level counters (commits, rollbacks, conflicts, deadlocks). | [`get_database_stats`](database.md#get_database_stats) |
 | `wal_archiving` | database | WAL archiving health (pg_stat_archiver). | [`get_backup_status`](database.md#get_backup_status) |
+| `restore_drill` | database | Whether a restore-drill clone is a safe, comparable copy of its source (read-only on both). | [`verify_restore_drill`](database.md#verify_restore_drill) |
 | `query_stats` | database | Aggregated per-statement execution statistics (pg_stat_statements). | [`get_slow_queries`](database.md#get_slow_queries) |
 | `query_plan` | database | Execution plan for a query (EXPLAIN). | [`explain_query`](database.md#explain_query) |
 | `vacuum_status` | database | Dead tuples and (auto)vacuum/analyze history. | [`get_table_stats`](database.md#get_table_stats), [`get_vacuum_status`](database.md#get_vacuum_status) |

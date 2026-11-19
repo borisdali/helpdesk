@@ -505,6 +505,7 @@ type Event struct {
 	RollbackExecution      *RollbackExecution      `json:"rollback_execution,omitempty"`
 	ObjectiveEvidence      *ObjectiveEvidence      `json:"objective_evidence,omitempty"`
 	RecoveryDecision       *RecoveryDecision       `json:"recovery_decision,omitempty"`
+	RestoreDrill           *DrillRecord            `json:"restore_drill,omitempty"`
 }
 
 // MarshalJSON returns the JSON encoding of the event.
