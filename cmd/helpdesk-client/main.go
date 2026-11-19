@@ -68,21 +68,7 @@ func main() {
 		sysadminKey           = flag.String("sysadmin-key", os.Getenv("HELPDESK_SYSADMIN_API_KEY"), "Sysadmin agent API key (for --pitr-plan)")
 		pitrServer            = flag.String("pitr-server", "", "Infrastructure alias of the database to restore (for --pitr-plan)")
 		pitrStanza            = flag.String("pitr-stanza", "main", "pgBackRest stanza (for --pitr-plan)")
-		drillRecord           = flag.Bool("drill-record", false, "Record a restore drill: the gateway verifies the clone and stores the record (needs --drill-source, --drill-clone, --drill-method)")
-		drillList             = flag.Bool("drill-list", false, "List the recorded restore drills (filter with --drill-source, --drill-status, --drill-current)")
-		drillSource           = flag.String("drill-source", "", "Database the drill is for: its infrastructure key or name (for --drill-record, --drill-list)")
-		drillClone            = flag.String("drill-clone", "", "The clone the drill produced, registered in the infrastructure config (for --drill-record)")
-		drillMethod           = flag.String("drill-method", "", "How the clone was made: pgbackrest, snapshot, cloud or other (for --drill-record)")
-		drillStarted          = flag.String("drill-started", "", "When the restore started, RFC3339 with a zone (for --drill-record)")
-		drillFinished         = flag.String("drill-finished", "", "When the restore finished, RFC3339 with a zone (for --drill-record)")
-		drillDuration         = flag.String("drill-duration", "", "How long the restore took, e.g. 1m35s; ignored when both times are given (for --drill-record)")
-		drillBackupLabel      = flag.String("drill-backup-label", "", "The pgBackRest backup restored from (for --drill-record)")
-		drillRecoveryTarget   = flag.String("drill-recovery-target", "", "The recovery target restored to, if a point-in-time drill (for --drill-record)")
-		drillVerifySQL        = flag.String("drill-verify-sql", "", "A single SELECT run on the clone that must return true (for --drill-record)")
-		drillNote             = flag.String("drill-note", "", "Free text recorded with the drill (for --drill-record)")
-		drillSupersedes       = flag.String("drill-supersedes", "", "The earlier drill `ID` this one replaces, e.g. after fixing a refusal (for --drill-record)")
-		drillStatus           = flag.String("drill-status", "", "Only drills with this status: verified, verified_with_warnings, refused, unverifiable (for --drill-list)")
-		drillCurrent          = flag.Bool("drill-current", false, "Leave out drills a later record supersedes (for --drill-list)")
+		drills                = registerDrillFlags(flag.CommandLine, pitrTicket)
 		listRollbacks         = flag.Bool("list-rollbacks", false, "List rollback records from the audit service")
 	)
 	flag.Parse()
@@ -137,16 +123,10 @@ func main() {
 	}
 
 	// --drill-record / --drill-list: restore drills, through the gateway.
-	if *drillRecord || *drillList {
-		o := drillOpts{
-			Source: *drillSource, Clone: *drillClone, Method: *drillMethod,
-			Started: *drillStarted, Finished: *drillFinished, Duration: *drillDuration,
-			BackupLabel: *drillBackupLabel, RecoveryTarget: *drillRecoveryTarget, VerifySQL: *drillVerifySQL,
-			Ticket: *pitrTicket, Note: *drillNote, Supersedes: *drillSupersedes,
-			Status: *drillStatus, Current: *drillCurrent,
-		}
+	if drills.requested() {
+		o := drills.opts()
 		var err error
-		if *drillRecord {
+		if *drills.record {
 			err = runDrillRecord(ctx, cfg, o)
 		} else {
 			err = runDrillList(ctx, cfg, o)
