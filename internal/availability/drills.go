@@ -69,6 +69,12 @@ type DrillInputs struct {
 	// SystemID is the source's system identifier as it is now, when the caller
 	// could read it. Empty means the drills are matched by name only.
 	SystemID string
+	// ReadSystemID reads it when it is not given, and is called only when there is
+	// a drill whose system it would be compared with, and at most once. Reading it
+	// costs a command on the instance, so a server nobody has drilled (nearly all
+	// of them) never pays for it. It returns "" when it cannot tell, and the drills
+	// are then matched by name.
+	ReadSystemID func() string
 	// RestoreBytes is the size of the restore (the backup's database size). Zero
 	// means unknown, and then a drill cannot be shown comparable.
 	RestoreBytes int64
@@ -141,6 +147,16 @@ func AddDrills(e *RecoveryEstimate, drills []audit.DrillRecord, in DrillInputs, 
 	from := now.Add(-DrillWindow)
 
 	drills = audit.Current(drills)
+	// The identifier is read only if a verified drill in the window could be
+	// matched with it.
+	if in.SystemID == "" && in.ReadSystemID != nil {
+		for _, r := range drills {
+			if r.Counted() && !drillWhen(r).Before(from) {
+				in.SystemID = in.ReadSystemID()
+				break
+			}
+		}
+	}
 	// Which system is "this one". Known from the caller when it could read it;
 	// otherwise the newest verified drill's, so that drills of a server since
 	// rebuilt stop counting once the new one has been drilled.

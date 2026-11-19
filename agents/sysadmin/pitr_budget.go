@@ -122,7 +122,9 @@ func budgetCheckWith(ctx context.Context, target string, serving bool, restoreBy
 	}
 	in.Estimate = recoveryEstimateOf(ctx, key, rto, now, availability.DrillInputs{
 		RestoreBytes: int64(restoreBytes),
-		SystemID:     systemID(ctx, target),
+		// Read only if there is a drill to match it with: it costs a command on the
+		// instance, and most servers have none.
+		ReadSystemID: func() string { return systemID(ctx, target) },
 	})
 	// When the restore runs under an approval, the gateway has said when its incident
 	// began: by now the ledger no longer reads that incident as open (approving the

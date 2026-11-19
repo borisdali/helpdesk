@@ -223,6 +223,61 @@ func TestAddDrills_MatchingToTheServer(t *testing.T) {
 	}
 }
 
+// Reading the source's identifier costs a command on the instance, so it is read
+// only when a drill could be matched with it, and at most once.
+func TestAddDrills_ReadsTheSystemIDOnlyWhenThereIsADrillToMatch(t *testing.T) {
+	reads := 0
+	read := func(id string) func() string {
+		return func() string { reads++; return id }
+	}
+	in := func(id string) DrillInputs { return DrillInputs{RestoreBytes: 10 * gib, ReadSystemID: read(id)} }
+
+	refused := drill("drl_r", 100, 3, 10*gib)
+	refused.Status = audit.DrillRefused
+	tooOld := drill("drl_o", 100, 120, 10*gib)
+	for name, c := range map[string]struct {
+		drills []audit.DrillRecord
+		reads  int
+	}{
+		"no drills at all":                {nil, 0},
+		"only a refused drill":            {[]audit.DrillRecord{refused}, 0},
+		"only a drill outside the window": {[]audit.DrillRecord{tooOld}, 0},
+		"one verified drill":              {drillsTook(100), 1},
+		"many verified drills":            {drillsTook(60, 70, 80, 90, 100), 1},
+		"verified and refused":            {append(drillsTook(60), refused), 1},
+	} {
+		reads = 0
+		e := noRealRestores()
+		AddDrills(&e, c.drills, in("7001"), now, nil)
+		if reads != c.reads {
+			t.Errorf("%s: the identifier was read %d times, want %d", name, reads, c.reads)
+		}
+	}
+
+	// Given, it is not read; read, it decides the match; unreadable, it is by name.
+	reads = 0
+	e := noRealRestores()
+	AddDrills(&e, drillsTook(60, 70, 80), DrillInputs{SystemID: "7001", RestoreBytes: 10 * gib, ReadSystemID: read("1")}, now, nil)
+	if reads != 0 || e.Drills.MatchedBy != "system_identifier" || e.Drills.Samples != 3 {
+		t.Errorf("a given identifier: read %d times, %+v", reads, e.Drills)
+	}
+	e = noRealRestores()
+	AddDrills(&e, drillsTook(60, 70, 80), in("7001"), now, nil)
+	if e.Drills.MatchedBy != "system_identifier" || e.Drills.Samples != 3 {
+		t.Errorf("read and matching: %+v", e.Drills)
+	}
+	e = noRealRestores()
+	AddDrills(&e, drillsTook(60, 70, 80), in("some-other-system"), now, nil)
+	if e.Drills.Samples != 0 || e.Drills.NotCounted[notCountedOtherSystem] != 3 {
+		t.Errorf("read, and a different system: %+v", e.Drills)
+	}
+	e = noRealRestores()
+	AddDrills(&e, drillsTook(60, 70, 80), in(""), now, nil)
+	if e.Drills.MatchedBy != "name" || e.Drills.Samples != 3 || !strings.Contains(e.Drills.Basis, "matched by name") {
+		t.Errorf("unreadable, so by name: %+v", e.Drills)
+	}
+}
+
 func TestAddDrills_AgainstTheDeclaredRTO(t *testing.T) {
 	e := noRealRestores()
 	AddDrills(&e, drillsTook(600, 1200, 2400), DrillInputs{RestoreBytes: 10 * gib}, now, rto(30*time.Minute))

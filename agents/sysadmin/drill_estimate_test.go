@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,24 +78,129 @@ func TestBudgetCheckForRestore_ReadsTheSourceSystemID(t *testing.T) {
 		return "7001"
 	}
 	budgetCheckForRestore(context.Background(), "helpdesk-test-pg-pgbackrest", true, 5<<30)
-	if len(calls.drills) != 1 || calls.drills[0].SystemID != "7001" || calls.drills[0].RestoreBytes != 5<<30 {
-		t.Errorf("drill inputs: %+v", calls.drills)
+	if len(calls.drills) != 1 || calls.drills[0].RestoreBytes != 5<<30 || calls.drills[0].ReadSystemID == nil {
+		t.Fatalf("drill inputs: %+v", calls.drills)
+	}
+	// Nothing was read by the call itself: the estimate reads it only if there is a
+	// drill to match, so a server nobody has drilled never pays for the command.
+	if len(asked) != 0 {
+		t.Errorf("the identifier was read eagerly, for %v", asked)
+	}
+	// When the estimate asks, it is read for the target the call named.
+	if got := calls.drills[0].ReadSystemID(); got != "7001" {
+		t.Errorf("ReadSystemID = %q", got)
 	}
 	if len(asked) != 1 || asked[0] != "helpdesk-test-pg-pgbackrest" {
 		t.Errorf("the identifier was read for %v, want the target the call named", asked)
 	}
-	// A restore with no size in view and the check that has none read nothing.
+	// The check that has no restore in view offers no way to read one.
 	budgetCheckFor(context.Background(), "helpdesk-test-pg-pgbackrest", true)
-	if len(asked) != 1 {
-		t.Errorf("budgetCheckFor read an identifier: %v", asked)
+	if got := calls.drills[len(calls.drills)-1].ReadSystemID(); got != "" || len(asked) != 1 {
+		t.Errorf("budgetCheckFor read an identifier: %q, asked %v", got, asked)
 	}
-	// When it cannot be read, drills are matched by name: an empty identifier.
+	// When it cannot be read, the answer is empty and drills are matched by name.
 	sourceSystemIDFn = func(context.Context, string) string { return "" }
 	budgetCheckForRestore(context.Background(), "helpdesk-test-pg-pgbackrest", true, 5<<30)
-	if calls.drills[len(calls.drills)-1].SystemID != "" {
-		t.Errorf("an unreadable identifier was replaced by something: %+v", calls.drills[len(calls.drills)-1])
+	if got := calls.drills[len(calls.drills)-1].ReadSystemID(); got != "" {
+		t.Errorf("an unreadable identifier was replaced by %q", got)
 	}
 }
+
+// ── reading it: the script, and the bound ─────────────────────────────────────
+
+// systemIDRun runs the real script with stub psql and pg_controldata on the PATH,
+// so its order of preference and its refusal of garbage are tested on any machine.
+func systemIDRun(t *testing.T, psql, controldata string) string {
+	t.Helper()
+	dir := t.TempDir()
+	stub := func(name, body string) {
+		if body == "" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub("psql", psql)
+	stub("pg_controldata", controldata)
+	data := filepath.Join(dir, "data")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "PG_VERSION"), []byte("16\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", systemIDScript)
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "PGDATA=" + data}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script: %v\n%s", err, out)
+	}
+	return parseSystemID(string(out))
+}
+
+func TestSystemIDScript_OrderOfPreferenceAndGarbage(t *testing.T) {
+	controldata := `echo "pg_control version number:            1300"; echo "Database system identifier:           2222222222222222222"`
+	for name, c := range map[string]struct{ psql, controldata, want string }{
+		"the running instance is asked first":     {`echo 1111111111111111111`, controldata, "1111111111111111111"},
+		"psql fails: the data directory is read":  {`exit 2`, controldata, "2222222222222222222"},
+		"psql prints nothing: the data directory": {`:`, controldata, "2222222222222222222"},
+		"neither works":                            {`exit 2`, `exit 1`, ""},
+		"neither is installed":                     {``, ``, ""},
+		"psql prints an error as its answer":       {`echo "psql: error: connection refused"`, `exit 1`, ""},
+		"pg_controldata prints something else":     {`exit 2`, `echo "pg_controldata: error: could not open file"`, ""},
+		"pg_controldata with no identifier line":   {`exit 2`, `echo "pg_control version number: 1300"`, ""},
+		"psql answers with several lines: the 1st": {`printf '3333333333333333333\n4444\n'`, controldata, "3333333333333333333"},
+	} {
+		if got := systemIDRun(t, c.psql, c.controldata); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// blockingRunner never answers until its context ends: a docker exec or an ssh
+// that has hung.
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ string, _ []string, _ []string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// A command that hangs does not hold up the plan: the read gives up at its bound
+// and says "not known".
+func TestReadSourceSystemID_GivesUpAtTheBound(t *testing.T) {
+	oldRunner, oldInfra, oldBound := cmdRunner, infraConfig, systemIDTimeout
+	t.Cleanup(func() { cmdRunner, infraConfig, systemIDTimeout = oldRunner, oldInfra, oldBound })
+	cmdRunner, infraConfig, systemIDTimeout = blockingRunner{}, nil, 100*time.Millisecond
+
+	began := time.Now()
+	got := readSourceSystemID(context.Background(), "anything")
+	if got != "" {
+		t.Errorf("a read that never answered gave %q", got)
+	}
+	if took := time.Since(began); took > 3*time.Second {
+		t.Errorf("the read waited %s, far past its bound", took)
+	}
+}
+
+func TestReadSourceSystemID_ErrorsAreNotKnownNotFailures(t *testing.T) {
+	oldRunner, oldInfra := cmdRunner, infraConfig
+	t.Cleanup(func() { cmdRunner, infraConfig = oldRunner, oldInfra })
+	infraConfig = nil
+	cmdRunner = mockRunnerFn(func() (string, error) { return "partial output", errors.New("docker: no such container") })
+	if got := readSourceSystemID(context.Background(), "x"); got != "" {
+		t.Errorf("a failed command gave %q", got)
+	}
+	cmdRunner = mockRunnerFn(func() (string, error) { return "system_id=424242\n", nil })
+	if got := readSourceSystemID(context.Background(), "x"); got != "424242" {
+		t.Errorf("a good answer gave %q", got)
+	}
+}
+
+type mockRunnerFn func() (string, error)
+
+func (f mockRunnerFn) Run(context.Context, string, []string, []string) (string, error) { return f() }
 
 // Through the real estimate: a server rebuilt under the same name is told apart
 // from the one the drills were of, even before any drill of the new one exists.

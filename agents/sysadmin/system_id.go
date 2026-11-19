@@ -66,8 +66,9 @@ func parseSystemID(out string) string {
 	return ""
 }
 
-// systemIDTimeout bounds the read: the plan must not wait on it.
-const systemIDTimeout = 15 * time.Second
+// systemIDTimeout bounds the read: the plan must not wait on it. A variable so a
+// test need not wait it out.
+var systemIDTimeout = 15 * time.Second
 
 // sourceSystemIDFn reads the system identifier of the database a call targets, or
 // "" when it cannot be read. A variable so a test can say what it reads.
