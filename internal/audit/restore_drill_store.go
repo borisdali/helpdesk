@@ -41,6 +41,22 @@ type DrillCheck struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// DrillVerification is what the database agent's verify_restore_drill tool
+// returns and the gateway reads. It lives here so the two cannot drift apart.
+type DrillVerification struct {
+	Output         string       `json:"output"`
+	Status         string       `json:"status,omitempty"` // verified | verified_with_warnings | refused | unverifiable
+	Checks         []DrillCheck `json:"checks,omitempty"`
+	SourceKey      string       `json:"source_key,omitempty"`
+	CloneKey       string       `json:"clone_key,omitempty"`
+	SourceSystemID string       `json:"source_system_id,omitempty"`
+	CloneSystemID  string       `json:"clone_system_id,omitempty"`
+	SourceEndpoint string       `json:"source_endpoint,omitempty"`
+	CloneEndpoint  string       `json:"clone_endpoint,omitempty"`
+	SourceBytes    int64        `json:"source_bytes,omitempty"`
+	CloneBytes     int64        `json:"clone_bytes,omitempty"`
+}
+
 // DrillRecord is one restore drill: a restore of the source's backup onto a
 // clone the customer brought, with what aiHelpDesk verified about it.
 //

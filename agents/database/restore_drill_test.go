@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -296,6 +298,27 @@ func TestVerifyRestoreDrillTool_SameInfraEntryIsRefused(t *testing.T) {
 	res, _ := verifyRestoreDrillTool(newTestContext(), VerifyRestoreDrillArgs{Source: "prod-db", Clone: "prod-db"})
 	if res.Status != audit.DrillRefused || resultOf(res.Checks, "not_the_source").Result != "fail" {
 		t.Errorf("the same entry as source and clone: %+v", res)
+	}
+}
+
+// The gateway reads the verdict out of the direct tool's output, so the
+// registered tool must return the structured result as JSON.
+func TestVerifyRestoreDrill_DirectToolReturnsTheVerdictAsJSON(t *testing.T) {
+	defer withMockRunnerSequence(psqlResponse{out: factsOutput(srcFacts())}, psqlResponse{out: factsOutput(cloneFacts())})()
+	fn, ok := NewDatabaseDirectRegistry().Get("verify_restore_drill")
+	if !ok {
+		t.Fatal("verify_restore_drill is not in the direct registry")
+	}
+	out, err := fn(context.Background(), map[string]any{"source": "host=prod port=5432", "clone": "host=scratch port=5432"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v audit.DrillVerification
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if v.Status != audit.DrillVerified || v.SourceSystemID != "7001" || v.CloneBytes == 0 || !strings.Contains(v.Output, "VERIFIED") {
+		t.Errorf("verdict %+v", v)
 	}
 }
 

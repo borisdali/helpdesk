@@ -296,19 +296,8 @@ type VerifyRestoreDrillArgs struct {
 }
 
 // VerifyRestoreDrillResult is the structured result of verify_restore_drill.
-type VerifyRestoreDrillResult struct {
-	Output         string             `json:"output"`
-	Status         string             `json:"status,omitempty"` // verified | verified_with_warnings | refused | unverifiable
-	Checks         []audit.DrillCheck `json:"checks,omitempty"`
-	SourceKey      string             `json:"source_key,omitempty"`
-	CloneKey       string             `json:"clone_key,omitempty"`
-	SourceSystemID string             `json:"source_system_id,omitempty"`
-	CloneSystemID  string             `json:"clone_system_id,omitempty"`
-	SourceEndpoint string             `json:"source_endpoint,omitempty"`
-	CloneEndpoint  string             `json:"clone_endpoint,omitempty"`
-	SourceBytes    int64              `json:"source_bytes,omitempty"`
-	CloneBytes     int64              `json:"clone_bytes,omitempty"`
-}
+// It is defined in internal/audit because the gateway reads it too.
+type VerifyRestoreDrillResult = audit.DrillVerification
 
 func readDrillFacts(ctx context.Context, connStr, key string) drillFacts {
 	out, err := runPsqlWithToolName(ctx, key, drillFactsQuery, "verify_restore_drill")

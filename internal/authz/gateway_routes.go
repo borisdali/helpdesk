@@ -23,6 +23,12 @@ var DefaultGatewayPermissions = map[string]Permission{
 	"GET /api/v1/availability-ledger":      {AdminBypass: true},
 	"POST /api/v1/admin/infra/register-db": {AdminBypass: true},
 
+	// Restore drills: recording is open to whoever may approve a recovery gate
+	// (proceed-escalation below), the same rule until decision rights land.
+	"POST /api/v1/drills":     {AdminBypass: true},
+	"GET /api/v1/drills":      {AdminBypass: true},
+	"GET /api/v1/drills/{id}": {AdminBypass: true},
+
 	// Governance reads
 	"GET /api/v1/governance":                   {AdminBypass: true},
 	"GET /api/v1/governance/policies":          {AdminBypass: true},

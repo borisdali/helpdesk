@@ -3203,7 +3203,13 @@ func NewDatabaseDirectRegistry() *agentutil.DirectToolRegistry {
 			return "", err
 		}
 		result, _ := verifyRestoreDrillImpl(ctx, a)
-		return result.Output, nil
+		// The gateway reads the structured verdict, so this direct tool returns
+		// the whole result as JSON (its "output" field is the readable text).
+		b, err := json.Marshal(result)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
 	})
 	r.Register("get_lock_info", func(ctx context.Context, args map[string]any) (string, error) {
 		a, err := argsToStruct[GetLockInfoArgs](args)
