@@ -226,6 +226,9 @@ func wrapHanging(line string, width, hang int) string {
 // wrapVerification wraps the verdict lines the tool printed. A check line is
 // "  FAIL name: detail"; its continuation lines start under the name, two columns in.
 func wrapVerification(text string, width int) string {
+	// The verdict is text that came from a tool reading servers, printed to the
+	// operator's terminal: whatever acts on a terminal is made harmless first.
+	text = audit.PrintableText(text, true)
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	for i, l := range lines {
 		hang := 4

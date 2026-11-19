@@ -81,6 +81,23 @@ func validateDrillRequest(req *drillRequest, now time.Time) error {
 	if len(req.Note) > drillNoteMax {
 		return fmt.Errorf("note is longer than %d characters", drillNoteMax)
 	}
+	// What is typed here is printed to the terminal of whoever reads the record
+	// later, so control characters and bidirectional overrides are refused (a tab
+	// and a newline are fine in the free text).
+	for name, v := range map[string]string{"source": req.Source, "clone": req.Clone, "backup_label": req.BackupLabel,
+		"recovery_target": req.RecoveryTarget, "supersedes": req.Supersedes} {
+		if audit.HasUnsafeText(v, false) {
+			return fmt.Errorf("%s holds a control character, which is not allowed", name)
+		}
+	}
+	for name, v := range map[string]string{"note": req.Note, "verify_sql": req.VerifySQL} {
+		if audit.HasUnsafeText(v, true) {
+			return fmt.Errorf("%s holds a control character (other than a tab or newline), which is not allowed", name)
+		}
+	}
+	if req.Supersedes != "" && !drillIDRe.MatchString(req.Supersedes) {
+		return fmt.Errorf("supersedes %q is not a drill ID (letters, digits and . _ -, up to 64 characters)", req.Supersedes)
+	}
 	if len(req.BackupLabel) > drillFieldMax || len(req.RecoveryTarget) > drillFieldMax {
 		return fmt.Errorf("backup_label and recovery_target are limited to %d characters", drillFieldMax)
 	}
@@ -101,6 +118,8 @@ func validateDrillRequest(req *drillRequest, now time.Time) error {
 	}
 	return nil
 }
+
+var drillIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 var drillPasswordRe = regexp.MustCompile(`(?i)\bpassword=\S+`)
 

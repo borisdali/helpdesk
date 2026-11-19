@@ -139,6 +139,164 @@ func TestFormatDrillDetail_SparseRecord(t *testing.T) {
 	}
 }
 
+// A record can come from a writer that did not check it, and what is read back is
+// printed to whoever reads it: nothing in a drill may act on their terminal.
+func TestFormatDrill_NothingRecordedCanActOnATerminal(t *testing.T) {
+	rlo := string(rune(0x202E)) // built by number: never written as a literal
+	hostile := someDrill("drl_evil\x1b[2J", audit.DrillVerified, time.Hour)
+	hostile.SourceKey, hostile.CloneKey = "prod\x1b[31m", "clone"+rlo+"exe"
+	hostile.Note = "fine\x1b]0;owned\x07\nsecond line\twith a tab\r overwritten"
+	hostile.BackupLabel, hostile.RecoveryTarget = "label\x1b[0m", "target"+rlo
+	hostile.RecordedBy, hostile.Ticket, hostile.Supersedes = "alice\x1b[1m", "T-1\x07", "drl_x\x1b[0m"
+	hostile.Checks = []audit.DrillCheck{{Name: "same\x1b[0m", Result: "pass\x07", Detail: "ok\x1b[2J then " + rlo + "reversed\r"}}
+	hostile.AuditEventID, hostile.InfraDigest = "evt\x1b[0m", "sha256:\x07"
+	copyOf := hostile.Note
+
+	for name, out := range map[string]string{
+		"table":  formatDrillTable([]audit.DrillRecord{hostile}, drillNow),
+		"detail": formatDrillDetail(hostile, []audit.DrillRecord{hostile}, 100),
+	} {
+		if audit.HasUnsafeText(out, true) {
+			t.Errorf("%s still holds a character that acts on a terminal: %q", name, out)
+		}
+	}
+	// The harmless text of the note is kept, and its layout.
+	detail := formatDrillDetail(hostile, nil, 100)
+	if !strings.Contains(detail, "fine") || !strings.Contains(detail, "second line") || !strings.Contains(detail, "with a tab") {
+		t.Errorf("the note's words were lost:\n%s", detail)
+	}
+	// The caller's record is not changed, and the siblings it was given neither.
+	later := []audit.DrillRecord{hostile}
+	formatDrillDetail(hostile, later, 100)
+	if hostile.Note != copyOf || later[0].Note != copyOf {
+		t.Error("formatting changed the record it was given")
+	}
+	// A hostile status never counts as verified.
+	d := someDrill("drl_s", audit.DrillVerified+"\x1b[0m", time.Hour)
+	if out := formatDrillTable([]audit.DrillRecord{d}, drillNow); !strings.Contains(out, "1 of them refused or unverifiable and not counted") {
+		t.Errorf("a status with an escape sequence counted:\n%s", out)
+	}
+}
+
+func TestFormatDrillTable_NoFinishTimeUsesWhenItWasRecorded(t *testing.T) {
+	d := someDrill("drl_nofinish", audit.DrillVerified, 0)
+	d.StartedAt, d.FinishedAt, d.DurationSeconds = time.Time{}, time.Time{}, 0
+	d.RecordedAt = drillNow.Add(-5 * 24 * time.Hour)
+	out := formatDrillTable([]audit.DrillRecord{d}, drillNow)
+	if !strings.Contains(out, "5d ago") {
+		t.Errorf("dated by neither the finish nor the record:\n%s", out)
+	}
+	if detail := formatDrillDetail(d, nil, 100); !strings.Contains(detail, "When       "+d.RecordedAt.UTC().Format("2006-01-02 15:04 UTC")) {
+		t.Errorf("detail:\n%s", detail)
+	}
+}
+
+func TestFormatDrillDetail_LongTextWrapsUnderItsLabel(t *testing.T) {
+	d := someDrill("drl_long", audit.DrillVerified, time.Hour)
+	d.CloneKey = "orders-clone-in-the-disaster-recovery-region-eu-west-3"
+	d.Note = strings.Repeat("quarterly drill with the new runbook and the new clone host; ", 6)
+	d.BackupLabel = "20261101-020000F_20261118-020000I"
+	out := formatDrillDetail(d, nil, 80)
+	for i, l := range strings.Split(out, "\n") {
+		if len([]rune(l)) > 80 {
+			t.Errorf("line %d is %d wide: %q", i, len([]rune(l)), l)
+		}
+	}
+	var inNote bool
+	for _, l := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(l, "  Note"):
+			inNote = true
+		case inNote && strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "             "):
+			inNote = false
+		case inNote && strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "             "):
+			t.Errorf("a continuation of the note does not hang under its text: %q", l)
+		}
+	}
+	if !strings.Contains(out, "\n             ") {
+		t.Errorf("the long note did not wrap:\n%s", out)
+	}
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	if !strings.Contains(flat(out), flat(d.Note)) {
+		t.Errorf("wrapping changed the note's words:\n%s", out)
+	}
+}
+
+// The command end to end against a fake gateway: what it asks, and what it prints.
+func TestDrillsReport(t *testing.T) {
+	bad := someDrill("drl_bad00002", audit.DrillRefused, 2*24*time.Hour)
+	bad.Checks = []audit.DrillCheck{{Name: "archive_guard", Result: "fail", Detail: "would push into the source's archive"}}
+	redo := someDrill("drl_ok000003", audit.DrillVerified, 24*time.Hour)
+	redo.Supersedes = "drl_bad00002"
+
+	var queries []neturl.Values
+	var failSiblings bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/drills/drl_bad00002":
+			json.NewEncoder(w).Encode(bad) //nolint:errcheck
+		case "/api/v1/drills/drl_nope":
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"drill not found"}`)) //nolint:errcheck
+		case "/api/v1/drills":
+			if failSiblings && r.URL.Query().Get("limit") == "200" {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode([]audit.DrillRecord{redo, bad}) //nolint:errcheck
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	// The listing: filters reach the gateway, drills are printed.
+	out, err := drillsReport(srv.URL, "k", "", "prod-orders", "refused", false, 30, 5, drillNow, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := queries[0]
+	if q.Get("source") != "prod-orders" || q.Get("status") != "refused" || q.Get("current") != "true" || q.Get("limit") != "5" || q.Get("since") == "" {
+		t.Errorf("the listing asked %v", q)
+	}
+	if !strings.Contains(out, "drl_ok000003") || !strings.Contains(out, "drl_bad00002") || !strings.Contains(out, "2 drill(s), 1 of them refused") {
+		t.Errorf("listing:\n%s", out)
+	}
+	// One drill: its replacement is found in the database's drills, which are read
+	// including the superseded ones.
+	queries = nil
+	out, err = drillsReport(srv.URL, "", "drl_bad00002", "ignored", "ignored", false, 0, 30, drillNow, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Replaced by drl_ok000003 (verified)") || !strings.Contains(out, "FAIL archive_guard") {
+		t.Errorf("detail:\n%s", out)
+	}
+	if len(queries) != 2 || queries[1].Get("source") != "prod-orders" || queries[1].Get("current") != "" {
+		t.Errorf("the siblings must be read for the drill's own database, superseded ones included: %v", queries)
+	}
+	// The siblings cannot be read: the drill is still shown, without that line.
+	failSiblings = true
+	out, err = drillsReport(srv.URL, "", "drl_bad00002", "", "", false, 0, 30, drillNow, 100)
+	if err != nil || !strings.Contains(out, "Restore drill drl_bad00002  REFUSED") || strings.Contains(out, "Replaced by") {
+		t.Errorf("siblings unreadable: %v\n%s", err, out)
+	}
+	// An unknown drill says so; an unreachable gateway is an error; an empty list is said.
+	if _, err := drillsReport(srv.URL, "", "drl_nope", "", "", false, 0, 30, drillNow, 100); err == nil || !strings.Contains(err.Error(), `no restore drill "drl_nope" is recorded`) {
+		t.Errorf("unknown: %v", err)
+	}
+	if _, err := drillsReport("http://127.0.0.1:1", "", "", "", "", false, 0, 30, drillNow, 100); err == nil {
+		t.Error("an unreachable gateway was not an error")
+	}
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`[]`)) })) //nolint:errcheck
+	defer empty.Close()
+	if out, err := drillsReport(empty.URL, "", "", "", "", false, 0, 30, drillNow, 100); err != nil || out != "No restore drills recorded.\n" {
+		t.Errorf("empty: %v %q", err, out)
+	}
+}
+
 func TestDrillsQuery(t *testing.T) {
 	q := drillsQuery(" prod-orders ", "refused", false, 30, 10, drillNow)
 	if q.Get("source") != "prod-orders" || q.Get("status") != "refused" || q.Get("current") != "true" || q.Get("limit") != "10" {

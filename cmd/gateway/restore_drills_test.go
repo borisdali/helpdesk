@@ -284,6 +284,58 @@ func TestRecordDrill_RejectsBeforeTouchingAnything(t *testing.T) {
 	}
 }
 
+// What is typed into a drill is printed to the terminal of whoever reads it, so a
+// control character or a bidirectional override is refused before anything runs.
+func TestRecordDrill_RefusesTextThatCouldRewriteATerminal(t *testing.T) {
+	rlo := string(rune(0x202E)) // built by number: never written as a literal
+	cases := map[string]struct {
+		field string
+		value string
+	}{
+		"escape in the note":         {"note", "fine so far \x1b[2J\x1b[1;1Hpwned"},
+		"title change in the note":   {"note", "\x1b]0;owned\x07"},
+		"carriage return":            {"note", "ok\rfake line"},
+		"override in the note":       {"note", "gnp." + rlo + "exe"},
+		"escape in the backup label": {"backup_label", "2026\x1b[31m"},
+		"override in the target":     {"recovery_target", "time" + rlo},
+		"escape in verify_sql":       {"verify_sql", "select true\x1b[0m"},
+		"escape in supersedes":       {"supersedes", "drl_x\x1b[0m"},
+		"escape in the source":       {"source", "prod-orders\x1b[0m"},
+		"escape in the clone":        {"clone", "orders-clone\x1b[0m"},
+	}
+	for name, c := range cases {
+		f := &drillFakes{verdict: goodVerdict()}
+		req := goodDrillRequest()
+		req[c.field] = c.value
+		rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "control character") || !strings.Contains(rec.Body.String(), c.field) {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+		if len(f.toolArgs) != 0 || len(f.posted) != 0 {
+			t.Errorf("%s: the agent was called %d times and %d records posted", name, len(f.toolArgs), len(f.posted))
+		}
+	}
+	// Layout is fine in free text: a note may be several lines with a tab in it.
+	f := &drillFakes{verdict: goodVerdict()}
+	req := goodDrillRequest()
+	req["note"] = "Q4 drill\n\t- runbook v3\n\t- new clone host"
+	req["verify_sql"] = "select count(*) > 0\n  from orders"
+	if rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", req); rec.Code != http.StatusCreated {
+		t.Errorf("a note with newlines and tabs: %d %s", rec.Code, rec.Body.String())
+	} else if f.posted[0].Note != req["note"] {
+		t.Errorf("the note was changed: %q", f.posted[0].Note)
+	}
+	// A superseded ID that is not an ID, even a harmless one.
+	for _, id := range []string{"drl x", "../x", "drl_x;drop", strings.Repeat("a", 65), "-lead"} {
+		f := &drillFakes{verdict: goodVerdict()}
+		req := goodDrillRequest()
+		req["supersedes"] = id
+		if rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", req); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "is not a drill ID") {
+			t.Errorf("supersedes %q: %d %s", id, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestRecordDrill_ToolFailuresRecordNothing(t *testing.T) {
 	// A tool answer without a verdict (an unusable verify_sql, an unregistered database).
 	f := &drillFakes{toolText: "verify_sql must be a single statement (no ';')"}

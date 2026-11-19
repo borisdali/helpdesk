@@ -307,6 +307,27 @@ func TestFormatDrillRecorded_WrapsUnderTheCheckAndKeepsTheFlagWhole(t *testing.T
 	}
 }
 
+// The verdict came from a tool reading servers and is printed to the operator's
+// terminal: nothing in it may act on that terminal.
+func TestFormatDrillRecorded_NothingInTheVerdictCanActOnATerminal(t *testing.T) {
+	rlo := string(rune(0x202E)) // built by number: never written as a literal
+	r := drillRecordResponse{
+		Drill: audit.DrillRecord{DrillID: "drl_abc12345", Status: audit.DrillRefused},
+		Verification: "Restore drill of prod on clone: REFUSED\n" +
+			"  FAIL archive_mode: could not be read (\"on\x1b[2J\")\n" +
+			"  FAIL x: " + rlo + "reversed\x07\r",
+	}
+	for _, width := range []int{0, 80} {
+		out := formatDrillRecorded(r, width)
+		if audit.HasUnsafeText(out, true) {
+			t.Errorf("width %d: a character that acts on a terminal got through: %q", width, out)
+		}
+		if !strings.Contains(out, "FAIL archive_mode: could not be read") {
+			t.Errorf("width %d: the harmless words were lost:\n%s", width, out)
+		}
+	}
+}
+
 func TestRunDrillList_ErrorPaths(t *testing.T) {
 	ctx := context.Background()
 	cfg := drillGateway(t, http.StatusBadGateway, map[string]string{"error": "could not reach the audit service"}, nil, nil)

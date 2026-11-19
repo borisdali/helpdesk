@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"helpdesk/internal/audit"
 )
 
@@ -46,27 +48,41 @@ func vaultDrills(args []string) {
 		fmt.Fprintln(os.Stderr, "Usage: faulttest vault drills [--source KEY] [--status S] [--all] [--days N] [drl_…]")
 		os.Exit(1)
 	}
+	id := ""
 	if len(fs.Args()) == 1 {
-		id := fs.Args()[0]
-		d, err := fetchDrill(cfg.GatewayURL, cfg.GatewayAPIKey, id)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-		// What replaced it, when something did: read the database's drills, best effort.
-		var later []audit.DrillRecord
-		if mine, err := fetchDrills(cfg.GatewayURL, cfg.GatewayAPIKey, neturl.Values{"source": {d.SourceKey}, "limit": {"200"}}); err == nil {
-			later = mine
-		}
-		fmt.Print(formatDrillDetail(*d, later, rdWidth()))
-		return
+		id = fs.Args()[0]
 	}
-	drills, err := fetchDrills(cfg.GatewayURL, cfg.GatewayAPIKey, drillsQuery(source, status, all, days, limit, time.Now()))
+	out, err := drillsReport(cfg.GatewayURL, cfg.GatewayAPIKey, id, source, status, all, days, limit, time.Now(), drillWidth())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Print(formatDrillTable(drills, time.Now()))
+	fmt.Print(out)
+}
+
+// drillsReport is what `vault drills` prints: the listing, or, with an id, that
+// one drill in full. It does the reading and the formatting and leaves printing
+// and exiting to the caller, so the whole command can be checked against a fake
+// gateway.
+func drillsReport(gatewayURL, apiKey, id, source, status string, all bool, days, limit int, now time.Time, width int) (string, error) {
+	if id == "" {
+		drills, err := fetchDrills(gatewayURL, apiKey, drillsQuery(source, status, all, days, limit, now))
+		if err != nil {
+			return "", err
+		}
+		return formatDrillTable(drills, now), nil
+	}
+	d, err := fetchDrill(gatewayURL, apiKey, id)
+	if err != nil {
+		return "", err
+	}
+	// What replaced it, when something did: the database's drills are read for it,
+	// and a failure to read them leaves the drill shown without that line.
+	var later []audit.DrillRecord
+	if mine, err := fetchDrills(gatewayURL, apiKey, neturl.Values{"source": {d.SourceKey}, "limit": {"200"}}); err == nil {
+		later = mine
+	}
+	return formatDrillDetail(*d, later, width), nil
 }
 
 // drillsQuery is what the listing asks the gateway for. A drill that a later
@@ -91,8 +107,14 @@ func drillsQuery(source, status string, all bool, days, limit int, now time.Time
 	return q
 }
 
-// rdWidth is the width the detail view wraps to.
-func rdWidth() int { return 100 }
+// drillWidth is the width the detail view wraps to: the terminal's, or 100 when
+// stdout is not one.
+func drillWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w >= 60 {
+		return w - 1
+	}
+	return 100
+}
 
 func gatewayGet(gatewayURL, apiKey, path string, q neturl.Values) ([]byte, int, error) {
 	u := strings.TrimSuffix(gatewayURL, "/") + path
@@ -149,6 +171,29 @@ func fetchDrill(gatewayURL, apiKey, id string) (*audit.DrillRecord, error) {
 	return &d, nil
 }
 
+// cleanDrill makes every text of a drill safe to print to a terminal. The gateway
+// refuses control characters when a drill is recorded, but a record can come from
+// another writer, and what is read back is printed to whoever reads it: an escape
+// sequence in a note could rewrite their screen. Characters that act on a terminal
+// become "?"; a note keeps its tabs and newlines, which lay it out and do nothing
+// else. The caller's record is not changed.
+func cleanDrill(d audit.DrillRecord) audit.DrillRecord {
+	p := func(s string) string { return audit.PrintableText(s, false) }
+	d.DrillID, d.SourceKey, d.CloneKey = p(d.DrillID), p(d.SourceKey), p(d.CloneKey)
+	d.SourceSystemID, d.CloneSystemID = p(d.SourceSystemID), p(d.CloneSystemID)
+	d.SourceEndpoint, d.CloneEndpoint, d.SourceHostType, d.Stanza = p(d.SourceEndpoint), p(d.CloneEndpoint), p(d.SourceHostType), p(d.Stanza)
+	d.InfraDigest, d.Method, d.DurationSource = p(d.InfraDigest), p(d.Method), p(d.DurationSource)
+	d.BackupLabel, d.RecoveryTarget, d.Status, d.Supersedes = p(d.BackupLabel), p(d.RecoveryTarget), p(d.Status), p(d.Supersedes)
+	d.RecordedBy, d.Ticket, d.AuditEventID = p(d.RecordedBy), p(d.Ticket), p(d.AuditEventID)
+	d.Note = audit.PrintableText(d.Note, true)
+	checks := make([]audit.DrillCheck, len(d.Checks))
+	for i, c := range d.Checks {
+		checks[i] = audit.DrillCheck{Name: p(c.Name), Result: p(c.Result), Detail: audit.PrintableText(c.Detail, true)}
+	}
+	d.Checks = checks
+	return d
+}
+
 func drillWord(status string) string { return strings.ReplaceAll(status, "_", " ") }
 
 func drillDuration(sec int64) string {
@@ -200,6 +245,7 @@ func formatDrillTable(drills []audit.DrillRecord, now time.Time) string {
 	fmt.Fprintf(&b, "%-13s %-9s %-30s %-10s %-9s %-10s %s\n", "DRILL", "WHEN", "SOURCE <- CLONE", "METHOD", "TOOK", "SIZE", "STATUS")
 	notCounted := 0
 	for _, d := range drills {
+		d = cleanDrill(d)
 		line := fmt.Sprintf("%-13s %-9s %-30s %-10s %-9s %-10s %s", d.DrillID, drillAgo(now.Sub(drillWhenOf(d))),
 			d.SourceKey+" <- "+d.CloneKey, d.Method, drillDuration(d.DurationSeconds), drillSizeText(d.RestoreBytes), drillWord(d.Status))
 		if d.Ticket != "" {
@@ -227,6 +273,12 @@ func formatDrillTable(drills []audit.DrillRecord, now time.Time) string {
 // formatDrillDetail is one drill in full. later is the database's drills, to find
 // the one that replaced this (when one did).
 func formatDrillDetail(d audit.DrillRecord, later []audit.DrillRecord, width int) string {
+	d = cleanDrill(d)
+	siblings := make([]audit.DrillRecord, len(later))
+	for i, l := range later {
+		siblings[i] = cleanDrill(l)
+	}
+	later = siblings
 	var b strings.Builder
 	row := func(label, text string) {
 		const indent = "  " + "           "
