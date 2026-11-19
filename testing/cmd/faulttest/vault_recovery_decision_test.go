@@ -113,7 +113,7 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 		"rpo 15m 00s [environment:prod]", "rto 30m 00s [default]", "availability 99.95% [database]",
 		"preference data_first [environment:prod]", "enforcement acknowledge [environment:prod]",
 		"14:01:00  plan", "14:02:00  gate", "14:03:00  execution",
-		"by alice; acknowledged: data loss, stopping the instance, exceeding the objective",
+		"by alice; acknowledged: data loss, stopping the instance, exceeding an objective if it comes to that",
 		"on alice's approval",
 		"point_in_time_restore (chosen): loss 18h 12m, 16.0 MiB of WAL (live_instance, exact) → exceeds; needed the breach acknowledged",
 		"[time=2026-11-04T01:39:07Z]",
@@ -605,11 +605,12 @@ func TestFormatRecoveryDecisions_GateShowsTicketAndJustification(t *testing.T) {
 	got := formatRecoveryDecisions([]narrativeRecoveryDecision{gate(audit.ApprovalFacts{
 		AcknowledgedDataLoss: true, AcknowledgedBreach: true, Justification: why, Ticket: "INC-1234"})})
 	for _, want := range []string{
-		"by alice; acknowledged: data loss, exceeding the objective; ticket INC-1234",
+		"by alice; acknowledged: data loss, exceeding an objective if it comes to that; ticket INC-1234",
 		"justification (the approver's words): batch corrupted the ledger;",
 		"incident call at 14:10",
 	} {
-		if !strings.Contains(got, want) {
+		// The gate line wraps, so it is read as one line.
+		if !strings.Contains(rdUnwrap(got), rdUnwrap(want)) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}

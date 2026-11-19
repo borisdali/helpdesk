@@ -331,7 +331,10 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 					acks = append(acks, "stopping the instance")
 				}
 				if a.AcknowledgedBreach {
-					acks = append(acks, "exceeding the objective")
+					// The gate cannot know whether an objective will be exceeded (only the
+					// restore, at the moment before it stops the instance, does), so this
+					// is the approver's consent in advance, not a finding.
+					acks = append(acks, "exceeding an objective if it comes to that")
 				}
 				if len(acks) == 0 {
 					acks = append(acks, "nothing beyond approving")
