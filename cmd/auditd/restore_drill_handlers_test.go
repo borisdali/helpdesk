@@ -70,6 +70,46 @@ func TestDrillHandlers_RecordWritesRowAndHashedEvent(t *testing.T) {
 	}
 }
 
+// The gateway marshals a DrillRecord, and Go writes an unset time as
+// "0001-01-01T00:00:00Z" rather than leaving it out. A drill recorded with only
+// a stated duration therefore arrives with two such times; they must come back
+// as "not given", not as the year 1.
+func TestDrillHandlers_UnsetTimesFromTheGatewayStayUnset(t *testing.T) {
+	srv, _ := newDrillServer(t)
+	rec := audit.DrillRecord{
+		SourceKey: "prod-db", CloneKey: "prod-clone", SourceSystemID: "7001", CloneSystemID: "7001",
+		Method: audit.DrillMethodSnapshot, Status: audit.DrillVerified,
+		DurationSeconds: 120, DurationSource: audit.DrillDurationReported,
+	}
+	wire, err := json.Marshal(rec) // exactly what the gateway sends
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), "0001-01-01T00:00:00Z") {
+		t.Fatalf("this test assumes unset times are written out; the wire form is %s", wire)
+	}
+	resp := callPV(srv.handleRecordDrill, http.MethodPost, "/v1/drills", string(wire), nil)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("%d %s", resp.Code, resp.Body.String())
+	}
+	var saved audit.DrillRecord
+	json.NewDecoder(resp.Body).Decode(&saved) //nolint:errcheck
+	got, err := srv.store.Get(saved.DrillID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.StartedAt.IsZero() || !got.FinishedAt.IsZero() || got.DurationSeconds != 120 {
+		t.Errorf("unset times came back as %v / %v (duration %d)", got.StartedAt, got.FinishedAt, got.DurationSeconds)
+	}
+	// A listing with an age filter still finds it: it falls back to recorded_at.
+	list := callPV(srv.handleListDrills, http.MethodGet, "/v1/drills?source=prod-db&since="+time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), nil, nil)
+	var drills []audit.DrillRecord
+	json.NewDecoder(list.Body).Decode(&drills) //nolint:errcheck
+	if len(drills) != 1 {
+		t.Errorf("a drill with no finish time is not found by an age filter: %d", len(drills))
+	}
+}
+
 func TestDrillHandlers_RejectsBeforeWritingAnEvent(t *testing.T) {
 	srv, store := newDrillServer(t)
 	cases := map[string]func(map[string]any){

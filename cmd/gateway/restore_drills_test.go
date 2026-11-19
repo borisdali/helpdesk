@@ -196,6 +196,51 @@ func TestRecordDrill_ARefusedCloneIsOnTheTrailToo(t *testing.T) {
 	}
 }
 
+func TestRecordDrill_UnverifiableCloneIsRecordedToo(t *testing.T) {
+	v := goodVerdict()
+	v.Status = audit.DrillUnverifiable
+	v.SourceSystemID, v.CloneSystemID, v.CloneBytes = "", "", 0
+	v.Checks = []audit.DrillCheck{{Name: "reachable", Result: "fail", Detail: "the clone could not be reached: connection refused"}}
+	f := &drillFakes{verdict: v}
+	rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", goodDrillRequest())
+	if rec.Code != http.StatusCreated || len(f.posted) != 1 {
+		t.Fatalf("%d %s; posted %d", rec.Code, rec.Body.String(), len(f.posted))
+	}
+	p := f.posted[0]
+	if p.Status != audit.DrillUnverifiable || p.CloneSystemID != "" || p.RestoreBytes != 0 || len(p.Checks) != 1 {
+		t.Errorf("record %+v", p)
+	}
+}
+
+func TestRecordDrill_ForwardsSupersedes(t *testing.T) {
+	f := &drillFakes{verdict: goodVerdict()}
+	req := goodDrillRequest()
+	req["supersedes"] = "drl_earlier01"
+	if rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", req); rec.Code != http.StatusCreated {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if f.posted[0].Supersedes != "drl_earlier01" {
+		t.Errorf("supersedes = %q", f.posted[0].Supersedes)
+	}
+}
+
+func TestRecordDrill_UnreadableBodiesAreRefusedCleanly(t *testing.T) {
+	for name, body := range map[string]any{
+		"time not RFC3339": map[string]any{"source": "prod-orders", "clone": "orders-clone", "method": "pgbackrest", "started_at": "yesterday"},
+		"duration a word":  map[string]any{"source": "prod-orders", "clone": "orders-clone", "method": "pgbackrest", "duration_seconds": "long"},
+		"not an object":    []string{"prod-orders"},
+	} {
+		f := &drillFakes{verdict: goodVerdict()}
+		rec := drillCall(t, f.gateway(t), http.MethodPost, "/api/v1/drills", body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid JSON body") {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+		if len(f.toolArgs) != 0 || len(f.posted) != 0 {
+			t.Errorf("%s: something was called or stored", name)
+		}
+	}
+}
+
 func TestRecordDrill_PassesVerifySQLToTheTool(t *testing.T) {
 	f := &drillFakes{verdict: goodVerdict()}
 	req := goodDrillRequest()
