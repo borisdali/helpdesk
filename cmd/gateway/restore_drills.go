@@ -30,7 +30,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"helpdesk/internal/audit"
+	"helpdesk/internal/identity"
 	"helpdesk/internal/infra"
 )
 
@@ -182,57 +185,124 @@ func (g *Gateway) callDirectTool(ctx context.Context, agentName, toolName string
 	return tr.Output, nil
 }
 
+// drillAttempt carries what a failed attempt to record a drill is audited with.
+// A recorded drill leaves its own restore_drill event; an attempt that does not
+// end in one (rejected, could not be verified, could not be stored) leaves a
+// gateway request event instead, so the trail shows who tried what and why it
+// did not go through. Failures of authentication and authorization are audited
+// by the auth wrapper before the handler runs.
+type drillAttempt struct {
+	g         *Gateway
+	r         *http.Request
+	w         http.ResponseWriter
+	start     time.Time
+	requestID string
+	traceID   string
+	principal identity.ResolvedPrincipal
+	params    map[string]any
+	agent     string
+}
+
+// fail answers with an error and audits the attempt.
+func (a *drillAttempt) fail(code int, msg string) {
+	a.g.recordAudit(a.r.Context(), &audit.GatewayRequest{
+		RequestID:      a.requestID,
+		TraceID:        a.traceID,
+		Endpoint:       a.r.URL.Path,
+		Method:         a.r.Method,
+		Agent:          a.agent,
+		ToolName:       "record_restore_drill",
+		ToolParameters: a.params,
+		// Not classified by name: an unknown tool would default to a class that
+		// can attach an approval requirement, and a failed attempt to record a
+		// drill touches no database.
+		ActionClass:       audit.ActionRead,
+		StartTime:         a.start,
+		Duration:          time.Since(a.start),
+		Status:            "error",
+		Error:             msg,
+		HTTPCode:          code,
+		Principal:         a.principal.EffectiveID(),
+		ResolvedPrincipal: a.principal,
+	})
+	writeError(a.w, code, msg)
+}
+
+// drillParams is the request as the audit event records it: who the drill is
+// for and what was claimed, with the free text bounded.
+func drillParams(req drillRequest) map[string]any {
+	clip := func(s string, n int) string {
+		if len(s) > n {
+			return s[:n] + "…"
+		}
+		return s
+	}
+	p := map[string]any{"source": req.Source, "clone": req.Clone, "method": req.Method}
+	for k, v := range map[string]string{"ticket": req.Ticket, "supersedes": req.Supersedes,
+		"backup_label": req.BackupLabel, "verify_sql": clip(req.VerifySQL, 200)} {
+		if v != "" {
+			p[k] = v
+		}
+	}
+	return p
+}
+
 func (g *Gateway) handleRecordDrill(w http.ResponseWriter, r *http.Request) {
+	traceID := r.Header.Get("X-Trace-ID")
+	if traceID == "" {
+		traceID = audit.NewTraceIDWithPrefix("drl_")
+	}
+	w.Header().Set("X-Trace-ID", traceID)
+	principal, _, _, _, err := g.resolveRequest(r, "", "")
+	att := &drillAttempt{g: g, r: r, w: w, start: time.Now(), requestID: uuid.New().String()[:8],
+		traceID: traceID, principal: principal, agent: "gateway", params: map[string]any{}}
+	if err != nil {
+		att.fail(http.StatusUnauthorized, "authentication failed: "+err.Error())
+		return
+	}
 	if g.auditURL == "" {
-		writeError(w, http.StatusServiceUnavailable, "no audit service is configured; a drill has to be recorded in it")
+		att.fail(http.StatusServiceUnavailable, "no audit service is configured; a drill has to be recorded in it")
 		return
 	}
 	if g.infra == nil {
-		writeError(w, http.StatusNotFound, "no infrastructure configuration is loaded; both the source and the clone must be registered in it")
-		return
-	}
-	principal, _, _, _, err := g.resolveRequest(r, "", "")
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "authentication failed: "+err.Error())
+		att.fail(http.StatusNotFound, "no infrastructure configuration is loaded; both the source and the clone must be registered in it")
 		return
 	}
 	var req drillRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		att.fail(http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
+	att.params = drillParams(req)
 	now := time.Now().UTC()
 	if err := validateDrillRequest(&req, now); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		att.fail(http.StatusBadRequest, err.Error())
 		return
 	}
 
 	srcKey, err := g.resolveDrillTarget("source", req.Source)
 	if err != nil {
-		writeError(w, drillResolveStatus(err), err.Error())
+		att.fail(drillResolveStatus(err), err.Error())
 		return
 	}
 	cloneKey, err := g.resolveDrillTarget("clone", req.Clone)
 	if err != nil {
-		writeError(w, drillResolveStatus(err), err.Error())
+		att.fail(drillResolveStatus(err), err.Error())
 		return
 	}
 	if srcKey == cloneKey {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("the clone cannot be the source (%s)", srcKey))
+		att.fail(http.StatusBadRequest, fmt.Sprintf("the clone cannot be the source (%s)", srcKey))
 		return
 	}
 
-	traceID := r.Header.Get("X-Trace-ID")
-	if traceID == "" {
-		traceID = audit.NewTraceIDWithPrefix("drl_")
-	}
 	args := map[string]any{"source": srcKey, "clone": cloneKey}
 	if req.VerifySQL != "" {
 		args["verify_sql"] = req.VerifySQL
 	}
+	att.agent = agentNameDB
 	out, err := g.callDirectTool(r.Context(), agentNameDB, "verify_restore_drill", args, traceID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "could not verify the clone: "+err.Error())
+		att.fail(http.StatusBadGateway, "could not verify the clone: "+err.Error())
 		return
 	}
 	var ver audit.DrillVerification
@@ -243,7 +313,7 @@ func (g *Gateway) handleRecordDrill(w http.ResponseWriter, r *http.Request) {
 		if text == "" {
 			text = strings.TrimSpace(out)
 		}
-		writeError(w, http.StatusUnprocessableEntity, text)
+		att.fail(http.StatusUnprocessableEntity, text)
 		return
 	}
 
@@ -284,7 +354,8 @@ func (g *Gateway) handleRecordDrill(w http.ResponseWriter, r *http.Request) {
 
 	saved, status, err := g.postDrill(r.Context(), rec)
 	if err != nil {
-		writeError(w, status, err.Error())
+		att.agent = "gateway"
+		att.fail(status, err.Error())
 		return
 	}
 	slog.Info("restore drill recorded", "drill", saved.DrillID, "source", srcKey, "clone", cloneKey,

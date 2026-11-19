@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -328,6 +330,119 @@ func TestRecordDrill_NeedsAuditAndInfra(t *testing.T) {
 	gw.infra = nil
 	if rec := drillCall(t, gw, http.MethodPost, "/api/v1/drills", goodDrillRequest()); rec.Code != http.StatusNotFound {
 		t.Errorf("no infra config: %d", rec.Code)
+	}
+}
+
+// auditedGateway is a drill gateway whose own audit trail is a real store, so a
+// test can read back what a failed attempt left in it.
+func auditedGateway(t *testing.T, f *drillFakes) (*Gateway, *audit.Store) {
+	t.Helper()
+	store, err := audit.NewStore(audit.StoreConfig{DBPath: filepath.Join(t.TempDir(), "gw.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	gw := f.gateway(t)
+	gw.auditor = audit.NewGatewayAuditor(store)
+	return gw, store
+}
+
+func attemptEvents(t *testing.T, store *audit.Store) []audit.Event {
+	t.Helper()
+	all, err := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeGatewayRequest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []audit.Event
+	for _, e := range all {
+		if e.Tool != nil && e.Tool.Name == "record_restore_drill" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func TestRecordDrill_FailedAttemptsAreAudited(t *testing.T) {
+	long := strings.Repeat("select 1 -- ", 40)
+	cases := map[string]struct {
+		fakes *drillFakes
+		edit  func(map[string]any)
+		code  int
+		want  string
+	}{
+		"rejected request":      {&drillFakes{verdict: goodVerdict()}, func(r map[string]any) { r["method"] = "dump" }, http.StatusBadRequest, "not one of"},
+		"unregistered clone":    {&drillFakes{verdict: goodVerdict()}, func(r map[string]any) { r["clone"] = "new-clone" }, http.StatusNotFound, "has to be registered"},
+		"clone is the source":   {&drillFakes{verdict: goodVerdict()}, func(r map[string]any) { r["clone"] = "prod-orders" }, http.StatusBadRequest, "cannot be the source"},
+		"verification failed":   {&drillFakes{toolStatus: http.StatusInternalServerError}, func(r map[string]any) {}, http.StatusBadGateway, "could not verify the clone"},
+		"no verdict":            {&drillFakes{toolText: "verify_sql must be a single statement (no ';')"}, func(r map[string]any) { r["verify_sql"] = long }, http.StatusUnprocessableEntity, "single statement"},
+		"audit service refused": {&drillFakes{verdict: goodVerdict(), auditCode: http.StatusInternalServerError, auditBody: "db down"}, func(r map[string]any) {}, http.StatusBadGateway, "did not record the drill"},
+	}
+	for name, c := range cases {
+		gw, store := auditedGateway(t, c.fakes)
+		req := goodDrillRequest()
+		c.edit(req)
+		rec := drillCall(t, gw, http.MethodPost, "/api/v1/drills", req)
+		if rec.Code != c.code {
+			t.Errorf("%s: %d %s, want %d", name, rec.Code, rec.Body.String(), c.code)
+		}
+		evs := attemptEvents(t, store)
+		if len(evs) != 1 {
+			t.Errorf("%s: %d audit events for the attempt, want 1", name, len(evs))
+			continue
+		}
+		e := evs[0]
+		if e.Tool.Error == "" || !strings.Contains(e.Tool.Error, c.want) {
+			t.Errorf("%s: the event does not say why: %q", name, e.Tool.Error)
+		}
+		if e.ActionClass != audit.ActionRead {
+			t.Errorf("%s: action class %q: a failed attempt must not be classified as a mutation", name, e.ActionClass)
+		}
+		if e.Tool.Parameters["source"] != "prod-orders" || e.Tool.Parameters["ticket"] != "DRILL-7" {
+			t.Errorf("%s: the event lacks who the drill was for: %v", name, e.Tool.Parameters)
+		}
+		if _, leaked := e.Tool.Parameters["note"]; leaked {
+			t.Errorf("%s: the free-text note is in the audit event", name)
+		}
+		if sql, _ := e.Tool.Parameters["verify_sql"].(string); len(sql) > 210 {
+			t.Errorf("%s: verify_sql is not bounded: %d characters", name, len(sql))
+		}
+	}
+}
+
+func TestRecordDrill_ASuccessfulRecordLeavesNoFailureEvent(t *testing.T) {
+	gw, store := auditedGateway(t, &drillFakes{verdict: goodVerdict()})
+	if rec := drillCall(t, gw, http.MethodPost, "/api/v1/drills", goodDrillRequest()); rec.Code != http.StatusCreated {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if evs := attemptEvents(t, store); len(evs) != 0 {
+		t.Errorf("a recorded drill produced %d failed-attempt events: its own restore_drill event is its record", len(evs))
+	}
+}
+
+// A refused clone is a recorded drill, not a failed attempt.
+func TestRecordDrill_ARefusedCloneIsNotAFailedAttempt(t *testing.T) {
+	v := goodVerdict()
+	v.Status = audit.DrillRefused
+	gw, store := auditedGateway(t, &drillFakes{verdict: v})
+	if rec := drillCall(t, gw, http.MethodPost, "/api/v1/drills", goodDrillRequest()); rec.Code != http.StatusCreated {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if evs := attemptEvents(t, store); len(evs) != 0 {
+		t.Errorf("%d failed-attempt events for a drill that was recorded as refused", len(evs))
+	}
+}
+
+func TestRecordDrill_ConfigurationFailuresAreAuditedToo(t *testing.T) {
+	for name, edit := range map[string]func(*Gateway){
+		"no audit service": func(g *Gateway) { g.auditURL = "" },
+		"no infra config":  func(g *Gateway) { g.infra = nil },
+	} {
+		gw, store := auditedGateway(t, &drillFakes{verdict: goodVerdict()})
+		edit(gw)
+		drillCall(t, gw, http.MethodPost, "/api/v1/drills", goodDrillRequest())
+		if evs := attemptEvents(t, store); len(evs) != 1 {
+			t.Errorf("%s: %d events, want 1", name, len(evs))
+		}
 	}
 }
 
