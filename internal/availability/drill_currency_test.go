@@ -66,6 +66,58 @@ func TestAssessDrillCurrency_TheEdgeAndTheWording(t *testing.T) {
 	}
 }
 
+// A drill recorded with only a duration has no finish time: it is as old as it was
+// recorded, which decides whether it is overdue.
+func TestAssessDrillCurrency_NoFinishTimeUsesWhenItWasRecorded(t *testing.T) {
+	at := func(recordedDaysAgo int) audit.DrillRecord {
+		d := agoDays("drl_nofinish", 0)
+		d.StartedAt, d.FinishedAt = time.Time{}, time.Time{}
+		d.RecordedAt = now.Add(-time.Duration(recordedDaysAgo) * 24 * time.Hour)
+		return d
+	}
+	if got := AssessDrillCurrency([]audit.DrillRecord{at(10)}, quarter(), DrillInputs{}, now); got.State != DrillCurrent || *got.AgeDays != 10 {
+		t.Errorf("recorded 10 days ago: %+v", got)
+	}
+	if got := AssessDrillCurrency([]audit.DrillRecord{at(100)}, quarter(), DrillInputs{}, now); got.State != DrillOverdue || *got.AgeDays != 100 {
+		t.Errorf("recorded 100 days ago: %+v", got)
+	}
+	// A failed attempt with no finish time is dated the same way.
+	bad := at(2)
+	bad.DrillID, bad.Status = "drl_nofinish_bad", audit.DrillRefused
+	got := AssessDrillCurrency([]audit.DrillRecord{at(100), bad}, quarter(), DrillInputs{}, now)
+	if got.LastAttempt == nil || !strings.Contains(got.Detail, "drl_nofinish_bad (2 days ago)") {
+		t.Errorf("attempt: %+v", got)
+	}
+}
+
+// Under a day is "today", not "0 days ago".
+func TestAssessDrillCurrency_TodayIsSaidAsToday(t *testing.T) {
+	d := agoDays("drl_now", 0)
+	d.FinishedAt, d.RecordedAt = now.Add(-3*time.Hour), now.Add(-3*time.Hour)
+	got := AssessDrillCurrency([]audit.DrillRecord{d}, quarter(), DrillInputs{}, now)
+	if !strings.HasPrefix(got.Detail, "last verified drill today (limit 90 days)") || strings.Contains(got.Detail, "drill 0 days") || *got.AgeDays != 0 {
+		t.Errorf("%+v", got)
+	}
+	bad := agoDays("drl_bad_today", 0)
+	bad.Status, bad.FinishedAt, bad.RecordedAt = audit.DrillRefused, now.Add(-time.Hour), now.Add(-time.Hour)
+	got = AssessDrillCurrency([]audit.DrillRecord{agoDays("drl_old", 100), bad}, quarter(), DrillInputs{}, now)
+	if !strings.Contains(got.Detail, "drl_bad_today (today)") {
+		t.Errorf("an attempt from today: %q", got.Detail)
+	}
+	// A clock a little ahead of the drill's is today too, never a negative age.
+	future := agoDays("drl_future", 0)
+	future.FinishedAt, future.RecordedAt = now.Add(2*time.Hour), now.Add(2*time.Hour)
+	got = AssessDrillCurrency([]audit.DrillRecord{future}, quarter(), DrillInputs{}, now)
+	if *got.AgeDays != 0 || !strings.Contains(got.Detail, "today") {
+		t.Errorf("future: %+v", got)
+	}
+	// And a day is "1 day ago".
+	got = AssessDrillCurrency([]audit.DrillRecord{agoDays("drl_y", 1)}, quarter(), DrillInputs{}, now)
+	if !strings.HasPrefix(got.Detail, "last verified drill 1 day ago") {
+		t.Errorf("yesterday: %q", got.Detail)
+	}
+}
+
 // Practising the procedure is what the reminder asks, so any verified drill counts,
 // not only one that is comparable enough to plan a restore from.
 func TestAssessDrillCurrency_AnyVerifiedDrillCounts(t *testing.T) {

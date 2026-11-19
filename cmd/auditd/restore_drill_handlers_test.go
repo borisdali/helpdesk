@@ -12,6 +12,7 @@ import (
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/availability"
+	"helpdesk/internal/infra"
 )
 
 func newDrillServer(t *testing.T) (*restoreDrillServer, *audit.Store) {
@@ -175,6 +176,79 @@ func TestDrills_FeedTheEstimateThroughAuditd(t *testing.T) {
 		availability.DrillInputs{RestoreBytes: 10 << 30})
 	if err != nil || other.Drills.Samples != 1 || other.Drills.Status != availability.EstimateTooFew {
 		t.Errorf("prod-other drills = %+v, %v", other.Drills, err)
+	}
+}
+
+// The reminder reads drills through auditd's own handlers over a range far longer
+// than the estimate's: a drill 143 days old is found, a failed attempt is named
+// until a re-verification replaces it, and what the list filters out is what the
+// reminder does not see.
+func TestDrills_TheReminderReadsThemThroughAuditd(t *testing.T) {
+	srv, _ := newDrillServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/drills", srv.handleRecordDrill)
+	mux.HandleFunc("GET /v1/drills", srv.handleListDrills)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	now := time.Now().UTC()
+	record := func(source, status string, daysAgo int, extra map[string]any) string {
+		fin := now.Add(-time.Duration(daysAgo) * 24 * time.Hour)
+		b := map[string]any{
+			"source_key": source, "clone_key": source + "-clone", "source_system_id": "7001", "clone_system_id": "7001",
+			"method": "snapshot", "status": status, "finished_at": fin.Format(time.RFC3339),
+		}
+		if status == "refused" {
+			b["checks"] = []map[string]string{{"name": "same_system", "result": "pass"}, {"name": "archive_guard", "result": "fail"}}
+		}
+		for k, v := range extra {
+			b[k] = v
+		}
+		raw, _ := json.Marshal(b)
+		resp, err := http.Post(ts.URL+"/v1/drills", "application/json", strings.NewReader(string(raw)))
+		if err != nil || resp.StatusCode != http.StatusCreated {
+			t.Fatalf("recording a drill: %v %v", err, resp)
+		}
+		var saved audit.DrillRecord
+		json.NewDecoder(resp.Body).Decode(&saved) //nolint:errcheck
+		resp.Body.Close()
+		return saved.DrillID
+	}
+	reminder := infra.DrillReminder{Applies: true, Interval: infra.DefaultDrillInterval, Source: infra.SourceBuiltin}
+	client := &availability.Client{URL: ts.URL}
+	currency := func(db string) *availability.DrillCurrency {
+		return client.DrillCurrency(context.Background(), db, reminder, availability.DrillInputs{}, now)
+	}
+
+	// An old drill, past the estimate's 90 days, and a refusal since.
+	record("prod-orders", "verified", 143, nil)
+	refused := record("prod-orders", "refused", 2, nil)
+	record("prod-other", "verified", 5, nil) // another database: never seen here
+	got := currency("prod-orders")
+	if got.State != availability.DrillOverdue || got.AgeDays == nil || *got.AgeDays != 143 {
+		t.Fatalf("a 143-day-old drill must be found and be overdue: %+v", got)
+	}
+	if got.LastAttempt == nil || got.LastAttempt.DrillID != refused || len(got.LastAttempt.Failed) != 1 || got.LastAttempt.Failed[0] != "archive_guard" {
+		t.Errorf("the refusal after it is not named with what failed: %+v", got.LastAttempt)
+	}
+	if !strings.Contains(got.Detail, "last verified drill 143 days ago (limit 90 days)") || !strings.Contains(got.Detail, "was refused on archive_guard and does not count") {
+		t.Errorf("detail: %q", got.Detail)
+	}
+
+	// Put right: a re-verification that replaces the refusal. The reminder is current
+	// and the refusal is no longer an attempt that is named.
+	record("prod-orders", "verified", 1, map[string]any{"supersedes": refused})
+	got = currency("prod-orders")
+	if got.State != availability.DrillCurrent || got.LastAttempt != nil || got.AgeDays == nil || *got.AgeDays != 1 {
+		t.Errorf("after the re-verification: %+v", got)
+	}
+	// Another database has its own history.
+	if other := currency("prod-other"); other.State != availability.DrillCurrent || *other.AgeDays != 5 {
+		t.Errorf("prod-other: %+v", other)
+	}
+	// And one nobody has drilled is overdue, not an error.
+	if none := currency("prod-never"); none.State != availability.DrillNever || !none.Overdue {
+		t.Errorf("prod-never: %+v", none)
 	}
 }
 

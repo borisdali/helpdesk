@@ -1,6 +1,7 @@
 package infra
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,75 @@ func TestDrillReminder_AnUnreadableIntervalFallsBackToTheDefaultAndSaysSo(t *tes
 	cfg := load(t, `{"db_servers":{"a":{"name":"a","connection_string":"host=a","objectives":{"drill_interval":"-1h"}}}}`)
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "drill_interval") {
 		t.Errorf("negative: %v", err)
+	}
+}
+
+// A config that some tool re-serialises reads back with the same reminders: "0d"
+// stays off (it is written as "0s", which is the same thing) and an interval does
+// not vanish and quietly become the default.
+func TestDrillInterval_SurvivesBeingWrittenBackOut(t *testing.T) {
+	cfg := load(t, `{
+	  "defaults": {"objectives": {"drill_interval": "120d"}},
+	  "environments": {"prod": {"objectives": {"rto": "30m", "drill_interval": "30d"}}, "quiet": {"objectives": {"rto": "1h", "drill_interval": "0d"}}},
+	  "db_servers": {
+	    "env":   {"name":"env","connection_string":"host=1","environment":"prod"},
+	    "own":   {"name":"own","connection_string":"host=2","environment":"prod","objectives":{"drill_interval":"14d"}},
+	    "off":   {"name":"off","connection_string":"host=3","environment":"quiet"},
+	    "back":  {"name":"back","connection_string":"host=4","environment":"quiet","objectives":{"drill_interval":"45d"}},
+	    "bare":  {"name":"bare","connection_string":"host=5"}
+	  }}`)
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	if err := back.Validate(); err != nil {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	for id := range cfg.DBServers {
+		a, _ := cfg.ResolveObjectives(id)
+		b, _ := back.ResolveObjectives(id)
+		if a.DrillReminder() != b.DrillReminder() {
+			t.Errorf("%s: %+v became %+v", id, a.DrillReminder(), b.DrillReminder())
+		}
+	}
+	for id, want := range map[string]DrillReminder{
+		"env":  {Applies: true, Interval: 30 * 24 * time.Hour, Source: "environment:prod"},
+		"own":  {Applies: true, Interval: 14 * 24 * time.Hour, Source: SourceDatabase},
+		"off":  {Off: true, Source: "environment:quiet"},
+		"back": {Applies: true, Interval: 45 * 24 * time.Hour, Source: SourceDatabase},
+		"bare": {},
+	} {
+		res, _ := back.ResolveObjectives(id)
+		if got := res.DrillReminder(); got != want {
+			t.Errorf("after the round trip %s: %+v, want %+v", id, got, want)
+		}
+	}
+}
+
+// A mistake in drill_interval costs only that setting: the file loads, every other
+// database and objective resolves, and the reminder reports the problem.
+func TestDrillInterval_ATypoInTheFileCostsNothingElse(t *testing.T) {
+	cfg := load(t, `{"db_servers": {
+	  "typo":  {"name":"typo","connection_string":"host=1","objectives":{"rto":"30m","rpo":"15m","drill_interval":"ninety days"}},
+	  "fine":  {"name":"fine","connection_string":"host=2","objectives":{"rto":"30m","drill_interval":"60d"}}}}`)
+	good, _ := cfg.ResolveObjectives("fine")
+	if r := good.DrillReminder(); !r.Applies || r.Interval != 60*24*time.Hour {
+		t.Errorf("the other database was affected: %+v", r)
+	}
+	bad, _ := cfg.ResolveObjectives("typo")
+	if !bad.RPO.Set || !bad.RTO.Set {
+		t.Errorf("the typo spoiled the database's other objectives: %+v", bad)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "db_servers.typo.objectives") {
+		t.Errorf("Validate must say where: %v", err)
+	}
+	// And the invalid value is never written back as something else.
+	if raw, err := json.Marshal(cfg); err == nil {
+		t.Errorf("an invalid interval was written out: %s", raw)
 	}
 }
 

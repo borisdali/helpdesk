@@ -373,6 +373,49 @@ func TestAvailabilityLedger_SaysWhetherADrillIsDue(t *testing.T) {
 	}
 }
 
+// The interval is the database's own setting: a shorter one goes overdue sooner and
+// is reported with its own limit, and "0d" turns the reminder off without asking
+// auditd for drills.
+func TestAvailabilityLedger_TheDrillIntervalComesFromTheConfig(t *testing.T) {
+	cfg := ledgerInfra()
+	days := func(n int) *infra.Duration { return &infra.Duration{Duration: time.Duration(n) * 24 * time.Hour} }
+	cfg.DBServers["monthly"] = infra.DBServer{Name: "monthly", ConnectionString: "host=db4.example.com port=5432 dbname=m", Environment: "prod",
+		Objectives: &infra.Objectives{DrillInterval: days(30)}}
+	cfg.DBServers["quiet"] = infra.DBServer{Name: "quiet", ConnectionString: "host=db5.example.com port=5432 dbname=q", Environment: "prod",
+		Objectives: &infra.Objectives{DrillInterval: days(0)}}
+	drillOf := func(db string, ago int) string {
+		return strings.ReplaceAll(drillJSON(t, ago, audit.DrillVerified), `"prod-orders"`, `"`+db+`"`)
+	}
+	ledger := func(aud *ledgerAuditd, db string) availability.Ledger {
+		aud.mine, aud.loose = `{"incidents": []}`, `{"incidents": [], "count": 0}`
+		rec, l := getLedger(t, &Gateway{auditURL: aud.server(t).URL, infra: cfg}, "?database="+db)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		return l
+	}
+	// 29 days against a limit of 30 is current; 31 is overdue; the default 90 would call both current.
+	cur := ledger(&ledgerAuditd{drills: drillOf("monthly", 29)}, "monthly")
+	if d := cur.DrillCurrency; d == nil || d.State != availability.DrillCurrent || d.LimitDays != 30 || d.Source != infra.SourceDatabase {
+		t.Errorf("29 days: %+v", d)
+	}
+	over := ledger(&ledgerAuditd{drills: drillOf("monthly", 31)}, "monthly")
+	if d := over.DrillCurrency; d == nil || d.State != availability.DrillOverdue || d.LimitDays != 30 || !strings.Contains(d.Detail, "limit 30 days") {
+		t.Errorf("31 days: %+v", d)
+	}
+	// Off: said, not overdue, and no drills read.
+	aud := &ledgerAuditd{drills: drillOf("quiet", 400)}
+	off := ledger(aud, "quiet")
+	if d := off.DrillCurrency; d == nil || d.State != availability.DrillReminderOff || d.Overdue {
+		t.Errorf("off: %+v", d)
+	}
+	for _, q := range aud.queries {
+		if q.Get("source") != "" {
+			t.Errorf("drills were read for a database whose reminder is off: %v", q)
+		}
+	}
+}
+
 // The reminder is beside the budget: it does not touch its figures.
 func TestAvailabilityLedger_TheDrillReminderLeavesTheBudgetAlone(t *testing.T) {
 	get := func(drills string) availability.Ledger {

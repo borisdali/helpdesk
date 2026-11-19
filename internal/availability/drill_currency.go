@@ -92,6 +92,14 @@ func UnavailableDrillCurrency(reminder infra.DrillReminder, err error) *DrillCur
 
 func days(d time.Duration) int { return int(d / (24 * time.Hour)) }
 
+// agoText is how long ago, in whole days: "today" under a day, else "N days ago".
+func agoText(days int) string {
+	if days <= 0 {
+		return "today"
+	}
+	return plural(days, "day", "days") + " ago"
+}
+
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, one)
@@ -176,11 +184,10 @@ func AssessDrillCurrency(drills []audit.DrillRecord, reminder infra.DrillReminde
 		c.LastVerifiedAt, c.LastDrillID, c.AgeDays = &at, last.DrillID, &age
 		if now.Sub(at) > reminder.Interval {
 			c.State, c.Overdue = DrillOverdue, true
-			c.Detail = fmt.Sprintf("last verified drill %s ago (limit %s)", plural(age, "day", "days"), limit)
 		} else {
 			c.State = DrillCurrent
-			c.Detail = fmt.Sprintf("last verified drill %s ago (limit %s)", plural(age, "day", "days"), limit)
 		}
+		c.Detail = fmt.Sprintf("last verified drill %s (limit %s)", agoText(age), limit)
 	}
 	if a := c.LastAttempt; a != nil {
 		ago := int(now.Sub(a.At) / (24 * time.Hour))
@@ -191,7 +198,7 @@ func AssessDrillCurrency(drills []audit.DrillRecord, reminder infra.DrillReminde
 		if len(a.Failed) > 0 {
 			why = " on " + strings.Join(a.Failed, ", ")
 		}
-		c.Detail += fmt.Sprintf("; the latest attempt, %s (%s ago), was %s%s and does not count", a.DrillID, plural(ago, "day", "days"), strings.ReplaceAll(a.Status, "_", " "), why)
+		c.Detail += fmt.Sprintf("; the latest attempt, %s (%s), was %s%s and does not count", a.DrillID, agoText(ago), strings.ReplaceAll(a.Status, "_", " "), why)
 	}
 	if c.MatchedBy == "name" && c.State != DrillNever {
 		c.Detail += "; matched by name, the source's system identifier was not checked"
