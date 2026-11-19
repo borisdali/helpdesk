@@ -100,10 +100,13 @@ func assessDrill(in drillInput) (string, []audit.DrillCheck) {
 
 	// 4. Consistent and out of recovery.
 	switch {
-	case in.Clone.InRecovery && in.Clone.WalReceivers == 0:
-		checks = append(checks, check("consistent", "warn", "the clone is still in recovery (paused at a target, or not promoted yet)"))
-	case in.Clone.InRecovery:
+	case in.Clone.InRecovery && in.Clone.WalReceivers > 0:
 		checks = append(checks, check("consistent", "fail", "the clone is replaying WAL from a primary"))
+	case in.Clone.InRecovery:
+		// A paused restore and a standby look alike to a role that cannot see
+		// the wal receiver, so this fails closed: promote the clone and record
+		// the drill again.
+		checks = append(checks, check("consistent", "fail", "the clone is still in recovery (paused at a target, not promoted yet, or a standby); promote it and record the drill again"))
 	default:
 		checks = append(checks, check("consistent", "pass", "out of recovery"))
 	}
@@ -214,12 +217,16 @@ func humanBytes(n int64) string {
 }
 
 // drillFactsQuery is run, read-only, on both servers. current_setting(.., true)
-// returns NULL for a setting this version does not have.
+// returns NULL for a setting this version does not have. primary_conninfo is
+// read from pg_settings: current_setting() raises "permission denied" for a role
+// without pg_read_all_settings, pg_settings just shows it empty. Neither the
+// conninfo nor the wal receiver may be relied on to prove a clone is not a
+// standby, so being in recovery is itself a refusal (see assessDrill).
 const drillFactsQuery = `SELECT
 	(SELECT system_identifier::text FROM pg_control_system()) AS system_identifier,
 	pg_is_in_recovery() AS in_recovery,
 	(SELECT count(*) FROM pg_stat_wal_receiver) AS wal_receivers,
-	coalesce(current_setting('primary_conninfo', true), '') AS primary_conninfo,
+	coalesce((SELECT setting FROM pg_settings WHERE name = 'primary_conninfo'), '') AS primary_conninfo,
 	current_setting('archive_mode') AS archive_mode,
 	coalesce(current_setting('archive_command', true), '') AS archive_command,
 	coalesce(current_setting('archive_library', true), '') AS archive_library,
@@ -322,11 +329,14 @@ func verifyRestoreDrillImpl(ctx context.Context, args VerifyRestoreDrillArgs) (V
 	}
 	srcInfo, err := resolveDatabaseInfo(args.Source)
 	if err != nil {
-		return VerifyRestoreDrillResult{Output: "source: " + err.Error()}, nil
+		return VerifyRestoreDrillResult{Output: "The source cannot be used: " + err.Error()}, nil
 	}
 	cloneInfo, err := resolveDatabaseInfo(args.Clone)
 	if err != nil {
-		return VerifyRestoreDrillResult{Output: "clone: " + err.Error()}, nil
+		// Both servers must be registered: the clone is a new infra entry, and
+		// adding it is the customer's step, like bringing the clone itself.
+		return VerifyRestoreDrillResult{Output: "The clone cannot be used: " + err.Error() +
+			"\nThe clone has to be registered in the infrastructure config before a drill can be recorded against it."}, nil
 	}
 	res := VerifyRestoreDrillResult{
 		SourceKey: srcInfo.Name, CloneKey: cloneInfo.Name,

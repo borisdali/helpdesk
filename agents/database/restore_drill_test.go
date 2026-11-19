@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/infra"
 )
 
 func srcFacts() drillFacts {
@@ -62,7 +63,7 @@ func TestAssessDrill(t *testing.T) {
 			c.InRecovery = true
 		}, audit.DrillRefused, "not_the_source", "fail"},
 		{"still in recovery without a receiver", func(s, c *drillFacts, in *drillInput) { c.InRecovery = true },
-			audit.DrillVerifiedWithWarnings, "consistent", "warn"},
+			audit.DrillRefused, "consistent", "fail"},
 		{"archiving on with the source's command", func(s, c *drillFacts, in *drillInput) {
 			c.ArchiveMode, c.ArchiveCommand = "on", s.ArchiveCommand
 		}, audit.DrillRefused, "archive_guard", "fail"},
@@ -249,6 +250,52 @@ func TestVerifyRestoreDrillTool_UnreachableCloneAndVerifySQL(t *testing.T) {
 	})
 	if res.Status != "" || !strings.Contains(res.Output, "single statement") {
 		t.Errorf("unsafe verify_sql: %+v", res)
+	}
+}
+
+func drillInfra() *infra.Config {
+	return &infra.Config{DBServers: map[string]infra.DBServer{
+		"prod-db":    {Name: "prod-db", ConnectionString: "host=prod.example.com port=5432 dbname=app user=postgres"},
+		"prod-clone": {Name: "prod-clone", ConnectionString: "host=scratch.example.com port=5432 dbname=app user=postgres"},
+	}}
+}
+
+func TestVerifyRestoreDrillTool_ResolvesInfraKeysAndReportsThem(t *testing.T) {
+	defer withInfraConfig(drillInfra())()
+	defer withMockRunnerSequence(psqlResponse{out: factsOutput(srcFacts())}, psqlResponse{out: factsOutput(cloneFacts())})()
+	res, _ := verifyRestoreDrillTool(newTestContext(), VerifyRestoreDrillArgs{Source: "prod-db", Clone: "prod-clone"})
+	if res.Status != audit.DrillVerified || res.SourceKey != "prod-db" || res.CloneKey != "prod-clone" ||
+		res.SourceEndpoint != "prod.example.com:5432" || res.CloneEndpoint != "scratch.example.com:5432" {
+		t.Errorf("result %+v", res)
+	}
+}
+
+func TestVerifyRestoreDrillTool_UnregisteredCloneSaysWhatToDo(t *testing.T) {
+	defer withInfraConfig(drillInfra())()
+	defer withMockRunnerSequence(psqlResponse{err: fmt.Errorf("must not be called")})()
+	res, _ := verifyRestoreDrillTool(newTestContext(), VerifyRestoreDrillArgs{
+		Source: "prod-db", Clone: "host=new-clone.example.com port=5432 dbname=app user=postgres"})
+	if res.Status != "" {
+		t.Errorf("an unregistered clone got a verdict: %+v", res)
+	}
+	for _, want := range []string{"The clone cannot be used", "not registered", "prod-clone", "has to be registered in the infrastructure config"} {
+		if !strings.Contains(res.Output, want) {
+			t.Errorf("output lacks %q:\n%s", want, res.Output)
+		}
+	}
+	res, _ = verifyRestoreDrillTool(newTestContext(), VerifyRestoreDrillArgs{
+		Source: "host=other.example.com port=5432 dbname=app user=postgres", Clone: "prod-clone"})
+	if !strings.Contains(res.Output, "The source cannot be used") {
+		t.Errorf("an unregistered source: %q", res.Output)
+	}
+}
+
+func TestVerifyRestoreDrillTool_SameInfraEntryIsRefused(t *testing.T) {
+	defer withInfraConfig(drillInfra())()
+	defer withMockRunnerSequence(psqlResponse{err: fmt.Errorf("must not be called")})()
+	res, _ := verifyRestoreDrillTool(newTestContext(), VerifyRestoreDrillArgs{Source: "prod-db", Clone: "prod-db"})
+	if res.Status != audit.DrillRefused || resultOf(res.Checks, "not_the_source").Result != "fail" {
+		t.Errorf("the same entry as source and clone: %+v", res)
 	}
 }
 
