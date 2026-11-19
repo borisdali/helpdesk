@@ -92,6 +92,12 @@ const (
 	// DurationFromHistoryLongest: the longest of this server's past restores
 	// (three to nine, too few for a p90 to mean more than that).
 	DurationFromHistoryLongest = "history_longest"
+	// DurationFromDrillP90: the p90 of this server's restore drills (ten or more
+	// that count), restores demonstrated on a copy and not on this server.
+	DurationFromDrillP90 = "drill_p90"
+	// DurationFromDrillLongest: the longest of this server's restore drills
+	// (three to nine that count).
+	DurationFromDrillLongest = "drill_longest"
 	// DurationFromRTO: the declared rto, an upper bound.
 	DurationFromRTO = "declared_rto"
 )
@@ -263,11 +269,17 @@ func verdict(in BudgetInputs, v *BudgetVerdict, pending []Entry) (status, detail
 	// ten samples, the longest from three to nine, with the sample size said), and
 	// otherwise the declared rto, as an upper bound.
 	var dur time.Duration
-	haveDur, fromHistory, historyIsP90 := false, false, false
-	if e := in.Estimate; e != nil && e.Status == EstimateEstimated && e.PlanningSeconds != nil {
+	haveDur, fromHistory, historyIsP90, fromDrills := false, false, false, false
+	if e := in.Estimate; e != nil && e.PlanningSeconds != nil {
 		dur, haveDur, fromHistory = secondsOf(*e.PlanningSeconds), true, true
+		fromDrills = e.PlanningSource == PlanningFromDrills
 		d, basis := *e.PlanningSeconds, DurationFromHistoryLongest
-		if e.PlanningBasis == PlanningP90 {
+		switch {
+		case fromDrills && e.PlanningBasis == PlanningP90:
+			basis, historyIsP90 = DurationFromDrillP90, true
+		case fromDrills:
+			basis = DurationFromDrillLongest
+		case e.PlanningBasis == PlanningP90:
 			basis, historyIsP90 = DurationFromHistoryP90, true
 		}
 		v.DurationSeconds, v.DurationBasis = &d, basis
@@ -288,6 +300,12 @@ func verdict(in BudgetInputs, v *BudgetVerdict, pending []Entry) (status, detail
 		return BudgetExceeds, fmt.Sprintf("%s: the budget is spent (%s left), so any further downtime breaches the SLO%s", spent, span(rem), note)
 	case !haveDur:
 		return BudgetNotComparable, fmt.Sprintf("%s, %s left, but no rto is declared and there is no history of past restores, so how long this restore may take is not known%s", spent, span(rem), note)
+	case fromDrills && rem >= int64(dur.Seconds()):
+		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this server's drills took (%s)%s",
+			spent, span(rem), drillPhrase(infra.FormatSpan(dur), in.Estimate.Drills, historyIsP90), note)
+	case fromDrills:
+		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this server's restore drills have taken up to %s: this one may use more than is left%s",
+			spent, span(rem), drillPhrase(infra.FormatSpan(dur), in.Estimate.Drills, historyIsP90), note)
 	case fromHistory && rem >= int64(dur.Seconds()):
 		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this server's have been (%s)%s",
 			spent, span(rem), historyPhrase(infra.FormatSpan(dur), in.Estimate.Samples, historyIsP90), note)
@@ -300,6 +318,19 @@ func verdict(in BudgetInputs, v *BudgetVerdict, pending []Entry) (status, detail
 		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this restore may take up to the rto of %s: it may use more than is left (a restore can finish sooner than its rto)%s",
 			spent, span(rem), infra.FormatSpan(dur), note)
 	}
+}
+
+// drillPhrase says what a duration taken from restore drills rests on. A drill
+// is a restore on a copy, so it says so: this is not this server's history.
+func drillPhrase(span string, d *DrillEstimate, p90 bool) string {
+	n := 0
+	if d != nil {
+		n = d.Samples
+	}
+	if p90 {
+		return fmt.Sprintf("%s at the p90 of %d drills, demonstrated on a copy, not on this server", span, n)
+	}
+	return fmt.Sprintf("%s, the longest of %d drills, demonstrated on a copy, not on this server", span, n)
 }
 
 // historyPhrase says what a duration taken from history rests on, as a p90 when

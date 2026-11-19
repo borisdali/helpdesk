@@ -197,8 +197,10 @@ type DecisionOption struct {
 	// How long the budget verdict took the restore to last, and on what:
 	// "history_p90" (the p90 of this server's past restores, from ten of them),
 	// "history_longest" (the longest of three to nine, too few for a p90) or
-	// "declared_rto" (an upper bound). Absent when it was not compared. Records
-	// from before this naming say "history", which meant the p90.
+	// "drill_p90" / "drill_longest" (the same, from this server's restore drills
+	// when it has too few real restores: restores demonstrated on a copy, not on
+	// this server), or "declared_rto" (an upper bound). Absent when it was not
+	// compared. Records from before this naming say "history", which meant the p90.
 	BudgetDurationSeconds *int64 `json:"budget_duration_seconds,omitempty"`
 	BudgetDurationBasis   string `json:"budget_duration_basis,omitempty"`
 

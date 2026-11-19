@@ -457,6 +457,46 @@ func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T)
 	}
 }
 
+func TestFormatPITRPlan_ShowsRestoreDrillsBesideRealRestores(t *testing.T) {
+	plan := func(estimate string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d","recovery_estimate":` + estimate + `}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	real0 := `"status":"no_history","basis":"no resolved restore of this server in the last 90d among real incidents: nothing to estimate from"`
+	drills := `"drills":{"status":"estimated","samples":4,"basis":"4 restore drills of this server count (last 90d, pgBackRest, comparable size): median 1m 40s, longest 1m 52s (too few for a p90, which needs 10)","vs_rto":"within","vs_rto_detail":"none of the 4 drills took longer than the rto of 5m"}`
+
+	// Planned from drills: both lines, and the plan says what the figure rests on.
+	got := formatPITRPlan(plan(`{`+real0+`,"planning_source":"drills",`+drills+`}`), goodOpts())
+	for _, want := range []string{
+		"Past restores      : no resolved restore of this server",
+		"Restore drills     : 4 restore drills of this server count",
+		"The planned duration comes from these: a restore demonstrated on a copy, not on this server",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), strings.Join(strings.Fields(want), " ")) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Real restores plan it: the drills are shown, and not claimed as the basis.
+	got = formatPITRPlan(plan(`{`+real0+`,"planning_source":"restores",`+drills+`}`), goodOpts())
+	if !strings.Contains(got, "Restore drills     :") || strings.Contains(got, "comes from these") {
+		t.Errorf("drills claimed as the basis:\n%s", got)
+	}
+	// A drill that took longer than the rto is called out even with no real restore to show it.
+	over := `"drills":{"status":"estimated","samples":3,"basis":"3 restore drills count","vs_rto":"exceeds","vs_rto_detail":"1 of the 3 drills took longer than the rto of 5m (the longest took 9m)"}`
+	got = formatPITRPlan(plan(`{`+real0+`,`+over+`}`), goodOpts())
+	if !strings.Contains(got, "RTO CHECK (!)      : exceeds, by the drills: 1 of the 3 drills") {
+		t.Errorf("no rto warning from the drills:\n%s", got)
+	}
+	// No drills in the estimate: nothing about drills.
+	if got := formatPITRPlan(plan(`{`+real0+`}`), goodOpts()); strings.Contains(got, "Restore drills") {
+		t.Errorf("a plan with no drills mentions them:\n%s", got)
+	}
+}
+
 func TestFormatPITRPlan_InfeasibleOffersNoApproveCommand(t *testing.T) {
 	got := formatPITRPlan(pitrPlan{Status: "not_feasible", Detail: "WAL gap", PlanDigest: "3c7ae8cf0d79ffd9"}, goodOpts())
 	if strings.Contains(got, "--pitr-approve") || strings.Contains(got, "--plan-digest") || !strings.Contains(got, "WAL gap") {

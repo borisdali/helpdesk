@@ -221,6 +221,17 @@ type pitrPlan struct {
 			Basis       string `json:"basis"`
 			VsRTO       string `json:"vs_rto"`
 			VsRTODetail string `json:"vs_rto_detail"`
+			// PlanningSource is where the planned duration comes from: "restores",
+			// or "drills" when there are too few real restores. Drills are restores
+			// on a copy the operator brought, shown beside the real ones.
+			PlanningSource string `json:"planning_source"`
+			Drills         *struct {
+				Status      string `json:"status"`
+				Samples     int    `json:"samples"`
+				Basis       string `json:"basis"`
+				VsRTO       string `json:"vs_rto"`
+				VsRTODetail string `json:"vs_rto_detail"`
+			} `json:"drills"`
 		} `json:"recovery_estimate"`
 	} `json:"availability_budget"`
 	// DataDelay is what putting the decision off does to the data the restore
@@ -330,6 +341,21 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			field(&b, "RTO CHECK (!)      ", "exceeds: "+e.VsRTODetail)
 		case "within":
 			field(&b, "RTO check          ", "within: "+e.VsRTODetail)
+		}
+		// Restore drills, beside the real restores and never mixed with them. A
+		// drill is a restore on a copy, so what plans the restore from drills is
+		// said to be that.
+		if d := e.Drills; d != nil && d.Basis != "" {
+			text := d.Basis
+			if e.PlanningSource == "drills" {
+				text += ". The planned duration comes from these: a restore demonstrated on a copy, not on this server"
+			}
+			field(&b, "Restore drills     ", text)
+			// A drill that took longer than the rto says the rto is not met, even
+			// where no real restore has shown it.
+			if d.VsRTO == "exceeds" && e.VsRTO != "exceeds" {
+				field(&b, "RTO CHECK (!)      ", "exceeds, by the drills: "+d.VsRTODetail)
+			}
 		}
 	}
 	// What putting the decision off costs. Information, not a deadline: the restore

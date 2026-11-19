@@ -181,6 +181,10 @@ func rdBasisText(basis string) string {
 		return "the p90 of past restores"
 	case "history_longest":
 		return "the longest past restore (too few for a p90)"
+	case "drill_p90":
+		return "the p90 of restore drills, demonstrated on a copy"
+	case "drill_longest":
+		return "the longest restore drill, demonstrated on a copy (too few for a p90)"
 	}
 	return "from the declared rto"
 }

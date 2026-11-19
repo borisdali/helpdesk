@@ -282,7 +282,7 @@ func measurePITRPlan(ctx context.Context, args PlanPITRArgs) (PITRPlan, error) {
 		est.withTransactions(measureTransactionLoss(ctx, inst, plan, live))
 	}
 	plan.DataLossEstimate = withObjective(est, args.Target)
-	plan.AvailabilityBudget = budgetCheckFor(ctx, args.Target, plan.InstanceServing)
+	plan.AvailabilityBudget = budgetCheckForRestore(ctx, args.Target, plan.InstanceServing, plan.BackupDatabaseBytes)
 	plan.DataDelay = dataDelayFor(plan.DataLossEstimate, plan.InstanceServing)
 	return plan, nil
 }

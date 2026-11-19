@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"helpdesk/internal/audit"
+	"helpdesk/internal/availability"
 )
 
 func newDrillServer(t *testing.T) (*restoreDrillServer, *audit.Store) {
@@ -108,6 +110,79 @@ func TestDrillHandlers_UnsetTimesFromTheGatewayStayUnset(t *testing.T) {
 	if len(drills) != 1 {
 		t.Errorf("a drill with no finish time is not found by an age filter: %d", len(drills))
 	}
+}
+
+// The estimate reads drills through auditd's own handlers: drills recorded
+// there plan a restore that has too few real ones, and what the handlers
+// filter (the source, the age, a superseded record) is what the estimate sees.
+func TestDrills_FeedTheEstimateThroughAuditd(t *testing.T) {
+	srv, _ := newDrillServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/drills", srv.handleRecordDrill)
+	mux.HandleFunc("GET /v1/drills", srv.handleListDrills)
+	mux.HandleFunc("GET /v1/incidents", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"count":0,"incidents":[]}`)) //nolint:errcheck
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	now := time.Now().UTC()
+	record := func(source string, took int, daysAgo int, method string, extra map[string]any) string {
+		fin := now.Add(-time.Duration(daysAgo) * 24 * time.Hour)
+		b := map[string]any{
+			"source_key": source, "clone_key": source + "-clone", "source_system_id": "7001", "clone_system_id": "7001",
+			"method": method, "status": "verified", "duration_seconds": took, "duration_source": "reported",
+			"restore_bytes": 10 << 30, "finished_at": fin.Format(time.RFC3339),
+		}
+		for k, v := range extra {
+			b[k] = v
+		}
+		raw, _ := json.Marshal(b)
+		resp, err := http.Post(ts.URL+"/v1/drills", "application/json", strings.NewReader(string(raw)))
+		if err != nil || resp.StatusCode != http.StatusCreated {
+			t.Fatalf("recording a drill: %v %v", err, resp)
+		}
+		var saved audit.DrillRecord
+		json.NewDecoder(resp.Body).Decode(&saved) //nolint:errcheck
+		resp.Body.Close()
+		return saved.DrillID
+	}
+	record("prod-orders", 60, 5, "pgbackrest", nil)
+	record("prod-orders", 90, 10, "pgbackrest", nil)
+	record("prod-orders", 120, 20, "pgbackrest", nil)
+	record("prod-orders", 9999, 30, "snapshot", nil)    // proof of recovery, not counted
+	record("prod-orders", 9999, 120, "pgbackrest", nil) // too old
+	record("prod-other", 5, 1, "pgbackrest", nil)       // another database
+	refused := record("prod-orders", 9999, 15, "pgbackrest", map[string]any{"status": "refused"})
+	record("prod-orders", 100, 14, "pgbackrest", map[string]any{"supersedes": refused}) // the redo of the refused one
+
+	e, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(context.Background(), "prod-orders", availability.RestoreSeries, nil, now,
+		availability.DrillInputs{RestoreBytes: 10 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := e.Drills
+	if d == nil || d.Status != availability.EstimateEstimated || d.Samples != 4 || d.Recorded != 5 {
+		t.Fatalf("drills: %+v", d)
+	}
+	// 60, 90, 100, 120 count; the snapshot is recorded but not counted; the one
+	// older than 90 days is not even recorded for the window.
+	if d.NotCounted["method"] != 1 || *d.MaxSeconds != 120 || e.PlanningSource != availability.PlanningFromDrills || *e.PlanningSeconds != 120 {
+		t.Errorf("not counted %v, longest %v, planning %v from %q", d.NotCounted, ptrOr(d.MaxSeconds), ptrOr(e.PlanningSeconds), e.PlanningSource)
+	}
+	// Another database's drill never leaks in.
+	other, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(context.Background(), "prod-other", availability.RestoreSeries, nil, now,
+		availability.DrillInputs{RestoreBytes: 10 << 30})
+	if err != nil || other.Drills.Samples != 1 || other.Drills.Status != availability.EstimateTooFew {
+		t.Errorf("prod-other drills = %+v, %v", other.Drills, err)
+	}
+}
+
+func ptrOr(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func TestDrillHandlers_RejectsBeforeWritingAnEvent(t *testing.T) {

@@ -40,8 +40,8 @@ var budgetLedgerFn = readLedger
 
 // readEstimate reads how long this database's restores have taken, through the
 // configured client.
-func readEstimate(ctx context.Context, key string, rto *time.Duration, now time.Time) (*availability.RecoveryEstimate, error) {
-	return ledgerClient.RecoveryEstimate(ctx, key, availability.RestoreSeries, rto, now)
+func readEstimate(ctx context.Context, key string, rto *time.Duration, now time.Time, drill availability.DrillInputs) (*availability.RecoveryEstimate, error) {
+	return ledgerClient.RecoveryEstimate(ctx, key, availability.RestoreSeries, rto, now, drill)
 }
 
 // recoveryEstimateFn is how the check reads that history: a variable for the same
@@ -52,8 +52,8 @@ var recoveryEstimateFn = readEstimate
 // there is no history to look at and nothing is said (the budget check already
 // says the ledger is unavailable); any other failure is reported as an estimate
 // that could not be made, so it is never read as there being no history.
-func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now time.Time) *availability.RecoveryEstimate {
-	est, err := recoveryEstimateFn(ctx, key, rto, now)
+func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now time.Time, drill availability.DrillInputs) *availability.RecoveryEstimate {
+	est, err := recoveryEstimateFn(ctx, key, rto, now, drill)
 	switch {
 	case errors.Is(err, availability.ErrNoAudit):
 		return nil
@@ -71,6 +71,16 @@ func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now
 // The objectives are resolved under the config lock and the lock is let go
 // before the ledger is read over the network.
 func budgetCheckFor(ctx context.Context, target string, serving bool) *availability.BudgetVerdict {
+	return budgetCheckForRestore(ctx, target, serving, 0)
+}
+
+// budgetCheckForRestore is budgetCheckFor for a restore whose size is known
+// (the selected backup's database size, in bytes; 0 when it is not). The size is
+// what a restore drill is compared against: a drill of a very different size
+// says little about this restore, so with no size no drill can count. The
+// source's system identifier is not read here, so drills are matched to this
+// server by name and the estimate says so.
+func budgetCheckForRestore(ctx context.Context, target string, serving bool, restoreBytes uint64) *availability.BudgetVerdict {
 	infraConfigMu.RLock()
 	var (
 		res   infra.ResolvedObjectives
@@ -102,7 +112,7 @@ func budgetCheckFor(ctx context.Context, target string, serving bool) *availabil
 		d := res.RTO.Value
 		rto = &d
 	}
-	in.Estimate = recoveryEstimateOf(ctx, key, rto, now)
+	in.Estimate = recoveryEstimateOf(ctx, key, rto, now, availability.DrillInputs{RestoreBytes: int64(restoreBytes)})
 	// When the restore runs under an approval, the gateway has said when its incident
 	// began: by now the ledger no longer reads that incident as open (approving the
 	// gate marked it escalated), so it could not be found there.

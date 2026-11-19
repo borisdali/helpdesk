@@ -195,7 +195,7 @@ func withObjectiveExposure(ctx context.Context, res *GetPgBackRestStatusResult, 
 	var est *availability.RecoveryEstimate
 	if obj.RTO.Set {
 		d := obj.RTO.Value
-		est = recoveryEstimateOf(ctx, key, &d, now)
+		est = recoveryEstimateOf(ctx, key, &d, now, availability.DrillInputs{})
 	}
 	res.ObjectiveExposure = exposureOf(*res, now, obj, est)
 }

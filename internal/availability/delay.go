@@ -225,15 +225,22 @@ func ledgerOverspent(rem int64, grows, tail string, span func(int64) string) str
 
 // durationPhrase says what the restore's planned duration rests on.
 func durationPhrase(v *BudgetVerdict) string {
-	n := 0
+	n, drills := 0, 0
 	if v.RecoveryEstimate != nil {
 		n = v.RecoveryEstimate.Samples
+		if v.RecoveryEstimate.Drills != nil {
+			drills = v.RecoveryEstimate.Drills.Samples
+		}
 	}
 	switch v.DurationBasis {
 	case DurationFromHistoryP90:
 		return fmt.Sprintf("the p90 of %d past restores", n)
 	case DurationFromHistoryLongest:
 		return fmt.Sprintf("the longest of %d past restores", n)
+	case DurationFromDrillP90:
+		return fmt.Sprintf("the p90 of %d drills on a copy", drills)
+	case DurationFromDrillLongest:
+		return fmt.Sprintf("the longest of %d drills on a copy", drills)
 	}
 	return "the declared rto, an upper bound"
 }

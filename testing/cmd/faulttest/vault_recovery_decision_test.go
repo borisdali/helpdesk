@@ -460,6 +460,18 @@ func TestRDPlanVsActual(t *testing.T) {
 	if !strings.Contains(got, "planned 30m 00s (from the declared rto); took 1m 29s (28m 31s under)") {
 		t.Errorf("declared rto:\n%s", got)
 	}
+	// A plan made from restore drills says the figure was demonstrated on a copy,
+	// so it is never read as this server's own history.
+	for basis, want := range map[string]string{
+		"drill_longest": "planned 1m 41s (the longest restore drill, demonstrated on a copy (too few for a p90)); took 1m 29s (12s under)",
+		"drill_p90":     "planned 1m 41s (the p90 of restore drills, demonstrated on a copy); took 1m 29s (12s under)",
+	} {
+		fromDrills := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 101, basis))
+		got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{fromDrills, outcome(5, rdI(89))}), "\n")
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), want) {
+			t.Errorf("%s:\n%s", basis, got)
+		}
+	}
 	// Slower than planned, and exactly as planned.
 	if got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(150))}), "\n"); !strings.Contains(got, "took 2m 30s (49s over)") {
 		t.Errorf("over:\n%s", got)
