@@ -72,6 +72,11 @@ type DrillInputs struct {
 	// RestoreBytes is the size of the restore (the backup's database size). Zero
 	// means unknown, and then a drill cannot be shown comparable.
 	RestoreBytes int64
+	// SizeFromNewestDrill is for a caller with no restore in view, such as the
+	// backup posture check: with no RestoreBytes, the size drills are compared
+	// with is the newest counted pgBackRest drill's, so a drill of a very different
+	// size from the latest one does not count. Ignored when RestoreBytes is set.
+	SizeFromNewestDrill bool
 }
 
 // DrillEstimate summarises the drills of this server that count.
@@ -96,6 +101,9 @@ type DrillEstimate struct {
 	MatchedBy string `json:"matched_by"`
 	// LastVerifiedAt is when the newest drill that counts finished.
 	LastVerifiedAt *time.Time `json:"last_verified_at,omitempty"`
+	// DrillIDs are the drills that count, so a plan made from them can be traced
+	// to the records it rests on.
+	DrillIDs []string `json:"drill_ids,omitempty"`
 	// Against the declared rto, like the estimate from real restores.
 	RTOSeconds  *int64 `json:"rto_seconds,omitempty"`
 	OverRTO     *int   `json:"over_rto,omitempty"`
@@ -149,6 +157,20 @@ func AddDrills(e *RecoveryEstimate, drills []audit.DrillRecord, in DrillInputs, 
 		}
 	}
 
+	sizedBy := ""
+	if in.RestoreBytes <= 0 && in.SizeFromNewestDrill {
+		var newest time.Time
+		for _, r := range drills {
+			if r.Counted() && r.Method == audit.DrillMethodPgBackRest && r.RestoreBytes > 0 && !drillWhen(r).Before(from) &&
+				(target == "" || r.SourceSystemID == target) && !drillWhen(r).Before(newest) {
+				newest, in.RestoreBytes = drillWhen(r), r.RestoreBytes
+			}
+		}
+		if in.RestoreBytes > 0 {
+			sizedBy = "; sized against the newest drill, as there is no restore in view"
+		}
+	}
+
 	var took []time.Duration
 	var last time.Time
 	for _, r := range drills {
@@ -175,6 +197,7 @@ func AddDrills(e *RecoveryEstimate, drills []audit.DrillRecord, in DrillInputs, 
 			d.NotCounted[notCountedSize]++
 		default:
 			took = append(took, time.Duration(r.DurationSeconds)*time.Second)
+			d.DrillIDs = append(d.DrillIDs, r.DrillID)
 			if drillWhen(r).After(last) {
 				last = drillWhen(r)
 			}
@@ -187,6 +210,7 @@ func AddDrills(e *RecoveryEstimate, drills []audit.DrillRecord, in DrillInputs, 
 	if d.MatchedBy == "name" {
 		matched = "; matched by name, the source's system identifier was not checked"
 	}
+	matched += sizedBy
 	if rto != nil {
 		r := int64(rto.Round(time.Second) / time.Second)
 		d.RTOSeconds = &r

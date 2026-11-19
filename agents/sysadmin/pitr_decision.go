@@ -93,6 +93,13 @@ func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chose
 			n := e.Samples
 			o.EstimateStatus, o.EstimateVsRTO, o.EstimateOverRTO = e.Status, e.VsRTO, e.OverRTO
 			o.EstimateSamples, o.EstimateP50Seconds, o.EstimateP90Seconds, o.EstimateMaxSeconds = &n, e.P50Seconds, e.P90Seconds, e.MaxSeconds
+			// When the plan rests on drills, which ones: the figure is traceable to
+			// the records it came from.
+			o.PlanningSource = e.PlanningSource
+			if e.PlanningSource == availability.PlanningFromDrills && e.Drills != nil {
+				ds := e.Drills.Samples
+				o.DrillSamples, o.DrillIDs = &ds, e.Drills.DrillIDs
+			}
 		}
 	}
 	if est == nil {

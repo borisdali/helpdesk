@@ -218,6 +218,15 @@ type DecisionOption struct {
 	EstimateMaxSeconds *int64 `json:"estimate_max_seconds,omitempty"`
 	EstimateVsRTO      string `json:"estimate_vs_rto,omitempty"`
 	EstimateOverRTO    *int   `json:"estimate_over_rto,omitempty"`
+
+	// Where the planned duration came from: "restores" (this server's real
+	// restores) or "drills" (restore drills, on a copy, because there were too few
+	// real restores). With "drills", DrillSamples is how many counted and DrillIDs
+	// are exactly which, so the figure can be traced to the records it rests on.
+	// Absent when nothing was planned from history (v0.36).
+	PlanningSource string   `json:"planning_source,omitempty"`
+	DrillSamples   *int     `json:"drill_samples,omitempty"`
+	DrillIDs       []string `json:"drill_ids,omitempty"`
 }
 
 // The objectives a restore can breach, as named in ApprovalFacts.Breaches.
