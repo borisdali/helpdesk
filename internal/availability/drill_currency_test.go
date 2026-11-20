@@ -34,6 +34,44 @@ func TestAssessDrillCurrency_CurrentOverdueAndNever(t *testing.T) {
 	}
 }
 
+// An interval shorter than a day (a test setting, but allowed) must not be worded
+// in whole days: the live run said "overdue: last verified drill today (limit 0 days)".
+func TestAssessDrillCurrency_AnIntervalUnderADayIsWordedInItsOwnUnit(t *testing.T) {
+	minute := infra.DrillReminder{Applies: true, Interval: time.Minute, Source: infra.SourceDatabase}
+	d := agoDays("drl_a", 0)
+	d.FinishedAt, d.RecordedAt = now.Add(-23*time.Minute), now.Add(-23*time.Minute)
+	in := DrillInputs{SystemID: "7001"} // the system the drill helper records
+	got := AssessDrillCurrency([]audit.DrillRecord{d}, minute, in, now)
+	if got.State != DrillOverdue || !got.Overdue {
+		t.Fatalf("state: %+v", got)
+	}
+	if got.Detail != "last verified drill 23m ago (limit 1m)" {
+		t.Errorf("detail: %q", got.Detail)
+	}
+	for _, bad := range []string{"today", "0 days"} {
+		if strings.Contains(got.Detail, bad) {
+			t.Errorf("detail says %q for a sub-day interval: %q", bad, got.Detail)
+		}
+	}
+
+	// Within the interval it is current and still worded in the same unit.
+	d.FinishedAt, d.RecordedAt = now.Add(-30*time.Second), now.Add(-30*time.Second)
+	cur := AssessDrillCurrency([]audit.DrillRecord{d}, minute, in, now)
+	if cur.State != DrillCurrent || cur.Detail != "last verified drill 30s ago (limit 1m)" {
+		t.Errorf("current: %+v", cur)
+	}
+
+	// A failed attempt since is worded the same way.
+	bad := drill("drl_bad", 100, 0, 10*gib)
+	bad.Status = audit.DrillRefused
+	bad.FinishedAt, bad.RecordedAt = now.Add(-5*time.Minute), now.Add(-5*time.Minute)
+	d.FinishedAt, d.RecordedAt = now.Add(-23*time.Minute), now.Add(-23*time.Minute)
+	withBad := AssessDrillCurrency([]audit.DrillRecord{d, bad}, minute, in, now)
+	if !strings.Contains(withBad.Detail, "the latest attempt, drl_bad (5m ago), was refused") {
+		t.Errorf("attempt wording: %q", withBad.Detail)
+	}
+}
+
 func TestAssessDrillCurrency_TheEdgeAndTheWording(t *testing.T) {
 	at := func(age time.Duration) audit.DrillRecord {
 		d := agoDays("drl_a", 0)

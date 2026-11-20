@@ -170,7 +170,22 @@ func AssessDrillCurrency(drills []audit.DrillRecord, reminder infra.DrillReminde
 		c.LastAttempt = a
 	}
 
+	// Whole days read well for an interval of days. Below a day they contradict the
+	// state ("overdue: last verified drill today (limit 0 days)"), so say the span.
+	fine := reminder.Interval < 24*time.Hour
 	limit := plural(c.LimitDays, "day", "days")
+	if fine {
+		limit = infra.FormatSpan(reminder.Interval)
+	}
+	agoOf := func(d time.Duration) string {
+		if d < 0 {
+			d = 0
+		}
+		if fine {
+			return infra.FormatSpan(d) + " ago"
+		}
+		return agoText(int(d / (24 * time.Hour)))
+	}
 	switch {
 	case last == nil:
 		c.State, c.Overdue = DrillNever, true
@@ -187,18 +202,14 @@ func AssessDrillCurrency(drills []audit.DrillRecord, reminder infra.DrillReminde
 		} else {
 			c.State = DrillCurrent
 		}
-		c.Detail = fmt.Sprintf("last verified drill %s (limit %s)", agoText(age), limit)
+		c.Detail = fmt.Sprintf("last verified drill %s (limit %s)", agoOf(now.Sub(at)), limit)
 	}
 	if a := c.LastAttempt; a != nil {
-		ago := int(now.Sub(a.At) / (24 * time.Hour))
-		if ago < 0 {
-			ago = 0
-		}
 		why := ""
 		if len(a.Failed) > 0 {
 			why = " on " + strings.Join(a.Failed, ", ")
 		}
-		c.Detail += fmt.Sprintf("; the latest attempt, %s (%s), was %s%s and does not count", a.DrillID, agoText(ago), strings.ReplaceAll(a.Status, "_", " "), why)
+		c.Detail += fmt.Sprintf("; the latest attempt, %s (%s), was %s%s and does not count", a.DrillID, agoOf(now.Sub(a.At)), strings.ReplaceAll(a.Status, "_", " "), why)
 	}
 	if c.MatchedBy == "name" && c.State != DrillNever {
 		c.Detail += "; matched by name, the source's system identifier was not checked"

@@ -91,6 +91,44 @@ func TestFormatDrillTable(t *testing.T) {
 	}
 }
 
+// Keys and statuses have no length limit: a long source or clone key must widen its
+// column, not push the ones after it out of line (the first live listing did).
+func TestFormatDrillTable_ColumnsStayAlignedWhateverTheKeysLength(t *testing.T) {
+	short := someDrill("drl_short001", audit.DrillVerified, time.Hour)
+	long := someDrill("drl_long0002", audit.DrillUnverifiable, 2*time.Hour)
+	long.SourceKey, long.CloneKey = "pgbackrest-ubuntu-vm", "orders-clone-in-the-disaster-recovery-region"
+	long.DurationSeconds, long.RestoreBytes = 0, 0
+	out := formatDrillTable([]audit.DrillRecord{short, long}, drillNow)
+	lines := strings.Split(out, "\n")
+	header := lines[0]
+	cols := map[string]int{
+		"METHOD": strings.Index(header, "METHOD"), "TOOK": strings.Index(header, "TOOK"),
+		"SIZE": strings.Index(header, "SIZE"), "STATUS": strings.Index(header, "STATUS"),
+	}
+	for _, row := range lines[1:3] {
+		// "pgbackrest " with its space: a source key may start with the same word.
+		if i := strings.Index(row, "pgbackrest "); i != cols["METHOD"] {
+			t.Errorf("method column at %d, header says %d:\n%s", i, cols["METHOD"], out)
+		}
+		status := "verified"
+		if strings.Contains(row, "unverifiable") {
+			status = "unverifiable"
+		}
+		if i := strings.LastIndex(row, status); i != cols["STATUS"] {
+			t.Errorf("status column at %d, header says %d:\n%s", i, cols["STATUS"], out)
+		}
+	}
+	if !strings.Contains(out, "orders-clone-in-the-disaster-recovery-region") {
+		t.Errorf("the long key was cut:\n%s", out)
+	}
+	// No line ends in padding.
+	for _, l := range lines {
+		if l != strings.TrimRight(l, " ") {
+			t.Errorf("trailing spaces: %q", l)
+		}
+	}
+}
+
 func TestFormatDrillDetail_Verified(t *testing.T) {
 	d := someDrill("drl_ok000003", audit.DrillVerified, 24*time.Hour)
 	d.BackupLabel, d.RecoveryTarget, d.Note = "20261101-020000F", "2026-11-18T10:00:00Z", "Q4 drill with the new runbook"

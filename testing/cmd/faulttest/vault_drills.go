@@ -257,20 +257,28 @@ func formatDrillTable(drills []audit.DrillRecord, now time.Time) string {
 	if len(drills) == 0 {
 		return "No restore drills recorded.\n"
 	}
+	// A column is as wide as its widest value (keys and statuses have no length
+	// limit), so the columns after it stay lined up.
+	cleaned := make([]audit.DrillRecord, len(drills))
+	pair, status := len("SOURCE <- CLONE"), len("STATUS")
+	for i, d := range drills {
+		cleaned[i] = cleanDrill(d)
+		pair = max(pair, len(cleaned[i].SourceKey+" <- "+cleaned[i].CloneKey))
+		status = max(status, len(drillWord(cleaned[i].Status)))
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%-13s %-9s %-30s %-10s %-9s %-10s %s\n", "DRILL", "WHEN", "SOURCE <- CLONE", "METHOD", "TOOK", "SIZE", "STATUS")
+	fmt.Fprintf(&b, "%-13s %-9s %-*s %-10s %-9s %-10s %s\n", "DRILL", "WHEN", pair, "SOURCE <- CLONE", "METHOD", "TOOK", "SIZE", "STATUS")
 	notCounted := 0
-	for _, d := range drills {
-		d = cleanDrill(d)
-		line := fmt.Sprintf("%-13s %-9s %-30s %-10s %-9s %-10s %s", d.DrillID, drillAgo(now.Sub(drillWhenOf(d))),
-			d.SourceKey+" <- "+d.CloneKey, d.Method, drillDuration(d.DurationSeconds), drillSizeText(d.RestoreBytes), drillWord(d.Status))
+	for _, d := range cleaned {
+		line := fmt.Sprintf("%-13s %-9s %-*s %-10s %-9s %-10s %-*s", d.DrillID, drillAgo(now.Sub(drillWhenOf(d))),
+			pair, d.SourceKey+" <- "+d.CloneKey, d.Method, drillDuration(d.DurationSeconds), drillSizeText(d.RestoreBytes), status, drillWord(d.Status))
 		if d.Ticket != "" {
 			line += "  " + d.Ticket
 		}
 		if d.Supersedes != "" {
 			line += "  (replaces " + d.Supersedes + ")"
 		}
-		b.WriteString(line + "\n")
+		b.WriteString(strings.TrimRight(line, " ") + "\n")
 		if !d.Counted() {
 			notCounted++
 		}
