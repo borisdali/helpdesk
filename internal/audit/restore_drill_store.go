@@ -391,6 +391,31 @@ func (s *RestoreDrillStore) List(q DrillQuery) ([]DrillRecord, error) {
 	return out, rows.Err()
 }
 
+// DuplicateOf returns the current drill that d would count a second time, or nil.
+// A drill is one restore: a record of the same source and clone with the same start
+// and finish, when both would count, is that restore recorded twice (a script that
+// reused its times, a double submit) and would inflate the sample the estimate
+// plans from. current is the source's drills after Current. A record that names the
+// drill it replaces (Supersedes) is the way to re-record one, so that is not a
+// duplicate, and neither is a record that would not count. A record without both
+// times (only a duration) cannot be compared and is never a duplicate.
+func (d DrillRecord) DuplicateOf(current []DrillRecord) *DrillRecord {
+	if !d.Counted() || d.StartedAt.IsZero() || d.FinishedAt.IsZero() {
+		return nil
+	}
+	for i := range current {
+		c := current[i]
+		if !c.Counted() || c.DrillID == d.Supersedes || c.DrillID == d.DrillID {
+			continue
+		}
+		if c.SourceKey == d.SourceKey && c.CloneKey == d.CloneKey &&
+			c.StartedAt.Equal(d.StartedAt) && c.FinishedAt.Equal(d.FinishedAt) {
+			return &current[i]
+		}
+	}
+	return nil
+}
+
 // Current drops every drill that a later record supersedes.
 func Current(drills []DrillRecord) []DrillRecord {
 	gone := map[string]bool{}

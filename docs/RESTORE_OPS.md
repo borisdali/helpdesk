@@ -254,6 +254,7 @@ A duration that rests on a drill is a better guess than the declared `rto` and a
 | `the clone could not be reached` (`unverifiable`) | Connection, password or firewall | Fix access and record again |
 | `The clone cannot be used: ... not registered` | The clone is not in the infrastructure config | Add it (§2.2) |
 | `policy denied: ... No policy matched this resource` (`unverifiable`, naming the source or the clone) | No policy allows `read` on that database: its tags match no rule and deny-by-default applies | Tag the clone (and check the source's tag) so a `read` rule matches, restart the database agent, then record again (§2.2) |
+| `this restore is already recorded as drill drl_…` (HTTP 409) | A verified drill of the same source and clone with the same start and finish exists: the same restore recorded twice (often a script or shell variable reused for the next record). It would count twice in the estimate | Run the restore again and record its own times. To re-record this one, name the drill it replaces with `--drill-supersedes` |
 | `size_class` warning | The clone is not within 20% of the source | Recorded as proof of recovery; for a drill that plans restores, restore the whole cluster |
 | `verify_sql` failed | Your own check returned false or could not run | The restore is incomplete or the SQL is wrong |
 

@@ -473,6 +473,9 @@ Answers `201` with `drill` (the stored record, with its `drill_id`, `status`, ea
 `restore_bytes` and the `audit_event_id`) and `verification` (the verdict in text), for a refused or unverifiable clone
 as well as a verified one: `status` says which and only `verified` and `verified_with_warnings` count. `400` for a
 request that is wrong, `404` for a database not in the config (the message says a clone must be registered first),
+`409` when the same restore is already recorded (a verified drill of the same source and clone with the same start and
+finish: the message names it; to re-record it, send `supersedes` with its ID; a record that gives only a duration has
+no times to compare and is never refused for this),
 `422` when the verification could not give a verdict, `502` when the database agent or the audit service failed. A
 failed attempt leaves a gateway request event (`record_restore_drill`) in the audit trail; a recorded drill leaves its
 own hash-covered `restore_drill` event.

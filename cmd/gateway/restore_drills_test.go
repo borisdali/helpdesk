@@ -428,6 +428,8 @@ func TestRecordDrill_FailedAttemptsAreAudited(t *testing.T) {
 		"verification failed":   {&drillFakes{toolStatus: http.StatusInternalServerError}, func(r map[string]any) {}, http.StatusBadGateway, "could not verify the clone"},
 		"no verdict":            {&drillFakes{toolText: "verify_sql must be a single statement (no ';')"}, func(r map[string]any) { r["verify_sql"] = long }, http.StatusUnprocessableEntity, "single statement"},
 		"audit service refused": {&drillFakes{verdict: goodVerdict(), auditCode: http.StatusInternalServerError, auditBody: "db down"}, func(r map[string]any) {}, http.StatusBadGateway, "did not record the drill"},
+		// auditd refuses the same restore recorded twice; the gateway keeps its 409 and says why.
+		"same restore twice": {&drillFakes{verdict: goodVerdict(), auditCode: http.StatusConflict, auditBody: "this restore is already recorded as drill drl_first001: count it twice"}, func(r map[string]any) {}, http.StatusConflict, "already recorded as drill drl_first001"},
 	}
 	for name, c := range cases {
 		gw, store := auditedGateway(t, c.fakes)

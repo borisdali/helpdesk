@@ -297,6 +297,107 @@ func TestDrillHandlers_DuplicateIDConflicts(t *testing.T) {
 	}
 }
 
+// One restore is one drill: the same source, clone, start and finish recorded
+// twice would count twice in the estimate. The first live run did it by reusing a
+// shell variable.
+func TestDrillHandlers_TheSameRestoreRecordedTwiceIsRefused(t *testing.T) {
+	srv, store := newDrillServer(t)
+	post := func(b map[string]any) *httptest.ResponseRecorder {
+		return callPV(srv.handleRecordDrill, http.MethodPost, "/v1/drills", b, nil)
+	}
+	// One body, built once: drillBody takes its times from the clock, so a second
+	// call could land in the next second and no longer be the same restore.
+	base := drillBody("prod-db")
+	copyOf := func() map[string]any {
+		c := map[string]any{}
+		for k, v := range base {
+			c[k] = v
+		}
+		return c
+	}
+	first := post(copyOf())
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: %d %s", first.Code, first.Body.String())
+	}
+	var saved audit.DrillRecord
+	json.NewDecoder(first.Body).Decode(&saved) //nolint:errcheck
+
+	dup := copyOf()
+	dup["ticket"] = "DRILL-AGAIN"
+	rec := post(dup)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("the same restore twice: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{saved.DrillID, "count it twice", "supersedes"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("message does not say %q: %s", want, rec.Body.String())
+		}
+	}
+
+	// Nothing was written for the refused record: one row, one event.
+	rows, _ := srv.store.List(audit.DrillQuery{SourceKey: "prod-db"})
+	events, _ := store.Query(context.Background(), audit.QueryOptions{EventType: audit.EventTypeRestoreDrill})
+	if len(rows) != 1 || len(events) != 1 {
+		t.Errorf("rows=%d events=%d, want 1 and 1", len(rows), len(events))
+	}
+
+	// Another finish is another restore.
+	other := copyOf()
+	fin, _ := time.Parse(time.RFC3339, base["finished_at"].(string))
+	other["finished_at"] = fin.Add(10 * time.Minute).Format(time.RFC3339)
+	other["started_at"] = fin.Add(9 * time.Minute).Format(time.RFC3339)
+	if rec := post(other); rec.Code != http.StatusCreated {
+		t.Errorf("a different restore: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Naming the drill it replaces re-records the same restore, and the old row
+	// then stops counting: the sample is still one.
+	again := copyOf()
+	again["supersedes"] = saved.DrillID
+	if rec := post(again); rec.Code != http.StatusCreated {
+		t.Fatalf("re-record with supersedes: %d %s", rec.Code, rec.Body.String())
+	}
+	all, _ := srv.store.List(audit.DrillQuery{SourceKey: "prod-db"})
+	counted := 0
+	for _, d := range audit.Current(all) {
+		if d.Counted() && d.FinishedAt.Equal(fin) {
+			counted++
+		}
+	}
+	if counted != 1 {
+		t.Errorf("the restore counts %d times after the re-record, want 1", counted)
+	}
+}
+
+func TestDrillHandlers_AnAttemptThatDidNotCountNeverBlocksTheGoodRecord(t *testing.T) {
+	srv, _ := newDrillServer(t)
+	post := func(b map[string]any) *httptest.ResponseRecorder {
+		return callPV(srv.handleRecordDrill, http.MethodPost, "/v1/drills", b, nil)
+	}
+	// What the first live run did: an unverifiable attempt, then the verified one with
+	// the same times (a refusal put right without naming the earlier record).
+	base := drillBody("prod-db") // built once: its times come from the clock
+	with := func(status string) map[string]any {
+		c := map[string]any{}
+		for k, v := range base {
+			c[k] = v
+		}
+		c["status"] = status
+		return c
+	}
+	if rec := post(with("unverifiable")); rec.Code != http.StatusCreated {
+		t.Fatalf("unverifiable attempt: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(with("verified")); rec.Code != http.StatusCreated {
+		t.Errorf("verified record after an unverifiable one with the same times: %d %s, want 201", rec.Code, rec.Body.String())
+	}
+	// And a refused re-record of an already counted restore is just another attempt on the record.
+	refused := with("refused")
+	if rec := post(refused); rec.Code != http.StatusCreated {
+		t.Errorf("refused attempt after a verified one: %d %s, want 201", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDrillHandlers_ListGetAndCurrent(t *testing.T) {
 	srv, _ := newDrillServer(t)
 	refusedBody := drillBody("prod-db")

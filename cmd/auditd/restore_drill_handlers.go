@@ -57,6 +57,20 @@ func (s *restoreDrillServer) handleRecordDrill(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	// One restore is one drill. Checked here, where the records are kept, so
+	// every caller gets it and no event is left behind for a refused record.
+	same, err := s.store.List(audit.DrillQuery{SourceKey: d.SourceKey, Limit: 1000})
+	if err != nil {
+		http.Error(w, "failed to look up the source's drills: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if dup := d.DuplicateOf(audit.Current(same)); dup != nil {
+		http.Error(w, "this restore is already recorded as drill "+dup.DrillID+": the same source, clone, start and finish. "+
+			"A drill is one restore, so recording it again would count it twice. Restore again and record that, "+
+			"or to re-record this one name it with supersedes "+dup.DrillID, http.StatusConflict)
+		return
+	}
+
 	ev := &audit.Event{
 		EventType:   audit.EventTypeRestoreDrill,
 		TraceID:     d.DrillID,

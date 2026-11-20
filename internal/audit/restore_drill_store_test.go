@@ -183,6 +183,62 @@ func TestRestoreDrillStore_Supersedes(t *testing.T) {
 	}
 }
 
+func TestDrillRecord_DuplicateOf(t *testing.T) {
+	fin := time.Date(2026, 11, 20, 3, 54, 18, 0, time.UTC)
+	existing := goodDrill("prod", fin)
+	existing.DrillID = "drl_first001"
+	current := []DrillRecord{existing}
+
+	same := func(edit func(*DrillRecord)) DrillRecord {
+		d := goodDrill("prod", fin)
+		d.DrillID = "drl_second02"
+		edit(&d)
+		return d
+	}
+	cases := []struct {
+		name string
+		d    DrillRecord
+		dup  bool
+	}{
+		{"same source, clone and times", same(func(*DrillRecord) {}), true},
+		{"same times as another zone's spelling", same(func(d *DrillRecord) {
+			zone := time.FixedZone("EST", -5*3600)
+			d.StartedAt, d.FinishedAt = d.StartedAt.In(zone), d.FinishedAt.In(zone)
+		}), true},
+		{"verified with warnings counts too", same(func(d *DrillRecord) { d.Status = DrillVerifiedWithWarnings }), true},
+		{"a different finish is another restore", same(func(d *DrillRecord) { d.FinishedAt = d.FinishedAt.Add(time.Second) }), false},
+		{"a different start is another restore", same(func(d *DrillRecord) { d.StartedAt = d.StartedAt.Add(-time.Second) }), false},
+		{"another clone is another restore", same(func(d *DrillRecord) { d.CloneKey = "other-clone" }), false},
+		{"another source is another restore", same(func(d *DrillRecord) { d.SourceKey = "other" }), false},
+		{"a refused record would not count", same(func(d *DrillRecord) { d.Status = DrillRefused }), false},
+		{"an unverifiable record would not count", same(func(d *DrillRecord) { d.Status = DrillUnverifiable }), false},
+		{"naming the drill it replaces is the way to re-record", same(func(d *DrillRecord) { d.Supersedes = "drl_first001" }), false},
+		{"naming a different drill does not excuse it", same(func(d *DrillRecord) { d.Supersedes = "drl_other999" }), true},
+		{"a duration alone has no times to compare", same(func(d *DrillRecord) { d.StartedAt, d.FinishedAt = time.Time{}, time.Time{} }), false},
+	}
+	for _, c := range cases {
+		got := c.d.DuplicateOf(current)
+		if (got != nil) != c.dup {
+			t.Errorf("%s: duplicate = %v, want %v", c.name, got != nil, c.dup)
+		}
+		if got != nil && got.DrillID != "drl_first001" {
+			t.Errorf("%s: names %s, want the existing drill", c.name, got.DrillID)
+		}
+	}
+
+	// An earlier record that did not count never blocks a good one.
+	refused := goodDrill("prod", fin)
+	refused.DrillID, refused.Status = "drl_refused1", DrillRefused
+	d := goodDrill("prod", fin)
+	if d.DuplicateOf([]DrillRecord{refused}) != nil {
+		t.Error("a refused attempt blocked the verified re-record of the same restore")
+	}
+	// The record never conflicts with itself.
+	if existing.DuplicateOf(current) != nil {
+		t.Error("a drill is a duplicate of itself")
+	}
+}
+
 func TestRestoreDrillStore_GetUnknown(t *testing.T) {
 	ds := newDrillTestStore(t)
 	if _, err := ds.Get("drl_missing"); !errors.Is(err, ErrDrillNotFound) {
