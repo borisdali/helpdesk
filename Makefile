@@ -172,7 +172,7 @@ dev-auditd-wipe:
 	$(DEV_AUDITD_COMPOSE) down -v
 
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
-SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- SKIP:/{s++; k=$$0; sub(/^[[:space:]]*--- SKIP: /,"",k); skips=skips"\n    "k} /^SKIP:/{pk++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:   %d\n  Passed:  %d\n  Failed:  %d\n  Skipped: %d\n",p+f+s,p,f,s; if(f>0){print "  Failing tests:"fails}; if(s>0){print "  Skipped tests (a skip is not a pass; check each ran where you expect):"skips}; if(pk>0){print "  WARNING: "pk" package(s) skipped entirely (see the SKIP: lines above); none of their tests ran"}}'
+SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- SKIP:/{s++; k=$$0; sub(/^[[:space:]]*--- SKIP: /,"",k); r=""; if(prev ~ /^[[:space:]]+[A-Za-z0-9_.-]+\.go:[0-9]+: /){r=prev; sub(/^[[:space:]]+[A-Za-z0-9_.-]+\.go:[0-9]+: /,"",r); r="\n      reason: "r} skips=skips"\n    "k r} /^SKIP:/{pk++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:   %d\n  Passed:  %d\n  Failed:  %d\n  Skipped: %d\n",p+f+s,p,f,s; if(f>0){print "  Failing tests:"fails}; if(s>0){print "  Skipped tests (a skip is not a pass; check each ran where you expect):"skips}; if(pk>0){print "  WARNING: "pk" package(s) skipped entirely (see the SKIP: lines above); none of their tests ran"}} {prev=$$0}'
 
 integration:
 	@echo "Starting test infrastructure..."
