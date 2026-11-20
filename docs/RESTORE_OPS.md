@@ -199,7 +199,7 @@ When it is due, the reminder reads *last verified drill 143 days ago (limit 90 d
 
 ```bash
 helpdesk-client --drill-list --drill-source prod-orders      # a table, newest first
-faulttest vault drills --source prod-orders                  # the same, with --status, --days, --all
+faulttest vault drills --target prod-orders                  # the same, with --status, --days, --all
 faulttest vault drills drl_ab12cd34                          # one drill in full: every check, what replaced it
 ```
 

@@ -26,6 +26,36 @@ func someDrill(id, status string, ago time.Duration) audit.DrillRecord {
 	}
 }
 
+// The flags of `vault drills` are registered next to the shared harness flags. A
+// name the harness already owns panics at registration ("flag redefined: source")
+// and only parsing shows it: the first live run did.
+func TestParseDrillsArgs_RegistersNextToTheHarnessFlags(t *testing.T) {
+	cfg, o, rest := parseDrillsArgs([]string{
+		"--gateway", "http://gw.example.com", "--api-key", "k",
+		"--target", "prod-orders", "--status", "refused", "--all", "--days", "7", "--limit", "5",
+		"drl_ab12cd34",
+	})
+	if cfg.GatewayURL != "http://gw.example.com" || cfg.GatewayAPIKey != "k" {
+		t.Errorf("shared flags not read: %+v", cfg)
+	}
+	if o.target != "prod-orders" || o.status != "refused" || !o.all || o.days != 7 || o.limit != 5 {
+		t.Errorf("drills flags not read: %+v", o)
+	}
+	if len(rest) != 1 || rest[0] != "drl_ab12cd34" {
+		t.Errorf("the drill id is not left as the argument: %v", rest)
+	}
+}
+
+func TestParseDrillsArgs_DefaultsAndIDBeforeFlags(t *testing.T) {
+	_, o, rest := parseDrillsArgs([]string{"drl_ab12cd34", "--gateway", "http://gw.example.com"})
+	if o.limit != 30 || o.target != "" || o.all || o.days != 0 {
+		t.Errorf("defaults: %+v", o)
+	}
+	if len(rest) != 1 || rest[0] != "drl_ab12cd34" {
+		t.Errorf("an id given before the flags is lost: %v", rest)
+	}
+}
+
 func TestFormatDrillTable(t *testing.T) {
 	refused := someDrill("drl_bad00002", audit.DrillRefused, 2*24*time.Hour)
 	refused.Ticket = ""

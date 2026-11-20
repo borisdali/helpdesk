@@ -495,7 +495,7 @@ curl -X POST http://localhost:8080/api/v1/drills -H 'Content-Type: application/j
 | `current=true` | Leave out drills that a later record supersedes. |
 | `limit` | Default 100. |
 
-Newest first. `faulttest vault drills [--source KEY] [drl_…]` and `helpdesk-client --drill-list` print them.
+Newest first. `faulttest vault drills [--target KEY] [drl_…]` and `helpdesk-client --drill-list` print them.
 
 ---
 

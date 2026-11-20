@@ -4,7 +4,7 @@ package main
 // (helpdesk-client --drill-record), through the gateway's GET /api/v1/drills.
 //
 //	vault drills                    the recent drills, newest first
-//	vault drills --source KEY       one database's (a key, a name, or host:port)
+//	vault drills --target KEY       one database's (a key, a name, or host:port)
 //	vault drills drl_ab12cd34       one drill in full: what was checked, and what replaced it
 //
 // A drill is a restore of the source's backup on a clone the operator brought; it
@@ -29,30 +29,46 @@ import (
 	"helpdesk/internal/audit"
 )
 
-func vaultDrills(args []string) {
+// drillsOptions are the flags of `vault drills` beyond the shared harness ones.
+type drillsOptions struct {
+	target string
+	status string
+	all    bool
+	days   int
+	limit  int
+}
+
+// parseDrillsArgs registers the vault drills flags next to the shared harness
+// flags (loadConfig) and parses them. It is its own function so a test can parse
+// the real flag set: a name the harness already owns (--source is the catalog
+// filter) panics at registration, which only parsing shows.
+func parseDrillsArgs(args []string) (*HarnessConfig, drillsOptions, []string) {
 	fs := flag.NewFlagSet("vault drills", flag.ExitOnError)
-	var source, status string
-	var all bool
-	var days, limit int
-	fs.StringVar(&source, "source", "", "Only this database's drills (its infrastructure key, name or host:port)")
-	fs.StringVar(&status, "status", "", "Only drills with this status: verified, verified_with_warnings, refused, unverifiable")
-	fs.BoolVar(&all, "all", false, "Include drills that a later record supersedes")
-	fs.IntVar(&days, "days", 0, "Only drills from the last N days (0 for all)")
-	fs.IntVar(&limit, "limit", 30, "Maximum number of drills to show")
+	var o drillsOptions
+	fs.StringVar(&o.target, "target", "", "Only this database's drills (its infrastructure key, name or host:port)")
+	fs.StringVar(&o.status, "status", "", "Only drills with this status: verified, verified_with_warnings, refused, unverifiable")
+	fs.BoolVar(&o.all, "all", false, "Include drills that a later record supersedes")
+	fs.IntVar(&o.days, "days", 0, "Only drills from the last N days (0 for all)")
+	fs.IntVar(&o.limit, "limit", 30, "Maximum number of drills to show")
 	cfg := loadConfig(fs, args)
+	return cfg, o, fs.Args()
+}
+
+func vaultDrills(args []string) {
+	cfg, o, rest := parseDrillsArgs(args)
 	if cfg.GatewayURL == "" {
 		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault drills")
 		os.Exit(1)
 	}
-	if len(fs.Args()) > 1 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault drills [--source KEY] [--status S] [--all] [--days N] [drl_…]")
+	if len(rest) > 1 {
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault drills [--target KEY] [--status S] [--all] [--days N] [drl_…]")
 		os.Exit(1)
 	}
 	id := ""
-	if len(fs.Args()) == 1 {
-		id = fs.Args()[0]
+	if len(rest) == 1 {
+		id = rest[0]
 	}
-	out, err := drillsReport(cfg.GatewayURL, cfg.GatewayAPIKey, id, source, status, all, days, limit, time.Now(), drillWidth())
+	out, err := drillsReport(cfg.GatewayURL, cfg.GatewayAPIKey, id, o.target, o.status, o.all, o.days, o.limit, time.Now(), drillWidth())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
