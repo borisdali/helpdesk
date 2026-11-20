@@ -549,7 +549,7 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 			result, verdict = "none left", "exceeds"
 		}
 		note := ""
-		if planOpt.BudgetVerdict != verdict && !(planOpt.BudgetVerdict == "may_exceed" && verdict == "within") {
+		if planOpt.BudgetVerdict != verdict && (planOpt.BudgetVerdict != "may_exceed" || verdict != "within") {
 			note = "; the verdict changed"
 		}
 		lines = append(lines, fmt.Sprintf("  budget         planned %s left → %s; the incident was charged %s, so %s → %s%s",

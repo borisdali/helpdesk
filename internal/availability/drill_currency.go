@@ -186,8 +186,8 @@ func AssessDrillCurrency(drills []audit.DrillRecord, reminder infra.DrillReminde
 		}
 		return agoText(int(d / (24 * time.Hour)))
 	}
-	switch {
-	case last == nil:
+	switch last {
+	case nil:
 		c.State, c.Overdue = DrillNever, true
 		c.Detail = fmt.Sprintf("no verified restore drill of this server is recorded (limit %s)", limit)
 	default:

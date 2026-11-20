@@ -404,7 +404,9 @@ func TestDrillHandlers_ListGetAndCurrent(t *testing.T) {
 	refusedBody["status"] = "refused"
 	rec := callPV(srv.handleRecordDrill, http.MethodPost, "/v1/drills", refusedBody, nil)
 	var refused audit.DrillRecord
-	json.NewDecoder(rec.Body).Decode(&refused)
+	if err := json.NewDecoder(rec.Body).Decode(&refused); err != nil {
+		t.Fatalf("decode refused drill: %v", err)
+	}
 
 	again := drillBody("prod-db")
 	again["supersedes"] = refused.DrillID

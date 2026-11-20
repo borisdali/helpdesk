@@ -30,7 +30,7 @@ func TestFormatApprovalsByTicket(t *testing.T) {
 	if strings.Contains(out, "plr_other") {
 		t.Errorf("another ticket's approval was listed:\n%s", out)
 	}
-	if strings.Index(out, "plr_a") > strings.Index(out, "plr_b") || strings.Index(out, "plr_a") < 0 {
+	if strings.Index(out, "plr_a") > strings.Index(out, "plr_b") || !strings.Contains(out, "plr_a") {
 		t.Errorf("not oldest first:\n%s", out)
 	}
 	for _, want := range []string{"alice@example.com", "time=2026-11-18T02:49:55Z", "justification (the approver's words): testing the cost of waiting",
