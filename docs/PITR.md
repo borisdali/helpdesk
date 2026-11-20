@@ -759,4 +759,5 @@ make integration-k8s K8S_SYSADMIN_API_KEY=<key>                    # needs minik
 [MUTATION_TOOLS §1.15.1](MUTATION_TOOLS.md#1151-restore_to_point_in_time--restore-to-a-recovery-target) ·
 [DECISIONS.md](DECISIONS.md) (gates and the Decision Hub) ·
 [PLATFORMS.md](PLATFORMS.md) · [FAULTTEST.md §6.6](FAULTTEST.md#66-point-in-time-recovery-faults-pitr) ·
-[Tool reference](tools/sysadmin.md)
+[Tool reference](tools/sysadmin.md) ·
+[RESTORE_OPS.md](RESTORE_OPS.md) (drilling a restore before you need one)

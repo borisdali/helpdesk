@@ -141,7 +141,8 @@ An environment does not imply a tag and a tag does not imply an environment. A d
   "last verified drill 143 days ago (limit 90 days)" and nothing is blocked, held or refused because of it.   
 
   An interval that cannot be read neither switches the reminder off nor goes unnoticed: the default applies and the
-  config problem is reported. It resolves like the objectives (database, environment, fleet default).
+  config problem is reported. It resolves like the objectives (database, environment, fleet default). How to drill,
+  what to time and what a drill counts for: [RESTORE_OPS.md](RESTORE_OPS.md).
 
 - `enforcement` and `availability_enforcement` are exact lowercase strings. `Refuse` is an error, not a guess.
 
@@ -614,13 +615,25 @@ yardstick and no engine for getting better. Each supplies what the other lacks:
 | Certification (STABLE on pass rate and spread) also requires "recovers within the environment's `rto` at p90" | Objectives → Vault | Not built |
 | The flywheel's improvement is stated in the customer's terms: "about 25% of a month's downtime budget saved per incident" | Both | Not built |
 | A declared-versus-demonstrated report: "RTO 30 min, met 40% of the time, p90 52 min", for a person to act on (invest in HA or renegotiate; the system never changes the objective) | Both | Not built |
-| Practice restores (drills) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. Proposed, not decided: needs a declared link from the clone to the server, a data-size comparison and a recency limit | Both | Not built (proposed) |
+| Practice restores (**drills**) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. The clone is linked to the server by the PostgreSQL system identifier read from both, not by a name; a drill counts only if it is verified, of a similar size (±20%) and recent (90 days). Real restores take over from three samples | Both | Built ([RESTORE_OPS.md](RESTORE_OPS.md)); not yet run live through the gateway |
+| A database with an objective that has no verified drill in a quarter (`drill_interval`, default 90 days) is flagged **DRILL OVERDUE** in the plan and in `get_pgbackrest_status`, so the practice does not depend on someone remembering | Objectives → Vault | Built (warning only; not part of the `objective_exposure` verdict) |
+| Drills are not Vault incidents: they are not in the playbook statistics, the resolution rate or the certification, and cost no budget | (none) | By design: a rehearsal on a copy says nothing about how well a playbook handles a real outage |
 
 **What closes the loop is a person.**   
 The system measures and shows the gap between what was declared and what has been
 demonstrated; a human acts on it (more resources, a faster backup path, a better playbook or a more honest objective);
 the next recoveries then measure the result. The system never changes an objective. Without the "act, then measure
 again" half there is only a log of what happened.
+
+**Drills are how the outer loop turns without waiting for an outage.**   
+The flywheel learns from incidents and the objectives are checked against recoveries, both only when something
+has gone wrong. A well-run server may go years without a real restore, so its loop has nothing to learn from and
+its `rto` is a guess. A drill is the "act, then measure again" step run on a quiet day: the plan says "30 min
+declared, 52 min demonstrated on a copy" (`RTO CHECK (!)`), a person acts (a faster backup path, more resources,
+a more honest `rto`), and the next drill measures the change. The restore then is no longer the first time the procedure runs or the first time the
+number is known. Drilling regularly is therefore part of keeping an objective, not an extra: a declared
+`rto` that has never been demonstrated is the promise nobody has checked. The reminder (`drill_interval`) is the
+outer loop's nudge to run that step.
 
 **The unit is a server.**   
 "Database" in this section and in §5 means one `db_servers` entry, a whole PostgreSQL server

@@ -73,7 +73,7 @@ func registerDrillFlags(fs *flag.FlagSet, ticket *string) *drillFlags {
 		method:         fs.String("drill-method", "", "How the clone was made: pgbackrest, snapshot, cloud or other (for --drill-record)"),
 		started:        fs.String("drill-started", "", "When the restore started, RFC3339 with a zone (for --drill-record)"),
 		finished:       fs.String("drill-finished", "", "When the restore finished, RFC3339 with a zone (for --drill-record)"),
-		duration:       fs.String("drill-duration", "", "How long the restore took, e.g. 1m35s; ignored when both times are given (for --drill-record)"),
+		duration:       fs.String("drill-duration", "", "How long the restore took, e.g. 1m35s; ignored when both times are given. Time the restore, the start and your check, not provisioning the clone or waiting on people (docs/RESTORE_OPS.md) (for --drill-record)"),
 		backupLabel:    fs.String("drill-backup-label", "", "The pgBackRest backup restored from (for --drill-record)"),
 		recoveryTarget: fs.String("drill-recovery-target", "", "The recovery target restored to, if a point-in-time drill (for --drill-record)"),
 		verifySQL:      fs.String("drill-verify-sql", "", "A single SELECT run on the clone that must return true (for --drill-record)"),
