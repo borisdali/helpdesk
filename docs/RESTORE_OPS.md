@@ -125,6 +125,11 @@ The clone has to be an entry in the infrastructure config before a drill can be 
 
 Give the clone **no `environment` and no objectives**: it would inherit the environment's and a scratch copy should not get a downtime budget or a drill reminder of its own. An ordinary login role is enough for the checks and credentials come from the environment variable, never the file.
 
+Two more things have to be true before the verification can read the clone:
+
+- **Your policy has to allow it.** The checks run through the database agent, which asks the policy engine for `read` on **both** servers. Deny-by-default applies to a clone like to any database: one with no tag, or a tag no policy names, is refused (`policy denied: ... No policy matched this resource`). Give the clone a tag that a policy of yours allows `read` on (for a scratch copy, a rule for `tags: [test]` or `[development]` that allows only `read` is enough). The drill needs no write and no destructive permission on either server.
+- **The agent has to reach it.** The database agent, not your workstation, connects to the clone: its host needs a route to the clone's port (a firewall rule for the PostgreSQL port of the clone is the usual gap).
+
 ### 2.3 What to time
 
 The drill's duration is **your word** (recorded as `reported`) and it is what the plan will use, so time the same thing the plan compares it with. A real restore is timed as the remediation run: **the restore, the restart and the verification**, from when the restore command starts until the database accepts connections and has been checked. It does not include waiting for a person.
@@ -248,6 +253,7 @@ A duration that rests on a drill is a better guess than the declared `rto` and a
 | `the clone is the source` / `reached at the source's address` | The same server | Use a different clone |
 | `the clone could not be reached` (`unverifiable`) | Connection, password or firewall | Fix access and record again |
 | `The clone cannot be used: ... not registered` | The clone is not in the infrastructure config | Add it (§2.2) |
+| `policy denied: ... No policy matched this resource` (`unverifiable`, naming the source or the clone) | No policy allows `read` on that database: its tags match no rule and deny-by-default applies | Tag the clone (and check the source's tag) so a `read` rule matches, restart the database agent, then record again (§2.2) |
 | `size_class` warning | The clone is not within 20% of the source | Recorded as proof of recovery; for a drill that plans restores, restore the whole cluster |
 | `verify_sql` failed | Your own check returned false or could not run | The restore is incomplete or the SQL is wrong |
 

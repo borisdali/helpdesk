@@ -465,3 +465,16 @@ policies:
         conditions:
           blocked_purposes: [diagnostic]
         message: "Diagnostic purpose is read-only. Use 'remediation' purpose for write operations."
+
+
+  - name: test-databases-read
+    description: Read access to databases tagged test (restore drills verify the source and the clone)
+    priority: 10
+    resources:
+      - type: database
+        match:
+          tags: [test]
+    rules:
+      - action: read
+        effect: allow
+
