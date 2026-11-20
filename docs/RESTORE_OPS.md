@@ -64,18 +64,18 @@ Two things follow from setting them. The plan can say whether a restore fits wha
 
 A drill is **not an incident**. Recording one creates no incident and never charges the availability budget.
 
-**What skipping drills costs.** The first restore of a server is then the first time anyone learns that the backup is incomplete, that the restore takes three hours against a 30-minute `rto`, or that the on-call engineer has never run the procedure. All three surface during an outage, with the availability budget already burning and the plan unable to give a figure (`no_history`).
+**What skipping drills costs.** The first restore of a server is then the first time anyone learns that the backup is incomplete, that the restore takes three hours against a 30-minute `rto` or that the on-call engineer has never run the procedure. All three surface during an outage, with the availability budget already burning and the plan unable to give a figure (`no_history`).
 
 **When to drill again, not only on the calendar:** after a change of backup tool, repository, storage or retention; after a major PostgreSQL upgrade; when the database has grown by more than a fifth (older drills stop counting at ±20% of the size, §2.6); after a restore that took longer than the last drill said (§4); and when the person who last ran one has left.
 
 ### 1.4 How drills fit the flywheel
 
-Objectives are the outer loop of the Vault flywheel ([OBJECTIVES.md §6.2](OBJECTIVES.md#62-how-it-connects-to-the-vault-flywheel)): the flywheel makes diagnosis and repair better after each incident and the objectives ask whether the promises were kept. Both learn only from things going wrong. A server that rarely fails, or rarely needs a restore, gives them nothing to learn from. Drills supply the missing step on a quiet day:
+Objectives are the outer loop of the Vault flywheel ([OBJECTIVES.md §6.2](OBJECTIVES.md#62-how-it-connects-to-the-vault-flywheel)): the flywheel makes diagnosis and repair better after each incident and the objectives ask whether the promises were kept. Both learn only from things going wrong. A server that rarely fails or rarely needs a restore, gives them nothing to learn from. Drills supply the missing step on a quiet day:
 
 1. **Declare** an `rto`.
 2. **Drill**: restore on a copy and record how long it took.
 3. **Compare**: the plan shows the declared `rto` against what the drill demonstrated (`RTO CHECK`).
-4. **Act**: a person improves the backup path or the resources, or makes the `rto` honest. The system never changes an objective.
+4. **Act**: a person improves the backup path or the resources or makes the `rto` honest. The system never changes an objective.
 5. **Drill again** and see the change.
 
 Real restores then take over as the evidence (from three) and the drills go on guarding the cases a real restore has not yet covered. Drills stay out of the incident history on purpose: they are not in the playbook statistics, resolution rates or certification, because a rehearsal on a copy says nothing about how a playbook handles a real outage.
@@ -127,8 +127,11 @@ Give the clone **no `environment` and no objectives**: it would inherit the envi
 
 Two more things have to be true before the verification can read the clone:
 
-- **Your policy has to allow it.** The checks run through the database agent, which asks the policy engine for `read` on **both** servers. Deny-by-default applies to a clone like to any database: one with no tag, or a tag no policy names, is refused (`policy denied: ... No policy matched this resource`). Give the clone a tag that a policy of yours allows `read` on (for a scratch copy, a rule for `tags: [test]` or `[development]` that allows only `read` is enough). The drill needs no write and no destructive permission on either server.
-- **The agent has to reach it.** The database agent, not your workstation, connects to the clone: its host needs a route to the clone's port (a firewall rule for the PostgreSQL port of the clone is the usual gap).
+- **Your policy has to allow it**   
+The checks run through the database agent, which asks the policy engine for `read` on **both** servers. Deny-by-default applies to a clone like to any database: one with no tag or a tag no policy names, is refused (`policy denied: ... No policy matched this resource`). Give the clone a tag that a policy of yours allows `read` on (for a scratch copy, a rule for `tags: [test]` or `[development]` that allows only `read` is enough). The drill needs no write and no destructive permission on either server.
+
+- **The agent has to reach it**   
+The database agent, not your workstation, connects to the clone: its host needs a route to the clone's port (a firewall rule for the PostgreSQL port of the clone is the usual gap).
 
 ### 2.3 What to time
 
@@ -138,6 +141,9 @@ The drill's duration is **your word** (recorded as `reported`) and it is what th
 - **Leave out:** creating the VM or volume, copying a snapshot into place and any time spent waiting for someone.
 
 If you time less than that, the drill reads optimistic and nothing flags it. If your clone had to be provisioned first, record when the *restore* started, not when you began.
+
+**Expect a drill to read shorter than a real restore, even when you time the same steps**   
+A drill is run by hand, so it carries none of what a real restore adds around the same work: flushing the archive, stopping the running instance, saving the WAL and the agent's own steps between the tool calls (reading the log, running the recovery check). On the Linux VM test tiny testbed database (22 MiB) a drill took 3s and the same server's real restores took a median of 35s, about twelve times as long. The data volume alone does not explain it: on a database that small, the fixed steps dominate. Once a server has three real restores they plan the restore and the drills are shown beside them, not mixed in. Until then, treat a drill-planned figure as a lower bound, not a forecast.
 
 The clone's **size** should match the source's cluster (the plan compares them). A clone holding a subset of the data is recorded as proof of recovery, but it does not plan a restore.
 
@@ -225,20 +231,36 @@ A duration that rests on a drill is a better guess than the declared `rto` and a
 
 ## 4. After a restore
 
-- **Compare the plan with what happened.** `faulttest vault incidents <run>` shows *PLAN VS ACTUAL* with the recovery decision: the planned recovery time and its basis (a drill basis reads *the longest restore drill, demonstrated on a copy*) against how long the restore took.
-- **If the restore took longer than a drill said,** the drill read optimistic: different hardware, a smaller clone or a duration that left something out (§2.3). Drill again, on the hardware you would restore to and time it the way §2.3 says.
-- **A real restore is the best drill.** It joins the real-restore history that outranks drills. A drill after a real restore costs little and refreshes the reminder.
-- **Spend:** `faulttest vault budget <database>` shows the budget the incident used and the drill reminder beside it.
+- **Compare the plan with what happened**   
+` faulttest vault incidents <run>` shows *PLAN VS ACTUAL* with the recovery decision: the planned recovery time and its basis (a drill basis reads *the longest restore drill, demonstrated on a copy*) against how long the restore took.
+
+- **If the restore took longer than a drill said**   
+  The drill read optimistic: different hardware, a smaller clone or a duration that left something out (§2.3). Drill again, on the hardware you would restore to and time it the way §2.3 says.
+
+- **A real restore is the best drill**   
+  It joins the real-restore history that outranks drills. A drill after a real restore costs little and refreshes the reminder.
+
+- **Spend:**   
+  `faulttest vault budget <database>` shows the budget the incident used and the drill reminder beside it.
 
 ---
 
 ## 5. Training with drills
 
-- **Rotate who runs it.** The person who built the backup runbook is the one who needs it least. Have someone else follow it and note where they got stuck.
-- **A drill rehearses the restore and the check, not the gate.** The gate (the recovery decision, the acknowledgements) is exercised by a point-in-time restore on a non-production database; practise that separately, with the people who would approve for real.
-- **Make a drill day a habit.** The reminder does it per database; a quarterly drill day across the fleet is the same rhythm with a person attached.
-- **Write down what surprised you** in the drill's `--drill-note`, so the next person finds it. Keep it plain text: control characters are refused.
-- **Who may record a drill:** anyone who can authenticate to the gateway, like approving a recovery gate. Decision rights for restores are a separate piece of work; until then, treat recording a drill as the act of a named operator and use the ticket.
+- **Rotate who runs it**   
+  The person who built the backup runbook is the one who needs it least. Have someone else follow it and note where they got stuck.
+
+- **A drill rehearses the restore and the check, not the gate**   
+  The gate (the recovery decision, the acknowledgements) is exercised by a point-in-time restore on a non-production database; practise that separately, with the people who would approve for real.
+
+- **Make a drill day a habit**   
+  The reminder does it per database; a quarterly drill day across the fleet is the same rhythm with a person attached.
+
+- **Write down what surprised you**   
+  In the drill's `--drill-note`, so the next person finds it. Keep it plain text: control characters are refused.
+
+- **Who may record a drill:** 
+  Anyone who can authenticate to the gateway, like approving a recovery gate. Decision rights for restores are a separate piece of work; until then, treat recording a drill as the act of a named operator and use the ticket.
 
 ---
 
@@ -262,12 +284,29 @@ A duration that rests on a drill is a better guess than the declared `rto` and a
 
 ## 7. Limits
 
-- **The method is your claim.** A snapshot clone labelled `pgbackrest` would be counted. The duration is also your word and the record says `reported`.
-- **Matching by name.** The sysadmin agent reads the source's `system_identifier` (from the running instance or from the data directory when it is down) and matches drills by it. When it cannot, drills are matched by name and the estimate says so; a server rebuilt but not yet re-drilled would then still count its old drills. The posture check (`get_pgbackrest_status`) and `vault budget` match by name only.
-- **Ninety days.** An older drill is kept on record and no longer plans a restore. It still resets the reminder until the interval passes.
-- **One clone, one size.** The comparison is with the backup being restored and the posture check with the newest drill, since it has no restore in view.
-- **`verify_sql`** is one `SELECT`, no semicolon, at most 500 characters, run on the clone as a scalar subquery. It is not a test framework.
-- **A clone that is deliberately paused** at a recovery target is not supported: promote it.
+- **A drill measures the restore, not the whole recovery**   
+  It is shorter than a real restore of the same server by the steps a person does not repeat by hand (§2.3). The `RTO CHECK` from drills is therefore a lower bound: it can pass when a real restore would not.
+
+- **Anyone who is authenticated may record a drill**   
+  Recording is not gated by role, the same as approving the point-in-time gate today. The record says who did it and an auditd record cannot be edited, only superseded.
+
+- **The method is your claim**   
+  A snapshot clone labelled `pgbackrest` would be counted. The duration is also your word and the record says `reported`.
+
+- **Matching by name**   
+  The sysadmin agent reads the source's `system_identifier` (from the running instance or from the data directory when it is down) and matches drills by it. When it cannot, drills are matched by name and the estimate says so; a server rebuilt but not yet re-drilled would then still count its old drills. The posture check (`get_pgbackrest_status`) and `vault budget` match by name only.
+
+- **Ninety days**   
+  An older drill is kept on record and no longer plans a restore. It still resets the reminder until the interval passes.
+
+- **One clone, one size**   
+  The comparison is with the backup being restored and the posture check with the newest drill, since it has no restore in view.
+
+- **`verify_sql`**   
+  is one `SELECT`, no semicolon, at most 500 characters, run on the clone as a scalar subquery. It is not a test framework.
+
+- **A clone that is deliberately paused**   
+  At a recovery target is not supported: promote it.
 
 ---
 

@@ -275,6 +275,17 @@ without enough of it (fewer than three resolved restores of this server) the dec
 upper bound. The history is information: it never refuses a restore. See
 [OBJECTIVES.md §5.5](OBJECTIVES.md#55-the-recovery-time-estimate).
 
+A server that has not had three real restores can get a figure from **restore drills**, which are the practice restores of its backup
+onto a copy you bring, verified and recorded by aiHelpDesk (`helpdesk-client --drill-record`).   
+
+While there are fewer than three real restores, drills plan the restore instead (the `Restore drills` line, worded "demonstrated on a copy, not on
+this server") and from three the real restores take over and the drills stay beside them, never mixed in.   
+
+A drill breaking the `rto` raises `RTO CHECK (!)`, and a database with an objective that has no verified drill within
+`drill_interval` (90 days unless set) shows `DRILL OVERDUE (!)`. Neither refuses anything. A drill does not charge the
+availability budget and is not an incident. A drill reads shorter than a real restore of the same server (3 s against 35 s
+on a small test database), so a drill-planned figure is a lower bound. See [RESTORE_OPS.md](RESTORE_OPS.md).
+
 #### LSN targets and the lower bound
 
 An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against
