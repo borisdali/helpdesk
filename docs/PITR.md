@@ -126,7 +126,7 @@ For a **running** instance the restore step expands ([§5](#5-a-running-instance
 ## 4. Operating it
 
 Steps 2 and 3 can be done with `helpdesk-client` ([the short way](#the-short-way-helpdesk-client)), with the
-API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the gateway, `$KEY` a key that may
+API as below or in the Decision Hub ([DECISIONS.md](DECISIONS.md)). `$GW` is the Gateway, `$KEY` a key that may
 approve gates.
 
 **1. Start the triage with the target**   
@@ -275,6 +275,17 @@ without enough of it (fewer than three resolved restores of this server) the dec
 upper bound. The history is information: it never refuses a restore. See
 [OBJECTIVES.md §5.5](OBJECTIVES.md#55-the-recovery-time-estimate).
 
+A server that has not had three real restores can get a figure from **restore drills**, which are the practice restores of its backup
+onto a copy you bring, verified and recorded by aiHelpDesk (`helpdesk-client --drill-record`).   
+
+While there are fewer than three real restores, drills plan the restore instead (the `Restore drills` line, worded "demonstrated on a copy, not on
+this server") and from three the real restores take over and the drills stay beside them, never mixed in.   
+
+A drill breaking the `rto` raises `RTO CHECK (!)`, and a database with an objective that has no verified drill within
+`drill_interval` (90 days unless set) shows `DRILL OVERDUE (!)`. Neither refuses anything. A drill does not charge the
+availability budget and is not an incident. A drill reads shorter than a real restore of the same server (3 s against 35 s
+on a small test database), so a drill-planned figure is a lower bound. See [RESTORE_OPS.md](RESTORE_OPS.md).
+
 #### LSN targets and the lower bound
 
 An LSN has no time attached until the WAL is read, so a restore to one has no exact span of history to set against
@@ -338,9 +349,174 @@ The plan prints what approving will demand (`Approving needs : --acknowledge-obj
 REFUSED`) and adds the flag to the approve command it offers.
 
 Read it before approving. A gate can be approved once: if the approval lacks a required acknowledgement the restore
-refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the gateway
-(HTTP 409, "not in gate_pending state"). The way on is a new triage run and approving its gate with the flag. This was
+refuses (nothing is stopped), but the gate is then used up and approving the same run again is refused by the Gateway
+(HTTP 409, "not in `gate_pending` state"). The way on is a new triage run and approving its gate with the flag. This was
 found by running it: the refusal used to say "approve the gate again".
+
+#### **What waiting costs**   
+The plan prices the restore and also says what putting the decision off costs, on two lines, because the clock does
+not stop while the approval waits:
+
+```
+Waiting, budget    : estimated latest start to remain within budget, 
+  		     under current assumptions: 14:17:00Z (in 4m12s), 
+		     assuming a restore of 8m (the longest of 3 past restores)
+
+Waiting, data      : the recovery target is fixed and the instance keeps 
+		     taking writes, so the history a restore discards grows by 
+		     a minute every minute: 18m 00s now, against an rpo of 30m 00s; 
+		     estimated, under current assumptions, in 12m 00s it would exceed it
+```
+
+The budget line follows from when the ledger charges an incident, which for a PITR is not obvious:
+ * `T0` is when the triage started
+ * `now` is when an approver at the gate reads the plan
+ * `approve` is when the gate is approved (the restore starts then)
+ * `end` is when the restore's run completes and the incident closes
+ * `restore` is how long the restore is planned to take, that is `end - approve`:
+
+Here's how all of these points in time look together on a timeline:
+
+```
+                T0                    now                 approve                  end
+                |-- triage + model ---|-- wait at gate ---|------ restore ----------|
+
+the ledger
+ -while waiting |.. nothing charged: not an outage yet ...|
+ -once it ends  |============== charged in full: T0 -> end =========================|
+
+real downtime                                                     |-- downtime -----|
+(serving instance)
+```
+
+While the approval waits, nothing is charged, because the triage is not an outage (the restore is).   
+
+When the restore runs and the incident ends, the ledger charges the whole span from `T0`, so the time already spent and any further wait
+count in full.   
+
+The `real` row is the downtime of a **serving** instance, which starts only when the restore stops it
+(for an instance that is already down it began before `T0`, see [the two clocks](OBJECTIVES.md#two-clocks)).  
+
+The quantities in the diagram are different measurements that share an endpoint:
+
+| Quantity | Formula | Notes |
+|---|---|---|
+| Ledger charge | `end - T0` | The whole incident, charged only when it ends resolved as an outage (and counted from the start of the budget window if `T0` is before it). |
+| Estimate (what past restores measure) | `end - approve` | The remediation hop. The plan uses it as the planned `restore` time. |
+| Wait at the gate | `approve - (end of the triage)` | Inside the ledger charge, not inside the estimate. |
+| Real downtime, serving instance | `serving again - stop` | At most `end - stop`. For a down instance it is `serving again - failure`, which starts before `T0`. |
+
+The ledger and the estimate end at the same moment, the completion of the restore's run and differ only in where they
+start: `T0` for the ledger, `approve` for the estimate. The restore fits in the budget when the ledger charge, `end -
+T0`, plus what the other incidents have already spent, is no more than the budget. With the restore starting at `approve`
+and lasting `restore`, that is, so the latest it can start is:
+
+```
+latest start = T0 + left - restore
+```
+
+where `left` is the budget less the other incidents, not counting this one.   
+
+The worked example from the tests: 
+- the incident is 5m old
+- `left` is 33m12s 
+- the restore is planned at 8m
+
+So the latest start is `T0 + 25m12s`, which is `now + 20m12s`.
+
+   
+
+- **Budget**  
+  An incident is charged from the start of its first run to the end of its last and counts as an outage
+  only once a run has started. The triage that waits at the gate is not one (the restore is), so while the
+  approval waits the open incident is not charged and what is left of the budget does not shrink.   
+
+  Instead, it is charged in full, from its start, the moment the restore runs, so the time already spent and any further wait both count. The margin
+  is therefore what is left, less the age of that incident, less how long the restore is taken to last (history or the
+  declared `rto` as an upper bound) and the restore fits if it starts no later than `T0 + left - restore`.   
+
+  The plan reads the open incident from the ledger: with exactly one that is not charged yet it takes that to be the one this restore
+  is for and names it (so that an approver can check). Now, with several it says it does not know which and gives only an upper bound. An
+  incident already charged as an outage is already in what is left and is not taken off twice.   
+
+  The line is one of these: 
+	 * an *estimated latest start* when there is margin
+	 * *no remaining margin* when what is left is exactly what the restore needs
+	 * *projected budget breach* when the restore or the open incident once charged, is taken to need more than is left (a forecast, not yet a breach)
+	 * and *budget already overspent* when the ledger itself shows it  
+
+  With no open incident in the ledger (a plan asked for outside an incident) it says there is no time already spent to count,
+  and does not invent a deadline. It is the ledger's clock, not the downtime: for a serving instance the real downtime
+  starts only when the restore stops it and the line says so. The latest start was checked against the ledger's own
+  arithmetic: starting at it leaves the budget exactly used and one second later breaches it.
+
+- **Data**   
+  For a serving instance the target is fixed and the instance keeps taking writes, so the loss grows by a
+  minute towards the `rpo`. The line says how long until it would pass it and how fast commits are landing
+  when the count is exact. For an instance that is down nothing is being written, so the loss does not grow and waiting
+  costs downtime, which is the budget line.
+
+Both lines are information for the approver, not a deadline. The verdict is another matter: the `Budget check` (and
+the restore's own check just before it stops anything) is made on what is left **less the age of the open incident**
+that is charged when the restore runs. So a gate held open past its latest start no longer reads `within`: it reads
+`exceeds`, asks for `--acknowledge-objective-breach` and under `refuse` a serving instance is refused. With several
+open incidents, where which is this restore's is not known, the ledger's own figure stands.
+
+After the incident, the report sets the plan against what happened (`PLAN VS ACTUAL`): the recovery time, the data
+lost at the stop and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
+of the restore, against what the plan said was left:
+
+```
+═══ PLAN VS ACTUAL ═══  the plan of 21:47:14 against what happened
+recovery time  planned 2m 00s (from the declared rto); took 1m 27s (33s under)
+data loss      planned 9s → within; at the stop 5m 46s → within (5m 37s more)
+budget         planned 6m 23s left → within; the incident was charged 7m 03s, 
+  	       so overspent by 40s → exceeds; the verdict changed
+```
+
+#### **A refused restore uses the gate up**   
+A gate is approved once. The Gateway cannot know, when it takes an approval, whether the plan will ask for
+`--acknowledge-objective-breach` (that depends on the loss and the budget measured at the moment before the stop), so
+it accepts the approval and the restore tool decides. If the restore tool refuses because the acknowledgement is missing,
+the instance is not stopped, but the gate is used up, the incident ends `needs_human` and a second approval of the same
+gate gets a 409. The way on is to start the triage again and approve its new gate with the acknowledgement.
+
+The plan says beforehand when the acknowledgement is needed (`Approving needs : --acknowledge-objective-breach` and
+`BUDGET CHECK (!)` / `RPO CHECK (!)`) and an approver who follows it does not meet this. It is left this way on purpose:
+the check that matters is the restore's own, made as the instance is about to stop and a pre-check at the Gateway would be
+made on a verdict that can be stale by then. The wait the new gate costs is real, though: the incident stays open and the
+new triage starts a new incident, which is another reason to read the plan before approving.
+
+The incident that ended `needs_human` is not charged to the availability ledger (its downtime is not known) and is listed
+under *Unconfirmed* in `vault budget`.
+
+#### **Saying why and under which ticket**   
+The approval can carry the reason it was given and the ticket it was given under:
+
+```
+helpdesk-client --pitr-approve <run_id> ... --acknowledge-objective-breach \
+  --justification "batch corrupted the ledger; the on-call lead accepted the loss on the incident call" \
+  --ticket INC-1234
+```
+
+Both are recorded in the gate's `recovery_decision` event, so they are inside the audit hash and `vault incidents`
+prints the ticket on the gate line and the justification under it as the approver's words.   
+
+The ticket is its own field (letters, digits and `. _ : # / -`, at most 64 characters) so it can be looked up and cannot carry prose. 
+
+To look it up from the ticket side, `faulttest vault incidents --ticket INC-1234` lists the approvals given under it (time,
+run, approver, target, justification), and `vault budget` prints `ticket INC-1234` on the line of the incident whose restore
+was approved under one. Underneath, auditd takes `GET /v1/events?ticket=INC-1234` (an exact match: `INC-123` does not find
+`INC-1234`) and the gateway's availability ledger carries `ticket` and `entry_run_id` on each entry. Two limits: only the
+gate-stage decision carries the ticket, so the lookup returns the approval and the run to open next, and the ledger reads
+the last 1000 recovery decisions of its window, so in a very busy window the oldest tickets may be missing from `vault budget`.
+The justification is free text of up to 1000 characters, put on one line (a newline cannot forge a line of the narrative)
+and with anything that looks like a password redacted, in the gate event and in the gate_acknowledged record alike.   
+
+Neither is required unless you ask: set `HELPDESK_REQUIRE_BREACH_JUSTIFICATION=true` on the Gateway (Helm:
+`gateway.requireBreachJustification`) and an approval that acknowledges an objective breach is refused, with nothing
+changed, unless it carries a justification of at least 10 characters. Two limits: both are the operator's own words,
+recorded and not verified and the Decision Hub takes them too (`reason`, `ticket`).
 
 **The loss is measured again just before the instance is stopped**   
 Not taken from the plan. A plan that said `within` can be approved minutes or hours later and a serving instance has gone on committing since, so the
@@ -349,23 +525,26 @@ alone can take a minute and a half) and compares that. If the loss now breaches 
 **before stopping anything** and the refusal says so and how to proceed. A down instance is checked too.
 
 **What is recorded**   
-Every stage of the decision leaves a typed `recovery_decision` audit event: each plan that
-was shown, the gate approval or denial (who and which acknowledgements it carried) and the restore's decision to
-proceed or refuse just before it stops anything, with the reason and, when the remediation hop finishes, how it
-ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the
-verification; not the downtime). Each carries a snapshot of the objectives that
+Every stage of the decision leaves a typed `recovery_decision` audit event:   
+ * each plan that was shown
+ * the gate approval or denial (who and which acknowledgements it carried) 
+ * the restore's decision to proceed or refuse just before it stops anything
+   *  with the reason and 
+   * when the remediation hop finishes, how it ended and how long it took (the recovery duration: after the approval, covering the restore, the restart and the verification; not the downtime).   
+
+Each carries a snapshot of the objectives that
 were in force, with where each value came from and a digest of the `infrastructure.json` they were read from and
 the option it was weighing with its measured loss and verdict. Refusals are recorded too, including the ones that
-have nothing to do with the objective (the approved plan no longer matches, a standby, no room). The events are
-covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
+have nothing to do with the objective (the approved plan no longer matches, a standby, no room).   
+
+The events are covered by the audit hash chain, so editing one afterwards breaks it. If one cannot be written (the audit service
 is down) the restore is not held up for it, but the plan or result says `decision_unrecorded` and the log carries
 an error, so a restore that ran without its decision on record cannot be mistaken for one that has it. They are
-read back in
-`vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail` and in the incident
+read back in `vault incidents <run>` (the RECOVERY DECISION section), in `vault journey --detail` and in the incident
 narrative API. Fields: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 
 `acknowledge_objective_breach` is its own flag on the approval, like `allow_stop_serving`: it is not implied by
-`acknowledge_data_loss` and does not imply it and the model has no argument for it. The gateway passes it on and
+`acknowledge_data_loss` and does not imply it and the model has no argument for it. The Gateway passes it on and
 records it in the `gate_acknowledged` event; the restore tool decides whether it was needed.
 
 **3. Approve the plan you read**
@@ -387,7 +566,7 @@ curl -sX POST "$GW/api/v1/decisions/gate:$RUN_ID/resolve" \
 The same body goes to `POST /api/v1/fleet/playbook-runs/$RUN_ID/proceed-escalation`. `allow_stop_serving` is
 needed only when the instance is serving. Leave it out for a database that is already down.
 
-| The gateway refuses with | Because |
+| The Gateway refuses with | Because |
 |---|---|
 | `400` needs the recovery target | the approval has none or it is malformed |
 | `400` needs plan_digest | missing or not the 16-hex-character digest |
@@ -428,7 +607,7 @@ helpdesk-client --user ops@example.com --pitr-approve plr_a3f7c1b2 \
 ```
 
 Nothing is defaulted: a missing or malformed target, a digest that is not 16 hex characters or no
-`--acknowledge-data-loss` is refused before anything is sent and the gateway's own refusals are printed as
+`--acknowledge-data-loss` is refused before anything is sent and the Gateway's own refusals are printed as
 they come ([§4 table](#4-operating-it)). `--pitr-plan` prints no approve command for a plan that is not
 feasible. Denying a gate does not need any of this.
 
@@ -440,7 +619,7 @@ failure at any of them says so.
 
 1. **Ask the instance about itself** (`psql`, local socket).   
    It refuses a standby, any replica in `pg_stat_replication`, `archive_mode` other than `on` or `always`, a running HA manager (Patroni, repmgr,
-   pg_auto_failover, Stolon: matched by process name), an LSN target ahead of the instance's WAL position or
+   `pg_auto_failover`, Stolon: matched by process name), an LSN target ahead of the instance's WAL position or
    a time target ahead of its own clock. Its position, timeline and clock are recorded as `pre_stop` in the
    result.
 
@@ -591,4 +770,5 @@ make integration-k8s K8S_SYSADMIN_API_KEY=<key>                    # needs minik
 [MUTATION_TOOLS §1.15.1](MUTATION_TOOLS.md#1151-restore_to_point_in_time--restore-to-a-recovery-target) ·
 [DECISIONS.md](DECISIONS.md) (gates and the Decision Hub) ·
 [PLATFORMS.md](PLATFORMS.md) · [FAULTTEST.md §6.6](FAULTTEST.md#66-point-in-time-recovery-faults-pitr) ·
-[Tool reference](tools/sysadmin.md)
+[Tool reference](tools/sysadmin.md) ·
+[RESTORE_OPS.md](RESTORE_OPS.md) (drilling a restore before you need one)

@@ -67,6 +67,10 @@ type Gateway struct {
 	entryPointCache    entryPointPlaybookCache // cached list for query-time playbook auto-selection
 	diagnosisModel     string                  // HELPDESK_MODEL_NAME, used by trustNotYetEarnedForceGate's cert lookup; empty = check disabled, not "fail closed"
 	autoIncidentBundle bool                    // when true, auto-trigger create_incident_bundle on a resolved/escalated entry-point run (v0.29 Phase 3); opt-in, default off
+
+	// requireBreachJustification: a gate approval that acknowledges an objective
+	// breach must say why (HELPDESK_REQUIRE_BREACH_JUSTIFICATION).
+	requireBreachJustification bool
 }
 
 // NewGateway creates a Gateway and establishes A2A clients for each agent.
@@ -138,6 +142,13 @@ func (g *Gateway) SetIdentityProvider(p identity.Provider) {
 // SetOperatingMode sets the operating mode.
 func (g *Gateway) SetOperatingMode(mode string) {
 	g.operatingMode = mode
+}
+
+// SetRequireBreachJustification makes a point-in-time approval that acknowledges
+// an objective breach carry a justification (the request's reason). Off by default,
+// so nothing changes for anyone on upgrade.
+func (g *Gateway) SetRequireBreachJustification(on bool) {
+	g.requireBreachJustification = on
 }
 
 // SetAuthorizer sets the central authorizer for per-route access control.
@@ -361,6 +372,9 @@ func (g *Gateway) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/infrastructure", auth("GET /api/v1/infrastructure", g.handleListInfrastructure))
 	mux.HandleFunc("GET /api/v1/databases", auth("GET /api/v1/databases", g.handleListDatabases))
 	mux.HandleFunc("GET /api/v1/availability-ledger", auth("GET /api/v1/availability-ledger", g.handleAvailabilityLedger))
+	mux.HandleFunc("POST /api/v1/drills", auth("POST /api/v1/drills", g.handleRecordDrill))
+	mux.HandleFunc("GET /api/v1/drills", auth("GET /api/v1/drills", g.handleListDrills))
+	mux.HandleFunc("GET /api/v1/drills/{id}", auth("GET /api/v1/drills/{id}", g.handleGetDrill))
 	mux.HandleFunc("POST /api/v1/admin/infra/register-db", auth("POST /api/v1/admin/infra/register-db", g.handleRegisterEphemeralDB))
 	mux.HandleFunc("GET /api/v1/governance", auth("GET /api/v1/governance", g.handleGovernance))
 	mux.HandleFunc("GET /api/v1/governance/policies", auth("GET /api/v1/governance/policies", g.handleGovernancePolicies))

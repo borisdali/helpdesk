@@ -73,6 +73,13 @@ var DefaultAuditdPermissions = map[string]Permission{
 	"GET /v1/incidents/by-trace/{traceID}": {AdminBypass: true},
 	"GET /v1/incidents":                    {AdminBypass: true},
 
+	// Restore drills (v0.36). Recorded by the gateway's service account on behalf
+	// of an authorized person; the gateway, not auditd, decides who may record
+	// one. Reads are open to any authenticated user.
+	"POST /v1/drills":          {ServiceOnly: true, AdminBypass: true},
+	"GET /v1/drills":           {AdminBypass: true},
+	"GET /v1/drills/{drillID}": {AdminBypass: true},
+
 	// Upload endpoints (operator file uploads, e.g. PostgreSQL log files)
 	"POST /v1/uploads":                   {AdminBypass: true},
 	"GET /v1/uploads/{uploadID}":         {AdminBypass: true},

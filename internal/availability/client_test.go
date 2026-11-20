@@ -21,6 +21,10 @@ type recordingAuditd struct {
 	mine    string
 	loose   string
 	status  int
+	// drills is the JSON the drills route answers with ("[]" when empty), and
+	// drillsStatus a failure to answer with instead.
+	drills       string
+	drillsStatus int
 }
 
 func (a *recordingAuditd) serve(t *testing.T) *httptest.Server {
@@ -30,6 +34,18 @@ func (a *recordingAuditd) serve(t *testing.T) *httptest.Server {
 		a.queries = append(a.queries, r.URL.Query())
 		a.auth = append(a.auth, r.Header.Get("Authorization"))
 		a.mu.Unlock()
+		if r.URL.Path == "/v1/drills" {
+			if a.drillsStatus != 0 {
+				http.Error(w, "boom", a.drillsStatus)
+				return
+			}
+			if a.drills == "" {
+				w.Write([]byte(`[]`)) //nolint:errcheck
+				return
+			}
+			w.Write([]byte(a.drills)) //nolint:errcheck
+			return
+		}
 		if r.URL.Path != "/v1/incidents" {
 			http.NotFound(w, r)
 			return

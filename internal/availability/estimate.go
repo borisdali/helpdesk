@@ -101,6 +101,14 @@ type RecoveryEstimate struct {
 	// there are fewer. Present exactly when Status is estimated.
 	PlanningSeconds *int64 `json:"planning_seconds,omitempty"`
 	PlanningBasis   string `json:"planning_basis,omitempty"`
+	// PlanningSource says where PlanningSeconds comes from: this server's real
+	// restores, or, when there are too few of them, its restore drills (v0.36).
+	// Empty when nothing plans from history. With "drills", Status still describes
+	// the real restores only.
+	PlanningSource string `json:"planning_source,omitempty"`
+	// Drills is what the server's restore drills say, beside the real restores and
+	// never mixed with them. Nil when drills were not looked at.
+	Drills *DrillEstimate `json:"drills,omitempty"`
 	// WindowSeconds is how far back it looked.
 	WindowSeconds int64 `json:"window_seconds"`
 	// Excluded counts runs of these series in the window that are not counted:
@@ -180,6 +188,7 @@ func EstimateRecovery(l *audit.IncidentListing, series []string, now time.Time, 
 	sort.Slice(took, func(i, j int) bool { return took[i] < took[j] })
 	secs := func(d time.Duration) *int64 { v := int64(d.Round(time.Second) / time.Second); return &v }
 	e.Status = EstimateEstimated
+	e.PlanningSource = PlanningFromRestores
 	e.P50Seconds = secs(percentile(took, 0.50))
 	e.MinSeconds, e.MaxSeconds = secs(took[0]), secs(took[len(took)-1])
 	longest := took[len(took)-1]
@@ -228,14 +237,23 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 }
 
 // RecoveryEstimate reads the resolved restores of the database with this
-// infrastructure key from auditd and summarises them. rto is the declared rto,
-// or nil.
-func (c *Client) RecoveryEstimate(ctx context.Context, key string, series []string, rto *time.Duration, now time.Time) (*RecoveryEstimate, error) {
+// infrastructure key from auditd and summarises them, and sets the server's
+// restore drills beside them (AddDrills). rto is the declared rto, or nil. drill
+// is what is known about the restore being estimated, for matching drills to it.
+// Drills that cannot be read do not fail the estimate: they are reported as
+// unavailable, which is not the same as there being none.
+func (c *Client) RecoveryEstimate(ctx context.Context, key string, series []string, rto *time.Duration, now time.Time, drill DrillInputs) (*RecoveryEstimate, error) {
 	since := now.Add(-EstimateWindow).UTC().Format(time.RFC3339)
 	l, err := c.Incidents(ctx, url.Values{"target_key": {key}, "since": {since}, "include": {"runs"}})
 	if err != nil {
 		return nil, err
 	}
 	e := EstimateRecovery(l, series, now, EstimateWindow, rto)
+	drills, err := c.Drills(ctx, key, now.Add(-DrillWindow))
+	if err != nil {
+		e.Drills = UnavailableDrills(err)
+		return &e, nil
+	}
+	AddDrills(&e, drills, drill, now, rto)
 	return &e, nil
 }

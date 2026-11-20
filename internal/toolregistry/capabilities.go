@@ -40,6 +40,7 @@ const (
 	CapExtensions      = "extensions"
 	CapDatabaseStats   = "database_stats"
 	CapWALArchiving    = "wal_archiving"
+	CapRestoreDrill    = "restore_drill"
 	CapQueryStats      = "query_stats"
 	CapQueryPlan       = "query_plan"
 	CapVacuumStatus    = "vacuum_status"
@@ -125,6 +126,7 @@ var Vocabulary = []CapabilityInfo{
 	{CapExtensions, "CapExtensions", KindObserve, "database", "Installed extensions and versions."},
 	{CapDatabaseStats, "CapDatabaseStats", KindObserve, "database", "Database-level counters (commits, rollbacks, conflicts, deadlocks)."},
 	{CapWALArchiving, "CapWALArchiving", KindObserve, "database", "WAL archiving health (pg_stat_archiver)."},
+	{CapRestoreDrill, "CapRestoreDrill", KindObserve, "database", "Whether a restore-drill clone is a safe, comparable copy of its source (read-only on both)."},
 	{CapQueryStats, "CapQueryStats", KindObserve, "database", "Aggregated per-statement execution statistics (pg_stat_statements)."},
 	{CapQueryPlan, "CapQueryPlan", KindObserve, "database", "Execution plan for a query (EXPLAIN)."},
 	{CapVacuumStatus, "CapVacuumStatus", KindObserve, "database", "Dead tuples and (auto)vacuum/analyze history."},

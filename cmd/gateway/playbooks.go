@@ -1858,7 +1858,10 @@ type ProceedEscalationRequest struct {
 	ConnectionString string `json:"connection_string,omitempty"` // forwarded to the remediation playbook
 	Namespace        string `json:"namespace,omitempty"`         // K8s target namespace, forwarded to the remediation playbook (analogous to ConnectionString)
 	Purpose          string `json:"purpose,omitempty"`           // declared purpose, forwarded to the remediation playbook (analogous to ConnectionString); falls back to the triage run's own purpose when omitted
-	Reason           string `json:"reason,omitempty"`            // optional operator rationale
+	Reason           string `json:"reason,omitempty"`            // optional operator rationale; for a point-in-time restore that acknowledges an objective breach it is the justification (recorded in the recovery decision, and required when HELPDESK_REQUIRE_BREACH_JUSTIFICATION is set)
+	// Ticket is the reference (incident or change ticket) a point-in-time
+	// approval is given under, recorded in the recovery decision beside the reason.
+	Ticket string `json:"ticket,omitempty"`
 	// At-gate feedback — captured before remediation runs, while the hypothesis
 	// is fresh. Stored as (feedback_type="triage", feedback_time="at_gate").
 	VerdictCorrect *bool  `json:"verdict_correct,omitempty"`
@@ -2028,12 +2031,17 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	var carriedTarget *RecoveryTargetSpec
 	var recoveryAudit []string
 	if needsRecoveryApproval(nextSeriesID) {
-		ap, status, msg := recoveryApprovalFromGate(req, storedTarget, resolvedBy)
+		ap, status, msg := recoveryApprovalFromGate(req, storedTarget, resolvedBy, g.requireBreachJustification)
 		if msg != "" {
 			slog.Warn("playbook: gate approval refused — point-in-time restore not approved",
 				"run_id", runID, "leaf_run_id", leafRun.RunID, "resolved_by", resolvedBy, "detail", msg)
 			writeError(w, status, msg)
 			return
+		}
+		// The restore's budget check is told when this incident began: by then the
+		// triage hop has ended and the ledger no longer reads the incident as open.
+		if !run.StartedAt.IsZero() {
+			ap.IncidentStartedAt = run.StartedAt.UTC()
 		}
 		recoveryApproval = ap
 		carriedTarget = &RecoveryTargetSpec{Type: ap.Type, Value: ap.Value}
@@ -2055,7 +2063,13 @@ func (g *Gateway) handleProceedEscalation(w http.ResponseWriter, r *http.Request
 	}
 
 	// Now mutate: record acknowledgment, mark triage resolved, notify the hub.
-	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", req.Reason, recoveryAudit...)
+	// For a point-in-time approval the reason is the justification, which has been
+	// put on one line and redacted: that, not the raw text, is what is recorded.
+	gateReason := req.Reason
+	if needsRecoveryApproval(nextSeriesID) && recoveryApproval != nil {
+		gateReason = recoveryApproval.Justification
+	}
+	g.recordGateAcknowledged(r.Context(), run, resolvedBy, req.Resolution, req.ApprovalMode, "", gateReason, recoveryAudit...)
 	if needsRecoveryApproval(nextSeriesID) {
 		g.recordRecoveryGateDecision(r.Context(), run, recoveryApproval, resolvedBy, req.Reason)
 	}
@@ -2234,6 +2248,7 @@ func (g *Gateway) recordRecoveryGateDecision(ctx context.Context, run *audit.Pla
 		d.Approval = &audit.ApprovalFacts{
 			ApprovedBy: ap.ApprovedBy, AcknowledgedDataLoss: ap.Acknowledged,
 			AllowedStopServing: ap.StopServing, AcknowledgedBreach: ap.BreachAcknowledged,
+			Justification: ap.Justification, Ticket: ap.Ticket,
 		}
 	}
 	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(run.RunID, "", d)); err != nil {
@@ -2271,6 +2286,21 @@ func (g *Gateway) recordRecoveryOutcome(ctx context.Context, runID, outcome stri
 	entry := run.EntryRunID
 	if entry == "" {
 		entry = run.RunID
+	}
+	// How long the incident has run: from the start of its entry run, which is
+	// what the availability ledger charges for it, so a plan's budget check can be
+	// set against what the incident came to.
+	entryStart := run.StartedAt
+	if entry != run.RunID {
+		if er, err := g.fetchPlaybookRun(ctx, entry); err == nil && er != nil {
+			entryStart = er.StartedAt
+		} else {
+			entryStart = time.Time{}
+		}
+	}
+	if !entryStart.IsZero() && !completed.Before(entryStart) {
+		secs := int64(completed.Sub(entryStart).Round(time.Second) / time.Second)
+		d.IncidentSeconds = &secs
 	}
 	if err := g.auditor.RecordEvent(ctx, audit.NewRecoveryDecisionEvent(entry, "", d)); err != nil {
 		slog.Error("recovery outcome NOT recorded in the audit trail", "run_id", run.RunID, "outcome", outcome, "err", err)

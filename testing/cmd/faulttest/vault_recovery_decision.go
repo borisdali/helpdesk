@@ -6,12 +6,49 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"helpdesk/internal/audit"
 	"helpdesk/internal/infra"
 )
+
+var (
+	rdSpanHead = regexp.MustCompile(`\d+[dhm]$`)
+	rdSpanTail = regexp.MustCompile(`^\d+[hms]`)
+)
+
+// rdWrap wraps text at width characters, continuing under indent, like wordWrap,
+// but never between the parts of a duration: "1m 29s" stays on one line.
+func rdWrap(text string, width int, indent string) string {
+	const glue = " "
+	var words []string
+	for _, w := range strings.Fields(text) {
+		if n := len(words); n > 0 && rdSpanHead.MatchString(words[n-1]) && rdSpanTail.MatchString(w) {
+			words[n-1] += glue + w
+			continue
+		}
+		words = append(words, w)
+	}
+	var lines []string
+	cur := ""
+	for _, w := range words {
+		switch {
+		case cur == "":
+			cur = w
+		case len([]rune(cur))+1+len([]rune(w)) <= width:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return strings.ReplaceAll(strings.Join(lines, "\n"+indent), glue, " ")
+}
 
 // narrativeRecoveryDecision mirrors the gateway's RecoveryDecisionRecord.
 type narrativeRecoveryDecision struct {
@@ -89,7 +126,8 @@ func rdBudget(o *audit.ObjectivesInForce) string {
 	if b.Contradictory {
 		prefix = "  ⚠ budget: "
 	}
-	return prefix + b.Detail
+	// A long detail continues under itself, not under the label.
+	return prefix + rdWrap(b.Detail, 80, strings.Repeat(" ", len([]rune(prefix))))
 }
 
 // rdObjectives renders the objectives that were in force, with where each came
@@ -129,11 +167,36 @@ func rdObjectives(o *audit.ObjectivesInForce) []string {
 	if o.EnforcementSource != "" {
 		enf += " [" + o.EnforcementSource + "]"
 	}
-	lines = append(lines, "  "+strings.Join(append(policy, enf), "   "))
+	policy = append(policy, enf)
+	// The budget has its own enforcement. Shown with an availability objective, so the
+	// block does not read "enforcement warn" over a database that refuses on its budget.
+	if o.AvailabilitySLO != nil && o.AvailabilityEnforcement != "" {
+		aenf := "availability enforcement " + o.AvailabilityEnforcement
+		if o.AvailabilityEnforcementSource != "" {
+			aenf += " [" + o.AvailabilityEnforcementSource + "]"
+		}
+		policy = append(policy, aenf)
+	}
+	lines = append(lines, "  "+strings.Join(policy, "   "))
 	for _, p := range o.Problems {
 		lines = append(lines, "  ⚠ config problem: "+p)
 	}
 	return lines
+}
+
+// rdBasisText says what a restore's assumed duration rested on.
+func rdBasisText(basis string) string {
+	switch basis {
+	case "history_p90", "history": // "history" is a record from before the p90 needed ten samples
+		return "the p90 of past restores"
+	case "history_longest":
+		return "the longest past restore (too few for a p90)"
+	case "drill_p90":
+		return "the p90 of restore drills, demonstrated on a copy"
+	case "drill_longest":
+		return "the longest restore drill, demonstrated on a copy (too few for a p90)"
+	}
+	return "from the declared rto"
 }
 
 func rdOption(opt audit.DecisionOption) string {
@@ -193,18 +256,15 @@ func rdOption(opt audit.DecisionOption) string {
 		if opt.BudgetRemainingSeconds != nil {
 			taken := ""
 			if opt.BudgetDurationSeconds != nil {
-				basis := "from the declared rto"
-				switch opt.BudgetDurationBasis {
-				case "history_p90":
-					basis = "the p90 of past restores"
-				case "history_longest":
-					basis = "the longest past restore (too few for a p90)"
-				case "history": // records from before the p90 needed ten samples
-					basis = "the p90 of past restores"
-				}
-				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), basis)
+				taken = fmt.Sprintf("; restore taken as %s, %s", rdSpan(*opt.BudgetDurationSeconds), rdBasisText(opt.BudgetDurationBasis))
 			}
-			fmt.Fprintf(&b, " (%s left%s)", ledgerSpan(*opt.BudgetRemainingSeconds), taken)
+			// An open incident that was not charged yet was already using the budget: the
+			// figure is what was left after it.
+			pending := ""
+			if opt.BudgetPendingSeconds != nil {
+				pending = fmt.Sprintf(" after the %s the open incident had used, charged when the restore runs", rdSpan(*opt.BudgetPendingSeconds))
+			}
+			fmt.Fprintf(&b, " (%s left%s%s)", ledgerSpan(*opt.BudgetRemainingSeconds), pending, taken)
 		}
 		switch opt.BudgetGate {
 		case "acknowledge":
@@ -266,7 +326,9 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		if !d.At.IsZero() {
 			stamp = d.At.UTC().Format("15:04:05")
 		}
+		lineStart := b.Len()
 		fmt.Fprintf(&b, "%s  %-9s %-9s", stamp, rd.Stage, rd.Decision)
+		textStart := b.Len()
 		switch rd.Stage {
 		case audit.RecoveryStageGate:
 			who := rd.DecidedBy
@@ -283,12 +345,18 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 					acks = append(acks, "stopping the instance")
 				}
 				if a.AcknowledgedBreach {
-					acks = append(acks, "exceeding the objective")
+					// The gate cannot know whether an objective will be exceeded (only the
+					// restore, at the moment before it stops the instance, does), so this
+					// is the approver's consent in advance, not a finding.
+					acks = append(acks, "exceeding an objective if it comes to that")
 				}
 				if len(acks) == 0 {
 					acks = append(acks, "nothing beyond approving")
 				}
 				fmt.Fprintf(&b, "; acknowledged: %s", strings.Join(acks, ", "))
+				if a.Ticket != "" {
+					fmt.Fprintf(&b, "; ticket %s", a.Ticket)
+				}
 			}
 		case audit.RecoveryStageExecution:
 			if a := rd.Approval; a != nil && a.ApprovedBy != "" {
@@ -310,22 +378,215 @@ func formatRecoveryDecisions(ds []narrativeRecoveryDecision) string {
 		if rd.RecoveryTarget != "" && rd.Stage != audit.RecoveryStageExecution {
 			fmt.Fprintf(&b, "  [%s]", rd.RecoveryTarget)
 		}
+		// The stage line continues under its own text, not under the stamp.
+		if all := b.String(); strings.TrimSpace(all[textStart:]) != "" {
+			head, text := all[:textStart], strings.TrimSpace(all[textStart:])
+			b.Reset()
+			b.WriteString(head + " ")
+			b.WriteString(rdWrap(text, 80, strings.Repeat(" ", len([]rune(all[lineStart:textStart]))+1)))
+		}
 		b.WriteString("\n")
 		// Detail lines sit under the decision column (stamp, stage, decision).
 		const under = "                    "
 		for _, opt := range rd.Options {
-			b.WriteString(under + rdOption(opt) + "\n")
+			b.WriteString(under + rdWrap(rdOption(opt), 80, under+"  ") + "\n")
 		}
 		if rd.Reason != "" {
 			b.WriteString(under + "reason: " + wordWrap(rd.Reason, 60, under+"        ") + "\n")
+		}
+		// What the operator said about why they approved, in their words. It is
+		// their statement, recorded as given; the system did not verify it.
+		if a := rd.Approval; a != nil && a.Justification != "" && rd.Stage == audit.RecoveryStageGate {
+			b.WriteString(under + "justification (the approver's words): " + wordWrap(a.Justification, 60, under+"    ") + "\n")
 		}
 	}
 	if sawOutcome {
 		// Said once, so the figure is not mistaken for downtime.
 		b.WriteString("\n  recovery duration is the remediation hop after the approval (restore, restart, verify);\n" +
 			"  it is not the downtime, which began earlier and also includes the wait for the approval\n")
+		if lines := rdPlanVsActual(ds); len(lines) > 0 {
+			b.WriteString("\n" + strings.Join(rdWrapRows(lines), "\n") + "\n")
+		}
 	}
 	return b.String()
+}
+
+// rdDelta says how an actual figure stands against the planned one.
+func rdDelta(actual, planned int64, show func(int64) string, more, less string) string {
+	switch {
+	case actual > planned:
+		return show(actual-planned) + " " + more
+	case actual < planned:
+		return show(planned-actual) + " " + less
+	}
+	return "as planned"
+}
+
+func rdCount(n int64) string { return fmt.Sprintf("%d", n) }
+
+// rdPlanVsActual sets what the plan said against what happened, for a restore
+// that has an outcome: the recovery time the budget was checked with against the
+// time the remediation took, and the loss and transactions the plan counted
+// against the ones measured immediately before the stop. The plan is the last one
+// made before the execution, the one an approver would have seen. A line appears
+// only when both sides were recorded on the same basis; nothing is estimated here.
+func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
+	execIdx, outcomeIdx := -1, -1
+	for i, d := range ds {
+		switch d.Decision.Stage {
+		case audit.RecoveryStageExecution:
+			execIdx = i
+		case audit.RecoveryStageOutcome:
+			outcomeIdx = i
+		}
+	}
+	if outcomeIdx < 0 {
+		return nil
+	}
+	// A restore that was refused never stopped anything: there is no "at the stop"
+	// and the outcome's duration is not a restore time.
+	if execIdx >= 0 && ds[execIdx].Decision.Decision != audit.RecoveryDecisionProceeded {
+		return nil
+	}
+	planIdx := -1
+	for i, d := range ds {
+		if d.Decision.Stage == audit.RecoveryStagePlan && (execIdx < 0 || i < execIdx) {
+			planIdx = i
+		}
+	}
+	if planIdx < 0 {
+		return nil
+	}
+	pick := func(rd audit.RecoveryDecision) *audit.DecisionOption {
+		for i := range rd.Options {
+			if rd.Options[i].Chosen {
+				return &rd.Options[i]
+			}
+		}
+		if len(rd.Options) > 0 {
+			return &rd.Options[0]
+		}
+		return nil
+	}
+	planOpt := pick(ds[planIdx].Decision)
+	var execOpt *audit.DecisionOption
+	if execIdx >= 0 {
+		execOpt = pick(ds[execIdx].Decision)
+	}
+	var lines []string
+
+	// Recovery time: what the budget check assumed, against what the hop took.
+	// Both are the remediation hop after the approval, so they are comparable.
+	var planned *int64
+	basis := ""
+	for _, o := range []*audit.DecisionOption{execOpt, planOpt} {
+		if o != nil && o.BudgetDurationSeconds != nil {
+			planned, basis = o.BudgetDurationSeconds, o.BudgetDurationBasis
+			break
+		}
+	}
+	// Only a restore that ended resolved has a restore time: the estimate itself is
+	// built from resolved restores, and a failed or escalated hop's duration is the
+	// time to give up, not to recover.
+	if actual := ds[outcomeIdx].Decision.DurationSeconds; planned != nil && actual != nil && ds[outcomeIdx].Decision.Decision == "resolved" {
+		lines = append(lines, fmt.Sprintf("  recovery time  planned %s (%s); took %s (%s)",
+			rdSpan(*planned), rdBasisText(basis), rdSpan(*actual), rdDelta(*actual, *planned, rdSpan, "over", "under")))
+	}
+
+	if planOpt != nil && execOpt != nil {
+		if planOpt.LossSeconds != nil && execOpt.LossSeconds != nil && planOpt.LossBasis == execOpt.LossBasis {
+			// The verdict against the rpo, as each stage recorded it: a loss that grew
+			// while the approval waited can turn a plan that was within into one that
+			// exceeds, and that is the thing worth seeing.
+			verdict := func(o *audit.DecisionOption) string {
+				if o.Verdict == "" {
+					return ""
+				}
+				return " → " + o.Verdict
+			}
+			note := rdDelta(*execOpt.LossSeconds, *planOpt.LossSeconds, rdSpan, "more", "less")
+			if planOpt.Verdict != "" && execOpt.Verdict != "" && planOpt.Verdict != execOpt.Verdict {
+				note += "; the verdict changed"
+			}
+			lines = append(lines, fmt.Sprintf("  data loss      planned %s%s; at the stop %s%s (%s)",
+				rdSpan(*planOpt.LossSeconds), verdict(planOpt), rdSpan(*execOpt.LossSeconds), verdict(execOpt), note))
+		}
+		if planOpt.LossCommitsStatus == "measured" && planOpt.LossCommits != nil &&
+			execOpt.LossCommitsStatus == "measured" && execOpt.LossCommits != nil {
+			atLeast := func(o *audit.DecisionOption) string {
+				if o.LossCommitsAtLeast {
+					return "at least "
+				}
+				return ""
+			}
+			line := fmt.Sprintf("  transactions   planned %s%d; at the stop %s%d",
+				atLeast(planOpt), *planOpt.LossCommits, atLeast(execOpt), *execOpt.LossCommits)
+			if !planOpt.LossCommitsAtLeast && !execOpt.LossCommitsAtLeast {
+				line += " (" + rdDelta(int64(*execOpt.LossCommits), int64(*planOpt.LossCommits), rdCount, "more", "fewer") + ")"
+			}
+			lines = append(lines, line)
+		}
+	}
+	// The downtime budget: what the plan said was left against what the incident
+	// came to once it was charged. The ledger charges an incident from the start of
+	// its entry run to the end of its last, so a wait at the gate is in it; a plan
+	// that said "within" can end overspent, and that is the thing worth seeing. The
+	// figure is the plan's own, the ledger's as it stood then, with the incident
+	// taken off it; other incidents that were charged since are not counted.
+	if execOpt != nil && planOpt != nil && planOpt.BudgetRemainingSeconds != nil && ds[outcomeIdx].Decision.IncidentSeconds != nil &&
+		(planOpt.BudgetVerdict == "within" || planOpt.BudgetVerdict == "may_exceed" || planOpt.BudgetVerdict == "exceeds") {
+		atPlan := *planOpt.BudgetRemainingSeconds
+		if planOpt.BudgetPendingSeconds != nil {
+			atPlan += *planOpt.BudgetPendingSeconds // the ledger's own figure, before the incident
+		}
+		charged := *ds[outcomeIdx].Decision.IncidentSeconds
+		after := atPlan - charged
+		result := fmt.Sprintf("%s left", rdSpan(after))
+		verdict := "within"
+		if after < 0 {
+			result, verdict = fmt.Sprintf("overspent by %s", rdSpan(-after)), "exceeds"
+		} else if after == 0 {
+			result, verdict = "none left", "exceeds"
+		}
+		note := ""
+		if planOpt.BudgetVerdict != verdict && (planOpt.BudgetVerdict != "may_exceed" || verdict != "within") {
+			note = "; the verdict changed"
+		}
+		lines = append(lines, fmt.Sprintf("  budget         planned %s left → %s; the incident was charged %s, so %s → %s%s",
+			ledgerSpan(atPlan), planOpt.BudgetVerdict, rdSpan(charged), result, verdict, note))
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	head := "  ═══ PLAN VS ACTUAL ═══  the plan"
+	if at := ds[planIdx].At; !at.IsZero() {
+		head += " of " + at.UTC().Format("15:04:05")
+	}
+	head += " against what happened"
+	// The note sits under the rows' text, not under their labels.
+	note := rdRowIndent + rdWrap("\"at the stop\" is measured immediately before the restore stops the instance; "+
+		"what was discarded is not counted afterwards", 70, rdRowIndent)
+	return append(append([]string{head}, lines...), note)
+}
+
+// rdRowIndent is where a row's text starts: two spaces and a label of 13.
+const rdRowIndent = "                 "
+
+// rdWrapRows wraps the plan-vs-actual rows that are a label and a text, so a long
+// text continues under itself and not under the label. The header and the
+// footnote lines have no label column and are left as they are.
+func rdWrapRows(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		// A row has its label in columns 2-14 and two spaces before the text.
+		n := len(rdRowIndent)
+		if len(l) > n && strings.HasPrefix(l, "  ") && l[2] != ' ' && l[n-2:n] == "  " && !strings.HasPrefix(l, "  ═") {
+			out = append(out, l[:len(rdRowIndent)]+rdWrap(l[len(rdRowIndent):], 70, rdRowIndent))
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // rdRTOVerdict sets a recovery duration against the rto that was in force, for

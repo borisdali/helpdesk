@@ -88,7 +88,7 @@ func TestRecoveryApprovalFromGate(t *testing.T) {
 		{"another type than the run's", good, "lsn=0/3000028", 409, "cannot be changed"},
 	}
 	for _, tc := range tests {
-		ap, status, msg := recoveryApprovalFromGate(tc.req, tc.stored, "alice")
+		ap, status, msg := recoveryApprovalFromGate(tc.req, tc.stored, "alice", false)
 		if status != tc.wantStatus || (tc.wantMsg == "") != (msg == "") || !strings.Contains(msg, tc.wantMsg) {
 			t.Errorf("%s: status=%d msg=%q, want %d %q", tc.name, status, msg, tc.wantStatus, tc.wantMsg)
 		}
@@ -645,7 +645,7 @@ func TestRecordGateAcknowledged_RecordsThePITRApproval(t *testing.T) {
 
 	ap, status, msg := recoveryApprovalFromGate(ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
-	}, "", "alice")
+	}, "", "alice", false)
 	if status != 0 {
 		t.Fatalf("%d %s", status, msg)
 	}
@@ -672,17 +672,17 @@ func TestRecoveryApprovalFromGate_StopServingIsSeparate(t *testing.T) {
 	base := ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
 	}
-	ap, status, msg := recoveryApprovalFromGate(base, "", "alice")
+	ap, status, msg := recoveryApprovalFromGate(base, "", "alice", false)
 	if status != 0 || ap.StopServing || !ap.Approved() {
 		t.Fatalf("approval without the flag: %+v %d %s", ap, status, msg)
 	}
 	base.AllowStopServing = true
-	ap, status, _ = recoveryApprovalFromGate(base, "", "alice")
+	ap, status, _ = recoveryApprovalFromGate(base, "", "alice", false)
 	if status != 0 || !ap.StopServing {
 		t.Fatalf("approval with the flag: %+v", ap)
 	}
 	// The flag alone approves nothing.
-	if _, status, _ := recoveryApprovalFromGate(ProceedEscalationRequest{AllowStopServing: true}, "", "alice"); status != http.StatusBadRequest {
+	if _, status, _ := recoveryApprovalFromGate(ProceedEscalationRequest{AllowStopServing: true}, "", "alice", false); status != http.StatusBadRequest {
 		t.Errorf("allow_stop_serving alone: status %d, want 400", status)
 	}
 
@@ -756,19 +756,19 @@ func TestRecoveryApprovalFromGate_BreachAcknowledgementIsSeparate(t *testing.T) 
 	base := ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
 	}
-	ap, status, msg := recoveryApprovalFromGate(base, "", "alice")
+	ap, status, msg := recoveryApprovalFromGate(base, "", "alice", false)
 	if status != 0 || ap.BreachAcknowledged || !ap.Approved() {
 		t.Fatalf("approval without the flag: %+v %d %s", ap, status, msg)
 	}
 	base.AcknowledgeObjectiveBreach = true
-	if ap, status, _ = recoveryApprovalFromGate(base, "", "alice"); status != 0 || !ap.BreachAcknowledged {
+	if ap, status, _ = recoveryApprovalFromGate(base, "", "alice", false); status != 0 || !ap.BreachAcknowledged {
 		t.Fatalf("approval with the flag: %+v", ap)
 	}
 	// It stands in for nothing: without the data-loss acknowledgement the
 	// approval is refused however many other flags are set.
 	if _, status, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
 		RecoveryTarget: base.RecoveryTarget, PlanDigest: base.PlanDigest, AcknowledgeObjectiveBreach: true, AllowStopServing: true,
-	}, "", "alice"); status != http.StatusBadRequest {
+	}, "", "alice", false); status != http.StatusBadRequest {
 		t.Errorf("breach acknowledgement without acknowledge_data_loss: status %d, want 400", status)
 	}
 
@@ -860,7 +860,7 @@ func TestFaultlibGateApproval_IsWhatTheGatewayAccepts(t *testing.T) {
 	if err := dec.Decode(&got); err != nil {
 		t.Fatalf("the gateway does not read what the harness sends: %v\n%s", err, raw)
 	}
-	ap, status, msg := recoveryApprovalFromGate(got, "time=2026-10-28T17:11:10Z", "faulttest")
+	ap, status, msg := recoveryApprovalFromGate(got, "time=2026-10-28T17:11:10Z", "faulttest", false)
 	if status != 0 || !ap.Approved() || !ap.StopServing || !ap.BreachAcknowledged || ap.Value != "2026-10-28T17:11:10Z" || ap.PlanDigest != "0123456789abcdef" {
 		t.Fatalf("approval = %+v, status %d %s", ap, status, msg)
 	}
@@ -871,7 +871,7 @@ func TestFaultlibGateApproval_IsWhatTheGatewayAccepts(t *testing.T) {
 	raw, _ = json.Marshal(sent)
 	got = ProceedEscalationRequest{}
 	json.Unmarshal(raw, &got) //nolint:errcheck
-	if ap, _, _ := recoveryApprovalFromGate(got, "", "faulttest"); ap == nil || ap.StopServing {
+	if ap, _, _ := recoveryApprovalFromGate(got, "", "faulttest", false); ap == nil || ap.StopServing {
 		t.Errorf("approval = %+v", ap)
 	}
 }

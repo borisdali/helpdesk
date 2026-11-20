@@ -94,6 +94,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create restore drill store (shares the same database connection)
+	restoreDrillStore, err := audit.NewRestoreDrillStore(store.DB(), store.IsPostgres())
+	if err != nil {
+		slog.Error("failed to create restore drill store", "err", err)
+		os.Exit(1)
+	}
+
 	// Create fleet store (shares the same database connection)
 	fleetStore, err := audit.NewFleetStore(store.DB(), store.IsPostgres())
 	if err != nil {
@@ -267,6 +274,7 @@ func main() {
 	approvalSrv := &approvalServer{store: approvalStore, notifier: approvalNotifier, authorizer: authzr}
 	govSrv := newGovernanceServer(store, approvalStore, approvalNotifier)
 	govbotSrv := &govbotServer{store: govbotStore}
+	drillSrv := &restoreDrillServer{store: restoreDrillStore, auditStore: store}
 	fleetSrv := &fleetServer{store: fleetStore, approvalStore: approvalStore}
 	playbookSrv := &playbookServer{store: playbookStore, runStore: playbookRunStore, feedbackStore: runFeedbackStore}
 	uploadSrv := &uploadServer{store: uploadStore}
@@ -308,6 +316,11 @@ func main() {
 	// Govbot compliance history endpoints
 	mux.HandleFunc("POST /v1/govbot/runs", auth("POST /v1/govbot/runs", govbotSrv.handleSaveRun))
 	mux.HandleFunc("GET /v1/govbot/runs", auth("GET /v1/govbot/runs", govbotSrv.handleGetRuns))
+
+	// Restore drill endpoints
+	mux.HandleFunc("POST /v1/drills", auth("POST /v1/drills", drillSrv.handleRecordDrill))
+	mux.HandleFunc("GET /v1/drills", auth("GET /v1/drills", drillSrv.handleListDrills))
+	mux.HandleFunc("GET /v1/drills/{drillID}", auth("GET /v1/drills/{drillID}", drillSrv.handleGetDrill))
 
 	// Fleet runner job tracking endpoints
 	mux.HandleFunc("POST /v1/fleet/jobs", auth("POST /v1/fleet/jobs", fleetSrv.handleCreateJob))
@@ -578,6 +591,9 @@ func (s *server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if v := r.URL.Query().Get("tool_name"); v != "" {
 		opts.ToolName = v
+	}
+	if v := r.URL.Query().Get("ticket"); v != "" {
+		opts.Ticket = v
 	}
 
 	events, err := s.store.Query(r.Context(), opts)

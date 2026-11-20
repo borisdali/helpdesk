@@ -40,8 +40,8 @@ var budgetLedgerFn = readLedger
 
 // readEstimate reads how long this database's restores have taken, through the
 // configured client.
-func readEstimate(ctx context.Context, key string, rto *time.Duration, now time.Time) (*availability.RecoveryEstimate, error) {
-	return ledgerClient.RecoveryEstimate(ctx, key, availability.RestoreSeries, rto, now)
+func readEstimate(ctx context.Context, key string, rto *time.Duration, now time.Time, drill availability.DrillInputs) (*availability.RecoveryEstimate, error) {
+	return ledgerClient.RecoveryEstimate(ctx, key, availability.RestoreSeries, rto, now, drill)
 }
 
 // recoveryEstimateFn is how the check reads that history: a variable for the same
@@ -52,8 +52,8 @@ var recoveryEstimateFn = readEstimate
 // there is no history to look at and nothing is said (the budget check already
 // says the ledger is unavailable); any other failure is reported as an estimate
 // that could not be made, so it is never read as there being no history.
-func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now time.Time) *availability.RecoveryEstimate {
-	est, err := recoveryEstimateFn(ctx, key, rto, now)
+func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now time.Time, drill availability.DrillInputs) *availability.RecoveryEstimate {
+	est, err := recoveryEstimateFn(ctx, key, rto, now, drill)
 	switch {
 	case errors.Is(err, availability.ErrNoAudit):
 		return nil
@@ -71,6 +71,24 @@ func recoveryEstimateOf(ctx context.Context, key string, rto *time.Duration, now
 // The objectives are resolved under the config lock and the lock is let go
 // before the ledger is read over the network.
 func budgetCheckFor(ctx context.Context, target string, serving bool) *availability.BudgetVerdict {
+	return budgetCheckWith(ctx, target, serving, 0, func(context.Context, string) string { return "" })
+}
+
+// budgetCheckForRestore is budgetCheckFor for a restore whose size is known
+// (the selected backup's database size, in bytes; 0 when it is not). The size is
+// what a restore drill is compared against: a drill of a very different size
+// says little about this restore, so with no size no drill can count. The
+// source's system identifier is read too (system_id.go), so that drills are tied
+// to this server and not to a name a rebuilt server may have inherited; when it
+// cannot be read the estimate matches by name and says so.
+func budgetCheckForRestore(ctx context.Context, target string, serving bool, restoreBytes uint64) *availability.BudgetVerdict {
+	return budgetCheckWith(ctx, target, serving, restoreBytes, sourceSystemIDFn)
+}
+
+// budgetCheckWith is budgetCheckForRestore with the way of reading the source's
+// system identifier given. budgetCheckFor, which has no restore in view and is
+// what most tests call, reads none.
+func budgetCheckWith(ctx context.Context, target string, serving bool, restoreBytes uint64, systemID func(context.Context, string) string) *availability.BudgetVerdict {
 	infraConfigMu.RLock()
 	var (
 		res   infra.ResolvedObjectives
@@ -102,7 +120,18 @@ func budgetCheckFor(ctx context.Context, target string, serving bool) *availabil
 		d := res.RTO.Value
 		rto = &d
 	}
-	in.Estimate = recoveryEstimateOf(ctx, key, rto, now)
+	in.Estimate = recoveryEstimateOf(ctx, key, rto, now, availability.DrillInputs{
+		RestoreBytes: int64(restoreBytes),
+		// Read only if there is a drill to match it with: it costs a command on the
+		// instance, and most servers have none.
+		ReadSystemID: func() string { return systemID(ctx, target) },
+	})
+	// When the restore runs under an approval, the gateway has said when its incident
+	// began: by now the ledger no longer reads that incident as open (approving the
+	// gate marked it escalated), so it could not be found there.
+	if ap := audit.RecoveryApprovalFromContext(ctx); ap != nil {
+		in.IncidentStart = ap.IncidentStartedAt
+	}
 	// Only a budget that can be computed has anything to read the spend against.
 	if budget.Computed && !in.Invalid {
 		in.Ledger, in.LedgerErr = budgetLedgerFn(ctx, key, budget, now)

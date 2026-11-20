@@ -71,6 +71,9 @@ services:
   # a newer major version than the fault-injection target's postgres:16, to
   # get real cross-version coverage on auditd's own backend rather than only
   # ever testing against whatever version the target happens to pin.
+  # Disposable: the integration and faulttest targets end with `down -v` over this
+  # project, which deletes this volume. A locally running stack's auditd must not
+  # use it; its own database is docker-compose.dev-auditd.yaml (port 15440).
   postgres-auditd:
     image: postgres:18
     container_name: helpdesk-test-pg-auditd

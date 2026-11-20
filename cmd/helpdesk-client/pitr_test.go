@@ -67,6 +67,44 @@ func TestRunPITRApprove_SendsWhatTheGatewayReads(t *testing.T) {
 	}
 }
 
+// The justification goes to the gateway as the gate's own "reason" and the ticket
+// as its own field, only when given: an approval with neither sends neither.
+func TestPITRApprovalBody_JustificationAndTicket(t *testing.T) {
+	body := func(o pitrOpts) map[string]any {
+		t.Helper()
+		raw, err := o.approvalBody("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	o := goodOpts()
+	o.Justification, o.Ticket = "  batch corrupted the ledger; accepted by the on-call lead  ", " INC-1234 "
+	got := body(o)
+	if got["reason"] != "batch corrupted the ledger; accepted by the on-call lead" || got["ticket"] != "INC-1234" {
+		t.Errorf("body = %v", got)
+	}
+	if _, ok := got["justification"]; ok {
+		t.Errorf("the gateway reads reason, not justification: %v", got)
+	}
+	none := body(goodOpts())
+	if _, ok := none["reason"]; ok {
+		t.Errorf("a reason was sent with none given: %v", none)
+	}
+	if _, ok := none["ticket"]; ok {
+		t.Errorf("a ticket was sent with none given: %v", none)
+	}
+	blank := goodOpts()
+	blank.Justification, blank.Ticket = "   ", "  "
+	if got := body(blank); got["reason"] != nil || got["ticket"] != nil {
+		t.Errorf("blank values were sent: %v", got)
+	}
+}
+
 func TestRunPITRApprove_GatewayRefusalIsAnError(t *testing.T) {
 	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
@@ -296,6 +334,87 @@ func TestFormatPITRPlan_ShowsTheBudgetCheckAndWhatItDemands(t *testing.T) {
 
 // What this database's past restores have taken is shown, with the basis, and
 // against the declared rto; it is information and holds nothing.
+// What putting the decision off costs is on the plan, on its own lines, with the
+// text the agent gave and nothing added; a plan without it prints neither line.
+func TestFormatPITRPlan_ShowsWhatWaitingCosts(t *testing.T) {
+	parse := func(raw string) pitrPlan {
+		var p pitrPlan
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	got := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,`+
+		`"availability_budget":{"status":"within","detail":"d","delay":{"state":"latest_start","detail":"estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s)"}},`+
+		`"data_delay":{"state":"growing","detail":"the recovery target is fixed and the instance keeps taking writes"}}`), goodOpts())
+	for _, want := range []string{
+		"Waiting, budget    : estimated latest start to remain within budget, under current assumptions: 14:17:00Z (in 4m12s)",
+		"Waiting, data      : the recovery target is fixed and the instance keeps taking writes",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// They sit before the instance line, with the other things a person weighs.
+	if strings.Index(got, "Waiting, budget") > strings.Index(got, "Instance           :") {
+		t.Errorf("the cost of waiting is after the instance line:\n%s", got)
+	}
+
+	none := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d"}}`), goodOpts())
+	if strings.Contains(none, "Waiting") {
+		t.Errorf("a plan with no cost of waiting prints one:\n%s", none)
+	}
+	empty := formatPITRPlan(parse(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d","delay":{"state":"x","detail":""}},"data_delay":{"state":"x","detail":""}}`), goodOpts())
+	if strings.Contains(empty, "Waiting") {
+		t.Errorf("an empty detail prints a line:\n%s", empty)
+	}
+}
+
+// A long line wraps under its text, not under its label, and says the same words.
+func TestFormatPITRPlan_WrapsUnderTheText(t *testing.T) {
+	pitrWrapWidth = 60
+	defer func() { pitrWrapWidth = 0 }()
+	text := "the recovery target is fixed and the instance keeps taking writes, so the history a restore discards grows by a minute every minute"
+	var b strings.Builder
+	field(&b, "Waiting, data      ", text)
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("a long line did not wrap:\n%s", b.String())
+	}
+	var words []string
+	for i, l := range lines {
+		if len(l) > 60 {
+			t.Errorf("line %d is %d wide: %q", i, len(l), l)
+		}
+		if i == 0 {
+			if !strings.HasPrefix(l, "Waiting, data      : ") {
+				t.Errorf("first line: %q", l)
+			}
+			l = strings.TrimPrefix(l, "Waiting, data      : ")
+		} else {
+			if !strings.HasPrefix(l, strings.Repeat(" ", pitrIndent)) || strings.TrimLeft(l, " ") == l {
+				t.Errorf("line %d does not start under the text: %q", i, l)
+			}
+		}
+		words = append(words, strings.Fields(l)...)
+	}
+	if strings.Join(words, " ") != text {
+		t.Errorf("wrapping changed the words: %q", strings.Join(words, " "))
+	}
+	// Short text stays on one line, and a width of 0 never wraps.
+	b.Reset()
+	field(&b, "Note               ", "short")
+	if b.String() != "Note               : short\n" {
+		t.Errorf("short: %q", b.String())
+	}
+	pitrWrapWidth = 0
+	b.Reset()
+	field(&b, "Note               ", text)
+	if strings.Count(b.String(), "\n") != 1 {
+		t.Errorf("wrapped with no width: %q", b.String())
+	}
+}
+
 func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T) {
 	plan := func(estimate string) pitrPlan {
 		var p pitrPlan
@@ -335,6 +454,85 @@ func TestFormatPITRPlan_ShowsTheHistoryOfPastRestoresAgainstTheRTO(t *testing.T)
 	_ = json.Unmarshal([]byte(`{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d"}}`), &old)
 	if got := formatPITRPlan(old, goodOpts()); strings.Contains(got, "Past restores") {
 		t.Errorf("a plan with no estimate mentions one:\n%s", got)
+	}
+}
+
+func TestFormatPITRPlan_ShowsRestoreDrillsBesideRealRestores(t *testing.T) {
+	plan := func(estimate string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","availability_budget":{"status":"within","detail":"d","recovery_estimate":` + estimate + `}}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	real0 := `"status":"no_history","basis":"no resolved restore of this server in the last 90d among real incidents: nothing to estimate from"`
+	drills := `"drills":{"status":"estimated","samples":4,"basis":"4 restore drills of this server count (last 90d, pgBackRest, comparable size): median 1m 40s, longest 1m 52s (too few for a p90, which needs 10)","vs_rto":"within","vs_rto_detail":"none of the 4 drills took longer than the rto of 5m"}`
+
+	// Planned from drills: both lines, and the plan says what the figure rests on.
+	got := formatPITRPlan(plan(`{`+real0+`,"planning_source":"drills",`+drills+`}`), goodOpts())
+	for _, want := range []string{
+		"Past restores      : no resolved restore of this server",
+		"Restore drills     : 4 restore drills of this server count",
+		"The planned duration comes from these: a restore demonstrated on a copy, not on this server",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), strings.Join(strings.Fields(want), " ")) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Real restores plan it: the drills are shown, and not claimed as the basis.
+	got = formatPITRPlan(plan(`{`+real0+`,"planning_source":"restores",`+drills+`}`), goodOpts())
+	if !strings.Contains(got, "Restore drills     :") || strings.Contains(got, "comes from these") {
+		t.Errorf("drills claimed as the basis:\n%s", got)
+	}
+	// A drill that took longer than the rto is called out even with no real restore to show it.
+	over := `"drills":{"status":"estimated","samples":3,"basis":"3 restore drills count","vs_rto":"exceeds","vs_rto_detail":"1 of the 3 drills took longer than the rto of 5m (the longest took 9m)"}`
+	got = formatPITRPlan(plan(`{`+real0+`,`+over+`}`), goodOpts())
+	if !strings.Contains(got, "RTO CHECK (!)      : exceeds, by the drills: 1 of the 3 drills") {
+		t.Errorf("no rto warning from the drills:\n%s", got)
+	}
+	// No drills in the estimate: nothing about drills.
+	if got := formatPITRPlan(plan(`{`+real0+`}`), goodOpts()); strings.Contains(got, "Restore drills") {
+		t.Errorf("a plan with no drills mentions them:\n%s", got)
+	}
+}
+
+func TestFormatPITRPlan_ShowsWhetherADrillIsDue(t *testing.T) {
+	plan := func(currency string) pitrPlan {
+		var p pitrPlan
+		raw := `{"status":"feasible","plan_digest":"3c7ae8cf0d79ffd9","instance_serving":true,"availability_budget":{"status":"within","detail":"d"}` + currency + `}`
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+	got := formatPITRPlan(plan(`,"drill_currency":{"state":"overdue","overdue":true,"detail":"last verified drill 143 days ago (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "DRILL OVERDUE (!) : last verified drill 143 days ago (limit 90 days). Record one with helpdesk-client --drill-record") {
+		t.Errorf("overdue:\n%s", got)
+	}
+	// It is a reminder: the approval command is still offered and nothing is demanded.
+	if !strings.Contains(got, "--pitr-approve") || strings.Contains(got, "acknowledge-objective-breach") || strings.Contains(got, "REFUSED") {
+		t.Errorf("an overdue drill held the approval:\n%s", got)
+	}
+	got = formatPITRPlan(plan(`,"drill_currency":{"state":"current","overdue":false,"detail":"last verified drill 12 days ago (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "Drill reminder : last verified drill 12 days ago (limit 90 days)") || strings.Contains(got, "OVERDUE") {
+		t.Errorf("current:\n%s", got)
+	}
+	// Never drilled is overdue too, and says so.
+	got = formatPITRPlan(plan(`,"drill_currency":{"state":"never","overdue":true,"detail":"no verified restore drill of this server is recorded (limit 90 days)"}`), goodOpts())
+	if !strings.Contains(flat(got), "DRILL OVERDUE (!) : no verified restore drill of this server is recorded") {
+		t.Errorf("never:\n%s", got)
+	}
+	// Turned off, or absent: nothing about drills' currency.
+	for name, cur := range map[string]string{
+		"off":    `,"drill_currency":{"state":"off","detail":"the drill reminder is turned off for this database (drill_interval 0d)"}`,
+		"absent": ``,
+	} {
+		if got := formatPITRPlan(plan(cur), goodOpts()); strings.Contains(got, "Drill reminder") || strings.Contains(got, "DRILL OVERDUE") {
+			t.Errorf("%s:\n%s", name, got)
+		}
 	}
 }
 
@@ -395,12 +593,13 @@ func TestRunPITRPlan_AgentErrorSurfaces(t *testing.T) {
 func TestNewPITROpts_MapsEveryFlag(t *testing.T) {
 	got := newPITROpts(pitrFlagValues{
 		ApproveRunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, AckBreach: true, User: "ops@example.com",
-		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, Justification: "the on-call lead accepted it", Ticket: "INC-9",
+		User: "ops@example.com", SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	})
 	want := pitrOpts{
 		RunID: "plr_9", TargetType: "lsn", Target: "0/52000000", PlanDigest: "aaaaaaaaaaaaaaaa",
-		AckDataLoss: true, AllowStop: true, AckBreach: true, ResolvedBy: "ops@example.com", ApprovalMode: "auto",
+		AckDataLoss: true, AllowStop: true, AckBreach: true, Justification: "the on-call lead accepted it", Ticket: "INC-9",
+		ResolvedBy: "ops@example.com", ApprovalMode: "auto",
 		SysadminURL: "http://agent", SysadminKey: "sk", Server: "db1", Stanza: "main2",
 	}
 	if got != want {

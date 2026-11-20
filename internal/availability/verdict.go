@@ -77,6 +77,12 @@ type BudgetInputs struct {
 	// from three to nine); without one, as long as the declared rto, as an upper
 	// bound.
 	Estimate *RecoveryEstimate
+	// IncidentStart is when the incident this restore is for began, when the
+	// caller knows it (the approval carries it). The ledger cannot always say: once
+	// the gate is approved the triage hop has ended and the incident is marked
+	// escalated, so it is no longer an open incident to find there, though it is
+	// charged in full when the restore completes. Zero when not known.
+	IncidentStart time.Time
 }
 
 // What a verdict took a restore's duration to be.
@@ -86,6 +92,12 @@ const (
 	// DurationFromHistoryLongest: the longest of this server's past restores
 	// (three to nine, too few for a p90 to mean more than that).
 	DurationFromHistoryLongest = "history_longest"
+	// DurationFromDrillP90: the p90 of this server's restore drills (ten or more
+	// that count), restores demonstrated on a copy and not on this server.
+	DurationFromDrillP90 = "drill_p90"
+	// DurationFromDrillLongest: the longest of this server's restore drills
+	// (three to nine that count).
+	DurationFromDrillLongest = "drill_longest"
 	// DurationFromRTO: the declared rto, an upper bound.
 	DurationFromRTO = "declared_rto"
 )
@@ -111,6 +123,13 @@ type BudgetVerdict struct {
 	Gate string `json:"gate,omitempty"`
 	// GateNote explains a gate that is not what the enforcement alone would say.
 	GateNote string `json:"gate_note,omitempty"`
+	// PendingIncident and PendingSeconds are the open incident that is not charged
+	// to the ledger yet and how long it has been open, when exactly one is: the
+	// verdict took its age off what is left, because it is charged in full when
+	// the restore runs. RemainingSeconds is still the ledger's own figure; what the
+	// restore stood to use is LeftSeconds.
+	PendingIncident string `json:"pending_incident,omitempty"`
+	PendingSeconds  *int64 `json:"pending_seconds,omitempty"`
 	// DurationSeconds is how long the restore was taken to last, and
 	// DurationBasis what that rests on: DurationFromHistoryP90,
 	// DurationFromHistoryLongest or DurationFromRTO.
@@ -119,6 +138,24 @@ type BudgetVerdict struct {
 	// RecoveryEstimate is how long this server's restores have taken, whatever
 	// the verdict: it is worth showing even when no SLO is set.
 	RecoveryEstimate *RecoveryEstimate `json:"recovery_estimate,omitempty"`
+	// Delay is what waiting to decide costs against the budget (delay.go): the
+	// estimated latest start that stays within it, or why there is none. Absent
+	// when the budget could not be read.
+	Delay *BudgetDelay `json:"delay,omitempty"`
+}
+
+// LeftSeconds is what was left of the budget for the restore: the ledger's figure
+// less the age of the open incident that is about to be charged, when there is one.
+// Nil when the budget could not be read.
+func (v *BudgetVerdict) LeftSeconds() *int64 {
+	if v == nil || v.RemainingSeconds == nil {
+		return nil
+	}
+	left := *v.RemainingSeconds
+	if v.PendingSeconds != nil {
+		left -= *v.PendingSeconds
+	}
+	return &left
 }
 
 // NeedsAttention says the person approving should be told the restore is, or may
@@ -130,12 +167,48 @@ func (v *BudgetVerdict) NeedsAttention() bool {
 // CompareToBudget makes the verdict and the gate it implies.
 func CompareToBudget(in BudgetInputs) *BudgetVerdict {
 	v := &BudgetVerdict{Enforcement: in.Enforcement, WindowSource: in.Budget.WindowSource, RecoveryEstimate: in.Estimate}
-	v.Status, v.Detail = verdict(in, v)
+	charging, pending := pendingIncidents(in.Ledger, in.IncidentStart)
+	v.Status, v.Detail = verdict(in, v, pending)
 	v.Gate, v.GateNote = gateFor(v.Status, in.Enforcement, in.Serving)
+	v.Delay = delayFor(v, in.Ledger, in.Serving, charging, pending)
 	return v
 }
 
-func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
+// pendingIncidents says whether an open outage incident is already charged and
+// otherwise which incidents are about to be charged in full when the restore runs.
+// The ledger's open incidents that are not charged yet are those; when the caller
+// knows when the restore's own incident began, that one is it, named by the ledger
+// if it is still there as an open incident and by its age alone if it is not (the
+// gate's approval marks it escalated, so at the moment of the restore it is not
+// open any more).
+func pendingIncidents(l *Ledger, start time.Time) (charging bool, pending []Entry) {
+	if l == nil {
+		return false, nil
+	}
+	charging, pending = openIncidents(l)
+	if charging || start.IsZero() {
+		return charging, pending
+	}
+	age := l.AsOf.Sub(start)
+	if age < 0 {
+		return false, pending // a start in the future: the clocks disagree, say nothing of it
+	}
+	e := Entry{DurationSeconds: int64(age.Round(time.Second) / time.Second), DetectedAt: start, Ongoing: true}
+	if len(pending) == 1 {
+		e.IncidentID = pending[0].IncidentID
+	}
+	return false, []Entry{e}
+}
+
+// openIncidentName is how the open incident is named in a sentence.
+func openIncidentName(id string) string {
+	if id == "" {
+		return "the incident this restore is for"
+	}
+	return "the open incident " + id
+}
+
+func verdict(in BudgetInputs, v *BudgetVerdict, pending []Entry) (status, detail string) {
 	switch {
 	case !in.Found:
 		return BudgetNoObjective, "the target is not a configured database, so there is no availability budget to compare with"
@@ -170,6 +243,21 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 		return infra.FormatSpan(secondsOf(s))
 	}
 	spent := fmt.Sprintf("%s of the %s budget over %s already spent", span(l.ChargedSeconds), span(allowed), infra.FormatSpan(secondsOf(l.WindowSeconds)))
+	// An open incident that is not charged to the ledger yet is charged in full,
+	// from its start, the moment the restore runs (delay.go says why). So what is
+	// left for the restore is what is left less its age: the wait at the gate has
+	// already used that much, and a verdict made without it would say "within" of a
+	// budget the restore is certain to overspend. Only with exactly one such
+	// incident: with several, which is this restore's is not known, and the
+	// ledger's figure stands (delay.go says so).
+	pendingNow := false
+	if len(pending) == 1 {
+		age := pending[0].DurationSeconds
+		v.PendingIncident, v.PendingSeconds = pending[0].IncidentID, &age
+		rem -= age
+		pendingNow = true
+		spent += fmt.Sprintf(", and %s (open for %s, not charged yet) is charged in full when the restore runs", openIncidentName(pending[0].IncidentID), span(age))
+	}
 	note := ""
 	if len(l.Unconfirmed) > 0 && l.RemainingWorstCaseSeconds != nil {
 		note = fmt.Sprintf("; %d outage(s) of unknown length are not counted, and if they count in full %s would be left",
@@ -181,11 +269,17 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 	// ten samples, the longest from three to nine, with the sample size said), and
 	// otherwise the declared rto, as an upper bound.
 	var dur time.Duration
-	haveDur, fromHistory, historyIsP90 := false, false, false
-	if e := in.Estimate; e != nil && e.Status == EstimateEstimated && e.PlanningSeconds != nil {
+	haveDur, fromHistory, historyIsP90, fromDrills := false, false, false, false
+	if e := in.Estimate; e != nil && e.PlanningSeconds != nil {
 		dur, haveDur, fromHistory = secondsOf(*e.PlanningSeconds), true, true
+		fromDrills = e.PlanningSource == PlanningFromDrills
 		d, basis := *e.PlanningSeconds, DurationFromHistoryLongest
-		if e.PlanningBasis == PlanningP90 {
+		switch {
+		case fromDrills && e.PlanningBasis == PlanningP90:
+			basis, historyIsP90 = DurationFromDrillP90, true
+		case fromDrills:
+			basis = DurationFromDrillLongest
+		case e.PlanningBasis == PlanningP90:
 			basis, historyIsP90 = DurationFromHistoryP90, true
 		}
 		v.DurationSeconds, v.DurationBasis = &d, basis
@@ -200,9 +294,18 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 		if allowed == 0 {
 			return BudgetExceeds, "the SLO allows no downtime, so any restore breaches it" + note
 		}
+		if pendingNow && *l.RemainingSeconds > 0 {
+			return BudgetExceeds, fmt.Sprintf("%s: once it is charged the budget is spent (%s left), so the restore breaches the SLO%s", spent, span(rem), note)
+		}
 		return BudgetExceeds, fmt.Sprintf("%s: the budget is spent (%s left), so any further downtime breaches the SLO%s", spent, span(rem), note)
 	case !haveDur:
 		return BudgetNotComparable, fmt.Sprintf("%s, %s left, but no rto is declared and there is no history of past restores, so how long this restore may take is not known%s", spent, span(rem), note)
+	case fromDrills && rem >= int64(dur.Seconds()):
+		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this server's drills took (%s)%s",
+			spent, span(rem), drillPhrase(infra.FormatSpan(dur), in.Estimate.Drills, historyIsP90), note)
+	case fromDrills:
+		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this server's restore drills have taken up to %s: this one may use more than is left%s",
+			spent, span(rem), drillPhrase(infra.FormatSpan(dur), in.Estimate.Drills, historyIsP90), note)
 	case fromHistory && rem >= int64(dur.Seconds()):
 		return BudgetWithin, fmt.Sprintf("%s, %s left: enough for a restore as long as this server's have been (%s)%s",
 			spent, span(rem), historyPhrase(infra.FormatSpan(dur), in.Estimate.Samples, historyIsP90), note)
@@ -215,6 +318,19 @@ func verdict(in BudgetInputs, v *BudgetVerdict) (status, detail string) {
 		return BudgetMayExceed, fmt.Sprintf("%s, only %s left, and this restore may take up to the rto of %s: it may use more than is left (a restore can finish sooner than its rto)%s",
 			spent, span(rem), infra.FormatSpan(dur), note)
 	}
+}
+
+// drillPhrase says what a duration taken from restore drills rests on. A drill
+// is a restore on a copy, so it says so: this is not this server's history.
+func drillPhrase(span string, d *DrillEstimate, p90 bool) string {
+	n := 0
+	if d != nil {
+		n = d.Samples
+	}
+	if p90 {
+		return fmt.Sprintf("%s at the p90 of %d drills, demonstrated on a copy, not on this server", span, n)
+	}
+	return fmt.Sprintf("%s, the longest of %d drills, demonstrated on a copy, not on this server", span, n)
 }
 
 // historyPhrase says what a duration taken from history rests on, as a p90 when

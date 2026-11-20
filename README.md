@@ -131,6 +131,7 @@ aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two gu
 - **[High Availability / Disaster Recovery](docs/HA_DR.md)** is the domain-specific deep dive: what's certified today (replication lag, replica disconnection) and what's on the roadmap (replica promotion, Patroni HA)
 - **[Backup & Restore](docs/BACKUP.md)** covers backup-taking health specifically: WAL archiving and pgBackRest job-level status, triage and narrow remediation
 - **[Point-in-time recovery](docs/PITR.md)** restores a single pgBackRest instance to a time or LSN a human chose, down or still serving: the safety model, the operator steps, the limits and what is verified
+- **[Restore operations](docs/RESTORE_OPS.md)** is the operational guide for restores: drilling a backup on a clone you bring (verified, recorded, and a reminder when one is overdue), what a drill counts for in the plan's restore-time estimate, and what to read in the plan and after a restore
 
 ## Gateway REST API
 

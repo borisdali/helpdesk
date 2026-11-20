@@ -110,6 +110,10 @@ All flags have a corresponding environment variable. The flag takes precedence w
 | `--pitr-plan` | _(flag only)_ | `false` | Print the point-in-time recovery plan for `--recovery-target` (read from the sysadmin agent) and exit. Needs `--pitr-server` and `--sysadmin-url`; see [PITR.md](PITR.md#the-short-way-helpdesk-client) |
 | `--pitr-approve` | _(flag only)_ | _(none)_ | Approve the point-in-time gate of the given triage run ID. Needs `--recovery-target-type`, `--recovery-target`, `--plan-digest` and `--acknowledge-data-loss`; `--allow-stop-serving` for a serving instance |
 | `--sysadmin-url`, `--sysadmin-key` | `HELPDESK_SYSADMIN_URL`, `HELPDESK_SYSADMIN_API_KEY` | _(none)_ | The sysadmin agent `--pitr-plan` reads the plan from |
+| `--drill-record` | _(flag only)_ | `false` | Record a restore drill: the gateway checks the clone (read-only on both servers) and stores the record, whatever the verdict. Needs `--drill-source`, `--drill-clone` (registered in the infrastructure config) and `--drill-method` (`pgbackrest`, `snapshot`, `cloud`, `other`). Exits non-zero when the drill was refused or could not be verified: it is recorded but does not count |
+| `--drill-started`, `--drill-finished`, `--drill-duration` | _(flag only)_ | _(none)_ | When the restore ran (RFC3339 with a zone) or how long it took (`1m35s`); the two times win over a duration. The duration is recorded as reported, the size is measured on the clone |
+| `--drill-backup-label`, `--drill-recovery-target`, `--drill-verify-sql`, `--drill-note`, `--drill-supersedes`, `--ticket` | _(flag only)_ | _(none)_ | What was restored, an optional single `SELECT` that must return true on the clone, free text, the earlier drill this one replaces, and the ticket it is recorded under |
+| `--drill-list` | _(flag only)_ | `false` | List recorded drills, newest first; narrow with `--drill-source`, `--drill-status`, `--drill-current` |
 
 ### Using environment variables
 

@@ -50,8 +50,7 @@ var (
 func TestMain(m *testing.M) {
 	tmpDir, err := os.MkdirTemp("", "auditd-integration-*")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "SKIP: failed to create temp dir:", err)
-		os.Exit(0)
+		skipPackage("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -65,8 +64,7 @@ func TestMain(m *testing.M) {
 	for pkg, dest := range bins {
 		bin := filepath.Join(tmpDir, filepath.Base(pkg))
 		if out, err := exec.Command("go", "build", "-o", bin, pkg).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "SKIP: failed to build %s: %v\n%s\n", pkg, err, out)
-			os.Exit(0)
+			skipPackage("failed to build %s: %v\n%s", pkg, err, out)
 		}
 		*dest = bin
 	}
@@ -82,14 +80,12 @@ func TestMain(m *testing.M) {
 	)
 	proc.Stderr = os.Stderr
 	if err := proc.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "SKIP: failed to start auditd:", err)
-		os.Exit(0)
+		skipPackage("failed to start auditd: %v", err)
 	}
 
 	if !waitForReady(auditdAddr+"/health", 10*time.Second) {
 		proc.Process.Kill()
-		fmt.Fprintln(os.Stderr, "SKIP: auditd did not become ready within 10s")
-		os.Exit(0)
+		skipPackage("auditd did not become ready within 10s")
 	}
 
 	// Start a real gateway pointed at the primary auditd instance, so
@@ -112,7 +108,12 @@ func TestMain(m *testing.M) {
 	// config vars explicitly rather than relying on their ambient absence —
 	// appending "KEY=" overrides after os.Environ() is not a safe substitute,
 	// since exec.Cmd does not guarantee "last duplicate wins" behavior.
-	gwProc.Env = append(envWithout(os.Environ(), "HELPDESK_MODEL_VENDOR", "HELPDESK_MODEL_NAME", "HELPDESK_API_KEY"),
+	// The identity settings are stripped for the same reason: a shell that runs a
+	// live stack with HELPDESK_IDENTITY_PROVIDER=static and no users file made this
+	// gateway die reading /etc/helpdesk/users.yaml, and the whole package skipped.
+	gwProc.Env = append(envWithout(os.Environ(), "HELPDESK_MODEL_VENDOR", "HELPDESK_MODEL_NAME", "HELPDESK_API_KEY",
+		"HELPDESK_IDENTITY_PROVIDER", "HELPDESK_USERS_FILE", "HELPDESK_JWT_JWKS_URL", "HELPDESK_JWT_ISSUER",
+		"HELPDESK_JWT_AUDIENCE", "HELPDESK_JWT_ROLES_CLAIM", "HELPDESK_JWT_CACHE_TTL"),
 		"HELPDESK_GATEWAY_ADDR=localhost:19910",
 		"HELPDESK_AGENT_URLS="+stubAgent.URL,
 		"HELPDESK_DISCOVERY_TIMEOUT=5s",
@@ -121,16 +122,14 @@ func TestMain(m *testing.M) {
 	gwProc.Stderr = os.Stderr
 	if err := gwProc.Start(); err != nil {
 		proc.Process.Kill()
-		fmt.Fprintln(os.Stderr, "SKIP: failed to start gateway:", err)
-		os.Exit(0)
+		skipPackage("failed to start gateway: %v", err)
 	}
 	gwReady := waitForReady(gatewayAddr+"/health", 15*time.Second)
 	stubAgent.Close() // discovery only happens once, at gateway startup
 	if !gwReady {
 		gwProc.Process.Kill()
 		proc.Process.Kill()
-		fmt.Fprintln(os.Stderr, "SKIP: gateway did not become ready within 15s")
-		os.Exit(0)
+		skipPackage("gateway did not become ready within 15s")
 	}
 
 	code := m.Run()
@@ -202,6 +201,19 @@ func startAuditdWithPolicy(t *testing.T, policyPath string) {
 // used to guarantee a subprocess does NOT inherit specific ambient
 // environment variables from the parent shell, regardless of what else is
 // appended afterward.
+// skipPackage ends the run when the shared setup cannot be made. Under `make
+// integration` (HELPDESK_REQUIRE_INFRA set) that is a failure: a package that
+// skipped every test must not look like a pass. A bare `go test` skips.
+func skipPackage(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if os.Getenv("HELPDESK_REQUIRE_INFRA") != "" {
+		fmt.Fprintln(os.Stderr, "FAIL: "+msg+" (HELPDESK_REQUIRE_INFRA is set)")
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "SKIP: "+msg)
+	os.Exit(0)
+}
+
 func envWithout(env []string, keys ...string) []string {
 	strip := make(map[string]bool, len(keys))
 	for _, k := range keys {

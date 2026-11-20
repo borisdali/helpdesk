@@ -16,6 +16,9 @@ func rdI(n int64) *int64     { return &n }
 func rdU(n uint64) *uint64   { return &n }
 func rdF(n float64) *float64 { return &n }
 
+// rdUnwrap reads wrapped text as the one line it was before it was wrapped.
+func rdUnwrap(s string) string { return strings.Join(strings.Fields(s), " ") }
+
 func rdAt(m int) time.Time { return time.Date(2026, 11, 4, 14, m, 0, 0, time.UTC) }
 
 func rdObjectivesFixture(digest string) *audit.ObjectivesInForce {
@@ -68,7 +71,7 @@ func TestRDBudget(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rdBudget(tc.o); got != tc.want {
+			if got := rdBudget(tc.o); rdUnwrap(got) != rdUnwrap(tc.want) {
 				t.Errorf("\n got  %q\n want %q", got, tc.want)
 			}
 		})
@@ -104,17 +107,18 @@ func TestFormatRecoveryDecisions_PlanGateAndExecution(t *testing.T) {
 			Approval:   &audit.ApprovalFacts{ApprovedBy: "alice"}, Options: []audit.DecisionOption{rdOptionFixture(true)}}},
 	})
 	t.Log("\n" + out) // shown with -v: how the section reads
+	flat := rdUnwrap(out)
 	for _, want := range []string{
 		"Objectives in force (environment prod), config 0123456789abcdef:",
 		"rpo 15m 00s [environment:prod]", "rto 30m 00s [default]", "availability 99.95% [database]",
 		"preference data_first [environment:prod]", "enforcement acknowledge [environment:prod]",
 		"14:01:00  plan", "14:02:00  gate", "14:03:00  execution",
-		"by alice; acknowledged: data loss, stopping the instance, exceeding the objective",
+		"by alice; acknowledged: data loss, stopping the instance, exceeding an objective if it comes to that",
 		"on alice's approval",
 		"point_in_time_restore (chosen): loss 18h 12m, 16.0 MiB of WAL (live_instance, exact) → exceeds; needed the breach acknowledged",
 		"[time=2026-11-04T01:39:07Z]",
 	} {
-		if !strings.Contains(out, want) {
+		if !strings.Contains(flat, rdUnwrap(want)) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
@@ -306,6 +310,32 @@ func TestFormatRecoveryDecisions_FlagsAConfigChangedBetweenStages(t *testing.T) 
 	}
 }
 
+// The availability budget has its own enforcement. A narrative that printed only the
+// rpo's ("enforcement warn") over a database that refuses on its budget hid the
+// setting that explained the refusal.
+func TestRDObjectives_ShowsTheBudgetsEnforcementWithAnAvailabilityObjective(t *testing.T) {
+	slo := 99.95
+	o := &audit.ObjectivesInForce{
+		AvailabilitySLO: &slo, AvailabilitySource: "database",
+		Enforcement: "warn", EnforcementSource: "database",
+		AvailabilityEnforcement: "refuse", AvailabilityEnforcementSource: "database",
+	}
+	got := strings.Join(rdObjectives(o), "\n")
+	if !strings.Contains(got, "enforcement warn [database]   availability enforcement refuse [database]") {
+		t.Errorf("the budget's enforcement is not shown:\n%s", got)
+	}
+	// With no availability objective there is no budget to enforce: no extra words.
+	o.AvailabilitySLO = nil
+	if got := strings.Join(rdObjectives(o), "\n"); strings.Contains(got, "availability enforcement") {
+		t.Errorf("shown without an availability objective:\n%s", got)
+	}
+	// An old record without the field prints as before.
+	o.AvailabilitySLO, o.AvailabilityEnforcement = &slo, ""
+	if got := strings.Join(rdObjectives(o), "\n"); strings.Contains(got, "availability enforcement") {
+		t.Errorf("shown for a record that has none:\n%s", got)
+	}
+}
+
 func TestFormatRecoveryDecisions_UnsetAndUnreadableObjectives(t *testing.T) {
 	none := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{
 		Stage: "plan", Decision: "planned", Objectives: &audit.ObjectivesInForce{Enforcement: "warn"},
@@ -414,6 +444,232 @@ func TestFormatRecoveryDecisions_OutcomeAgainstTheRTO(t *testing.T) {
 }
 
 // A lower bound is said as one: never labelled exact, and never lost.
+// The section sets what the plan said against what happened, from the figures the
+// events recorded, and says nothing for a figure that was not recorded on both
+// sides on the same basis.
+func TestRDPlanVsActual(t *testing.T) {
+	commits := func(n int, atLeast bool) (string, *int, bool) { return "measured", &n, atLeast }
+	opt := func(chosen bool, loss int64, basis string, n int, atLeast bool, dur int64, durBasis string) audit.DecisionOption {
+		st, c, al := commits(n, atLeast)
+		return audit.DecisionOption{Name: "point_in_time_restore", Chosen: chosen,
+			LossBasis: basis, LossSeconds: rdI(loss), LossCommitsStatus: st, LossCommits: c, LossCommitsAtLeast: al,
+			BudgetDurationSeconds: rdI(dur), BudgetDurationBasis: durBasis}
+	}
+	stage := func(m int, s string, opts ...audit.DecisionOption) narrativeRecoveryDecision {
+		decision := map[string]string{"plan": "planned", "gate": "approved", "execution": "proceeded"}[s]
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: s, Decision: decision, Options: opts}}
+	}
+	outcomeAs := func(m int, decision string, secs *int64) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(m), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: decision, DurationSeconds: secs}}
+	}
+	outcome := func(m int, secs *int64) narrativeRecoveryDecision { return outcomeAs(m, "resolved", secs) }
+
+	plan := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 101, "history_longest"))
+	exec := stage(3, "execution", opt(true, 65, "live_instance", 3, false, 101, "history_longest"))
+
+	got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, stage(2, "gate"), exec, outcome(5, rdI(89))}), "\n")
+	for _, want := range []string{
+		"═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened",
+		"recovery time  planned 1m 41s (the longest past restore (too few for a p90)); took 1m 29s (12s under)",
+		"data loss      planned 20s; at the stop 1m 05s (45s more)",
+		"transactions   planned 0; at the stop 3 (3 more)",
+		"not counted afterwards",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+
+	// The declared rto is an upper bound, and the section says that is what it was.
+	declared := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 1800, "declared_rto"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{declared, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "planned 30m 00s (from the declared rto); took 1m 29s (28m 31s under)") {
+		t.Errorf("declared rto:\n%s", got)
+	}
+	// A plan made from restore drills says the figure was demonstrated on a copy,
+	// so it is never read as this server's own history.
+	for basis, want := range map[string]string{
+		"drill_longest": "planned 1m 41s (the longest restore drill, demonstrated on a copy (too few for a p90)); took 1m 29s (12s under)",
+		"drill_p90":     "planned 1m 41s (the p90 of restore drills, demonstrated on a copy); took 1m 29s (12s under)",
+	} {
+		fromDrills := stage(1, "plan", opt(false, 20, "live_instance", 0, false, 101, basis))
+		got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{fromDrills, outcome(5, rdI(89))}), "\n")
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), want) {
+			t.Errorf("%s:\n%s", basis, got)
+		}
+	}
+	// Slower than planned, and exactly as planned.
+	if got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(150))}), "\n"); !strings.Contains(got, "took 2m 30s (49s over)") {
+		t.Errorf("over:\n%s", got)
+	}
+	if got := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(101))}), "\n"); !strings.Contains(got, "took 1m 41s (as planned)") {
+		t.Errorf("as planned:\n%s", got)
+	}
+
+	// Nothing to compare: no outcome, no plan, an unknown duration.
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{plan, exec}); got != nil {
+		t.Errorf("no outcome: %v", got)
+	}
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{exec, outcome(5, rdI(89))}); got != nil {
+		t.Errorf("no plan: %v", got)
+	}
+	unknown := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, nil)}), "\n")
+	if strings.Contains(unknown, "recovery time") || !strings.Contains(unknown, "data loss") {
+		t.Errorf("unknown duration leaves the loss line only:\n%s", unknown)
+	}
+
+	// The verdict against the rpo is shown as each stage recorded it, and a verdict
+	// that changed is said to have; a stage with no verdict (an older record) shows none.
+	withVerdict := func(o audit.DecisionOption, v string) audit.DecisionOption { o.Verdict = v; return o }
+	flipPlan := stage(1, "plan", withVerdict(opt(false, 20, "live_instance", 0, false, 101, "history_longest"), "within"))
+	flipExec := stage(3, "execution", withVerdict(opt(true, 4000, "live_instance", 3, false, 101, "history_longest"), "exceeds"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{flipPlan, flipExec, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "data loss      planned 20s → within; at the stop 1h 06m → exceeds (1h 06m more; the verdict changed)") {
+		t.Errorf("a verdict that changed:\n%s", got)
+	}
+	same := stage(3, "execution", withVerdict(opt(true, 30, "live_instance", 3, false, 101, "history_longest"), "within"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{flipPlan, same, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(got, "planned 20s → within; at the stop 30s → within (10s more)") || strings.Contains(got, "verdict changed") {
+		t.Errorf("an unchanged verdict:\n%s", got)
+	}
+	oneSided := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, flipExec, outcome(5, rdI(89))}), "\n")
+	if !strings.Contains(oneSided, "planned 20s; at the stop 1h 06m → exceeds (1h 06m more)") || strings.Contains(oneSided, "verdict changed") {
+		t.Errorf("a plan with no recorded verdict:\n%s", oneSided)
+	}
+
+	// A refused restore never stopped anything: no "at the stop", and the outcome's
+	// duration (the time to escalate) is not a restore time.
+	refused := exec
+	refused.Decision.Decision = "refused"
+	if got := rdPlanVsActual([]narrativeRecoveryDecision{plan, refused, outcomeAs(5, "escalated", rdI(12))}); got != nil {
+		t.Errorf("a refused restore was compared: %v", got)
+	}
+	// A restore that ran but did not end resolved has a loss at the stop and no restore time.
+	failed := strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcomeAs(5, "escalated", rdI(300))}), "\n")
+	if strings.Contains(failed, "recovery time") || !strings.Contains(failed, "data loss      planned 20s; at the stop 1m 05s") {
+		t.Errorf("an unresolved restore:\n%s", failed)
+	}
+
+	// A loss measured on a different basis is not compared, and a count that is a
+	// lower bound on either side is not given a difference.
+	archive := stage(1, "plan", opt(false, 20, "archive_end", 4, true, 101, "history_longest"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{archive, exec, outcome(5, rdI(89))}), "\n")
+	if strings.Contains(got, "data loss") {
+		t.Errorf("loss on different bases was compared:\n%s", got)
+	}
+	if !strings.Contains(got, "transactions   planned at least 4; at the stop 3") || strings.Contains(got, "fewer)") || strings.Contains(got, "more)") {
+		t.Errorf("a lower bound is not given a difference:\n%s", got)
+	}
+
+	// The plan is the one made before the execution, not a later diagnostic one.
+	later := stage(9, "plan", opt(false, 999, "live_instance", 99, false, 7, "history_longest"))
+	got = strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(89)), later}), "\n")
+	if strings.Contains(got, "999") || !strings.Contains(got, "planned 20s") {
+		t.Errorf("used a plan made after the execution:\n%s", got)
+	}
+
+	// And it is part of the section, under the downtime caveat.
+	full := formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec, outcome(5, rdI(89))})
+	if strings.Index(full, "PLAN VS ACTUAL") < strings.Index(full, "it is not the downtime") {
+		t.Errorf("plan vs actual should follow the caveat:\n%s", full)
+	}
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{plan, exec}), "PLAN VS ACTUAL") {
+		t.Error("plan vs actual appears with no outcome")
+	}
+}
+
+// The downtime budget row sets what the plan said was left against what the
+// incident was charged: the wait at the gate is in the charge, so a plan that said
+// "within" can end overspent, and that is said as a changed verdict.
+func TestRDPlanVsActual_Budget(t *testing.T) {
+	planOpt := func(verdict string, left int64, pending *int64) audit.DecisionOption {
+		return audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: verdict,
+			BudgetRemainingSeconds: rdI(left), BudgetPendingSeconds: pending}
+	}
+	stages := func(plan audit.DecisionOption, incident *int64) []narrativeRecoveryDecision {
+		return []narrativeRecoveryDecision{
+			{At: rdAt(1), Decision: audit.RecoveryDecision{Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{plan}}},
+			{At: rdAt(3), Decision: audit.RecoveryDecision{Stage: "execution", Decision: "proceeded", Options: []audit.DecisionOption{{Name: "point_in_time_restore", Chosen: true}}}},
+			{At: rdAt(5), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: rdI(90), IncidentSeconds: incident}},
+		}
+	}
+	join := func(ds []narrativeRecoveryDecision) string { return strings.Join(rdPlanVsActual(ds), "\n") }
+
+	// The case found live: 6m 23s left at the plan, an incident that came to 7m 03s.
+	got := join(stages(planOpt("within", 383, nil), rdI(423)))
+	if !strings.Contains(got, "budget         planned 6m 23s left → within; the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed") {
+		t.Errorf("an overspent budget:\n%s", got)
+	}
+	// Within and staying within.
+	got = join(stages(planOpt("within", 1500, nil), rdI(200)))
+	if !strings.Contains(got, "planned 25m 00s left → within; the incident was charged 3m 20s, so 21m 40s left → within") || strings.Contains(got, "verdict changed") {
+		t.Errorf("a budget that held:\n%s", got)
+	}
+	// A plan that took the open incident off already: the ledger's own figure is
+	// what the charge is set against (5m 00s effective + 1m 00s pending = 6m 00s).
+	got = join(stages(planOpt("within", 300, rdI(60)), rdI(400)))
+	if !strings.Contains(got, "planned 6m 00s left → within; the incident was charged 6m 40s, so overspent by 40s → exceeds") {
+		t.Errorf("a plan with a pending incident:\n%s", got)
+	}
+	// "may exceed" that came to fit is not a changed verdict; one that did not is.
+	if got := join(stages(planOpt("may_exceed", 100, nil), rdI(50))); strings.Contains(got, "verdict changed") {
+		t.Errorf("may_exceed that fit:\n%s", got)
+	}
+	if got := join(stages(planOpt("may_exceed", 100, nil), rdI(150))); !strings.Contains(got, "verdict changed") {
+		t.Errorf("may_exceed that did not:\n%s", got)
+	}
+	// Nothing to set against: no incident length, no verdict (no SLO).
+	if got := join(stages(planOpt("within", 383, nil), nil)); strings.Contains(got, "budget  ") {
+		t.Errorf("a budget row with no incident length:\n%s", got)
+	}
+	if got := join(stages(planOpt("no_objective", 383, nil), rdI(423))); strings.Contains(got, "budget  ") {
+		t.Errorf("a budget row with no objective:\n%s", got)
+	}
+	// The open incident the verdict took off is said in the option.
+	opt := rdOption(audit.DecisionOption{Name: "point_in_time_restore", BudgetVerdict: "exceeds", BudgetRemainingSeconds: rdI(-40), BudgetPendingSeconds: rdI(423)})
+	if !strings.Contains(opt, "(-40s left after the 7m 03s the open incident had used, charged when the restore runs)") {
+		t.Errorf("pending incident in the option: %s", opt)
+	}
+}
+
+// The gate line carries the ticket the approval was given under, and the
+// approver's justification sits under it as their own words.
+func TestFormatRecoveryDecisions_GateShowsTicketAndJustification(t *testing.T) {
+	gate := func(a audit.ApprovalFacts) narrativeRecoveryDecision {
+		return narrativeRecoveryDecision{At: rdAt(2), Decision: audit.RecoveryDecision{
+			Stage: "gate", Decision: "approved", DecidedBy: "alice", Approval: &a}}
+	}
+	const why = "batch corrupted the ledger; the on-call lead accepted the loss on the incident call at 14:10"
+	got := formatRecoveryDecisions([]narrativeRecoveryDecision{gate(audit.ApprovalFacts{
+		AcknowledgedDataLoss: true, AcknowledgedBreach: true, Justification: why, Ticket: "INC-1234"})})
+	for _, want := range []string{
+		"by alice; acknowledged: data loss, exceeding an objective if it comes to that; ticket INC-1234",
+		"justification (the approver's words): batch corrupted the ledger;",
+		"incident call at 14:10",
+	} {
+		// The gate line wraps, so it is read as one line.
+		if !strings.Contains(rdUnwrap(got), rdUnwrap(want)) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(strings.Join(strings.Fields(got), " "), "the on-call lead accepted the loss on the incident call at 14:10") {
+		t.Errorf("the justification was cut:\n%s", got)
+	}
+
+	// With neither, the gate line is what it was.
+	plain := formatRecoveryDecisions([]narrativeRecoveryDecision{gate(audit.ApprovalFacts{AcknowledgedDataLoss: true})})
+	if strings.Contains(plain, "ticket") || strings.Contains(plain, "justification") {
+		t.Errorf("a ticket or justification is shown when none was given:\n%s", plain)
+	}
+	// A justification is shown on the gate stage only: an execution event that
+	// happens to carry one does not repeat it.
+	exec := narrativeRecoveryDecision{At: rdAt(3), Decision: audit.RecoveryDecision{
+		Stage: "execution", Decision: "proceeded", Approval: &audit.ApprovalFacts{Justification: why}}}
+	if strings.Contains(formatRecoveryDecisions([]narrativeRecoveryDecision{exec}), "justification") {
+		t.Error("the justification is repeated on the execution stage")
+	}
+}
+
 func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
 	render := func(opt audit.DecisionOption) string {
 		return formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{
@@ -421,6 +677,7 @@ func TestFormatRecoveryDecisions_ALowerBoundIsSaidAsOne(t *testing.T) {
 	}
 	withBytes := render(audit.DecisionOption{Name: "point_in_time_restore", LossBasis: "live_instance", LossBytes: rdU(448 << 20),
 		LossAtLeastSeconds: rdI(16*86400 + 13*3600 + 28*60), Verdict: "exceeds", Gate: "refuse"})
+	withBytes = rdUnwrap(withBytes)
 	for _, want := range []string{"loss 448.0 MiB of WAL (live_instance, exact); at least 16d 13h 28m of history", "→ exceeds", "enforcement refuses it"} {
 		if !strings.Contains(withBytes, want) {
 			t.Errorf("missing %q in:\n%s", want, withBytes)
@@ -518,5 +775,101 @@ func TestIncidentNarrative_DecodesRecoveryDecisionsFromTheGateway(t *testing.T) 
 	out := formatRecoveryDecisions(n.RecoveryDecisions)
 	if !strings.Contains(out, "refused") || !strings.Contains(out, "rpo 15m 00s [environment:prod]") {
 		t.Errorf("rendered:\n%s", out)
+	}
+}
+
+// A duration is never split across lines, and a long stage line continues under
+// its own text.
+func TestRDWrap_KeepsDurationsWhole(t *testing.T) {
+	got := rdWrap("took 1m 29s (3s under) and then 11m 55s the open incident had used, 1h 06m more", 20, "  ")
+	for _, bad := range []string{"1m\n", "11m\n", "1h\n"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("a duration was split (%q):\n%s", bad, got)
+		}
+	}
+	if rdUnwrap(got) != "took 1m 29s (3s under) and then 11m 55s the open incident had used, 1h 06m more" {
+		t.Errorf("text changed:\n%s", got)
+	}
+
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(2), Decision: audit.RecoveryDecision{
+		Stage: "gate", Decision: "approved", DecidedBy: "alice@example.com", RecoveryTarget: "time=2026-11-18T02:49:55Z",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, AcknowledgedBreach: true, Ticket: "INC-1239"}}}})
+	for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if len([]rune(l)) > 29+1+80 {
+			t.Errorf("stage line too wide (%d): %q", len([]rune(l)), l)
+		}
+	}
+	if !strings.Contains(out, "\n                              ") {
+		t.Errorf("no continuation under the text:\n%s", out)
+	}
+}
+
+func TestRDWrap_EdgeCases(t *testing.T) {
+	// A word longer than the width is kept whole on a line of its own.
+	long := strings.Repeat("x", 30)
+	if got := rdWrap("a "+long+" b", 10, "  "); got != "a\n  "+long+"\n  b" {
+		t.Errorf("long word: %q", got)
+	}
+	// A unit followed by a number with no unit of its own is not a duration.
+	if got := rdWrap("after 5m 12 commits", 4, ""); got != "after\n5m\n12\ncommits" {
+		t.Errorf("a number that is not a duration was glued: %q", got)
+	}
+	// Three-part spans and a span with trailing punctuation stay whole.
+	if got := rdWrap("lost 16d 13h 28m, then", 12, ""); got != "lost\n16d 13h 28m,\nthen" {
+		t.Errorf("a long span was split: %q", got)
+	}
+	// Nothing, and only spaces.
+	if rdWrap("", 10, "  ") != "" || rdWrap("   ", 10, "  ") != "" {
+		t.Error("empty text is not empty")
+	}
+
+	// An event with no time is stamped "–", one column narrower than a time; the
+	// continuation still sits under the text.
+	out := formatRecoveryDecisions([]narrativeRecoveryDecision{{Decision: audit.RecoveryDecision{
+		Stage: "gate", Decision: "approved", DecidedBy: "alice@example.com",
+		Approval: &audit.ApprovalFacts{ApprovedBy: "alice", AcknowledgedDataLoss: true, AllowedStopServing: true, AcknowledgedBreach: true, Ticket: "INC-1239"}}}})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "      –  gate") {
+		t.Fatalf("unexpected rendering:\n%s", out)
+	}
+	textCol := len([]rune("      –  gate      approved ")) // the text starts after this and a space
+	if want := strings.Repeat(" ", textCol+1); !strings.HasPrefix(lines[1], want) || strings.TrimSpace(lines[1][len(want)-1:]) == "" {
+		t.Errorf("continuation is not under the text:\n%s", out)
+	}
+}
+
+// A long row continues under its own text, never back under the label.
+func TestRDPlanVsActual_RowsWrapUnderTheText(t *testing.T) {
+	ds := []narrativeRecoveryDecision{
+		{At: rdAt(1), Decision: audit.RecoveryDecision{Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{{
+			Name: "point_in_time_restore", BudgetVerdict: "within", BudgetRemainingSeconds: rdI(287)}}}},
+		{At: rdAt(3), Decision: audit.RecoveryDecision{Stage: "execution", Decision: "proceeded", Options: []audit.DecisionOption{{Name: "point_in_time_restore", Chosen: true}}}},
+		{At: rdAt(5), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: rdI(89), IncidentSeconds: rdI(798)}},
+	}
+	var lines []string
+	for _, l := range rdWrapRows(rdPlanVsActual(ds)) {
+		lines = append(lines, strings.Split(l, "\n")...)
+	}
+	rows := 0
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "  budget         ") {
+			continue
+		}
+		rows++
+		if len(l) > 17+70 {
+			t.Errorf("row too wide (%d): %q", len(l), l)
+		}
+		next := lines[i+1]
+		if !strings.HasPrefix(next, strings.Repeat(" ", 17)) || strings.TrimSpace(next) == "" {
+			t.Errorf("continuation is not under the text: %q", next)
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("budget rows = %d:\n%s", rows, strings.Join(lines, "\n"))
+	}
+	// The footnote and the header are not touched.
+	out := strings.Join(lines, "\n")
+	if !strings.Contains(out, "\n                 \"at the stop\" is measured") || !strings.Contains(out, "\n                 instance; what was discarded is not counted afterwards") || !strings.Contains(out, "  ═══ PLAN VS ACTUAL ═══  the plan of 14:01:00 against what happened") {
+		t.Errorf("header or footnote changed:\n%s", out)
 	}
 }

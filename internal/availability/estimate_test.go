@@ -278,7 +278,7 @@ func TestClient_RecoveryEstimateAsksForRealRunsOfTheDatabaseOverTheWindow(t *tes
 	srv := aud.serve(t)
 	c := &Client{URL: srv.URL, APIKey: "svc-key"}
 
-	e, err := c.RecoveryEstimate(context.Background(), "prod-orders", []string{restoreSeries}, rto(25*time.Minute), now)
+	e, err := c.RecoveryEstimate(context.Background(), "prod-orders", []string{restoreSeries}, rto(25*time.Minute), now, DrillInputs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,12 +299,12 @@ func TestClient_RecoveryEstimateAsksForRealRunsOfTheDatabaseOverTheWindow(t *tes
 }
 
 func TestClient_RecoveryEstimateErrors(t *testing.T) {
-	if _, err := (&Client{}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now); err == nil {
+	if _, err := (&Client{}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now, DrillInputs{}); err == nil {
 		t.Error("no audit service: no error, an estimate would read as no history")
 	}
 	bad := &recordingAuditd{status: 500}
 	srv := bad.serve(t)
-	if _, err := (&Client{URL: srv.URL}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now); err == nil {
+	if _, err := (&Client{URL: srv.URL}).RecoveryEstimate(context.Background(), "x", RestoreSeries, nil, now, DrillInputs{}); err == nil {
 		t.Error("an auditd failure read as an estimate")
 	}
 }

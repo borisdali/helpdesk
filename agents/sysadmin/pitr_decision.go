@@ -84,12 +84,22 @@ func objectivesSnapshot(target string) *audit.ObjectivesInForce {
 func pitrOption(est *DataLossEstimate, budget *availability.BudgetVerdict, chosen bool) audit.DecisionOption {
 	o := audit.DecisionOption{Name: pitrOptionName, Chosen: chosen}
 	if budget != nil {
-		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.RemainingSeconds
+		// What was left for the restore: the ledger's figure less the open incident
+		// that is charged when it runs, which is the number the verdict was made on.
+		o.BudgetVerdict, o.BudgetVerdictDetail, o.BudgetGate, o.BudgetRemainingSeconds = budget.Status, budget.Detail, budget.Gate, budget.LeftSeconds()
+		o.BudgetPendingSeconds = budget.PendingSeconds
 		o.BudgetDurationSeconds, o.BudgetDurationBasis = budget.DurationSeconds, budget.DurationBasis
 		if e := budget.RecoveryEstimate; e != nil {
 			n := e.Samples
 			o.EstimateStatus, o.EstimateVsRTO, o.EstimateOverRTO = e.Status, e.VsRTO, e.OverRTO
 			o.EstimateSamples, o.EstimateP50Seconds, o.EstimateP90Seconds, o.EstimateMaxSeconds = &n, e.P50Seconds, e.P90Seconds, e.MaxSeconds
+			// When the plan rests on drills, which ones: the figure is traceable to
+			// the records it came from.
+			o.PlanningSource = e.PlanningSource
+			if e.PlanningSource == availability.PlanningFromDrills && e.Drills != nil {
+				ds := e.Drills.Samples
+				o.DrillSamples, o.DrillIDs = &ds, e.Drills.DrillIDs
+			}
 		}
 	}
 	if est == nil {

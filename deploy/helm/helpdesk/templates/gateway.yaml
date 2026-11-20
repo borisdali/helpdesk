@@ -74,6 +74,10 @@ spec:
             - name: HELPDESK_AUTO_INCIDENT_BUNDLE
               value: "true"
             {{- end }}
+            {{- if .Values.gateway.requireBreachJustification }}
+            - name: HELPDESK_REQUIRE_BREACH_JUSTIFICATION
+              value: "true"
+            {{- end }}
             {{- if .Values.gateway.baseURL }}
             - name: HELPDESK_BASE_URL
               value: {{ .Values.gateway.baseURL | quote }}

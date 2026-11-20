@@ -47,7 +47,7 @@ func TestRecordRecoveryGateDecision_Approved(t *testing.T) {
 	ap, status, msg := recoveryApprovalFromGate(ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef",
 		AcknowledgeDataLoss: true, AllowStopServing: true, AcknowledgeObjectiveBreach: true,
-	}, run.RecoveryTarget, "alice")
+	}, run.RecoveryTarget, "alice", false)
 	if status != 0 {
 		t.Fatalf("%d %s", status, msg)
 	}
@@ -80,7 +80,7 @@ func TestRecordRecoveryGateDecision_ApprovalThatAcknowledgedLess(t *testing.T) {
 	run := &audit.PlaybookRun{RunID: "plr_gate_rec02", RecoveryTarget: "time=2026-10-27T14:05:00Z"}
 	ap, _, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
-	}, "", "bob")
+	}, "", "bob", false)
 	g.recordRecoveryGateDecision(context.Background(), run, ap, "bob", "")
 	d := gateDecisions(t, store, run.RunID)[0]
 	if a := d.Approval; a == nil || !a.AcknowledgedDataLoss || a.AllowedStopServing || a.AcknowledgedBreach {
@@ -110,7 +110,7 @@ func TestRecordRecoveryGateDecision_NeverRecordsAPassword(t *testing.T) {
 	}
 	ap, _, _ := recoveryApprovalFromGate(ProceedEscalationRequest{
 		RecoveryTarget: &RecoveryTargetSpec{"time", "2026-10-27T14:05:00Z"}, PlanDigest: "0123456789abcdef", AcknowledgeDataLoss: true,
-	}, "", "alice")
+	}, "", "alice", false)
 	g.recordRecoveryGateDecision(context.Background(), run, ap, "alice", "")
 	g.recordRecoveryGateDecision(context.Background(), run, nil, "alice", "could not reach password=testpass")
 

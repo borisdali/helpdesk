@@ -94,6 +94,8 @@ type ProceedEscalationRequest struct {
 	// AcknowledgeObjectiveBreach is set when the plan says approving it needs
 	// the acknowledgement (the database's enforcement is acknowledge).
 	AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
+	// Ticket is the incident or change reference recorded with the approval.
+	Ticket string `json:"ticket,omitempty"`
 }
 
 // ApproveRunStep describes a single pending step in an agent_approve run.

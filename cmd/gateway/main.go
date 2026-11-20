@@ -101,6 +101,10 @@ func main() {
 	gw.SetIdentityProvider(idProvider)
 	gw.SetUsersFile(os.Getenv("HELPDESK_USERS_FILE"))
 	gw.SetOperatingMode(os.Getenv("HELPDESK_OPERATING_MODE"))
+	if v := os.Getenv("HELPDESK_REQUIRE_BREACH_JUSTIFICATION"); v == "true" || v == "1" {
+		gw.SetRequireBreachJustification(true)
+		slog.Info("approvals that acknowledge an objective breach must carry a justification")
+	}
 	slog.Info("identity provider initialized", "mode", os.Getenv("HELPDESK_IDENTITY_PROVIDER"))
 
 	// Build central authorizer. Enforcement is active when a real identity

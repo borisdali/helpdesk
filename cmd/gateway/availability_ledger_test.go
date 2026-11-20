@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"helpdesk/internal/audit"
 	"helpdesk/internal/availability"
 	"helpdesk/internal/infra"
 )
@@ -22,6 +23,10 @@ type ledgerAuditd struct {
 	loose      string // JSON of the unattributed incidents
 	status     int    // non-zero: answer with this instead
 	looseFails bool   // only the unattributed query fails
+	events     string // JSON of the recovery decisions the tickets are read from; none when empty
+	eventsFail bool   // the events read fails
+	drills     string // JSON of the restore drills; none when empty
+	drillsFail bool   // the drills read fails
 }
 
 func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
@@ -30,6 +35,32 @@ func (a *ledgerAuditd) server(t *testing.T) *httptest.Server {
 		a.mu.Lock()
 		a.queries = append(a.queries, r.URL.Query())
 		a.mu.Unlock()
+		if r.URL.Path == "/v1/drills" {
+			if a.drillsFail {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if a.drills == "" {
+				w.Write([]byte(`[]`)) //nolint:errcheck
+				return
+			}
+			w.Write([]byte(a.drills)) //nolint:errcheck
+			return
+		}
+		if r.URL.Path == "/v1/events" {
+			if a.eventsFail {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if a.events == "" {
+				w.Write([]byte(`[]`)) //nolint:errcheck
+				return
+			}
+			w.Write([]byte(a.events)) //nolint:errcheck
+			return
+		}
 		if r.URL.Path != "/v1/incidents" {
 			http.NotFound(w, r)
 			return
@@ -140,16 +171,27 @@ func TestAvailabilityLedger_AsksAuditdForTheRightIncidents(t *testing.T) {
 	if rec, _ := getLedger(t, gw, "?database=prod-orders"); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
-	if len(aud.queries) != 2 {
+	// Two reads of incidents, one of the approvals' tickets, and one of the drills.
+	if len(aud.queries) != 4 {
 		t.Fatalf("auditd was asked %d times: %v", len(aud.queries), aud.queries)
 	}
-	var mine, loose url.Values
+	var mine, loose, events url.Values
 	for _, q := range aud.queries {
-		if q.Get("unattributed") == "true" {
+		switch {
+		case q.Get("source") != "": // the drills read, tested on its own below
+			if q.Get("source") != "prod-orders" {
+				t.Errorf("drills were asked for %q", q.Get("source"))
+			}
+		case q.Get("unattributed") == "true":
 			loose = q
-		} else {
+		case q.Get("event_type") != "":
+			events = q
+		default:
 			mine = q
 		}
+	}
+	if events.Get("event_type") != "recovery_decision" || events.Get("since") == "" {
+		t.Errorf("the tickets query = %v", events)
 	}
 	if mine.Get("target_key") != "prod-orders" || mine.Get("origin") != "real" || mine.Get("include") != "series" || mine.Get("limit") != "200" {
 		t.Errorf("the database's query = %v", mine)
@@ -262,8 +304,158 @@ func TestAvailabilityLedger_SendsTheAuditKey(t *testing.T) {
 	if rec, _ := getLedger(t, &Gateway{auditURL: srv.URL, auditAPIKey: "svc-key", infra: ledgerInfra()}, "?database=prod-orders"); rec.Code != http.StatusOK {
 		t.Fatal(rec.Body.String())
 	}
-	if len(got) != 2 || got[0] != "Bearer svc-key" || got[1] != "Bearer svc-key" {
-		t.Errorf("authorization headers = %v", got)
+	// Both incident reads, the tickets read and the drills read.
+	if len(got) != 4 {
+		t.Fatalf("authorization headers = %v", got)
+	}
+	for i, h := range got {
+		if h != "Bearer svc-key" {
+			t.Errorf("request %d authorization = %q", i, h)
+		}
+	}
+}
+
+func drillJSON(t *testing.T, daysAgo int, status string) string {
+	t.Helper()
+	fin := time.Now().UTC().Add(-time.Duration(daysAgo) * 24 * time.Hour)
+	d := audit.DrillRecord{DrillID: "drl_t" + status, SourceKey: "prod-orders", CloneKey: "c", SourceSystemID: "7001", CloneSystemID: "7001",
+		Method: audit.DrillMethodPgBackRest, Status: status, FinishedAt: fin, RecordedAt: fin, DurationSeconds: 60}
+	b, err := json.Marshal([]audit.DrillRecord{d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestAvailabilityLedger_SaysWhetherADrillIsDue(t *testing.T) {
+	ledgerWith := func(aud *ledgerAuditd, database string) availability.Ledger {
+		aud.mine, aud.loose = `{"incidents": []}`, `{"incidents": [], "count": 0}`
+		srv := aud.server(t)
+		rec, l := getLedger(t, &Gateway{auditURL: srv.URL, infra: ledgerInfra()}, "?database="+database)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		return l
+	}
+	// An overdue drill, a current one, and none at all.
+	over := ledgerWith(&ledgerAuditd{drills: drillJSON(t, 143, audit.DrillVerified)}, "prod-orders")
+	if d := over.DrillCurrency; d == nil || d.State != availability.DrillOverdue || !d.Overdue || *d.AgeDays != 143 || d.LimitDays != 90 {
+		t.Errorf("overdue: %+v", d)
+	}
+	cur := ledgerWith(&ledgerAuditd{drills: drillJSON(t, 12, audit.DrillVerified)}, "prod-orders")
+	if d := cur.DrillCurrency; d == nil || d.State != availability.DrillCurrent || d.Overdue {
+		t.Errorf("current: %+v", d)
+	}
+	never := ledgerWith(&ledgerAuditd{}, "prod-orders")
+	if d := never.DrillCurrency; d == nil || d.State != availability.DrillNever || !d.Overdue {
+		t.Errorf("never: %+v", d)
+	}
+	// A refused drill does not count, and is named.
+	refused := ledgerWith(&ledgerAuditd{drills: drillJSON(t, 2, audit.DrillRefused)}, "prod-orders")
+	if d := refused.DrillCurrency; d == nil || d.State != availability.DrillNever || d.LastAttempt == nil || !strings.Contains(d.Detail, "refused") {
+		t.Errorf("refused: %+v", d)
+	}
+	// Unreadable drills are not "never drilled".
+	broken := ledgerWith(&ledgerAuditd{drillsFail: true}, "prod-orders")
+	if d := broken.DrillCurrency; d == nil || d.State != availability.DrillUnreadable || d.Overdue {
+		t.Errorf("unreadable: %+v", d)
+	}
+	// A database with no objective is not reminded, and auditd is not asked about its drills.
+	aud := &ledgerAuditd{}
+	noObjective := ledgerWith(aud, "scratch")
+	if noObjective.DrillCurrency != nil {
+		t.Errorf("a database with no objective: %+v", noObjective.DrillCurrency)
+	}
+	for _, q := range aud.queries {
+		if q.Get("source") != "" {
+			t.Errorf("drills were read for a database with no reminder: %v", q)
+		}
+	}
+}
+
+// The interval is the database's own setting: a shorter one goes overdue sooner and
+// is reported with its own limit, and "0d" turns the reminder off without asking
+// auditd for drills.
+func TestAvailabilityLedger_TheDrillIntervalComesFromTheConfig(t *testing.T) {
+	cfg := ledgerInfra()
+	days := func(n int) *infra.Duration { return &infra.Duration{Duration: time.Duration(n) * 24 * time.Hour} }
+	cfg.DBServers["monthly"] = infra.DBServer{Name: "monthly", ConnectionString: "host=db4.example.com port=5432 dbname=m", Environment: "prod",
+		Objectives: &infra.Objectives{DrillInterval: days(30)}}
+	cfg.DBServers["quiet"] = infra.DBServer{Name: "quiet", ConnectionString: "host=db5.example.com port=5432 dbname=q", Environment: "prod",
+		Objectives: &infra.Objectives{DrillInterval: days(0)}}
+	drillOf := func(db string, ago int) string {
+		return strings.ReplaceAll(drillJSON(t, ago, audit.DrillVerified), `"prod-orders"`, `"`+db+`"`)
+	}
+	ledger := func(aud *ledgerAuditd, db string) availability.Ledger {
+		aud.mine, aud.loose = `{"incidents": []}`, `{"incidents": [], "count": 0}`
+		rec, l := getLedger(t, &Gateway{auditURL: aud.server(t).URL, infra: cfg}, "?database="+db)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d %s", rec.Code, rec.Body.String())
+		}
+		return l
+	}
+	// 29 days against a limit of 30 is current; 31 is overdue; the default 90 would call both current.
+	cur := ledger(&ledgerAuditd{drills: drillOf("monthly", 29)}, "monthly")
+	if d := cur.DrillCurrency; d == nil || d.State != availability.DrillCurrent || d.LimitDays != 30 || d.Source != infra.SourceDatabase {
+		t.Errorf("29 days: %+v", d)
+	}
+	over := ledger(&ledgerAuditd{drills: drillOf("monthly", 31)}, "monthly")
+	if d := over.DrillCurrency; d == nil || d.State != availability.DrillOverdue || d.LimitDays != 30 || !strings.Contains(d.Detail, "limit 30 days") {
+		t.Errorf("31 days: %+v", d)
+	}
+	// Off: said, not overdue, and no drills read.
+	aud := &ledgerAuditd{drills: drillOf("quiet", 400)}
+	off := ledger(aud, "quiet")
+	if d := off.DrillCurrency; d == nil || d.State != availability.DrillReminderOff || d.Overdue {
+		t.Errorf("off: %+v", d)
+	}
+	for _, q := range aud.queries {
+		if q.Get("source") != "" {
+			t.Errorf("drills were read for a database whose reminder is off: %v", q)
+		}
+	}
+}
+
+// The reminder is beside the budget: it does not touch its figures.
+func TestAvailabilityLedger_TheDrillReminderLeavesTheBudgetAlone(t *testing.T) {
+	get := func(drills string) availability.Ledger {
+		aud := &ledgerAuditd{mine: `{"incidents": []}`, loose: `{"incidents": [], "count": 0}`, drills: drills}
+		_, l := getLedger(t, &Gateway{auditURL: aud.server(t).URL, infra: ledgerInfra()}, "?database=prod-orders")
+		return l
+	}
+	a, b := get(""), get(drillJSON(t, 400, audit.DrillVerified))
+	a.DrillCurrency, b.DrillCurrency, a.AsOf, b.AsOf, a.WindowStart, b.WindowStart = nil, nil, time.Time{}, time.Time{}, time.Time{}, time.Time{}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	if string(ja) != string(jb) {
+		t.Errorf("the ledger changed with the drills:\n%s\n%s", ja, jb)
+	}
+}
+
+// The ticket a restore was approved under is on its incident's entry; a failure
+// to read the tickets leaves the ledger as it is, without them.
+func TestAvailabilityLedger_AttachesTheTicketOfTheApproval(t *testing.T) {
+	mine := `{"count": 1, "incidents": [
+	  {"incident_id": "inc_restore", "entry_run_id": "plr_gate1", "origin": "real", "status": "resolved",
+	   "series_ids": ["pbs_pgbackrest_pitr_triage", "pbs_pgbackrest_pitr_remediate"],
+	   "detected_at": "` + hoursAgo(5) + `", "resolved_at": "` + hoursAgo(5-0.25) + `"}]}`
+	events := `[{"event_type": "recovery_decision", "recovery_decision": {"stage": "gate", "decision": "approved", "run_id": "plr_gate1",
+	   "approval": {"approved_by": "alice", "ticket": "INC-1239"}}}]`
+	loose := `{"incidents": [], "count": 0}`
+
+	aud := &ledgerAuditd{mine: mine, loose: loose, events: events}
+	srv := aud.server(t)
+	rec, l := getLedger(t, &Gateway{auditURL: srv.URL, infra: ledgerInfra()}, "?database=prod-orders")
+	if rec.Code != http.StatusOK || len(l.Charged) != 1 || l.Charged[0].Ticket != "INC-1239" || l.Charged[0].EntryRunID != "plr_gate1" {
+		t.Fatalf("%d charged = %+v", rec.Code, l.Charged)
+	}
+
+	// The tickets are a label: when they cannot be read the ledger is still served.
+	bad := &ledgerAuditd{mine: mine, loose: loose, eventsFail: true}
+	srv2 := bad.server(t)
+	rec, l = getLedger(t, &Gateway{auditURL: srv2.URL, infra: ledgerInfra()}, "?database=prod-orders")
+	if rec.Code != http.StatusOK || len(l.Charged) != 1 || l.Charged[0].Ticket != "" || l.ChargedSeconds != 900 {
+		t.Errorf("without the tickets: %d charged = %+v, %ds", rec.Code, l.Charged, l.ChargedSeconds)
 	}
 }
 

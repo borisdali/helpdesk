@@ -611,7 +611,7 @@ func TestAvailabilityClient_EstimateReadsTheRealHandlerOverHTTP(t *testing.T) {
 	defer ts.Close()
 
 	rto := 30 * time.Minute
-	e, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-orders", availability.RestoreSeries, &rto, now)
+	e, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-orders", availability.RestoreSeries, &rto, now, availability.DrillInputs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,11 +629,11 @@ func TestAvailabilityClient_EstimateReadsTheRealHandlerOverHTTP(t *testing.T) {
 		t.Errorf("vs rto = %q over %v", e.VsRTO, e.OverRTO)
 	}
 	// Another database has its own history, and its own too little of it.
-	other, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-other", availability.RestoreSeries, nil, now)
+	other, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "prod-other", availability.RestoreSeries, nil, now, availability.DrillInputs{})
 	if err != nil || other.Status != availability.EstimateTooFew || other.Samples != 1 {
 		t.Errorf("prod-other = %+v, %v", other, err)
 	}
-	none, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "no-such-db", availability.RestoreSeries, nil, now)
+	none, err := (&availability.Client{URL: ts.URL}).RecoveryEstimate(ctx, "no-such-db", availability.RestoreSeries, nil, now, availability.DrillInputs{})
 	if err != nil || none.Status != availability.EstimateNone {
 		t.Errorf("an unknown database = %+v, %v", none, err)
 	}

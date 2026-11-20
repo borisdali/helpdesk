@@ -296,7 +296,7 @@ func restoreToPITImpl(ctx context.Context, args RestoreToPITArgs) (namedResult R
 	// And what it costs in downtime, read now for the same reason: the ledger
 	// moves while a plan waits. A serving instance is what this restore takes
 	// down; one that is already down is accruing the downtime anyway.
-	result.AvailabilityBudget = budgetCheckFor(ctx, args.Target, live)
+	result.AvailabilityBudget = budgetCheckForRestore(ctx, args.Target, live, plan.BackupDatabaseBytes)
 	var rpo *RPOComparison
 	if result.DataLoss != nil {
 		rpo = result.DataLoss.Objective

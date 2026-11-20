@@ -108,6 +108,25 @@ func TestBudgetCheckFor_ReadsTheLedgerOfTheDatabaseTheRestoreRunsOn(t *testing.T
 	}
 }
 
+// The verdict the plan carries says what waiting costs, from the same ledger and
+// the same planned duration the verdict was made with.
+func TestBudgetCheckFor_CarriesTheCostOfWaiting(t *testing.T) {
+	withLedger(t, 20*time.Minute, nil) // 23m12s left; the rto of 30m is what the restore is taken to need
+	budgetObjectives(t, "", "acknowledge")
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	if v.Delay == nil || v.Delay.State != availability.DelayProjectedBreach || !strings.Contains(v.Delay.Detail, "projected budget breach") {
+		t.Fatalf("delay = %+v", v.Delay)
+	}
+	if v.Delay.SlackSeconds == nil || *v.Delay.SlackSeconds != 2592-1200-1800 {
+		t.Errorf("slack = %v", v.Delay.SlackSeconds)
+	}
+	// With no SLO there is no budget, so nothing is said about waiting.
+	objectiveInfra(t, "15m", nil)
+	if v := budgetCheckFor(context.Background(), "pgbackrest_db", true); v.Delay != nil {
+		t.Errorf("a database with no budget has a cost of waiting: %+v", v.Delay)
+	}
+}
+
 func TestBudgetCheckFor_ServingDecidesWhetherARefuseRefuses(t *testing.T) {
 	withLedger(t, 50*time.Minute, nil) // spent: the budget is gone
 	budgetObjectives(t, "", "refuse")
@@ -191,15 +210,22 @@ func TestBudgetCheckFor_ReadsTheLedgerThroughTheRealClient(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	// The history of past restores, the database's incidents with their series, and
-	// the count of incidents no database could be found for.
-	if len(queries) != 3 {
+	// The history of past restores, the restore drills, the database's incidents
+	// with their series, and the count of incidents no database could be found for.
+	if len(queries) != 4 {
 		t.Fatalf("auditd was asked %d times: %v", len(queries), queries)
 	}
-	history := 0
+	history, drills := 0, 0
 	for i, q := range queries {
 		if auth[i] != "Bearer svc-key" {
 			t.Errorf("request %d authorization = %q", i, auth[i])
+		}
+		if q.Get("source") != "" { // the drills read names the database as its source
+			drills++
+			if q.Get("source") != "pgbackrest_db" {
+				t.Errorf("drills were asked for %q, not the resolved database key", q.Get("source"))
+			}
+			continue
 		}
 		if q.Get("unattributed") != "true" && q.Get("target_key") != "pgbackrest_db" {
 			t.Errorf("auditd was asked for %q, not the resolved database key", q.Get("target_key"))
@@ -208,8 +234,49 @@ func TestBudgetCheckFor_ReadsTheLedgerThroughTheRealClient(t *testing.T) {
 			history++
 		}
 	}
-	if history != 1 {
-		t.Errorf("the history of past restores was asked for %d times, want once", history)
+	if history != 1 || drills != 1 {
+		t.Errorf("the history of past restores was asked for %d times and the drills %d times, want once each", history, drills)
+	}
+}
+
+// What waiting costs is worked out from what the real client reads: an open triage
+// waiting at the gate comes through the listing as an incident that is not charged
+// yet, and its age (not its absence from the ledger) is taken off the margin.
+func TestBudgetCheckFor_CostOfWaitingFromAnOpenTriageThroughTheRealClient(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	listing := audit.IncidentListing{Count: 2, Incidents: []audit.IncidentWithSeries{
+		{Incident: &audit.Incident{IncidentID: "inc_spent", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusResolved, TargetKey: "pgbackrest_db",
+			DetectedAt: now.Add(-3 * time.Hour), ResolvedAt: now.Add(-3*time.Hour + 20*time.Minute)},
+			SeriesIDs: []string{"pbs_pgbackrest_restore_remediate"}},
+		{Incident: &audit.Incident{IncidentID: "inc_pitr_open", Origin: audit.IncidentOriginReal, Status: audit.IncidentStatusOpen, TargetKey: "pgbackrest_db",
+			DetectedAt: now.Add(-5 * time.Minute)},
+			SeriesIDs: []string{"pbs_pgbackrest_pitr_triage"}},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		out := listing
+		if r.URL.Query().Get("unattributed") == "true" {
+			out = audit.IncidentListing{Incidents: []audit.IncidentWithSeries{}}
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+	oldClient, oldFn := ledgerClient, budgetLedgerFn
+	t.Cleanup(func() { ledgerClient, budgetLedgerFn = oldClient, oldFn })
+	ledgerClient, budgetLedgerFn = &availability.Client{URL: srv.URL, APIKey: "svc-key"}, readLedger
+	budgetObjectives(t, "", "acknowledge")
+
+	v := budgetCheckFor(context.Background(), "pgbackrest_db", true)
+	// What is left is the ledger's own: the open triage is not charged.
+	if v.RemainingSeconds == nil || *v.RemainingSeconds != 2592-1200 {
+		t.Fatalf("remaining = %v", v.RemainingSeconds)
+	}
+	d := v.Delay
+	if d == nil || d.Incident != "inc_pitr_open" || d.IncidentSeconds == nil || *d.IncidentSeconds < 300 || *d.IncidentSeconds > 330 {
+		t.Fatalf("delay = %+v", d)
+	}
+	// The restore is taken to need the rto (30m): 23m12s left, 5m of it spent on the incident.
+	if d.State != availability.DelayProjectedBreach || !strings.Contains(d.Detail, "inc_pitr_open has been open for") {
+		t.Errorf("state %s: %s", d.State, d.Detail)
 	}
 }
 
@@ -301,6 +368,8 @@ type estimateCalls struct {
 	keys []string
 	rtos []*time.Duration
 	nows []time.Time
+	// drills is what each call said about the restore, for matching drills to it.
+	drills []availability.DrillInputs
 }
 
 // withEstimate makes the history of past restores say this (or fail).
@@ -309,8 +378,9 @@ func withEstimate(t *testing.T, est *availability.RecoveryEstimate, readErr erro
 	old := recoveryEstimateFn
 	t.Cleanup(func() { recoveryEstimateFn = old })
 	calls := &estimateCalls{}
-	recoveryEstimateFn = func(_ context.Context, key string, rto *time.Duration, now time.Time) (*availability.RecoveryEstimate, error) {
+	recoveryEstimateFn = func(_ context.Context, key string, rto *time.Duration, now time.Time, drill availability.DrillInputs) (*availability.RecoveryEstimate, error) {
 		calls.keys, calls.rtos, calls.nows = append(calls.keys, key), append(calls.rtos, rto), append(calls.nows, now)
+		calls.drills = append(calls.drills, drill)
 		return est, readErr
 	}
 	return calls
@@ -368,6 +438,50 @@ func TestBudgetCheckFor_ReadsTheHistoryOfTheDatabaseAgainstItsRTO(t *testing.T) 
 	budgetCheckFor(context.Background(), "nope", true)
 	if len(calls.keys) != n {
 		t.Error("history was read for a database that does not exist")
+	}
+}
+
+// A restore drill counts only when its size is comparable with the restore's, so
+// the estimate has to be told the restore's size: the selected backup's database
+// size, when the caller has it, and nothing when it does not.
+func TestBudgetCheckForRestore_TellsTheEstimateTheSizeOfTheRestore(t *testing.T) {
+	calls := withEstimate(t, restoresThatTook(10, 20, 30), nil)
+	withLedger(t, 0, nil)
+	objectiveInfra(t, "", func(db *infra.DBServer, _ *infra.Config) {
+		db.Objectives = &infra.Objectives{RTO: &infra.Duration{Duration: 45 * time.Minute}}
+	})
+	budgetCheckForRestore(context.Background(), "helpdesk-test-pg-pgbackrest", true, 7<<30)
+	budgetCheckFor(context.Background(), "helpdesk-test-pg-pgbackrest", true) // no size known
+	if len(calls.drills) != 2 || calls.drills[0].RestoreBytes != 7<<30 || calls.drills[1].RestoreBytes != 0 {
+		t.Errorf("drill inputs: %+v", calls.drills)
+	}
+	// Nothing read an identifier in this test (the package default reads none), so
+	// none is passed and the drills are matched by name.
+	if calls.drills[0].SystemID != "" {
+		t.Errorf("a system identifier was passed that nothing read: %q", calls.drills[0].SystemID)
+	}
+}
+
+// The plan hands the estimate the size of the backup it selected.
+func TestPlan_GivesTheEstimateTheSizeOfTheSelectedBackup(t *testing.T) {
+	withLedger(t, 10*time.Minute, nil)
+	calls := withEstimate(t, restoresThatTook(40, 45, 50), nil)
+	budgetObjectives(t, "", "acknowledge")
+	_, _ = liveEnv(t)
+	store, cleanup := withRealToolAuditor(t)
+	defer cleanup()
+	_ = store
+
+	plan, err := planPITRWithEstimate(context.Background(), PlanPITRArgs{Target: "pgbackrest_db", Stanza: "main",
+		RecoveryTargetType: TargetTime, RecoveryTargetVal: liveTarget})
+	if err != nil || plan.Status != PITRFeasible {
+		t.Fatalf("%+v, %v", plan, err)
+	}
+	if len(calls.drills) == 0 || calls.drills[0].RestoreBytes != int64(plan.BackupDatabaseBytes) {
+		t.Errorf("the estimate was told %+v, the plan's backup is %d bytes", calls.drills, plan.BackupDatabaseBytes)
+	}
+	if plan.BackupDatabaseBytes == 0 {
+		t.Log("the fixture's backup reports no size, so this checked only that zero is passed on")
 	}
 }
 

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"helpdesk/internal/client"
 )
@@ -37,9 +40,14 @@ type pitrOpts struct {
 	// AckBreach acknowledges that the loss exceeds the database's recovery
 	// objective. Only a database whose enforcement is acknowledge needs it, and
 	// only when the loss measured at the stop does.
-	AckBreach    bool
-	ResolvedBy   string
-	ApprovalMode string
+	AckBreach bool
+	// Justification is why the approval is given (sent as the gate's reason) and
+	// Ticket the reference it is given under. Both optional here; the gateway can
+	// be set to require a justification for a breach acknowledgement.
+	Justification string
+	Ticket        string
+	ResolvedBy    string
+	ApprovalMode  string
 
 	// plan only
 	SysadminURL string
@@ -54,6 +62,7 @@ type pitrFlagValues struct {
 	TargetType, Target, PlanDigest string
 	AckDataLoss, AllowStop         bool
 	AckBreach                      bool
+	Justification, Ticket          string
 	User, SysadminURL, SysadminKey string
 	Server, Stanza                 string
 }
@@ -66,6 +75,7 @@ func newPITROpts(f pitrFlagValues) pitrOpts {
 	return pitrOpts{
 		RunID: f.ApproveRunID, TargetType: f.TargetType, Target: f.Target,
 		PlanDigest: f.PlanDigest, AckDataLoss: f.AckDataLoss, AllowStop: f.AllowStop, AckBreach: f.AckBreach,
+		Justification: f.Justification, Ticket: f.Ticket,
 		ResolvedBy: f.User, ApprovalMode: "auto",
 		SysadminURL: f.SysadminURL, SysadminKey: f.SysadminKey, Server: f.Server, Stanza: f.Stanza,
 	}
@@ -110,6 +120,13 @@ func (o pitrOpts) approvalBody(purpose string) ([]byte, error) {
 	}
 	if o.AckBreach {
 		body["acknowledge_objective_breach"] = true
+	}
+	// The justification is the gate's own "reason" field; the ticket is its own.
+	if j := strings.TrimSpace(o.Justification); j != "" {
+		body["reason"] = j
+	}
+	if t := strings.TrimSpace(o.Ticket); t != "" {
+		body["ticket"] = t
 	}
 	if o.ResolvedBy != "" {
 		body["resolved_by"] = o.ResolvedBy
@@ -191,6 +208,12 @@ type pitrPlan struct {
 		Enforcement      string `json:"enforcement"`
 		RemainingSeconds *int64 `json:"remaining_seconds"`
 		DurationBasis    string `json:"duration_basis"`
+		// Delay is what putting the decision off costs against the budget: the
+		// estimated latest start that stays within it, or why there is none.
+		Delay *struct {
+			State  string `json:"state"`
+			Detail string `json:"detail"`
+		} `json:"delay"`
 		// RecoveryEstimate is how long this database's restores have taken, from
 		// real incidents, and how that stands against its declared rto.
 		RecoveryEstimate *struct {
@@ -198,8 +221,61 @@ type pitrPlan struct {
 			Basis       string `json:"basis"`
 			VsRTO       string `json:"vs_rto"`
 			VsRTODetail string `json:"vs_rto_detail"`
+			// PlanningSource is where the planned duration comes from: "restores",
+			// or "drills" when there are too few real restores. Drills are restores
+			// on a copy the operator brought, shown beside the real ones.
+			PlanningSource string `json:"planning_source"`
+			Drills         *struct {
+				Status      string `json:"status"`
+				Samples     int    `json:"samples"`
+				Basis       string `json:"basis"`
+				VsRTO       string `json:"vs_rto"`
+				VsRTODetail string `json:"vs_rto_detail"`
+			} `json:"drills"`
 		} `json:"recovery_estimate"`
 	} `json:"availability_budget"`
+	// DataDelay is what putting the decision off does to the data the restore
+	// discards: it grows while a serving instance keeps taking writes.
+	DataDelay *struct {
+		State  string `json:"state"`
+		Detail string `json:"detail"`
+	} `json:"data_delay"`
+	// DrillCurrency is how recently this database's restore was drilled, for a
+	// database that has an objective. A reminder: it holds nothing back.
+	DrillCurrency *struct {
+		State   string `json:"state"`
+		Overdue bool   `json:"overdue"`
+		Detail  string `json:"detail"`
+	} `json:"drill_currency"`
+}
+
+// pitrWrapWidth is the line width the plan is wrapped to; 0 leaves lines as they
+// are. The plan command sets it from the terminal (or 100 when it is not one).
+var pitrWrapWidth int
+
+// pitrIndent is the width of a label and its ": ", where wrapped lines resume.
+const pitrIndent = 21
+
+// field writes "label: text" and, when a width is set, wraps the text at word
+// boundaries so that continuation lines start under the text, not under the label.
+func field(b *strings.Builder, label, text string) {
+	b.WriteString(label + ": ")
+	words := strings.Fields(text)
+	col := pitrIndent
+	for i, w := range words {
+		if i > 0 {
+			if pitrWrapWidth > 0 && col+1+len(w) > pitrWrapWidth {
+				b.WriteString("\n" + strings.Repeat(" ", pitrIndent))
+				col = pitrIndent
+			} else {
+				b.WriteString(" ")
+				col++
+			}
+		}
+		b.WriteString(w)
+		col += len(w)
+	}
+	b.WriteString("\n")
 }
 
 // formatPITRPlan renders the plan for a person, ending with the exact command
@@ -208,7 +284,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan status        : %s\n", p.Status)
 	if p.Detail != "" {
-		fmt.Fprintf(&b, "Detail             : %s\n", p.Detail)
+		field(&b, "Detail             ", p.Detail)
 	}
 	if p.BackupLabel != "" {
 		fmt.Fprintf(&b, "Backup to restore  : %s\n", p.BackupLabel)
@@ -220,10 +296,10 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		fmt.Fprintf(&b, "Archive ends       : %s\n", p.ArchiveEndTime)
 	}
 	if p.DataLoss != "" {
-		fmt.Fprintf(&b, "Will be discarded  : %s\n", p.DataLoss)
+		field(&b, "Will be discarded  ", p.DataLoss)
 	}
 	if e := p.DataLossEstimate; e != nil && e.Summary != "" {
-		fmt.Fprintf(&b, "Estimated loss     : %s\n", e.Summary)
+		field(&b, "Estimated loss     ", e.Summary)
 		if len(e.Unmeasured) > 0 {
 			fmt.Fprintf(&b, "Not counted        : %s\n", strings.Join(e.Unmeasured, "; "))
 		}
@@ -234,7 +310,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			if o.Status == "exceeds" || o.Status == "may_exceed" || o.Gate != "" {
 				label = "RPO CHECK (!)      "
 			}
-			fmt.Fprintf(&b, "%s: %s: %s\n", label, o.Status, o.Detail)
+			field(&b, label, o.Status+": "+o.Detail)
 			switch o.Gate {
 			case "acknowledge":
 				fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's enforcement is %s)\n", o.Enforcement)
@@ -250,7 +326,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 		if bd.Status == "exceeds" || bd.Status == "may_exceed" || bd.Gate != "" {
 			label = "BUDGET CHECK (!)   "
 		}
-		fmt.Fprintf(&b, "%s: %s: %s\n", label, bd.Status, bd.Detail)
+		field(&b, label, bd.Status+": "+bd.Detail)
 		switch bd.Gate {
 		case "acknowledge":
 			fmt.Fprintf(&b, "Approving needs    : --acknowledge-objective-breach (this database's availability enforcement is %s)\n", bd.Enforcement)
@@ -258,7 +334,7 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 			fmt.Fprintf(&b, "Approving          : REFUSED (this database's availability enforcement is refuse, and the instance is serving)\n")
 		}
 		if bd.GateNote != "" {
-			fmt.Fprintf(&b, "Note               : %s\n", bd.GateNote)
+			field(&b, "Note               ", bd.GateNote)
 		}
 	}
 	// How long this database's restores have taken, and against its declared rto.
@@ -266,13 +342,45 @@ func formatPITRPlan(p pitrPlan, o pitrOpts) string {
 	// incidents, and it says what it rests on. Information; it holds nothing.
 	if bd := p.AvailabilityBudget; bd != nil && bd.RecoveryEstimate != nil && bd.RecoveryEstimate.Basis != "" {
 		e := bd.RecoveryEstimate
-		fmt.Fprintf(&b, "Past restores      : %s\n", e.Basis)
+		field(&b, "Past restores      ", e.Basis)
 		switch e.VsRTO {
 		case "exceeds":
-			fmt.Fprintf(&b, "RTO CHECK (!)      : exceeds: %s\n", e.VsRTODetail)
+			field(&b, "RTO CHECK (!)      ", "exceeds: "+e.VsRTODetail)
 		case "within":
-			fmt.Fprintf(&b, "RTO check          : within: %s\n", e.VsRTODetail)
+			field(&b, "RTO check          ", "within: "+e.VsRTODetail)
 		}
+		// Restore drills, beside the real restores and never mixed with them. A
+		// drill is a restore on a copy, so what plans the restore from drills is
+		// said to be that.
+		if d := e.Drills; d != nil && d.Basis != "" {
+			text := d.Basis
+			if e.PlanningSource == "drills" {
+				text += ". The planned duration comes from these: a restore demonstrated on a copy, not on this server"
+			}
+			field(&b, "Restore drills     ", text)
+			// A drill that took longer than the rto says the rto is not met, even
+			// where no real restore has shown it.
+			if d.VsRTO == "exceeds" && e.VsRTO != "exceeds" {
+				field(&b, "RTO CHECK (!)      ", "exceeds, by the drills: "+d.VsRTODetail)
+			}
+		}
+	}
+	// Whether a restore drill is due. A reminder, apart from the checks above: it
+	// holds nothing back, and says how to put it right when it is overdue.
+	if d := p.DrillCurrency; d != nil && d.Detail != "" && d.State != "off" {
+		if d.Overdue {
+			field(&b, "DRILL OVERDUE (!)  ", d.Detail+". Record one with helpdesk-client --drill-record (see docs/RESTORE_OPS.md)")
+		} else {
+			field(&b, "Drill reminder     ", d.Detail)
+		}
+	}
+	// What putting the decision off costs. Information, not a deadline: the restore
+	// measures again just before it stops anything and decides on that.
+	if bd := p.AvailabilityBudget; bd != nil && bd.Delay != nil && bd.Delay.Detail != "" {
+		field(&b, "Waiting, budget    ", bd.Delay.Detail)
+	}
+	if d := p.DataDelay; d != nil && d.Detail != "" {
+		field(&b, "Waiting, data      ", d.Detail)
 	}
 	state := "down"
 	if p.InstanceServing {
@@ -372,6 +480,10 @@ func runPITRPlan(ctx context.Context, cfg client.Config, o pitrOpts) error {
 	var plan pitrPlan
 	if err := json.Unmarshal([]byte(out.Output), &plan); err != nil {
 		return fmt.Errorf("the plan is unreadable: %w", err)
+	}
+	pitrWrapWidth = 100
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w >= 60 {
+		pitrWrapWidth = w - 1
 	}
 	fmt.Print(formatPITRPlan(plan, o))
 	return nil

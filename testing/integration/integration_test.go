@@ -35,8 +35,14 @@ func TestMain(m *testing.M) {
 
 	cmd := exec.CommandContext(ctx, "psql", testConnStr, "-c", "SELECT 1")
 	if err := cmd.Run(); err != nil {
-		println("SKIP: PostgreSQL not reachable at", testConnStr)
 		println("Run: docker compose -f testing/docker/docker-compose.yaml up -d --wait")
+		if requireInfra() {
+			// Under `make integration`, which starts the infrastructure itself: a
+			// package that skipped everything must not look like a pass.
+			println("FAIL: PostgreSQL not reachable at", testConnStr, "(HELPDESK_REQUIRE_INFRA is set)")
+			os.Exit(1)
+		}
+		println("SKIP: PostgreSQL not reachable at", testConnStr)
 		os.Exit(0) // Skip, don't fail.
 	}
 

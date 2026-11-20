@@ -44,11 +44,11 @@ The response header `X-Trace-ID` is set on every agent call. Pass it in the requ
 | Status | Meaning |
 |---|---|
 | `200 OK` | Agent task completed and the response text is the agent's output |
-| `400 Bad Request` | Malformed request (missing required fields, invalid JSON, or unknown tool name) |
+| `400 Bad Request` | Malformed request (missing required fields, invalid JSON or unknown tool name) |
 | `401 Unauthorized` | Authentication failed (bad or missing API key / JWT) or caller is anonymous on an endpoint that requires identity |
-| `403 Forbidden` | Role-based authorization denied the request (wrong or missing role), a governance policy denied the operation, or the operating mode blocks the action. The response body identifies which layer rejected the request. |
+| `403 Forbidden` | Role-based authorization denied the request (wrong or missing role), a governance policy denied the operation or the operating mode blocks the action. The response body identifies which layer rejected the request. |
 | `422 Unprocessable Entity` | The request was well-formed but failed semantic validation (e.g. fleet planner returned an unknown tool or targeted a restricted server) |
-| `502 Bad Gateway` | The A2A task itself failed (agent runner error), or the agent service is unreachable |
+| `502 Bad Gateway` | The A2A task itself failed (agent runner error) or the agent service is unreachable |
 | `503 Service Unavailable` | A required service (e.g. fleet planner, auditd) is not configured |
 
 **Note on `403` vs `200` for policy denials:** For direct tool calls (`/api/v1/db/{tool}`, `/api/v1/k8s/{tool}`), policy denials are detected from the agent response text and returned as `403`. For natural-language queries (`/api/v1/query`), the agent decides how to present a denial in its prose response — the gateway cannot reliably distinguish a policy-blocked tool call from a successful but empty result in that path, so callers should inspect `text` for policy denial details.
@@ -192,7 +192,7 @@ When `agent` is omitted, the gateway tries three tiers, in order, stopping at th
 2. **LLM routing** — if no keyword match is strong enough, an LLM call picks the best agent for the message (requires `HELPDESK_MODEL_VENDOR`/`HELPDESK_MODEL_NAME`/`HELPDESK_API_KEY`) and may *also* select a playbook from the same candidate list, if the message clearly matches one.
 3. **Direct agent proxy** — if neither tier selects a playbook, the request proxies straight to the LLM-chosen agent, exactly as routing worked before playbook selection existed.
 
-When a playbook is selected (tier 1 or 2), the query runs through that playbook's triage flow (`POST /api/v1/fleet/playbooks/{id}/run` under the hood) with `approval_mode` pinned to `"manual"` — an auto-selected query can never silently authorize a write/destructive tool call. The routing decision (including which playbook, if any, and why) is recorded in the `delegation_decision` audit event.
+When a playbook is selected (tier 1 or 2), the query runs through that playbook's triage flow (`POST /api/v1/fleet/playbooks/{id}/run` under the hood) with `approval_mode` pinned to `"manual"` — an auto-selected query can never silently authorize a write/destructive tool call. The routing decision (including which playbook, if any and why) is recorded in the `delegation_decision` audit event.
 
 The response includes `context_id` alongside the agent's reply:
 
@@ -317,7 +317,7 @@ means the agent narrated or claimed a tool call with no matching `tool_execution
 `connection_string` than the run was invoked with; `has_unverified_evidence` (v0.28.0,
 content-provenance) means a hypothesis's `EVIDENCE` quote didn't match any real tool output for
 that hop — a genuinely different check from `has_mismatch`: the tool call itself can be real and
-correctly confirmed, and the quote can still be fabricated. All three default to `false` when
+correctly confirmed and the quote can still be fabricated. All three default to `false` when
 absent, which can mean either "verified clean" or "no delegation_verification events fall in this
 chapter's own window" (fail-open by design).
 
@@ -332,7 +332,7 @@ caller doesn't have to separately look up which claim was flagged. Its sibling
 hypotheses — still real fabrication worth tracking, but not folded into `has_unverified_evidence`
 since it doesn't indict the model's actual, acted-on conclusion. See
 [MUTATION_TOOLS.md §5](MUTATION_TOOLS.md#5-delegation-verification-zero-trust-in-agent-outcome),
-[§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope), and
+[§5.6](MUTATION_TOOLS.md#56-target-scope-drift-detection-checktargetscope) and
 [§5.11](MUTATION_TOOLS.md#511-content-provenance-verification-checkevidenceprovenance) for what
 sets each flag.
 
@@ -445,7 +445,60 @@ Response: `database`, `as_of`, `window_start`, `window_seconds`, `window_source`
 `impact`, `status`, `duration_seconds`, `ongoing`, `detected_at` and, when it is not charged although it is an outage,
 `why`. A failure to read the incidents from auditd is `502`, never an empty ledger.
 
-`faulttest vault budget <database>` prints it.
+`faulttest vault budget <database>` prints it. The response also carries `drill_currency` (how recently the database's
+restore was drilled against its `drill_interval`) for a database that has an objective; see
+[OBJECTIVES.md](OBJECTIVES.md#3-values).
+
+---
+
+### Restore drills
+
+A restore drill is a restore of a database's backup on a clone the operator brought. It is verified (read-only on both
+servers) and recorded whatever the verdict; only a verified one counts toward the drill reminder and a verified
+pgBackRest drill of comparable size can plan a restore. Recording is a human act at the gateway: the model never links a
+drill.
+
+#### `POST /api/v1/drills`
+
+Verifies the clone and stores the record. Both `source` and `clone` must be in the infrastructure config.
+
+| Body field | Meaning |
+|---|---|
+| `source`, `clone` (required) | `db_servers` key, name or connection string of the source; `db_servers` key of the clone. The clone cannot be the source. |
+| `method` (required) | `pgbackrest`, `snapshot`, `cloud` or `other`. The operator's claim: aiHelpDesk does not tell how a clone was made. |
+| `started_at`, `finished_at`, `duration_seconds` | RFC3339 times or a duration. When both times are given they decide the duration. It is recorded as `reported`: the operator's word. |
+| `backup_label`, `recovery_target`, `verify_sql`, `ticket`, `note`, `supersedes` | What was restored, an optional single `SELECT` that must return true on the clone, the ticket reference, free text (up to 1000 characters) and the earlier drill this one replaces. |
+
+Answers `201` with `drill` (the stored record, with its `drill_id`, `status`, each `checks[]` entry, the measured
+`restore_bytes` and the `audit_event_id`) and `verification` (the verdict in text), for a refused or unverifiable clone
+as well as a verified one: `status` says which and only `verified` and `verified_with_warnings` count. `400` for a
+request that is wrong, `404` for a database not in the config (the message says a clone must be registered first),
+`409` when the same restore is already recorded (a verified drill of the same source and clone with the same start and
+finish: the message names it; to re-record it, send `supersedes` with its ID; a record that gives only a duration has
+no times to compare and is never refused for this),
+`422` when the verification could not give a verdict, `502` when the database agent or the audit service failed. A
+failed attempt leaves a gateway request event (`record_restore_drill`) in the audit trail; a recorded drill leaves its
+own hash-covered `restore_drill` event.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/drills -H 'Content-Type: application/json' -d '{
+  "source": "prod-orders", "clone": "orders-clone", "method": "pgbackrest",
+  "started_at": "2026-11-19T02:00:00Z", "finished_at": "2026-11-19T02:01:35Z", "ticket": "DRILL-7"}'
+```
+
+`helpdesk-client --drill-record` does this.
+
+#### `GET /api/v1/drills` and `GET /api/v1/drills/{id}`
+
+| Query | Meaning |
+|---|---|
+| `source` | A database, by any name the infrastructure config knows. |
+| `status`, `method` | Filter by status or method. |
+| `since` | RFC3339; drills finished at or after it. |
+| `current=true` | Leave out drills that a later record supersedes. |
+| `limit` | Default 100. |
+
+Newest first. `faulttest vault drills [--target KEY] [drl_…]` and `helpdesk-client --drill-list` print them.
 
 ---
 
@@ -479,7 +532,7 @@ Hypothetical policy check — evaluates the policy engine without recording an e
 |---|---|---|
 | `resource_type` | yes | `database` or `kubernetes` |
 | `resource_name` | yes | Resource name, e.g. `prod-db` |
-| `action` | yes | `read`, `write`, or `destructive` |
+| `action` | yes | `read`, `write` or `destructive` |
 | `tags` | no | Comma-separated tags. Auto-resolved from infra config when omitted. |
 | `user_id` | no | Evaluate as a specific user |
 | `role` | no | Evaluate with a specific role |
@@ -499,7 +552,7 @@ Query the audit event trail (up to 100 by default).
 | `trace_id` | Filter by trace ID |
 | `event_type` | Filter by event type |
 | `agent` | Filter by agent name |
-| `action_class` | `read`, `write`, or `destructive` |
+| `action_class` | `read`, `write` or `destructive` |
 | `since` | RFC3339 lower bound, e.g. `2024-01-15T00:00:00Z` |
 
 ```bash
@@ -529,7 +582,7 @@ All approvals, filterable.
 
 | Parameter | Description |
 |---|---|
-| `status` | `pending`, `approved`, or `denied` |
+| `status` | `pending`, `approved` or `denied` |
 | `agent` | Filter by agent name |
 | `trace_id` | Filter by trace ID |
 | `requested_by` | Filter by requester |
@@ -614,7 +667,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/plan \
 
 Response fields: `job_def`, `job_def_raw`, `planner_notes`, `requires_approval`, `written_steps`, `excluded_servers`, `warning_messages`. See [FLEET.md](FLEET.md#natural-language-job-planner) for full details.
 
-Status codes: `400` (missing description), `422` (unknown tool or restricted server in generated plan), `503` (infra config or tool registry not loaded, or `ANTHROPIC_API_KEY` not set).
+Status codes: `400` (missing description), `422` (unknown tool or restricted server in generated plan), `503` (infra config or tool registry not loaded or `ANTHROPIC_API_KEY` not set).
 
 ---
 
@@ -632,7 +685,7 @@ curl http://localhost:8080/api/v1/fleet/jobs | jq .
 
 #### `GET /api/v1/fleet/jobs/{jobID}`
 
-Get a specific fleet job, including its full `job_def`, status, and summary.
+Get a specific fleet job, including its full `job_def`, status and summary.
 
 ```bash
 curl http://localhost:8080/api/v1/fleet/jobs/flj_abc123 | jq .
@@ -673,7 +726,7 @@ To approve or deny, use the auditd approval endpoints directly (see below) — t
 
 #### Playbook endpoints
 
-Playbooks encode strategic intent and expert triage knowledge that the fleet planner executes dynamically against live infrastructure state — not static scripts. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version, and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
+Playbooks encode strategic intent and expert triage knowledge that the fleet planner executes dynamically against live infrastructure state — not static scripts. aiHelpDesk ships 7 system playbooks out of the box (4 operational + 3 Database Down triage), with adaptive escalation across the triage graph. Operators create, version and import their own. See **[PLAYBOOKS.md](PLAYBOOKS.md)** for the full reference.
 
 #### `GET /api/v1/fleet/playbooks`
 
@@ -718,7 +771,7 @@ Delete a playbook. Returns `204 No Content`, `404` if not found, `400` for syste
 
 Runs a playbook. Behaviour depends on the playbook's `execution_mode`.
 
-**`execution_mode: fleet` (default)** — calls the fleet planner and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The playbook's `description`, `guidance`, and `target_hints` are injected into the planner prompt. Requires LLM configuration.
+**`execution_mode: fleet` (default)** — calls the fleet planner and returns a `FleetPlanResponse` (same shape as `POST /api/v1/fleet/plan`). The playbook's `description`, `guidance` and `target_hints` are injected into the planner prompt. Requires LLM configuration.
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
@@ -726,7 +779,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/pb_a1b2c3d4/run \
 ./fleet-runner --job-file /tmp/plan.json --dry-run
 ```
 
-**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses, and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks. The gateway parses a structured signal from the agent's response to automatically set `outcome`, `findings_summary`, and `escalated_to` on the run record.
+**`execution_mode: agent`** — routes to the database agent as an agentic triage session. The agent gathers evidence, forms and tests hypotheses and returns a diagnosis with recommended (not executed) remediation steps. Returns the same response shape as `POST /api/v1/query`. Used by the Database Down playbooks. The gateway parses a structured signal from the agent's response to automatically set `outcome`, `findings_summary` and `escalated_to` on the run record.
 
 Optional request body:
 
@@ -737,7 +790,7 @@ Optional request body:
 | `context` | Free-form operator context: server name, symptoms, log lines, recent changes. Used to evaluate `requires_evidence` patterns. |
 | `context_id` | A2A session ID to resume a multi-turn session |
 | `prior_run_id` | `plr_*` run ID of a prior investigation; its `findings_summary` is injected into the prompt for continuity |
-| `recovery_target` | `{"type": "time"\|"lsn", "value": "..."}`. Only for `pbs_pgbackrest_pitr_triage`: the point a human wants to recover to (RFC3339 with a zone, or an `X/Y` LSN). It is validated here (`400` if malformed), stored on the run, and **planned, not approved**. See [PITR.md](PITR.md#4-operating-it) |
+| `recovery_target` | `{"type": "time"\|"lsn", "value": "..."}`. Only for `pbs_pgbackrest_pitr_triage`: the point a human wants to recover to (RFC3339 with a zone or an `X/Y` LSN). It is validated here (`400` if malformed), stored on the run and **planned, not approved**. See [PITR.md](PITR.md#4-operating-it) |
 
 Response fields (in addition to the standard `text`, `agent`, `task_id`, `context_id`):
 
@@ -766,7 +819,7 @@ if [ -n "$NEXT_SERIES" ]; then
 fi
 ```
 
-See [PLAYBOOKS.md — Adaptive triage](PLAYBOOKS.md#adaptive-triage) for the full escalation graph, requires-evidence system, and continuity threading details.
+See [PLAYBOOKS.md — Adaptive triage](PLAYBOOKS.md#adaptive-triage) for the full escalation graph, requires-evidence system and continuity threading details.
 
 #### `GET /api/v1/fleet/playbooks/{playbookID}/runs`
 
@@ -843,7 +896,7 @@ curl -s -X POST http://localhost:8080/api/v1/fleet/playbooks/import \
 
 Operators upload files (typically PostgreSQL log files retrieved from a remote host) so that agents can analyse them when the database is unreachable. The `read_uploaded_file` database tool reads uploaded content by `upload_id`.
 
-Uploads are stored in auditd's SQLite database, expire after **24 hours**, and are capped at **50 MB** per file.
+Uploads are stored in auditd's SQLite database, expire after **24 hours** and are capped at **50 MB** per file.
 
 #### `POST /api/v1/fleet/uploads`
 
@@ -904,7 +957,7 @@ curl -s -X POST http://localhost:8080/api/v1/query \
 
 Query the persistent tool result log — a record of every tool execution written by fleet-runner jobs and direct tool calls (when `HELPDESK_AUDIT_URL` is configured). Useful for post-incident triage and auditing what was collected during a job.
 
-The database agent's `get_saved_snapshots` tool uses this endpoint internally to retrieve prior outputs during triage (e.g. recovering a `config_file` path when the DB is down, or diffing two baselines).
+The database agent's `get_saved_snapshots` tool uses this endpoint internally to retrieve prior outputs during triage (e.g. recovering a `config_file` path when the DB is down or diffing two baselines).
 
 | Parameter | Description |
 |---|---|
@@ -950,7 +1003,7 @@ Results are ordered most-recent first.
 
 ### Decision Hub
 
-The Decision Hub aggregates every pending human decision across all subsystems — playbook gates, fleet approvals, and per-step agent approvals — into a single list with a single resolve endpoint. See [DECISIONS.md](DECISIONS.md) for full details including notification configuration, Slack integration, HMAC signing, and the git merge adapter.
+The Decision Hub aggregates every pending human decision across all subsystems — playbook gates, fleet approvals and per-step agent approvals — into a single list with a single resolve endpoint. See [DECISIONS.md](DECISIONS.md) for full details including notification configuration, Slack integration, HMAC signing and the git merge adapter.
 
 #### `GET /api/v1/decisions`
 
@@ -1046,7 +1099,7 @@ An optional endpoint that lets operators merge a branch to approve a decision wi
 
 #### `POST /api/v1/webhooks/git`
 
-Accepts merge events from GitHub, GitLab, Gitea, or any generic JSON webhook. Routes to `resolve` based on the target branch name:
+Accepts merge events from GitHub, GitLab, Gitea or any generic JSON webhook. Routes to `resolve` based on the target branch name:
 
 | Branch | Resolves |
 |---|---|
@@ -1108,7 +1161,7 @@ Cancel a rollback that is in `pending_approval` status.
 
 #### `POST /v1/events/{eventID}/rollback-plan`
 
-Derive and return the rollback plan for an event without creating a rollback record. Returns the `RollbackPlan` with `reversibility`, `inverse_op`, and (if not reversible) `not_reversible_reason`. Read-only; no approval required.
+Derive and return the rollback plan for an event without creating a rollback record. Returns the `RollbackPlan` with `reversibility`, `inverse_op` and (if not reversible) `not_reversible_reason`. Read-only; no approval required.
 
 ```bash
 curl -s -X POST http://localhost:1199/v1/events/tool_abc12345/rollback-plan | jq .
@@ -1116,7 +1169,7 @@ curl -s -X POST http://localhost:1199/v1/events/tool_abc12345/rollback-plan | jq
 
 #### `POST /v1/fleet/jobs/{jobID}/rollback`
 
-Initiate a fleet-level rollback — constructs a reverse job definition and submits it through the normal fleet approval pipeline. Accepts `scope` (`"all"`, `"canary_only"`, `"failed_only"`, or a JSON array of server names) and `dry_run`.
+Initiate a fleet-level rollback — constructs a reverse job definition and submits it through the normal fleet approval pipeline. Accepts `scope` (`"all"`, `"canary_only"`, `"failed_only"` or a JSON array of server names) and `dry_run`.
 
 #### `GET /v1/fleet/jobs/{jobID}/rollback`
 
@@ -1136,7 +1189,7 @@ Create an approval request. Agents call this automatically when a policy require
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `action_class` | string | yes | `read`, `write`, or `destructive` |
+| `action_class` | string | yes | `read`, `write` or `destructive` |
 | `requested_by` | string | yes | Identity of the requester |
 | `event_id` | string | no | Associated audit event ID |
 | `trace_id` | string | no | Trace ID for correlation |
@@ -1290,7 +1343,7 @@ curl http://localhost:1199/health
 
 ## Agent A2A API (ports 1100–1106)
 
-Each agent implements the [A2A (Agent-to-Agent) protocol](https://google.github.io/A2A/). You can call agents directly without going through the gateway — useful when building custom orchestrators, upstream agents, or integrations that want fine-grained control over task lifecycle.
+Each agent implements the [A2A (Agent-to-Agent) protocol](https://google.github.io/A2A/). You can call agents directly without going through the gateway — useful when building custom orchestrators, upstream agents or integrations that want fine-grained control over task lifecycle.
 
 | Agent | Port | Internal name |
 |---|---|---|
@@ -1301,7 +1354,7 @@ Each agent implements the [A2A (Agent-to-Agent) protocol](https://google.github.
 
 ### Discovery: Agent Card
 
-Every A2A agent exposes its capabilities at a well-known URL. The card lists the agent's name, description, version, and skills (available tools).
+Every A2A agent exposes its capabilities at a well-known URL. The card lists the agent's name, description, version and skills (available tools).
 
 ```bash
 curl http://localhost:1100/.well-known/agent.json | jq .
@@ -1348,13 +1401,13 @@ curl -s -X POST http://localhost:1100/ \
   }' | jq .
 ```
 
-Response: an A2A Task object with `id`, `status.state` (`completed`, `failed`, …), `status.message`, and `artifacts`.
+Response: an A2A Task object with `id`, `status.state` (`completed`, `failed`, …), `status.message` and `artifacts`.
 
 The gateway's `/api/v1/query` and `/api/v1/db/{tool}` endpoints are thin wrappers around exactly this call — they construct the prompt text and call `message/send` on your behalf.
 
 ### A2A protocol reference
 
-The full A2A specification — including streaming (`message/stream`), task state machine, artifact handling, and push notifications — is published at **[google.github.io/A2A](https://google.github.io/A2A/)**. The Go SDK used by aiHelpDesk is [github.com/a2aproject/a2a-go](https://github.com/a2aproject/a2a-go).
+The full A2A specification — including streaming (`message/stream`), task state machine, artifact handling and push notifications — is published at **[google.github.io/A2A](https://google.github.io/A2A/)**. The Go SDK used by aiHelpDesk is [github.com/a2aproject/a2a-go](https://github.com/a2aproject/a2a-go).
 
 ---
 

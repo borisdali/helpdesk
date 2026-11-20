@@ -67,6 +67,11 @@ type RecoveryDecision struct {
 	// downtime: the instance may have been down before the hop began, and the
 	// hop includes the agent's own reasoning time.
 	DurationSeconds *int64 `json:"duration_seconds,omitempty"`
+	// IncidentSeconds is, for the outcome stage, how long the incident had run
+	// when the hop finished: from the start of its entry run to the end of this
+	// one, which is what the availability ledger charges for it. It includes the
+	// wait for the approval (v0.36).
+	IncidentSeconds *int64 `json:"incident_seconds,omitempty"`
 	// Tool is the tool the stage belongs to (plan_point_in_time_recovery,
 	// restore_to_point_in_time); empty for the gate.
 	Tool string `json:"tool,omitempty"`
@@ -183,11 +188,19 @@ type DecisionOption struct {
 	BudgetVerdictDetail    string `json:"budget_verdict_detail,omitempty"`
 	BudgetGate             string `json:"budget_gate,omitempty"`
 	BudgetRemainingSeconds *int64 `json:"budget_remaining_seconds,omitempty"`
+	// BudgetPendingSeconds is, when the open incident was not charged to the ledger
+	// yet, how long it had been open: the verdict took that off the budget (the
+	// incident is charged in full, from its start, when the restore runs), so
+	// BudgetRemainingSeconds is what was left after it. The ledger's own figure is
+	// the two added. Absent when there was no such incident (v0.36).
+	BudgetPendingSeconds *int64 `json:"budget_pending_seconds,omitempty"`
 	// How long the budget verdict took the restore to last, and on what:
 	// "history_p90" (the p90 of this server's past restores, from ten of them),
 	// "history_longest" (the longest of three to nine, too few for a p90) or
-	// "declared_rto" (an upper bound). Absent when it was not compared. Records
-	// from before this naming say "history", which meant the p90.
+	// "drill_p90" / "drill_longest" (the same, from this server's restore drills
+	// when it has too few real restores: restores demonstrated on a copy, not on
+	// this server), or "declared_rto" (an upper bound). Absent when it was not
+	// compared. Records from before this naming say "history", which meant the p90.
 	BudgetDurationSeconds *int64 `json:"budget_duration_seconds,omitempty"`
 	BudgetDurationBasis   string `json:"budget_duration_basis,omitempty"`
 
@@ -205,6 +218,15 @@ type DecisionOption struct {
 	EstimateMaxSeconds *int64 `json:"estimate_max_seconds,omitempty"`
 	EstimateVsRTO      string `json:"estimate_vs_rto,omitempty"`
 	EstimateOverRTO    *int   `json:"estimate_over_rto,omitempty"`
+
+	// Where the planned duration came from: "restores" (this server's real
+	// restores) or "drills" (restore drills, on a copy, because there were too few
+	// real restores). With "drills", DrillSamples is how many counted and DrillIDs
+	// are exactly which, so the figure can be traced to the records it rests on.
+	// Absent when nothing was planned from history (v0.36).
+	PlanningSource string   `json:"planning_source,omitempty"`
+	DrillSamples   *int     `json:"drill_samples,omitempty"`
+	DrillIDs       []string `json:"drill_ids,omitempty"`
 }
 
 // The objectives a restore can breach, as named in ApprovalFacts.Breaches.
@@ -219,6 +241,14 @@ type ApprovalFacts struct {
 	AcknowledgedDataLoss bool   `json:"acknowledged_data_loss,omitempty"`
 	AllowedStopServing   bool   `json:"allowed_stop_serving,omitempty"`
 	AcknowledgedBreach   bool   `json:"acknowledged_breach,omitempty"`
+	// Justification is the operator's stated reason for approving (the gate
+	// request's "reason"), and Ticket the reference it was approved under (an
+	// incident or change ticket), kept apart from the prose so it can be looked up.
+	// Both are the operator's own words, recorded as given (the prose is redacted of
+	// anything that looks like a password): a claim, not something the system
+	// verified. Empty when none was given.
+	Justification string `json:"justification,omitempty"`
+	Ticket        string `json:"ticket,omitempty"`
 	// Breaches are the objectives that stood in the way of this restore (each one
 	// demanded the acknowledgement), so that a person who acknowledged an rpo
 	// breach is not taken to have acknowledged a budget breach too. One

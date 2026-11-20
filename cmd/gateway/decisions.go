@@ -130,6 +130,8 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 		AllowStopServing    bool                `json:"allow_stop_serving,omitempty"`
 		// A separate acknowledgement that the loss exceeds the recovery objective.
 		AcknowledgeObjectiveBreach bool `json:"acknowledge_objective_breach,omitempty"`
+		// The reference the approval is given under (a ticket), kept apart from the reason.
+		Ticket string `json:"ticket,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
@@ -149,6 +151,10 @@ func (g *Gateway) handleResolveDecision(w http.ResponseWriter, r *http.Request) 
 			"acknowledge_data_loss":        req.AcknowledgeDataLoss,
 			"allow_stop_serving":           req.AllowStopServing,
 			"acknowledge_objective_breach": req.AcknowledgeObjectiveBreach,
+			"ticket":                       req.Ticket,
+			// The operator's reason is the justification of a restore's breach
+			// acknowledgement, so it must reach the gate through the hub too.
+			"reason": req.Reason,
 		})
 
 	case strings.HasPrefix(id, "fleet:"), strings.HasPrefix(id, "step:"):

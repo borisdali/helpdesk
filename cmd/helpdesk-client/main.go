@@ -62,10 +62,13 @@ func main() {
 		ackDataLoss           = flag.Bool("acknowledge-data-loss", false, "Acknowledge that everything committed after the target is discarded")
 		allowStopServing      = flag.Bool("allow-stop-serving", false, "Allow the restore to stop an instance that is serving")
 		ackObjectiveBreach    = flag.Bool("acknowledge-objective-breach", false, "Acknowledge that the restore discards more data than the database's recovery objective allows (only a database whose enforcement is acknowledge needs it; --pitr-plan says when)")
+		pitrJustification     = flag.String("justification", "", "Why you are approving, recorded with the approval (for --pitr-approve; required with --acknowledge-objective-breach when the gateway sets HELPDESK_REQUIRE_BREACH_JUSTIFICATION)")
+		pitrTicket            = flag.String("ticket", "", "The ticket (e.g. INC-1234) the approval is given under, recorded with it (for --pitr-approve)")
 		sysadminURL           = flag.String("sysadmin-url", os.Getenv("HELPDESK_SYSADMIN_URL"), "Sysadmin agent `URL` (for --pitr-plan)")
 		sysadminKey           = flag.String("sysadmin-key", os.Getenv("HELPDESK_SYSADMIN_API_KEY"), "Sysadmin agent API key (for --pitr-plan)")
 		pitrServer            = flag.String("pitr-server", "", "Infrastructure alias of the database to restore (for --pitr-plan)")
 		pitrStanza            = flag.String("pitr-stanza", "main", "pgBackRest stanza (for --pitr-plan)")
+		drills                = registerDrillFlags(flag.CommandLine, pitrTicket)
 		listRollbacks         = flag.Bool("list-rollbacks", false, "List rollback records from the audit service")
 	)
 	flag.Parse()
@@ -102,6 +105,7 @@ func main() {
 		o := newPITROpts(pitrFlagValues{
 			ApproveRunID: *pitrApprove, TargetType: *recoveryTargetType, Target: *recoveryTarget,
 			PlanDigest: *planDigest, AckDataLoss: *ackDataLoss, AllowStop: *allowStopServing, AckBreach: *ackObjectiveBreach,
+			Justification: *pitrJustification, Ticket: *pitrTicket,
 			User: *userID, SysadminURL: *sysadminURL, SysadminKey: *sysadminKey,
 			Server: *pitrServer, Stanza: *pitrStanza,
 		})
@@ -110,6 +114,22 @@ func main() {
 			err = runPITRApprove(ctx, cfg, o)
 		} else {
 			err = runPITRPlan(ctx, cfg, o)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// --drill-record / --drill-list: restore drills, through the gateway.
+	if drills.requested() {
+		o := drills.opts()
+		var err error
+		if *drills.record {
+			err = runDrillRecord(ctx, cfg, o)
+		} else {
+			err = runDrillList(ctx, cfg, o)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "helpdesk-client: %v\n", err)

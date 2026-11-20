@@ -139,7 +139,7 @@ func loadHistory() ([]historyRun, error) {
 
 func cmdVault(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|budget|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
+		fmt.Fprintln(os.Stderr, "Usage: faulttest vault <list|status|drift|accuracy|incidents|budget|drills|journey|versions|calibration|judge-accuracy|cert-compare|hop-certs|suggest|suggest-update|drafts|activate|diff|discard|import>")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  list            Show fault↔playbook pairings and last-run status")
 		fmt.Fprintln(os.Stderr, "  status          Show pass rate trends from run history")
@@ -147,6 +147,7 @@ func cmdVault(args []string) {
 		fmt.Fprintln(os.Stderr, "  accuracy        Show diagnosis accuracy for a playbook series")
 		fmt.Fprintln(os.Stderr, "  incidents       List incident run IDs for a fault with feedback status")
 		fmt.Fprintln(os.Stderr, "  budget          Show how much of a database's downtime budget its incidents have spent")
+		fmt.Fprintln(os.Stderr, "  drills          List the restore drills recorded for a database, or show one in full")
 		fmt.Fprintln(os.Stderr, "  journey         Show audit trail for a trace (tools, decisions, delegations)")
 		fmt.Fprintln(os.Stderr, "  versions        Show per-version run stats for a playbook series")
 		fmt.Fprintln(os.Stderr, "  calibration     Show how well diagnosis scores predict operator-confirmed accuracy")
@@ -182,6 +183,8 @@ func cmdVault(args []string) {
 		vaultIncidents(args[1:])
 	case "budget":
 		vaultBudget(args[1:])
+	case "drills":
+		vaultDrills(args[1:])
 	case "journey", "journeys":
 		vaultJourney(args[1:])
 	case "versions":
@@ -2384,7 +2387,7 @@ func vaultIncidentsRecent(cfg *HarnessConfig, limit int, details bool, origin, s
 		fmt.Println()
 	}
 	fmt.Println()
-	fmt.Println("  → vault incidents <plr_*>           full incident narrative")
+	fmt.Println("  → vault incidents <plr_*|inc_*>     full incident narrative (by entry run or incident ID)")
 	fmt.Println("  → vault incidents <fault-id>        all runs for a fault (per-hop detail)")
 	fmt.Println("  → vault incidents --details         show JOURNEYS count")
 	fmt.Println("  → vault incidents --origin real     real incidents only (excludes faulttest)")
@@ -2405,7 +2408,8 @@ func vaultIncidents(args []string) {
 	fs := flag.NewFlagSet("vault incidents", flag.ExitOnError)
 	var limit int
 	var details, summary bool
-	var origin, status, attribution string
+	var origin, status, attribution, ticket string
+	fs.StringVar(&ticket, "ticket", "", "List the approvals given under this ticket (e.g. INC-1234) instead of incidents")
 	fs.IntVar(&limit, "limit", 20, "Maximum number of incidents to show")
 	fs.BoolVar(&details, "details", false, "Fetch per-run journey count and source (slower; makes one extra API call per run)")
 	fs.BoolVar(&summary, "summary", false, "Deep-dive mode only: print one line per hop instead of the full breakdown")
@@ -2418,6 +2422,10 @@ func vaultIncidents(args []string) {
 		fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents")
 		os.Exit(1)
 	}
+	if ticket != "" {
+		vaultIncidentsByTicket(cfg, strings.TrimSpace(ticket), limit)
+		return
+	}
 	if len(fs.Args()) == 0 {
 		vaultIncidentsRecent(cfg, limit, details, origin, status, attribution)
 		return
@@ -2425,8 +2433,9 @@ func vaultIncidents(args []string) {
 
 	arg := fs.Args()[0]
 
-	// Deep-dive mode: when arg is a run ID (plr_*), print the full incident journey.
-	if strings.HasPrefix(arg, "plr_") {
+	// Deep-dive mode: when arg is a run ID (plr_*) or an incident ID (inc_*, which
+	// the gateway resolves to its entry run), print the full incident journey.
+	if strings.HasPrefix(arg, "plr_") || strings.HasPrefix(arg, "inc_") {
 		if cfg.GatewayURL == "" {
 			fmt.Fprintln(os.Stderr, "Error: --gateway URL is required for vault incidents <run-id>")
 			os.Exit(1)

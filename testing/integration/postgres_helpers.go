@@ -17,6 +17,11 @@ import (
 	"helpdesk/internal/audit"
 )
 
+// requireInfra reports whether the run is one that brings its infrastructure up
+// itself (`make integration` sets HELPDESK_REQUIRE_INFRA), where a test that
+// cannot find it must fail, not skip. A bare `go test` leaves it unset and skips.
+func requireInfra() bool { return os.Getenv("HELPDESK_REQUIRE_INFRA") != "" }
+
 // postgresTestDSN returns a DSN for a fresh, empty database created for this
 // test on the server POSTGRES_TEST_DSN points at, and drops it when the test
 // ends. It skips the test when POSTGRES_TEST_DSN isn't set — the convention
@@ -34,6 +39,9 @@ func postgresTestDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("POSTGRES_TEST_DSN")
 	if dsn == "" {
+		if requireInfra() {
+			t.Fatal("POSTGRES_TEST_DSN not set, and HELPDESK_REQUIRE_INFRA is set: this Postgres-backend test must run, not skip")
+		}
 		t.Skip("POSTGRES_TEST_DSN not set — skipping Postgres-backend test")
 	}
 	u, err := url.Parse(dsn)

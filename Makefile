@@ -45,7 +45,7 @@ BIN_PKGS := \
 	fleet-runner:./cmd/fleet-runner/ \
 	faulttest:./testing/cmd/faulttest/
 
-.PHONY: test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr pitr-objectives-infra recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools fmt-check docs-links
+.PHONY: dev-auditd-up dev-auditd-down dev-auditd-wipe test test-nocache cover test-governance cover-governance test-helm integration integration-k8s integration-governance faulttest faulttest-gateway faulttest-gateway-pgbackrest faulttest-pitr pitr-objectives-infra recertify e2e e2e-governance e2e-identity image push binaries bundle build release github-release clean hashapikey fleet-runner docs-tools fmt-check docs-links
 
 fleet-runner:
 	go build -o fleet-runner ./cmd/fleet-runner/
@@ -150,8 +150,29 @@ faulttest-gateway-nocache:          FAULTTEST_LOG = /tmp/helpdesk-faulttest-gate
 faulttest-gateway-pgbackrest:       FAULTTEST_LOG = /tmp/helpdesk-faulttest-gateway-pgbackrest.log
 faulttest-pitr:                     FAULTTEST_LOG = /tmp/helpdesk-faulttest-pitr.log
 
+# ---------------------------------------------------------------------------
+# The audit database of a locally running stack (port 15440)
+# ---------------------------------------------------------------------------
+# Its own Compose project and volume (testing/docker/docker-compose.dev-auditd.yaml),
+# so no test target's `down -v` can delete it: the test infrastructure's
+# postgres-auditd on 15434 is disposable, this one holds the history.
+DEV_AUDITD_COMPOSE = docker compose -f testing/docker/docker-compose.dev-auditd.yaml
+
+dev-auditd-up:
+	$(DEV_AUDITD_COMPOSE) up -d --wait
+	@echo 'Point auditd at it: HELPDESK_AUDIT_DB="postgres://postgres:auditddevpass@localhost:15440/auditd?sslmode=disable"'
+
+dev-auditd-down:
+	$(DEV_AUDITD_COMPOSE) down
+
+# Deletes the history of the locally running stack: asks first.
+dev-auditd-wipe:
+	@printf 'This deletes the audit history of the local stack (incidents, approvals, ledger). Type "wipe" to continue: '; \
+	read answer; [ "$$answer" = "wipe" ] || { echo "Not wiped."; exit 1; }
+	$(DEV_AUDITD_COMPOSE) down -v
+
 # Shared awk program — append a log file path to invoke: $(SUMMARY_CMD) <logfile>
-SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:  %d\n  Passed: %d\n  Failed: %d\n",p+f,p,f; if(f>0){print "  Failing tests:"fails}}'
+SUMMARY_CMD = awk '/^[[:space:]]*--- PASS:/{p++} /^[[:space:]]*--- SKIP:/{s++; k=$$0; sub(/^[[:space:]]*--- SKIP: /,"",k); r=""; if(prev ~ /^[[:space:]]+[A-Za-z0-9_.-]+\.go:[0-9]+: /){r=prev; sub(/^[[:space:]]+[A-Za-z0-9_.-]+\.go:[0-9]+: /,"",r); r="\n      reason: "r} skips=skips"\n    "k r} /^SKIP:/{pk++} /^[[:space:]]*--- FAIL:/{f++; n=$$0; sub(/^[[:space:]]*--- FAIL: /,"",n); fails=fails"\n    "n} END{printf "\n=== Test Summary ===\n  Total:   %d\n  Passed:  %d\n  Failed:  %d\n  Skipped: %d\n",p+f+s,p,f,s; if(f>0){print "  Failing tests:"fails}; if(s>0){print "  Skipped tests (a skip is not a pass; check each ran where you expect):"skips}; if(pk>0){print "  WARNING: "pk" package(s) skipped entirely (see the SKIP: lines above); none of their tests ran"}} {prev=$$0}'
 
 integration:
 	@echo "Starting test infrastructure..."
@@ -163,12 +184,16 @@ integration:
 	# would fail on every fresh (-v wiped) volume.
 	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
-	# POSTGRES_TEST_DSN: dedicated postgres-auditd service above (port 15434),
+	# POSTGRES_TEST_DSN: dedicated postgres-auditd service above (port 15434), which
+	# is disposable (the teardown below deletes its volume: a locally running
+	# stack's auditd belongs on `make dev-auditd-up`, port 15440, not here),
 	# never the fault-injection-target postgres service (port 15432) — see
 	# testing/docker/docker-compose.yaml's own comment for why they must stay
 	# separate. Exercises internal/audit's Postgres backend, otherwise never
 	# run anywhere.
-	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+	# HELPDESK_REQUIRE_INFRA: this target brings the infrastructure up, so a test
+	# that cannot find it fails instead of skipping (a bare `go test` still skips).
+	-HELPDESK_REQUIRE_INFRA=1 POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
 		go test -tags integration -timeout 900s -v $(GOTEST_EXTRA) $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
@@ -183,7 +208,7 @@ integration-nocache:
 	docker compose -f testing/docker/docker-compose.yaml -f testing/docker/docker-compose.pgbackrest.yaml up -d --wait
 	./testing/docker/setup-pgbackrest-backup.sh
 	@echo "Running integration tests..."
-	-POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
+	-HELPDESK_REQUIRE_INFRA=1 POSTGRES_TEST_DSN="postgres://postgres:auditdtestpass@localhost:15434/auditd_test?sslmode=disable" \
 		go test --count=1 -tags integration -timeout 900s -v $(INTEGRATION_PKGS) 2>&1 | tee $(INTEGRATION_LOG)
 	@$(SUMMARY_CMD) $(INTEGRATION_LOG)
 	@echo "Stopping test infrastructure..."
@@ -459,7 +484,7 @@ faulttest-gateway-nocache:
 #      that were only in pg_wal came back.
 #
 # Starts only the pgBackRest container and never tears anything down, so the
-# auditd database of a locally running stack (:15434) is left alone.
+# auditd database of a locally running stack (:15440, `make dev-auditd-up`) is left alone.
 #
 # Required env vars: FAULTTEST_GATEWAY_URL, FAULTTEST_API_KEY (as above).
 # The gateway's infrastructure.json must contain "pgbackrest-db"

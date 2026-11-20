@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -59,6 +60,18 @@ func (g *Gateway) handleAvailabilityLedger(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "could not read the incidents the ledger is built from: "+err.Error())
 		return
+	}
+	// The ticket an incident's restore was approved under is a label on its line,
+	// not part of the arithmetic: a failure to read it leaves the label off.
+	if tickets, err := g.availabilityClient().ApprovalTickets(r.Context(), l.WindowStart); err != nil {
+		slog.Warn("availability ledger: tickets not attached", "err", err)
+	} else {
+		l.AttachTickets(tickets)
+	}
+	// Whether a restore drill is due is a reminder beside the budget. The gateway
+	// reads no database, so drills are matched to the server by name.
+	if res, ok := g.infra.ResolveObjectives(key); ok {
+		l.DrillCurrency = g.availabilityClient().DrillCurrency(r.Context(), key, res.DrillReminder(), availability.DrillInputs{}, time.Now().UTC())
 	}
 	writeJSON(w, http.StatusOK, l)
 }

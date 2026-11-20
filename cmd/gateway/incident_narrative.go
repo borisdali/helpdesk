@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -258,11 +259,66 @@ type EscalationHop struct {
 // handleGetIncident handles GET /api/v1/incidents/{runID}.
 // Assembles a unified IncidentNarrative from triage run, gate event,
 // remediation run, and feedback.
+// errIncidentNotFound is entryRunOfIncident's answer for an unknown incident.
+var errIncidentNotFound = errors.New("incident not found")
+
+// entryRunOfIncident reads an incident from auditd and returns its entry run: the
+// playbook run the incident's narrative is keyed by. "" with no error means the
+// incident exists but has no entry run.
+func (g *Gateway) entryRunOfIncident(ctx context.Context, incidentID string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(g.auditURL, "/")+"/v1/incidents/"+incidentID, nil)
+	if err != nil {
+		return "", err
+	}
+	if g.auditAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+g.auditAPIKey)
+	}
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx2))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return "", errIncidentNotFound
+	case resp.StatusCode != http.StatusOK:
+		return "", fmt.Errorf("auditd returned %d", resp.StatusCode)
+	}
+	var inc struct {
+		EntryRunID string `json:"entry_run_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&inc); err != nil {
+		return "", err
+	}
+	return inc.EntryRunID, nil
+}
+
 func (g *Gateway) handleGetIncident(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	if runID == "" {
 		writeError(w, http.StatusBadRequest, "runID is required")
 		return
+	}
+
+	// An incident ID (inc_…) names the same thing as its entry run: the narrative
+	// is keyed by the entry run, so resolve one to the other.
+	if strings.HasPrefix(runID, "inc_") {
+		entry, err := g.entryRunOfIncident(r.Context(), runID)
+		switch {
+		case errors.Is(err, errIncidentNotFound):
+			writeError(w, http.StatusNotFound, "incident not found")
+			return
+		case err != nil:
+			slog.Error("handleGetIncident: failed to resolve incident", "incident_id", runID, "err", err)
+			writeError(w, http.StatusBadGateway, "could not look up the incident in the audit service: "+err.Error())
+			return
+		case entry == "":
+			writeError(w, http.StatusNotFound, "incident "+runID+" has no entry run to show a narrative for")
+			return
+		}
+		runID = entry
 	}
 
 	// 1. Fetch the triage run.

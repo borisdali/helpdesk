@@ -84,35 +84,67 @@ An environment does not imply a tag and a tag does not imply an environment. A d
 
 ## 3. Values
 
-- **Durations** are strings: `"15m"`, `"1h30m"`, `"90s"` and a days unit, `"1d"` or `"1d12h"`. A bare number is
+- **Durations**   
+  Are strings: `"15m"`, `"1h30m"`, `"90s"` and a days unit, `"1d"` or `"1d12h"`. A bare number is
   invalid: `900` would be seconds to one reader and minutes to another. So is a sign after the days (`"1d-5m"`).
-- **`rpo`** may be `"0s"`: no data loss tolerated. It is a value, not an absence and does not fall through to the
-  next level.
-- **`rto`** must be greater than zero.
-- **`availability_slo`** is a percentage greater than 0 and at most 100.
-- **`availability_window`** is a duration greater than zero: the rolling window the SLO is measured over. Unset
+
+- **`rpo`** 
+  May be `"0s"`: no data loss tolerated. It is a value, not an absence and does not fall through to the next level.
+
+- **`rto`** 
+  Must be greater than zero.
+
+- **`availability_slo`**   
+  Is a percentage greater than 0 and at most 100.
+
+- **`availability_window`**   
+  Is a duration greater than zero: the rolling window the SLO is measured over. Unset
   means 30 days and everything that shows a budget says when the window is that default. An unreadable window
   is never replaced by the default: no budget is computed and the problem is logged. Together with the SLO it
   gives the downtime budget ([§5.2](#52-the-availability-budget)).
-- **`recovery_preference`** is `availability_first` or `data_first`: what to favour when a recovery has to choose
+
+- **`recovery_preference`**   
+  Is `availability_first` or `data_first`: what to favour when a recovery has to choose
   between getting the database back sooner and losing less data. It will decide how a recommendation is ranked
   and how an option that breaches an objective is treated. It never decides to act. Unset means no preference.
-- **`enforcement`** is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
+
+- ##### **`enforcement`** 
+  Is `warn`, `acknowledge` or `refuse`: what happens when a recovery would breach an objective.
   `warn` says so and blocks nothing; `acknowledge` makes the person approving acknowledge the breach separately;
   `refuse` refuses the recovery. Unset means `warn`, which is the behaviour from before it existed. An invalid
   value, inherited or not, is treated as `acknowledge`, not `warn`. So is a database that names an environment
   that is not declared and sets no enforcement of its own, because it cannot tell which enforcement its real
-  environment would have set. A typo must not quietly weaken the check. What a database sets itself is always
-  honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
+  environment would have set. A typo must not quietly weaken the check.   
+
+  What a database sets itself is always honoured. **`enforcement` governs the `rpo` only**: it acts on the estimated data loss of a point-in-time
   restore before the instance is stopped. The downtime a restore costs has its own setting,
   `availability_enforcement`, below and the `rto` is shown against what a recovery took, after the fact.
-- **`availability_enforcement`** is `warn`, `acknowledge` or `refuse` and says what happens when a restore is
+
+- ##### **`availability_enforcement`** 
+  Is `warn`, `acknowledge` or `refuse` and says what happens when a restore is
   expected to breach the availability budget ([§5.4](#54-the-budget-at-the-gate)). It is its own setting and not
   `enforcement`'s, because an existing `enforcement: refuse` means "refuse a restore that loses too much data" and
-  must not start refusing restores for a budget it never named. Unset means `warn`. It follows the same rules as
-  `enforcement`: an invalid value, inherited or not and a database that names an environment that is not declared
+  must not start refusing restores for a budget it never named.   
+
+  Unset means `warn`. It follows the same rules as `enforcement`: an invalid value, inherited or not and a database that names an environment that is not declared
   and sets none of its own, are treated as `acknowledge`, never as `warn`.
-- Both are exact lowercase strings. `Refuse` is an error, not a guess.
+
+- ##### **`drill_interval`** 
+  Is how long a database may go without a *verified* restore drill before it is reported
+  as overdue for one: `"90d"` (a quarter) when unset, `"0d"` to turn the reminder off.   
+
+  It applies to a database that has an `rpo`, an `rto` or an `availability_slo`: nothing says a restore matters to one that has none and a
+  development database should not nag. Any verified drill resets the clock, whatever its method or size. A refused 
+  or unverifiable one does not and the report names it.   
+
+  It is a reminder and nothing else: the plan, the posture check (`get_pgbackrest_status`: `drill_currency`, `drill_overdue`) and `faulttest vault budget` say
+  "last verified drill 143 days ago (limit 90 days)" and nothing is blocked, held or refused because of it.   
+
+  An interval that cannot be read neither switches the reminder off nor goes unnoticed: the default applies and the
+  config problem is reported. It resolves like the objectives (database, environment, fleet default). How to drill,
+  what to time and what a drill counts for: [RESTORE_OPS.md](RESTORE_OPS.md).
+
+- `enforcement` and `availability_enforcement` are exact lowercase strings. `Refuse` is an error, not a guess.
 
 Both settings resolve like the objectives (database, then environment, then fleet default, each on its own), so a
 production environment can be `data_first` with `acknowledge` while one database in it overrides to `refuse`.
@@ -444,6 +476,9 @@ does not shrink with the data and is charged in full, whether or not the instanc
 instance is not down until the restore stops it). Neither figure is the downtime and a gate that compares one with
 the other is on the optimistic side by about the difference.
 
+For a point-in-time restore specifically, when the ledger charges the wait and what that means for how long a decision
+can be put off, see the timeline in [PITR.md, What waiting costs](PITR.md#what-waiting-costs).
+
 ### 5.6 Is the backup posture enough for the objectives?
 
 `backup_stale` in `get_pgbackrest_status` answers a question about the backup **job**: is the newest backup older than
@@ -544,7 +579,7 @@ it spends.
 | A window on `availability_slo`, the downtime budget it gives, the number of worst-case recoveries it absorbs (budget ÷ `rto`) and a check that flags an `rto` longer than the whole budget; read from declared numbers only ([§5.2](#52-the-availability-budget)), shown in the recovery decision's objectives | Built |
 | A ledger of the downtime budget already spent in the window, from recorded real incidents, charged by availability impact, with unconfirmed outages listed apart ([§5.3](#53-the-availability-ledger)) | Built (run live on the Docker fixture: three charged restores, one unconfirmed run, the budget overspent; on the Ubuntu VM over SSH and on a K8s Pod: three charged restores and one unconfirmed run on each) |
 | The remaining budget shown to the person at the gate (`helpdesk-client --pitr-plan` and recorded on the plan and execution decisions) | Built |
-| A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built (run live on the Docker fixture with `acknowledge`: refused without the acknowledgement, the instance not stopped and ran with it, on the Docker fixture, the Ubuntu VM and a K8s Pod; the `refuse` mode not yet) |
+| A restore expected to breach the remaining availability budget is held to `acknowledge` or `refuse` by its own setting, `availability_enforcement` (default `warn`); refuse only for a serving instance; one acknowledgement covers every breach and the record says which there were ([§5.4](#54-the-budget-at-the-gate)) | Built (run live on the Docker fixture with `acknowledge`: refused without the acknowledgement, the instance not stopped and ran with it, on the Docker fixture, the Ubuntu VM and a K8s Pod; the `refuse` mode on the Ubuntu VM in v0.36: a restore of the serving instance was refused at execution, the unit stayed `active` and the decision recorded why) |
 | The budget check applied to any tool declared `impact: outage` in the tool registry (planned restarts, scale-downs, failover), not only the restore: a spent budget argues against voluntary downtime, never against recovery | Not built (v0.36) |
 | The `rto` itself enforced at the gate (it stands in for the restore's duration, as an upper bound, in the budget check; nothing else compares it before the restore) | Not built |
 | Recovery-time estimate for a restore, from this server's past real restores (median and longest from three samples, a p90 only from ten, with the sample size and the window), "unknown" below three samples, set against the declared `rto` as a count of the past restores that broke it and used as the restore's duration in the budget check ([§5.5](#55-the-recovery-time-estimate)) | Built (restores only; run live on the Docker fixture: `no_history` with none, `insufficient_history` with 1 and 2 samples, `estimated` at 3 with the longest as the planning figure, on the Docker fixture (longest 1m41s), on the Ubuntu VM (longest 36 s) and on a K8s Pod (longest 55 s)) |
@@ -580,13 +615,25 @@ yardstick and no engine for getting better. Each supplies what the other lacks:
 | Certification (STABLE on pass rate and spread) also requires "recovers within the environment's `rto` at p90" | Objectives → Vault | Not built |
 | The flywheel's improvement is stated in the customer's terms: "about 25% of a month's downtime budget saved per incident" | Both | Not built |
 | A declared-versus-demonstrated report: "RTO 30 min, met 40% of the time, p90 52 min", for a person to act on (invest in HA or renegotiate; the system never changes the objective) | Both | Not built |
-| Practice restores (drills) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. Proposed, not decided: needs a declared link from the clone to the server, a data-size comparison and a recency limit | Both | Not built (proposed) |
+| Practice restores (**drills**) on a clone of the server feed the estimate, **labelled as rehearsals and kept apart from real history** (never merged into it), so a server that is rarely restored still has a number. The clone is linked to the server by the PostgreSQL system identifier read from both, not by a name; a drill counts only if it is verified, of a similar size (±20%) and recent (90 days). Real restores take over from three samples | Both | Built ([RESTORE_OPS.md](RESTORE_OPS.md)); not yet run live through the gateway |
+| A database with an objective that has no verified drill in a quarter (`drill_interval`, default 90 days) is flagged **DRILL OVERDUE** in the plan and in `get_pgbackrest_status`, so the practice does not depend on someone remembering | Objectives → Vault | Built (warning only; not part of the `objective_exposure` verdict) |
+| Drills are not Vault incidents: they are not in the playbook statistics, the resolution rate or the certification, and cost no budget | (none) | By design: a rehearsal on a copy says nothing about how well a playbook handles a real outage |
 
 **What closes the loop is a person.**   
 The system measures and shows the gap between what was declared and what has been
 demonstrated; a human acts on it (more resources, a faster backup path, a better playbook or a more honest objective);
 the next recoveries then measure the result. The system never changes an objective. Without the "act, then measure
 again" half there is only a log of what happened.
+
+**Drills are how the outer loop turns without waiting for an outage.**   
+The flywheel learns from incidents and the objectives are checked against recoveries, both only when something
+has gone wrong. A well-run server may go years without a real restore, so its loop has nothing to learn from and
+its `rto` is a guess. A drill is the "act, then measure again" step run on a quiet day: the plan says "30 min
+declared, 52 min demonstrated on a copy" (`RTO CHECK (!)`), a person acts (a faster backup path, more resources,
+a more honest `rto`), and the next drill measures the change. The restore then is no longer the first time the procedure runs or the first time the
+number is known. Drilling regularly is therefore part of keeping an objective, not an extra: a declared
+`rto` that has never been demonstrated is the promise nobody has checked. The reminder (`drill_interval`) is the
+outer loop's nudge to run that step.
 
 **The unit is a server.**   
 "Database" in this section and in §5 means one `db_servers` entry, a whole PostgreSQL server

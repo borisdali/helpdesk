@@ -149,21 +149,36 @@ func rtoExposure(obj infra.ResolvedObjectives, est *availability.RecoveryEstimat
 	}
 	rto := int64(obj.RTO.Value.Round(time.Second) / time.Second)
 	check := &ExposureCheck{ObjectiveSeconds: &rto}
-	if est == nil || est.Status != availability.EstimateEstimated || est.MaxSeconds == nil || est.VsRTO == "" {
-		check.Status = ExposureNotComparable
-		check.Detail = "there is not enough history of restores of this server to say whether the rto of " + humanSpan(rto) + " has been met"
-		if est != nil && est.Basis != "" {
-			check.Detail += " (" + est.Basis + ")"
+	// Real restores of this server come first. Below that many, restore drills say
+	// what a restore takes before the bad day, and an rto a drill overran is as
+	// much an exposure: it is said to be a drill, a restore on a copy.
+	switch {
+	case est != nil && est.Status == availability.EstimateEstimated && est.MaxSeconds != nil && est.VsRTO != "":
+		check.MeasuredSeconds = est.MaxSeconds
+		check.Detail = est.VsRTODetail
+		check.Status = ExposureWithin
+		if est.VsRTO != "within" {
+			check.Status = ExposureExceeds
+		}
+		return check
+	case est != nil && est.Drills != nil && est.Drills.Status == availability.EstimateEstimated && est.Drills.MaxSeconds != nil && est.Drills.VsRTO != "":
+		d := est.Drills
+		check.MeasuredSeconds = d.MaxSeconds
+		check.Detail = "by restore drills, restores on a copy and not on this server: " + d.VsRTODetail
+		check.Status = ExposureWithin
+		if d.VsRTO != "within" {
+			check.Status = ExposureExceeds
 		}
 		return check
 	}
-	check.MeasuredSeconds = est.MaxSeconds
-	if est.VsRTO == "within" {
-		check.Status = ExposureWithin
-	} else {
-		check.Status = ExposureExceeds
+	check.Status = ExposureNotComparable
+	check.Detail = "there is not enough history of restores of this server to say whether the rto of " + humanSpan(rto) + " has been met"
+	if est != nil && est.Basis != "" {
+		check.Detail += " (" + est.Basis + ")"
 	}
-	check.Detail = est.VsRTODetail
+	if est != nil && est.Drills != nil && est.Drills.Basis != "" {
+		check.Detail += "; restore drills: " + est.Drills.Basis
+	}
 	return check
 }
 
@@ -195,7 +210,13 @@ func withObjectiveExposure(ctx context.Context, res *GetPgBackRestStatusResult, 
 	var est *availability.RecoveryEstimate
 	if obj.RTO.Set {
 		d := obj.RTO.Value
-		est = recoveryEstimateOf(ctx, key, &d, now)
+		// No restore is in view here, so a drill is compared in size with the newest one.
+		est = recoveryEstimateOf(ctx, key, &d, now, availability.DrillInputs{SizeFromNewestDrill: true})
 	}
 	res.ObjectiveExposure = exposureOf(*res, now, obj, est)
+	// Whether a drill is due is a separate reminder, not part of the exposure
+	// verdict: it holds nothing and changes no status.
+	if c := drillCurrencyAt(ctx, key, obj.DrillReminder(), target, now); c != nil {
+		res.DrillCurrency, res.DrillOverdue = c, c.Overdue
+	}
 }
