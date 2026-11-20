@@ -462,6 +462,8 @@ that is charged when the restore runs. So a gate held open past its latest start
 `exceeds`, asks for `--acknowledge-objective-breach` and under `refuse` a serving instance is refused. With several
 open incidents, where which is this restore's is not known, the ledger's own figure stands.
 
+##### Plan vs Actual
+
 After the incident, the report sets the plan against what happened (`PLAN VS ACTUAL`): the recovery time, the data
 lost at the stop and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
 of the restore, against what the plan said was left:
