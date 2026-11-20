@@ -21,6 +21,9 @@ The Vault is the library where these Playbooks live. Tracked, versioned and cont
    - [vault list](#vault-list)
    - [vault accuracy](#vault-accuracy)
    - [vault incidents](#vault-incidents)
+   - [vault incidents --ticket](#vault-incidents---ticket)
+   - [vault budget](#vault-budget)
+   - [vault drills](#vault-drills)
    - [vault journey](#vault-journey) — [`--detail`: reasoning interleaved with tool calls](#--detail-reasoning-interleaved-with-tool-calls), [TOOL CALL INTEGRITY: declared vs. confirmed tool calls](#tool-call-integrity-declared-vs-confirmed-tool-calls)
    - [vault status](#vault-status)
    - [vault drift](#vault-drift)
@@ -114,7 +117,7 @@ There are three paths by which operational knowledge enters the Vault:
 aiHelpDesk ships 34 expert-authored system Playbooks that are seeded into auditd on startup, spanning three domains:
 
 **PostgreSQL (24 playbooks — 14 triage, 8 remediation, 2 recovery)**  
-Connection exhaustion, lock contention and lock chains, slow queries, vacuum and bloat, high cache miss ratio, replication lag, stale replication slots, WAL disk full, checkpoint and bgwriter pressure, disk pressure, authentication failures, pg_hba.conf rejections, database-down restart, config recovery, and PITR restore.
+Connection exhaustion, lock contention and lock chains, slow queries, vacuum and bloat, high cache miss ratio, replication lag, stale replication slots, WAL disk full, checkpoint and bgwriter pressure, disk pressure, authentication failures, pg_hba.conf rejections, database-down restart, config recovery and PITR restore.
 
 **Kubernetes (8 playbooks — 6 triage, 2 remediation)**  
 Pod crashes (OOMKill, CrashLoopBackOff), ImagePullBackOff, pods stuck in Pending, PVC provisioning failures, services with no endpoints, StatefulSets scaled to zero.
@@ -315,7 +318,7 @@ The per-version breakdown is the primary learning signal: it shows whether step 
 | `UNSTABLE(N)` | Certified UNSTABLE — pass rate or confidence spread outside bounds; playbook needs attention before promotion |
 | `—` | No certification run has been posted for this fault |
 
-The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md). The `⚠N/M warnings` suffix, and how it gates real (non-faulttest) incidents by default, is documented in [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
+The `attr=` label requires `root_cause_classes` to be set on the triage playbook and `HELPDESK_API_KEY` available at cert time. See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md). The `⚠N/M warnings` suffix and how it gates real (non-faulttest) incidents by default, is documented in [ATTRIBUTION_CERTS.md §9](ATTRIBUTION_CERTS.md#9-the-clean-axis).
 
 The `ACCURACY` column shows the diagnosis accuracy rate from operator feedback (see [operator feedback](PLAYBOOKS.md#operator-feedback)). `–` means no feedback has been submitted yet.
 
@@ -407,7 +410,7 @@ Cert history (last 3)
   2026-08-14 19:14 UTC   STABLE   CLEAN  attr=consistent (5 runs)
 ```
 
-Each row is one recertification, newest first. The `↳` line under a row — when present — explains what changed since the row below it: `IsStable`/`IsClean`/`AttributionConsistent` flips, `warning_distribution` and `confirmed_distribution` deltas (which specific signal appeared, disappeared, or changed count), and `playbook_version`/`taxonomy_version` changes. A row with no `↳` line means nothing tracked here changed since the previous cert. The section is silently omitted below two recorded certs — there's no trend to show yet.
+Each row is one recertification, newest first. The `↳` line under a row — when present — explains what changed since the row below it: `IsStable`/`IsClean`/`AttributionConsistent` flips, `warning_distribution` and `confirmed_distribution` deltas (which specific signal appeared, disappeared or changed count) and `playbook_version`/`taxonomy_version` changes. A row with no `↳` line means nothing tracked here changed since the previous cert. The section is silently omitted below two recorded certs — there's no trend to show yet.
 
 > **Not to be confused with [`vault history`](#vault-history)**, a different, unrelated command — this section is the *stability cert's* own recertification trend for one fault; `vault history` lists every stored *version of a playbook* (authoring/provenance lineage, `pb_` IDs, `from=` trace). Same word, different axis.
 
@@ -550,11 +553,11 @@ The `Score` line matches the `SCORE` column in `vault incidents <series-id>` —
 decision (today, a point-in-time restore) adds this section between REMEDIATION and EVALUATION. It lists the
 objectives that were in force, each with the level it came from and the digest of the config it was read from,
 then the stages oldest first: every plan that was shown with the loss it measured and its verdict against the
-`rpo`, the gate (approved or denied, by whom, and which acknowledgements it carried), and the restore's own
-decision to proceed or refuse, with the reason, and finally the outcome: how the remediation hop ended and its
+`rpo`, the gate (approved or denied, by whom and which acknowledgements it carried) and the restore's own
+decision to proceed or refuse, with the reason and finally the outcome: how the remediation hop ended and its
 recovery duration, set against the `rto` that was in force (not the downtime, which is longer; the section says so).
 A line warns when the configuration changed between stages.
-`vault journey <trace> --detail` shows the same block for one trace, and its header gains a `Recovery:` line.
+`vault journey <trace> --detail` shows the same block for one trace and its header gains a `Recovery:` line.
 Fields and event: [AUDIT.md §4.6](AUDIT.md#46-recovery_decision-fields).
 
 **`--summary`: one line per hop.** A multi-hop escalation chain's full deep-dive view above can run long — add `--summary` to condense it to one line per hop (triage/escalation/remediation playbook and outcome, truncated findings) plus a final score line, with none of the hypothesis/gate/feedback detail:
@@ -582,7 +585,7 @@ Every hop beyond TRIAGE gets its own `plr_*` run ID, shown in brackets — pass 
 Reads the same `incidentNarrative` the full view fetches — no extra API calls. Has no effect outside deep-dive mode (the fault-id/series-id list view and the no-argument all-incidents listing both ignore it).
 
 **Verification warnings appear inline, when present.** If a chapter's underlying tool calls
-weren't fully verified — the agent narrated calling a tool that never actually executed, or a real
+weren't fully verified — the agent narrated calling a tool that never actually executed or a real
 tool call targeted a different server than requested — an inline warning line prints right under
 that chapter's `Findings`, so it's visible without a separate `vault journey <trace_id>` lookup
 (the example above is a fully clean run, so neither warning appears there):
@@ -660,6 +663,101 @@ Use the displayed `trace_id` with `vault journey` to see the full tool-by-tool a
 
 See also the [Incidents page](INCIDENTS.md#the-incident-receipt-full-timeline-view) for the full description of this feature.
 
+### vault incidents --ticket
+
+```bash
+faulttest vault incidents --ticket INC-1234 --gateway http://localhost:8080
+```
+
+Lists the approvals that were given under a ticket, oldest first: when, which run, who approved, the recovery target and the justification the approver typed. The ticket and the justification come from the approval of a point-in-time restore (`helpdesk-client --pitr-approve --ticket … --justification …`); they are inside the hash-covered decision record. The ticket is **recorded, not checked** against a ticket system.
+
+```
+Approvals given under ticket CUT-3 (1)
+
+TIME (UTC)         RUN             APPROVED BY               RECOVERY TARGET
+──────────────────────────────────────────────────────────────────────────────
+2026-11-20 18:41   plr_f0e646c3    alice@example.com         time=2026-11-20T18:38:51Z
+                   justification (the approver's words): VM cutover test: real restore 3 of 3
+
+The ticket is what the approver typed; it is recorded, not checked against a ticket system.
+Open one with: faulttest vault incidents <run>
+```
+
+Open the run with `vault incidents <run>` for the full narrative. The same ticket shows on the incident's line in [vault budget](#vault-budget).
+
+### vault budget
+
+```bash
+faulttest vault budget <database> --gateway http://localhost:8080
+```
+
+The availability budget of one database and what has been charged against it. `<database>` is an infrastructure key (`db_servers`), a name or a connection string. It reads `GET /api/v1/availability-ledger?database=…` (see [API.md](API.md)) and prints:
+
+| Line | Meaning |
+|---|---|
+| **Window**, **Budget** | the window the budget is measured over and where it came from and the budget in minutes (from the availability objective in `infrastructure.json`) |
+| **Spent** | the downtime charged in the window, the number of outage incidents and the share of the budget used |
+| **Left** | what remains, flagged `⚠ OVERSPENT` when it is used up; a second line shows what would remain if the *unconfirmed* outages counted in full |
+| **Drills** | the restore-drill reminder: when the last verified drill was and `⚠ DRILL OVERDUE` when it is past its `drill_interval`. A reminder only: it is not part of the budget's figures |
+| **Charged** | the outages that count: incident, detection time, status, duration and `ticket <ref>` when the approval carried one |
+| **Unconfirmed** | outages that are *not* charged because their real downtime is unknown, each with the reason |
+| **Not charged** | degraded incidents, incidents with no availability impact and incidents with no declared impact, counted and summed |
+
+```
+Availability budget: prod-orders
+  Window   30d [objective], as of 2026-11-20 18:50 UTC
+  Budget   43m (99.9% over 30d)
+  Spent    1m 41s in 1 outage incident(s), 4% of the budget
+  Left     41m 19s
+  Drills   last verified drill 4h ago (limit 90 days)
+
+Charged (outages that count against the budget)
+  plr_f0e646c3   2026-11-20 18:38  resolved               1m 41s  ticket CUT-3
+
+Duration is from detection to recovery: each incident runs from the start of its entry playbook run to the end of its last run, …
+```
+
+(The figures are illustrative. The shape is what the command prints.)
+
+Things to know:
+
+- **Real incidents only.** A faulttest run never charges the ledger and a restore *drill* is not an incident: it never charges the budget either. See [RESTORE_OPS.md](RESTORE_OPS.md).
+- **The duration is the whole incident**, from the start of its entry playbook run to the end of its last run, so it includes the time the gate waited for an approval. The restore estimate in the plan uses only the remediation hop; see [PITR.md](PITR.md).
+- The budget model, the window and the unconfirmed rule are in [OBJECTIVES.md](OBJECTIVES.md); the reading of a budget at the gate is in [PITR.md](PITR.md).
+
+### vault drills
+
+```bash
+faulttest vault drills                          # the recent drills, newest first
+faulttest vault drills --target prod-orders     # one database's drills
+faulttest vault drills drl_ab12cd34             # one drill in full
+```
+
+The restore drills recorded with `helpdesk-client --drill-record` (see [RESTORE_OPS.md](RESTORE_OPS.md)), read through `GET /api/v1/drills`. A drill is on record whatever its verdict (`verified`, `verified_with_warnings`, `refused`, `unverifiable`); only a verified one counts.
+
+| Flag | Meaning |
+|---|---|
+| `--target KEY` | only this database's drills (an infrastructure key, a name or `host:port`). It is `--target` and not `--source` because `--source` is the harness's fault-catalog filter |
+| `--status S` | only drills with this status |
+| `--all` | include drills that a later record supersedes (a refusal put right); hidden by default |
+| `--days N` | only drills from the last N days (0 for all) |
+| `--limit N` | at most N drills (default 30) |
+
+```
+DRILL         WHEN      SOURCE <- CLONE                       METHOD     TOOK      SIZE       STATUS
+drl_809b6b47  2h ago    pgbackrest-ubuntu-vm <- orders-clone  pgbackrest 3s        22.0 MiB   verified
+drl_aad337d6  5h ago    pgbackrest-ubuntu-vm <- orders-clone  pgbackrest 3s        22.0 MiB   verified
+
+2 drill(s).
+A drill resets the reminder when verified. It also plans a restore only when it is a pgBackRest drill
+of comparable size; see `helpdesk-client --pitr-plan` for what the plan rests on.
+Open one with `faulttest vault drills <drill id>`.
+```
+
+(The table is abridged; column widths follow the longest key and status.) With a drill id the command prints that drill in full: each check and its result, the system identifiers that linked the two servers, the endpoints (never credentials), the digest of the infrastructure config at the time and, when a later record replaced it, which one.
+
+A record is immutable. Re-verifying a drill is a new record that names the one it replaces (`supersedes`); recording the same restore twice is refused with HTTP 409 unless it does.
+
 ### vault journey
 
 ```bash
@@ -717,7 +815,7 @@ A `!` suffix on a TOOLS entry (or anywhere on the row) means `has_mismatch=true`
 |------|---------|-------------|
 | `--limit N` | 20 | Maximum number of journeys to show |
 | `--since duration` | `24h` | Show journeys from the last duration; supports `7d` notation |
-| `--category` | (all) | Filter by `database`, `kubernetes`, or `host` |
+| `--category` | (all) | Filter by `database`, `kubernetes` or `host` |
 | `--outcome` | (all) | Filter by outcome: `resolved`, `abandoned`, `denied`, `error`, etc. |
 | `--incident` | false | Show only journeys that are linked to an incident run (`incident_run_id` non-empty) |
 | `--detail` | false | Interleave agent reasoning with tool calls in the EXECUTION TRACE section (see below); requires the journey to be incident-linked |
@@ -760,7 +858,7 @@ INCIDENT LINK
 
 The INCIDENT LINK section appears when the journey's `trace_id` is associated with a playbook run. Use the navigation hint (`→ vault incidents <plr_>`) to jump to the incident narrative for the WHY behind these tool calls.
 
-When the journey's outcome is `verified_warning`, `verified_failed`, or `escalation_required` — the Layer 1 post-mutation re-verification outcomes [JOURNEYS.md](JOURNEYS.md) documents — a `Verification:` line appears next to `Retries:` in the header block, tagged with [AIGOVERNANCE.md §1.1's Layer 1](AIGOVERNANCE.md#layer-1--intra-agent-post-mutation-verification):
+When the journey's outcome is `verified_warning`, `verified_failed` or `escalation_required` — the Layer 1 post-mutation re-verification outcomes [JOURNEYS.md](JOURNEYS.md) documents — a `Verification:` line appears next to `Retries:` in the header block, tagged with [AIGOVERNANCE.md §1.1's Layer 1](AIGOVERNANCE.md#layer-1--intra-agent-post-mutation-verification):
 
 ```
   Retries:           1
@@ -1000,7 +1098,7 @@ CONFIDENCE: value`) — those runs have no confidence score at all and do not ap
 
 The remediation section only appears when there are runs with both a non-zero `remediation_judge_score` and operator remediation feedback (`feedback_type: "remediation"`).
 
-**Data quality banner.** When the table exists but human operator verdicts are absent or sparse (zero human-sourced feedback rows, or fewer than 50% of runs have human verdicts), `vault calibration` prints a warning box before the table:
+**Data quality banner.** When the table exists but human operator verdicts are absent or sparse (zero human-sourced feedback rows or fewer than 50% of runs have human verdicts), `vault calibration` prints a warning box before the table:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1192,7 +1290,7 @@ The `To activate` / `To discard` hints only appear when the `after` version is n
 
 Fields compared: `name`, `description`, `guidance`, `symptoms`, `escalation`, `execution_mode`, `approval_mode`. The `guidance` field is the most important — it is the strategic intent the agent works from, so any wording change there has direct effect on agent behaviour. `escalation` changes are the second-most critical: added or removed conditions change when the agent hands off to a human.
 
-`execution_mode`, `approval_mode`, and `playbook_type` are **operational fields** — they control how a playbook runs and which protocol it declares, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
+`execution_mode`, `approval_mode` and `playbook_type` are **operational fields** — they control how a playbook runs and which protocol it declares, not what it knows. The `from-trace` endpoint preserves these from the currently-active version when generating a draft, so they should normally be identical in both versions. If they appear in a diff it means they were changed via a manual edit or a direct API call, which warrants extra scrutiny.
 
 If a field is identical in both versions, it is not shown. "No differences" means the two versions are identical.
 
@@ -1276,7 +1374,7 @@ faulttest vault discard <draft-id> \
   --api-key $HELPDESK_API_KEY
 ```
 
-Permanently deletes a draft that should not be activated — for example, a draft with protocol warnings that cannot be corrected, or a `suggest-update` output that was superseded by a better run. Calls `DELETE /api/v1/fleet/playbooks/{id}` on the gateway.
+Permanently deletes a draft that should not be activated — for example, a draft with protocol warnings that cannot be corrected or a `suggest-update` output that was superseded by a better run. Calls `DELETE /api/v1/fleet/playbooks/{id}` on the gateway.
 
 ```
 Discarded: pb_a9258113
@@ -1376,11 +1474,11 @@ faulttest vault cert-compare <model-a> <model-b> \
   --api-key $HELPDESK_API_KEY
 ```
 
-Compares consistency certification results across two diagnosis models, fault by fault. This is the primary gate for model upgrade decisions: before promoting a new model into production — whether a newer version of the same model family, a different provider, or an entirely different architecture — run the full cert suite against both the current model and the candidate and use `cert-compare` to confirm there are no regressions.
+Compares consistency certification results across two diagnosis models, fault by fault. This is the primary gate for model upgrade decisions: before promoting a new model into production — whether a newer version of the same model family, a different provider or an entirely different architecture — run the full cert suite against both the current model and the candidate and use `cert-compare` to confirm there are no regressions.
 
-The command is vendor-agnostic. `model-a` and `model-b` are treated as opaque strings that must match the `diagnosis_model` field stored when certs were generated. Any combination of providers works: Claude → Claude, Claude → Gemini, Gemini → a self-hosted model, and so on.
+The command is vendor-agnostic. `model-a` and `model-b` are treated as opaque strings that must match the `diagnosis_model` field stored when certs were generated. Any combination of providers works: Claude → Claude, Claude → Gemini, Gemini → a self-hosted model and so on.
 
-**What the cert measures — and what it doesn't.** `cert-compare` compares *triage diagnosis certs* only: did the agent consistently identify the correct root cause, call the expected tools, and produce the expected diagnostic keywords? It does not cover remediation quality (did the playbook fix the database?), resolution rate, recovery time, or operator-confirmed accuracy. A STABLE triage cert is a necessary condition for model promotion, not a sufficient one. Remediation cert comparison is a planned extension.
+**What the cert measures — and what it doesn't.** `cert-compare` compares *triage diagnosis certs* only: did the agent consistently identify the correct root cause, call the expected tools and produce the expected diagnostic keywords? It does not cover remediation quality (did the playbook fix the database?), resolution rate, recovery time or operator-confirmed accuracy. A STABLE triage cert is a necessary condition for model promotion, not a sufficient one. Remediation cert comparison is a planned extension.
 
 **Prerequisite:** stability certs must exist for both models. Generate them with `faulttest run --repeat N` with each model configured as the diagnosis model. The results are posted to auditd automatically when `--gateway` is configured.
 
@@ -1458,7 +1556,7 @@ db-max-connections   STABLE        STABLE        —  ⚠ TAXONOMY MAJOR
 
 See [ATTRIBUTION_CERTS.md](ATTRIBUTION_CERTS.md) for the full taxonomy versioning rules.
 
-**Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count, and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
+**Data source.** `cert-compare` calls `GET /api/v1/fleet/fault-stability` on the gateway, which returns every `(fault_id, diagnosis_model)` row stored in the `fault_stability_cert` table in auditd. No deduplication is applied — each model's cert for each fault is a separate row with its own pass rate, run count and stability verdict. If a fault has never been run under a given model, the corresponding cell shows `(no data)`.
 
 **Model name display.** The `claude-` vendor prefix is stripped from column headers (`claude-sonnet-4-6` → `sonnet-4-6`) to keep the table readable. Full model names are used everywhere else (summary line, pass-rate delta lines, error messages).
 
@@ -1511,7 +1609,7 @@ Stability certs for series pbs_sysadmin_host_triage (model: claude-sonnet-4-6)
 **How a hop earns Trust/STABLE/CLEAN.** Unlike an entry-point cert (text-scored
 against the fault's `expected_keywords`/`expected_diagnosis`), a hop's pass/fail is
 outcome-validity: it passed a rep if it reached a valid non-error outcome (resolved,
-escalated, or transitioned) rather than getting stuck, erroring, or being abandoned.
+escalated or transitioned) rather than getting stuck, erroring or being abandoned.
 Reps where a *different*, legitimate gate paused the chain (`gate_pending`) don't
 count either way — that's not this hop misbehaving. `Attribution` for a hop is
 code-derived, not LLM-classified: did it hand off to the same next target on every
@@ -1523,7 +1621,7 @@ passes through now earns its own cert, not just the fault's declared entry point
 
 **Same `EarnsTrust()` bar as everywhere else.** A hop cert only unblocks
 `trustNotYetEarnedForceGate` for that series when `Trust: EARNED` — `IsStable`,
-`IsClean`, and `AttributionConsistent` all true, identical to any other cert. A
+`IsClean` and `AttributionConsistent` all true, identical to any other cert. A
 `Trust: NOT EARNED` result here is a real finding (the hop's actual behavior across
 reps), not a structural limitation to work around.
 
