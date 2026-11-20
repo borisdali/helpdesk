@@ -167,7 +167,17 @@ func rdObjectives(o *audit.ObjectivesInForce) []string {
 	if o.EnforcementSource != "" {
 		enf += " [" + o.EnforcementSource + "]"
 	}
-	lines = append(lines, "  "+strings.Join(append(policy, enf), "   "))
+	policy = append(policy, enf)
+	// The budget has its own enforcement. Shown with an availability objective, so the
+	// block does not read "enforcement warn" over a database that refuses on its budget.
+	if o.AvailabilitySLO != nil && o.AvailabilityEnforcement != "" {
+		aenf := "availability enforcement " + o.AvailabilityEnforcement
+		if o.AvailabilityEnforcementSource != "" {
+			aenf += " [" + o.AvailabilityEnforcementSource + "]"
+		}
+		policy = append(policy, aenf)
+	}
+	lines = append(lines, "  "+strings.Join(policy, "   "))
 	for _, p := range o.Problems {
 		lines = append(lines, "  ⚠ config problem: "+p)
 	}

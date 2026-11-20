@@ -310,6 +310,32 @@ func TestFormatRecoveryDecisions_FlagsAConfigChangedBetweenStages(t *testing.T) 
 	}
 }
 
+// The availability budget has its own enforcement. A narrative that printed only the
+// rpo's ("enforcement warn") over a database that refuses on its budget hid the
+// setting that explained the refusal.
+func TestRDObjectives_ShowsTheBudgetsEnforcementWithAnAvailabilityObjective(t *testing.T) {
+	slo := 99.95
+	o := &audit.ObjectivesInForce{
+		AvailabilitySLO: &slo, AvailabilitySource: "database",
+		Enforcement: "warn", EnforcementSource: "database",
+		AvailabilityEnforcement: "refuse", AvailabilityEnforcementSource: "database",
+	}
+	got := strings.Join(rdObjectives(o), "\n")
+	if !strings.Contains(got, "enforcement warn [database]   availability enforcement refuse [database]") {
+		t.Errorf("the budget's enforcement is not shown:\n%s", got)
+	}
+	// With no availability objective there is no budget to enforce: no extra words.
+	o.AvailabilitySLO = nil
+	if got := strings.Join(rdObjectives(o), "\n"); strings.Contains(got, "availability enforcement") {
+		t.Errorf("shown without an availability objective:\n%s", got)
+	}
+	// An old record without the field prints as before.
+	o.AvailabilitySLO, o.AvailabilityEnforcement = &slo, ""
+	if got := strings.Join(rdObjectives(o), "\n"); strings.Contains(got, "availability enforcement") {
+		t.Errorf("shown for a record that has none:\n%s", got)
+	}
+}
+
 func TestFormatRecoveryDecisions_UnsetAndUnreadableObjectives(t *testing.T) {
 	none := formatRecoveryDecisions([]narrativeRecoveryDecision{{At: rdAt(1), Decision: audit.RecoveryDecision{
 		Stage: "plan", Decision: "planned", Objectives: &audit.ObjectivesInForce{Enforcement: "warn"},
