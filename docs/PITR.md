@@ -465,15 +465,26 @@ open incidents, where which is this restore's is not known, the ledger's own fig
 ##### Plan vs Actual
 
 After the incident, the report sets the plan against what happened (`PLAN VS ACTUAL`): the recovery time, the data
-lost at the stop and the budget. The budget row uses the incident's charge, from the start of its entry run to the end
-of the restore, against what the plan said was left:
+lost at the stop and the budget. The three rows are measured at different points:
+
+- **Recovery time**  
+  This is final: how long the remediation hop took (from the approval to the restore resolving), against the figure the plan used and the rto in force.
+
+- **Data loss**   
+  This is *not* a count after the restore. It is measured immediately before the restore stops the instance,
+  so it includes what accumulated while the gate waited. What was actually discarded is not counted afterwards.
+
+- **Budget**   
+  This is also final for the incident (similar to the recovery time): the ledger charges from the start of the entry run to the end of the last run,
+  so the wait at the gate is in it and it is longer than the recovery time. The first figure is what the ledger had left
+  *before* this incident was charged (not a forecast of what is left after the restore) and the plan's verdict on it.
 
 ```
 ═══ PLAN VS ACTUAL ═══  the plan of 21:47:14 against what happened
-recovery time  planned 2m 00s (from the declared rto); took 1m 27s (33s under)
+recovery time  planned 2m 00s (from the declared rto); took 1m 27s (33s under); within the rto of 30m 00s
 data loss      planned 9s → within; at the stop 5m 46s → within (5m 37s more)
-budget         planned 6m 23s left → within; the incident was charged 7m 03s, 
-  	       so overspent by 40s → exceeds; the verdict changed
+budget         6m 23s left before this incident (the plan said within); the incident was charged 7m 03s,
+               so overspent by 40s → exceeds; the verdict changed
 ```
 
 #### **A refused restore uses the gate up**   

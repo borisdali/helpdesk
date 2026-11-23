@@ -443,6 +443,40 @@ func TestFormatRecoveryDecisions_OutcomeAgainstTheRTO(t *testing.T) {
 	}
 }
 
+// The recovery time row says whether the time the restore took was within the rto
+// in force, as the data loss and budget rows say theirs; with no objectives
+// recorded it says nothing, and with none declared it says so.
+func TestRDPlanVsActual_RecoveryTimeSaysItsVerdictAgainstTheRTO(t *testing.T) {
+	opt := func(chosen bool) audit.DecisionOption {
+		return audit.DecisionOption{Name: "point_in_time_restore", Chosen: chosen, LossBasis: "live_instance",
+			LossSeconds: rdI(20), BudgetDurationSeconds: rdI(3), BudgetDurationBasis: "drill_longest"}
+	}
+	run := func(rto *int64, withObjectives bool, took int64) string {
+		plan := narrativeRecoveryDecision{At: rdAt(1), Decision: audit.RecoveryDecision{Stage: "plan", Decision: "planned", Options: []audit.DecisionOption{opt(false)}}}
+		if withObjectives {
+			plan.Decision.Objectives = &audit.ObjectivesInForce{RTOSeconds: rto, RTOSource: "environment:prod"}
+		}
+		exec := narrativeRecoveryDecision{At: rdAt(3), Decision: audit.RecoveryDecision{Stage: "execution", Decision: "proceeded", Options: []audit.DecisionOption{opt(true)}}}
+		out := narrativeRecoveryDecision{At: rdAt(5), Decision: audit.RecoveryDecision{Stage: "outcome", Decision: "resolved", DurationSeconds: rdI(took)}}
+		return strings.Join(rdPlanVsActual([]narrativeRecoveryDecision{plan, exec, out}), "\n")
+	}
+	for name, c := range map[string]struct {
+		got, want string
+	}{
+		"within":  {run(rdI(1800), true, 37), "took 37s (34s over); within the rto of 30m 00s"},
+		"over":    {run(rdI(30), true, 37), "took 37s (34s over); over the rto of 30s by 7s"},
+		"no rto":  {run(nil, true, 37), "took 37s (34s over); no rto set"},
+		"on time": {run(rdI(37), true, 37), "within the rto of 37s"},
+	} {
+		if !strings.Contains(c.got, c.want) {
+			t.Errorf("%s: want %q in:\n%s", name, c.want, c.got)
+		}
+	}
+	if got := run(nil, false, 37); strings.Contains(got, "rto") {
+		t.Errorf("no objectives recorded, yet the row says something of the rto:\n%s", got)
+	}
+}
+
 // A lower bound is said as one: never labelled exact, and never lost.
 // The section sets what the plan said against what happened, from the figures the
 // events recorded, and says nothing for a figure that was not recorded on both
@@ -597,18 +631,18 @@ func TestRDPlanVsActual_Budget(t *testing.T) {
 
 	// The case found live: 6m 23s left at the plan, an incident that came to 7m 03s.
 	got := join(stages(planOpt("within", 383, nil), rdI(423)))
-	if !strings.Contains(got, "budget         planned 6m 23s left → within; the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed") {
+	if !strings.Contains(got, "budget         6m 23s left before this incident (the plan said within); the incident was charged 7m 03s, so overspent by 40s → exceeds; the verdict changed") {
 		t.Errorf("an overspent budget:\n%s", got)
 	}
 	// Within and staying within.
 	got = join(stages(planOpt("within", 1500, nil), rdI(200)))
-	if !strings.Contains(got, "planned 25m 00s left → within; the incident was charged 3m 20s, so 21m 40s left → within") || strings.Contains(got, "verdict changed") {
+	if !strings.Contains(got, "25m 00s left before this incident (the plan said within); the incident was charged 3m 20s, so 21m 40s left → within") || strings.Contains(got, "verdict changed") {
 		t.Errorf("a budget that held:\n%s", got)
 	}
 	// A plan that took the open incident off already: the ledger's own figure is
 	// what the charge is set against (5m 00s effective + 1m 00s pending = 6m 00s).
 	got = join(stages(planOpt("within", 300, rdI(60)), rdI(400)))
-	if !strings.Contains(got, "planned 6m 00s left → within; the incident was charged 6m 40s, so overspent by 40s → exceeds") {
+	if !strings.Contains(got, "6m 00s left before this incident (the plan said within); the incident was charged 6m 40s, so overspent by 40s → exceeds") {
 		t.Errorf("a plan with a pending incident:\n%s", got)
 	}
 	// "may exceed" that came to fit is not a changed verdict; one that did not is.

@@ -489,8 +489,16 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 	// built from resolved restores, and a failed or escalated hop's duration is the
 	// time to give up, not to recover.
 	if actual := ds[outcomeIdx].Decision.DurationSeconds; planned != nil && actual != nil && ds[outcomeIdx].Decision.Decision == "resolved" {
-		lines = append(lines, fmt.Sprintf("  recovery time  planned %s (%s); took %s (%s)",
-			rdSpan(*planned), rdBasisText(basis), rdSpan(*actual), rdDelta(*actual, *planned, rdSpan, "over", "under")))
+		// The verdict is against the rto in force, as the outcome line gives it.
+		var latest *audit.ObjectivesInForce
+		for _, d := range ds {
+			if o := d.Decision.Objectives; o != nil {
+				latest = o
+			}
+		}
+		lines = append(lines, fmt.Sprintf("  recovery time  planned %s (%s); took %s (%s)%s",
+			rdSpan(*planned), rdBasisText(basis), rdSpan(*actual), rdDelta(*actual, *planned, rdSpan, "over", "under"),
+			rdRTONote(*actual, latest)))
 	}
 
 	if planOpt != nil && execOpt != nil {
@@ -552,7 +560,10 @@ func rdPlanVsActual(ds []narrativeRecoveryDecision) []string {
 		if planOpt.BudgetVerdict != verdict && (planOpt.BudgetVerdict != "may_exceed" || verdict != "within") {
 			note = "; the verdict changed"
 		}
-		lines = append(lines, fmt.Sprintf("  budget         planned %s left → %s; the incident was charged %s, so %s → %s%s",
+		// "before this incident" because that is what the figure is: the ledger's
+		// own, without this incident's charge. It is not a forecast of what is left
+		// after the restore.
+		lines = append(lines, fmt.Sprintf("  budget         %s left before this incident (the plan said %s); the incident was charged %s, so %s → %s%s",
 			ledgerSpan(atPlan), planOpt.BudgetVerdict, rdSpan(charged), result, verdict, note))
 	}
 	if len(lines) == 0 {
@@ -587,6 +598,22 @@ func rdWrapRows(lines []string) []string {
 		out = append(out, l)
 	}
 	return out
+}
+
+// rdRTONote is the recovery time row's verdict: the time the restore took against
+// the rto in force, in the words of the other rows. Nothing when no objectives were
+// recorded; the outcome line says the same with the source of the rto.
+func rdRTONote(durationSeconds int64, o *audit.ObjectivesInForce) string {
+	if o == nil {
+		return ""
+	}
+	if o.RTOSeconds == nil {
+		return "; no rto set"
+	}
+	if rto := *o.RTOSeconds; durationSeconds > rto {
+		return fmt.Sprintf("; over the rto of %s by %s", rdSpan(rto), rdSpan(durationSeconds-rto))
+	}
+	return fmt.Sprintf("; within the rto of %s", rdSpan(*o.RTOSeconds))
 }
 
 // rdRTOVerdict sets a recovery duration against the rto that was in force, for
