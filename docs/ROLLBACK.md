@@ -6,7 +6,7 @@ When an agent-initiated mutation turns out to be wrong — a deployment scaled t
 the wrong replica count, rows updated with bad values, a pod deleted before its
 work was finished — aiHelpDesk can generate and execute the compensating
 operation that reverses it. Every rollback is a first-class governed action:
-it goes through the same policy check, approval gate, and audit trail as the
+it goes through the same policy check, approval gate and audit trail as the
 original mutation.
 
 This page covers the full rollback lifecycle for single-event rollbacks and
@@ -123,7 +123,7 @@ them as `pre_state`:
 The derived inverse is another `patch_deployment_resources` call with those values. If
 either value could not be read, the plan has `reversibility: "no"`. When the original
 call omitted `container`, the patch applied to every container in the pod template, but
-the pre-state holds only the first container's values, and the inverse sets every
+the pre-state holds only the first container's values and the inverse sets every
 container back to them. For multi-container pods, pass `container` explicitly.
 
 ### 3.2 Database (Tier 1 — row-capture)
@@ -433,7 +433,7 @@ Response (`200 OK`):
 |--------|---------|
 | `200 OK` | Cancelled successfully |
 | `404 Not Found` | Rollback record not found |
-| `409 Conflict` | Rollback is already in a terminal state (`success`, `failed`, or `cancelled`) |
+| `409 Conflict` | Rollback is already in a terminal state (`success`, `failed` or `cancelled`) |
 
 ---
 
@@ -456,7 +456,7 @@ curl -X POST http://localhost:1199/v1/fleet/jobs/flj_abc123/rollback \
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `scope` | no | `"all"` (default), `"canary_only"`, `"failed_only"`, or a JSON array of server names |
+| `scope` | no | `"all"` (default), `"canary_only"`, `"failed_only"` or a JSON array of server names |
 | `justification` | no | Reason recorded in the fleet rollback record and audit trail |
 | `dry_run` | no | Print the reverse job definition without persisting or executing |
 
@@ -493,7 +493,7 @@ Retrieve the fleet rollback status for a job.
 curl http://localhost:1199/v1/fleet/jobs/flj_abc123/rollback
 ```
 
-Response: `FleetRollbackRecord` JSON, or `404` if no rollback has been initiated for this job.
+Response: `FleetRollbackRecord` JSON or `404` if no rollback has been initiated for this job.
 
 ---
 
@@ -601,7 +601,7 @@ curl -X POST http://localhost:1199/v1/fleet/jobs/flj_abc123/rollback \
   -d '{"scope": "failed_only"}'
 ```
 
-The resulting fleet job goes through the same approval gate, canary/wave strategy, and
+The resulting fleet job goes through the same approval gate, canary/wave strategy and
 full audit trail as any other fleet job. Its name is prefixed `"rollback: "` and its
 `original_job_id` field links back to the job being reversed.
 
@@ -632,7 +632,7 @@ the same level of approval as the original.
 | `GET /v1/fleet/jobs/{id}/rollback` | any (admin bypass) |
 | `POST /v1/rollbacks` | `operator` or `admin` |
 | `POST /v1/rollbacks/{id}/cancel` | `operator` or `admin` |
-| `POST /v1/fleet/jobs/{id}/rollback` | `operator`, `fleet-approver`, or `admin` |
+| `POST /v1/fleet/jobs/{id}/rollback` | `operator`, `fleet-approver` or `admin` |
 
 ### Audit trail
 
@@ -671,9 +671,11 @@ support was deployed have no `pre_state` field and cannot be reversed automatica
 The derived plan returns `reversibility: "no"` with an explanation.
 
 **Restart and connection operations:** `restart_deployment`, `terminate_connection`,
-`terminate_idle_connections`, and `cancel_query` are irreversible by design. The
+`terminate_idle_connections` and `cancel_query` are irreversible by design. The
 `get_session_info` pre-flight for termination operations already surfaces the rollback
 cost estimate before approval, making post-facto reversal unnecessary.
+
+**Configuration changes:** `set_archive_command` and `reset_pg_setting` have no rollback. The state captured at mutation time would be the value the failure had already left, so a setting is restored from a reading recorded *before the failure* (`get_saved_snapshots`, fed by a scheduled `get_baseline` job) and, with none, the remediation stops and asks for a human-supplied value. See [Playbook Operations §1.1](PLAYBOOK_OPS.md#11-schedule-regular-baselines-required-for-db-down-diagnosis).
 
 **Tier 1 TOCTOU gap:** there is a brief window between the row-capture SELECT and the
 actual DML. In the rare case where another session modifies the same rows in that window,

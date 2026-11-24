@@ -396,6 +396,9 @@ failures:
       complete, unbroken WAL archive, and a silently failing archiver
       means that assumption is false the whole time no one is looking.
     external_compat: true
+    # The remediation restores archive_command from a reading taken before the
+    # failure; a new stack or a wiped audit volume has none, so record one first.
+    pre_snapshots: [get_pg_settings]
     inject:
       type: sql
       script: sql/inject_backup_archiving_broken.sql

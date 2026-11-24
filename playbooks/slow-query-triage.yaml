@@ -1,6 +1,6 @@
 series_id: pbs_slow_query_triage
 name: Slow Query Triage
-version: "1.6"
+version: "1.7"
 playbook_type: triage
 entry_point: true
 execution_mode: agent
@@ -67,7 +67,13 @@ guidance: |
     - If the issue is a single slow query (plan inefficiency, missing index,
       expensive query) and no blocking chain is involved, choose slow-query remediate.
     - If lock_contention=true AND get_blocking_queries returned a non-empty
-      chain, choose lock-chain remediate.
+      chain, choose lock-chain remediate. Lock-chain remediate begins by
+      calling get_blocking_queries again and stops when it finds no waiter, so
+      it must never be chosen on a chain you did not see.
+    - If a session holds a lock while idle in a transaction (or runs a long
+      query) and get_blocking_queries returned NO waiting session, that is not a
+      chain: choose slow-query remediate, which can terminate a session that
+      holds locks passively.
     - If neither cleanly applies (ambiguous diagnosis, or the destructive action
       requires human judgment), escalate for operator approval.
 

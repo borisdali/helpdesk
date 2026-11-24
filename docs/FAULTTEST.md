@@ -4,7 +4,7 @@ TL;DR: Your database, your faults, your [playbooks](PLAYBOOKS.md). Our [verifica
 
 `faulttest` is aiHelpDesk's customer-facing CLI for validating how well your agents diagnose and recover from real database and infrastructure failures. It is one of the two cornerstones of the [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) — the feedback loop that makes aiHelpDesk's operational knowledge compound over time.
 
-Point it at a database, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit), and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. With `--auto-db`, faulttest spins up a temporary PostgreSQL container itself — no database setup required at all. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
+Point it at a database, let aiHelpDesk inject a known fault, send a diagnostic prompt to the agent, score the response against expected keywords, category diagnosis, tool usage (automatically from the audit) and optionally trigger a remediation Playbook and confirm recovery — all without touching your production systems. With `--auto-db`, faulttest spins up a temporary PostgreSQL container itself — no database setup required at all. When remediation succeeds, a Playbook draft is **automatically saved to the [Vault](VAULT.md)** for your review.
 
 This page covers external fault injection against customer-owned databases. For the internal Docker-compose harness and governance integration tests, see [here](../testing/FAULT_INJECTION_TESTING.md). For the wider testing strategy see [here](../testing/README.md).
 
@@ -46,7 +46,7 @@ The tool was designed for two complementary use cases:
    - [Interactive single-fault injection](#74-interactive-single-fault-injection)
    - [Running from Docker](#75-running-from-docker)
    - [Running from Kubernetes (Helm)](#76-running-from-kubernetes-helm)
-   - [Vault: tracking history, drift, and auto-suggest](#77-vault-tracking-history-and-drift)
+   - [Vault: tracking history, drift and auto-suggest](#77-vault-tracking-history-and-drift)
 8. [Interpreting results](#8-interpreting-results) — including [LLM-as-judge fields](LLM_AS_JUDGE.md)
 9. [Customer fault catalogs](#9-customer-fault-catalogs)
    - [Overview](#91-overview)
@@ -141,7 +141,7 @@ into `score` itself:
 *Added in v0.33.* A fault whose playbook starts a chain (`--via-gateway`, e.g.
 `db-pgdata-corrupted-vm`: data-loss triage, host triage, health triage, restore) used to be scored on
 the first hop's response only. The entry hop is deliberately limited (`pbs_db_data_loss_triage` has no
-log tools, so it front-loads what it can decide and hands off), and the evidence a fault's
+log tools, so it front-loads what it can decide and hands off) and the evidence a fault's
 `expected_keywords` and `expected_diagnosis.category` describe (`pg_control`, "could not find the
 database system", the data directory) is found by the hops after it. A chain that restored the database
 could fail its diagnostic depending on how the entry hop worded its hand-off.
@@ -150,14 +150,14 @@ After the run finishes, the harness fetches the incident narrative and re-checks
 criteria against the first hop's response plus the findings (and primary hypothesis) of every later
 *diagnostic* hop. The tool criterion gets the same treatment: the tools that executed without error in any
 hop (from the audit trail, by each hop's trace ID, through the gateway's governance events endpoint) count
-toward `expected_tools` alongside what the first hop itself ran, and the report's `tool_evidence_mode`
+toward `expected_tools` alongside what the first hop itself ran and the report's `tool_evidence_mode`
 gains a `+chain` suffix (`structured+chain`). Before this, a chain whose entry hop had no log tools scored
 `tools 0%` however many of the expected tools the later hops ran. The terminal remediation hop is left out: its findings say "restore" because it
-restored, and whether the fix worked is the remediation score's job. The re-check can only raise a
+restored and whether the fix worked is the remediation score's job. The re-check can only raise a
 score: a first hop that already passed is untouched, the evidence gates above still fail a result
-regardless, and the protocol-violation cap still applies. With `--judge` the diagnosis score stays the
+regardless and the protocol-violation cap still applies. With `--judge` the diagnosis score stays the
 judge's and only the keyword criterion is re-checked. When it changes anything, the run prints a
-`Chain evidence:` line and the report carries `chain_evidence_hops`. A single-hop run is unaffected, and
+`Chain evidence:` line and the report carries `chain_evidence_hops`. A single-hop run is unaffected and
 so is `--repeat` (which does not run the chain).
 
 When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM that reads the agent's response against a natural-language `narrative` describing what a correct answer should contain. This replaces the brittle category string-match with semantic evaluation. See [LLM-as-Judge](LLM_AS_JUDGE.md) for full details.
@@ -171,7 +171,7 @@ When `--judge` is enabled, the diagnosis dimension is scored by a secondary LLM 
 | Platform | How to get `faulttest` | Deployment guide |
 |----------|------------------------|------------------|
 | **Host (binary tarball)** | Included in the platform tarball (`helpdesk-vX.Y.Z-linux-amd64.tar.gz`). Run it directly alongside the other binaries. | [deploy/host/README.md](../deploy/host/README.md) — agents run directly on a Linux or macOS host, no Docker or K8s required |
-| **Docker Compose** | Use the same helpdesk Docker image your stack already pulls. Run `docker run ... faulttest` or add a one-off `docker compose run` service. | [deploy/docker-compose/README.md](../deploy/docker-compose/README.md) — agents run in Docker containers on a VM, orchestrated via Compose |
+| **Docker Compose** | Use the same helpdesk Docker image your stack already pulls. Run `docker run ... faulttest` or add a one-off `docker compose run` service. | [deploy/docker-compose/README.md](../deploy/docker-compose/README.md) — agents run in Docker containers on a VM orchestrated via Compose |
 | **Kubernetes / Helm** | Use `kubectl run` with the same image referenced in your Helm values. No separate image pull needed. | [deploy/helm/README.md](../deploy/helm/README.md) — agents deployed as Kubernetes workloads via the included Helm chart |
 
 ```bash
@@ -211,12 +211,12 @@ The `DB` column in `faulttest list` shows the database requirement for each faul
 | `DB` value | Meaning |
 |:---:|---------|
 | `auto` | faulttest can spin up a temporary PostgreSQL for you — no connection string needed (`--auto-db`) |
-| `byo` | requires OS/SSH access to the database host, or a Kubernetes cluster — always BYO |
+| `byo` | requires OS/SSH access to the database host or a Kubernetes cluster — always BYO |
 | `-` | requires the internal Docker Compose stack (internal development use only) |
 
 ### 3.1 Auto-DB mode (zero setup)
 
-`--auto-db` is the fastest way to get started. faulttest pulls a `postgres:16-alpine` container, maps a random local port, waits for it to be ready, runs the 12 auto-db-compatible faults against it, and removes the container when done. No connection string, no infrastructure config, no existing database required.
+`--auto-db` is the fastest way to get started. faulttest pulls a `postgres:16-alpine` container, maps a random local port, waits for it to be ready, runs the 12 auto-db-compatible faults against it and removes the container when done. No connection string, no infrastructure config, no existing database required.
 
 ```bash
 faulttest run --auto-db \
@@ -333,7 +333,7 @@ Each remediation attempt produces a `remediation_score` (0.0–1.0) from its rec
 | Longer, but `verify_sql` passed | **0.75** | Recovered, slowly |
 | `verify_sql` never passed within `verify_timeout` | **0.0** | Recovery not confirmed |
 
-The bar is half the fault's own `timeout`, its budget for the whole run (*v0.32*; it was half of `verify_timeout`, which only bounds the `verify_sql` poll and, measured from injection, no multi-hop chain could meet). This is a stopgap: two buckets can't rank one restore against another, and diagnosis time counts against the remediation. To compare remediations, use the times themselves (`recovery_time_seconds`, and `vault versions`' average recovery time per playbook version).
+The bar is half the fault's own `timeout`, its budget for the whole run (*v0.32*; it was half of `verify_timeout`, which only bounds the `verify_sql` poll and, measured from injection, no multi-hop chain could meet). This is a stopgap: two buckets can't rank one restore against another and diagnosis time counts against the remediation. To compare remediations, use the times themselves (`recovery_time_seconds` and `vault versions`' average recovery time per playbook version).
 
 The `overall_score` combines diagnosis and remediation:
 
@@ -348,7 +348,7 @@ When no remediation is attempted, `overall_score` equals `score` (the diagnosis-
 
 **Remediation judge (`--remediation-judge`):**
 
-The time-based `remediation_score` answers *did it recover?* — not *was the approach good?* Adding `--remediation-judge` evaluates the qualitative approach: blast radius, tool choice, and step sequencing. After each remediation, faulttest fetches the executed steps from the Gateway and sends them to the LLM judge, which scores on a 0–3 scale:
+The time-based `remediation_score` answers *did it recover?* — not *was the approach good?* Adding `--remediation-judge` evaluates the qualitative approach: blast radius, tool choice and step sequencing. After each remediation, faulttest fetches the executed steps from the Gateway and sends them to the LLM judge, which scores on a 0–3 scale:
 
 | Judge score | Normalised | Meaning |
 |:-----------:|:----------:|---------|
@@ -459,7 +459,7 @@ The `Narrative` URL points to the incident narrative endpoint (see [Incident nar
 
 ## 4. Policy safety: the infra-config guard
 
-Before injecting any fault, `faulttest` optionally checks that the target PostgreSQL host is present in your `infrastructure.json` and is tagged `test` or `chaos`. This prevents accidental injection against production databases. The check applies to all three injection subcommands: `run`, `inject`, and `teardown`.
+Before injecting any fault, `faulttest` optionally checks that the target PostgreSQL host is present in your `infrastructure.json` and is tagged `test` or `chaos`. This prevents accidental injection against production databases. The check applies to all three injection subcommands: `run`, `inject` and `teardown`.
 
 ```json
 {
@@ -557,7 +557,7 @@ Add `--source builtin` or `--source custom` to restrict output to faults from on
 faulttest run [options]
 ```
 
-Injects each fault in sequence, prompts the agent, evaluates the response, optionally remediates, tears down, and writes a JSON report.
+Injects each fault in sequence, prompts the agent, evaluates the response, optionally remediates, tears down and writes a JSON report.
 
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
@@ -578,11 +578,11 @@ Injects each fault in sequence, prompts the agent, evaluates the response, optio
 | `--repeat` | — | `1` | Run each matching fault N times (inject→diagnose→teardown) and print a stability report. Remediation is skipped in repeat mode. N > 1 triggers [triage consistency certification](CONSISTENCY.md) and posts a `STABLE`/`UNSTABLE` cert to auditd via the Gateway. Use `make recertify` (from source) or `faulttest run --repeat 5 --auto-db` (binary) for batch certification of all faults. |
 | `--approval-mode` | — | playbook default | Override the playbook's `approval_mode` for this run (`auto\|session\|manual\|force`). Use `force` in repeat mode and automated pipelines to bypass interactive gates. When combined with `--judge`, post-incident triage feedback is auto-submitted from the judge's verdict (tagged `feedback_source: "auto_judge"`); see [Automatic post-incident feedback](#post-recovery-feedback-prompt). |
 | `--remediate` | — | false | Run remediation phase after diagnosis |
-| `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy`, and `run --repeat` — pick it up automatically. |
+| `--gateway` | `FAULTTEST_GATEWAY_URL` | — | Gateway URL for Playbook/agent remediation and vault Playbook checks. When the env var is set, all subcommands — including `vault list`, `vault accuracy` and `run --repeat` — pick it up automatically. |
 | `--api-key` | `HELPDESK_CLIENT_API_KEY` | — | Bearer token for Gateway auth |
 | `--purpose` | — | `diagnostic` | Purpose declared in Gateway requests (e.g. `diagnostic`, `remediation`, `maintenance`). Required when your Gateway policy enforces declared purposes. |
 | `--judge` | — | `false` | Enable LLM-as-judge for semantic diagnosis scoring. See [LLM-as-Judge](LLM_AS_JUDGE.md). |
-| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the Gateway after remediation and scores blast-radius, step efficiency, and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
+| `--remediation-judge` | — | `false` | Enable LLM-as-judge for remediation approach quality. Fetches executed steps from the Gateway after remediation and scores blast-radius, step efficiency and sequencing on a 0–3 scale. Requires `--gateway` and `--remediate`. Scores are stored in `run_evaluation.remediation_judge_score` and feed `vault calibration`. |
 | `--agent-model` | `HELPDESK_MODEL_NAME` | — | Name of the triage agent model. Stored as `diagnosis_model` in the stability cert when `--repeat N` is used. Defaults to `HELPDESK_MODEL_NAME`. Set this explicitly when certifying against a specific model so certs can be distinguished across model upgrades in `vault accuracy`. |
 | `--judge-model` | `HELPDESK_MODEL_NAME` | — | Model name for the judge LLM |
 | `--judge-vendor` | `HELPDESK_MODEL_VENDOR` | — | Model vendor for the judge LLM |
@@ -625,7 +625,7 @@ Validates one or more customer catalog files before running them. Errors (exit 1
 
 | Severity | Condition |
 |----------|-----------|
-| **Error** | Missing `id`, `name`, `category`, or `inject.type` |
+| **Error** | Missing `id`, `name`, `category` or `inject.type` |
 | **Error** | `inject.type` is not a known type |
 | **Error** | Duplicate ID — conflicts with built-in catalog or another custom file |
 | **Error** | `script:` file referenced and `--testing-dir` set but file not found |
@@ -665,7 +665,7 @@ faulttest vault <list|status|drift|accuracy|incidents|versions|calibration|sugge
 
 The vault is aiHelpDesk's library of fault→remedy pairings and the engine of the [Operational SRE/DBA Flywheel](VAULT.md). Run history is stored in `~/.faulttest/history.json` and is updated automatically at the end of every `faulttest run`. When `--gateway` is configured, per-fault evaluation scores are also posted to auditd (`run_evaluation` table) keyed by the `plr_*` playbook run ID — the local JSON file is a cache. For the full vault concept and three customer workflows, see [VAULT.md](VAULT.md).
 
-`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)` or `UNSTABLE(N)` (optionally suffixed with an attribution `attr=<class>` label and/or a `⚠N/M warnings` CLEAN-axis flag), or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and every column value is documented in full in [CONSISTENCY.md §7.1](CONSISTENCY.md#71-vault-list--stable-column).
+`vault list` includes a **STABLE** column showing the latest consistency certification result for each fault — `STABLE(N)` or `UNSTABLE(N)` (optionally suffixed with an attribution `attr=<class>` label and/or a `⚠N/M warnings` CLEAN-axis flag) or `—` (never certified). Certification is triggered by `faulttest run --repeat N` and every column value is documented in full in [CONSISTENCY.md §7.1](CONSISTENCY.md#71-vault-list--stable-column).
 
 #### vault list
 
@@ -673,7 +673,7 @@ The vault is aiHelpDesk's library of fault→remedy pairings and the engine of t
 faulttest vault list [--gateway http://gateway:8080] [--api-key sk-...]
 ```
 
-Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run, and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the Gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
+Shows the full fault catalog alongside the linked Playbook (if any), the date of the last run and the pass/fail status. When `--gateway` is provided, `faulttest` also verifies that referenced Playbook IDs exist on the Gateway and shows `PLAYBOOK NOT FOUND` for any that are missing or not yet registered.
 
 ```
 FAULT                            PLATFORM   PLAYBOOK                   FAULT TEST             INCIDENTS
@@ -760,7 +760,7 @@ faulttest vault incidents <fault-id or series-id> \
   --api-key sk-...
 ```
 
-Lists the most recent triage runs for a fault or playbook series, with DIAG outcome, REMEDIATION outcome, operator FEEDBACK verdict, and the faulttest SCORE (from `run_evaluation` in auditd). See [VAULT.md — vault incidents](VAULT.md#vault-incidents) for full column reference and output example.
+Lists the most recent triage runs for a fault or playbook series, with DIAG outcome, REMEDIATION outcome, operator FEEDBACK verdict and the faulttest SCORE (from `run_evaluation` in auditd). See [VAULT.md — vault incidents](VAULT.md#vault-incidents) for full column reference and output example.
 
 #### vault versions
 
@@ -770,7 +770,7 @@ faulttest vault versions <fault-id or series-id> \
   --api-key sk-...
 ```
 
-Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time, and separate average diagnosis / remediation scores (`AVG DIAG` / `AVG REMED`). Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
+Shows per-version run stats for a playbook series: resolution rate, average step count, average wall-clock recovery time and separate average diagnosis / remediation scores (`AVG DIAG` / `AVG REMED`). Useful after a `vault suggest-update` to confirm whether the new version improved outcomes. See [VAULT.md — vault versions](VAULT.md#vault-versions) for output example and column reference.
 
 #### vault calibration
 
@@ -786,7 +786,7 @@ faulttest vault calibration db-lock-contention \
   --api-key sk-...
 ```
 
-Shows confidence-band calibration: how well `diagnosis_score` (and `remediation_score` when available) predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%`, and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT`, or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator feedback (at-gate or post-incident; at-gate is preferred when both exist). A remediation calibration section appears automatically when runs with non-zero `remediation_score` and remediation feedback exist. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
+Shows confidence-band calibration: how well `diagnosis_score` (and `remediation_score` when available) predicts operator-confirmed accuracy. Groups runs into `90-100%`, `70-89%` and `<70%` score bands and labels each as `OVERCONFIDENT`, `WELL_CALIBRATED`, `UNDERCONFIDENT` or `INSUFFICIENT_DATA` (fewer than 3 runs). Requires runs with both eval scores and operator feedback (at-gate or post-incident; at-gate is preferred when both exist). A remediation calibration section appears automatically when runs with non-zero `remediation_score` and remediation feedback exist. See [VAULT.md — vault calibration](VAULT.md#vault-calibration) for full output example and band thresholds.
 
 #### vault suggest
 
@@ -813,7 +813,7 @@ faulttest vault suggest-update \
   --api-key sk-...
 ```
 
-Fetches the current active Playbook for `--series-id`, synthesises a proposed update from the given trace, and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing Playbook.
+Fetches the current active Playbook for `--series-id`, synthesises a proposed update from the given trace and displays the two side by side so you can compare and decide whether to activate the proposal. Useful when `vault drift` shows a declining pass rate and you want to incorporate a more recent successful approach into the existing Playbook.
 
 ---
 
@@ -915,11 +915,27 @@ Each fault's `remediation` block specifies a `verify_sql` query that confirms th
 
 When writing customer catalog entries, prefer specific queries that directly verify the fault condition rather than bare connectivity checks.
 
+#### Recording a healthy reading first (`pre_snapshots`)
+
+Some remediations restore a value the fault is about to break and can only do so from a reading taken **before** the failure. `db-backup-archiving-broken` is the example: its remediation (`pbs_db_backup_archiving_remediate`) restores `archive_command` from `get_saved_snapshots` and, finding none from before the failure, refuses to guess and ends `no_action` (the right behaviour for a person, a failed test for the suite). In a real deployment that reading comes from the scheduled baseline job ([PLAYBOOK_OPS.md §1.1](PLAYBOOK_OPS.md#11-schedule-regular-baselines-required-for-db-down-diagnosis)). A new test stack or one whose audit volume was wiped, has no such history, so the fault lists the tools to record first:
+
+```yaml
+  - id: db-backup-archiving-broken
+    pre_snapshots: [get_pg_settings]
+```
+
+Before injecting, the harness (`CaptureSnapshots` in `testing/faultlib/snapshots.go`) calls each listed tool once through the gateway's direct tool route (`POST /api/v1/db/<tool>`), against the connection the fault's prompt uses (`agent_conn_override`, else `--agent-conn`). The gateway stores the result in the audit trail, exactly as it does for the scheduled job, so the remediation finds it. Notes:
+
+- It needs `--gateway` (`FAULTTEST_VIA_GATEWAY`). A direct-to-agent run has no audit trail to record into and the helper does nothing.
+- It stands in for the baseline job and is for test stacks only. It is not a rollback feature: [ROLLBACK.md](ROLLBACK.md) captures the state before an agent's *own* mutation, which for a settings fault would be the already broken value.
+- Only read-only tools belong in the list. If the call fails, the fault stops before it is injected and names the tool and the gateway's answer.
+- The fault only needs this when the healthy value is not already in the history. Anything that holds a snapshot from before the failure (a baseline job, an earlier run through the gateway) makes it redundant but harmless.
+
 ---
 
 ### 6.6 Point-in-time recovery faults (`pitr:`)
 
-A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected, and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block, and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database, on the Docker fixture). The same fault exists for a Kubernetes pod (`db-pitr-dropped-table-k8s`) and, since v0.34, for a real host/VM, with a time target (`db-pitr-dropped-table-vm`) and an LSN target (`db-pitr-dropped-table-vm-lsn`); see [the VM faults](#point-in-time-faults-on-a-vm) below.
+A fault whose recovery is a point-in-time restore has a moment that is only known once it has been injected and a restore that no auto-chain may start on its own. The catalog marks such a fault with a `pitr` block and the harness plays the operator who supplies the target and approves the gate. The first is `db-pitr-dropped-table` (a table dropped on a live database, on the Docker fixture). The same fault exists for a Kubernetes pod (`db-pitr-dropped-table-k8s`) and, since v0.34, for a real host/VM, with a time target (`db-pitr-dropped-table-vm`) and an LSN target (`db-pitr-dropped-table-vm-lsn`); see [the VM faults](#point-in-time-faults-on-a-vm) below.
 
 ```yaml
 pitr:
@@ -933,26 +949,26 @@ pitr:
 PITR_TARGET time=2026-10-28T17:11:10Z lsn=0/3000028
 ```
 
-Only `shell_exec` and `ssh_exec` injections keep their output (`ssh_exec` since v0.34, for the VM faults), and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
+Only `shell_exec` and `ssh_exec` injections keep their output (`ssh_exec` since v0.34, for the VM faults) and the newest `PITR_TARGET` line wins. A script that prints none fails the fault with a message that says so; the prompt must not name a target either (the model is never handed one).
 
 **What the harness does with it**, in order:
 
 1. The target goes on the triage run's request as `recovery_target` (`{"type", "value"}`), so the gateway stores it and the plan tool plans exactly that.
 2. The chain stops at the gate into `pbs_pgbackrest_pitr_remediate` (reason `recovery_target_required`) whatever the approval mode.
-3. At the gate the harness reads the plan itself, from the sysadmin agent's `plan_point_in_time_recovery` (read-only), as an operator would, and approves with `recovery_target`, that plan's `plan_digest`, `acknowledge_data_loss`, and `allow_stop_serving` if the fault says so. It **refuses to approve a plan that is not feasible**, and reports why.
+3. At the gate the harness reads the plan itself, from the sysadmin agent's `plan_point_in_time_recovery` (read-only), as an operator would and approves with `recovery_target`, that plan's `plan_digest`, `acknowledge_data_loss` and `allow_stop_serving` if the fault says so. It **refuses to approve a plan that is not feasible** and reports why.
 4. `verify_sql` then checks the rows themselves.
 
-**It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset), and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
+**It needs** `FAULTTEST_SYSADMIN_AGENT_URL` (to read the plan) and the agent's own key (`--sysadmin-api-key` / `FAULTTEST_SYSADMIN_API_KEY`; the gateway key `--api-key` is used when that is unset) and remediation on, as for any gated chain. The sysadmin agent must be a build that has the point-in-time tools.
 
 The `go test` sweeps (`make faulttest`, `faulttest-gateway`) skip a PITR fault unless they run through the gateway with remediation, the gate and `FAULTTEST_SYSADMIN_AGENT_URL`, so they never inject a fault they cannot recover. `make faulttest-pitr FAULTTEST_GATEWAY_URL=… FAULTTEST_API_KEY=… FAULTTEST_SYSADMIN_AGENT_URL=…` runs the Docker one (`PITR_FAULT_IDS` picks another) against the pgBackRest fixture.
 
-**What it checks in the audit trail (v0.34).** After the gate loop the run reads the `recovery_decision` events the restore left, under the fault's trace and the triage run's ID, and fails the fault if any of these is wrong: a stage is missing (plan, gate `approved`, execution `proceeded`, outcome with a duration); a stage that decides does not name the objectives in force; a restore that went past an exceeded objective under `enforcement: acknowledge` has no acknowledgement on record; a connection password appears in the clear; or `GET /v1/verify` on auditd says the hash chain no longer verifies. The gateway writes the outcome after the run completes, so the check retries for up to 30 s before calling a stage missing. It needs `FAULTTEST_AUDIT_URL` (`make faulttest-pitr` requires it); without it the check reports that it could not read the trail rather than skipping. Setting it also makes the harness verify, after a gate resolves with no pending step approval, that a child remediation run really started (an auditd query on `prior_run_id`; without the URL it assumes one did). If auditd cannot be reached or answers an error it logs a warning and lets the run through. The same check runs from the `faulttest` CLI (since v0.34): with `--audit-url` set, a PITR fault that recovered is failed if its trail is wrong (the problems are printed and listed as `recovery_trail_problems` in the report), and without it the CLI says the trail was not checked and does not fail the run. Both harnesses call `faultlib.AwaitRecoveryTrail`, so the check and its 30 s wait are defined once. `--audit-url` also turns on the CLI's audit-backed tool evidence, which `make faulttest-pitr` does not use.
+**What it checks in the audit trail (v0.34).** After the gate loop the run reads the `recovery_decision` events the restore left, under the fault's trace and the triage run's ID and fails the fault if any of these is wrong: a stage is missing (plan, gate `approved`, execution `proceeded`, outcome with a duration); a stage that decides does not name the objectives in force; a restore that went past an exceeded objective under `enforcement: acknowledge` has no acknowledgement on record; a connection password appears in the clear; or `GET /v1/verify` on auditd says the hash chain no longer verifies. The gateway writes the outcome after the run completes, so the check retries for up to 30 s before calling a stage missing. It needs `FAULTTEST_AUDIT_URL` (`make faulttest-pitr` requires it); without it the check reports that it could not read the trail rather than skipping. Setting it also makes the harness verify, after a gate resolves with no pending step approval, that a child remediation run really started (an auditd query on `prior_run_id`; without the URL it assumes one did). If auditd cannot be reached or answers an error it logs a warning and lets the run through. The same check runs from the `faulttest` CLI (since v0.34): with `--audit-url` set, a PITR fault that recovered is failed if its trail is wrong (the problems are printed and listed as `recovery_trail_problems` in the report) and without it the CLI says the trail was not checked and does not fail the run. Both harnesses call `faultlib.AwaitRecoveryTrail`, so the check and its 30 s wait are defined once. `--audit-url` also turns on the CLI's audit-backed tool evidence, which `make faulttest-pitr` does not use.
 
-**An LSN target and an objective.** `db-pitr-dropped-table-lsn` is the same fault with `target_type: lsn`. `make pitr-objectives-infra` writes a copy of `testing/testing.infra.json` in which `pgbackrest-db` has `rpo: 1s` and `enforcement: acknowledge`; start the sysadmin agent and the gateway with `HELPDESK_INFRA_CONFIG` pointing at it, and the plan will show the objective exceeded, the harness acknowledges it as the operator would, and the trail has to say so. Without that file the same fault runs with no objective, and the plan shows the loss and compares nothing ([OBJECTIVES.md](OBJECTIVES.md)).
+**An LSN target and an objective.** `db-pitr-dropped-table-lsn` is the same fault with `target_type: lsn`. `make pitr-objectives-infra` writes a copy of `testing/testing.infra.json` in which `pgbackrest-db` has `rpo: 1s` and `enforcement: acknowledge`; start the sysadmin agent and the gateway with `HELPDESK_INFRA_CONFIG` pointing at it and the plan will show the objective exceeded, the harness acknowledges it as the operator would and the trail has to say so. Without that file the same fault runs with no objective and the plan shows the loss and compares nothing ([OBJECTIVES.md](OBJECTIVES.md)).
 
 #### Point-in-time faults on a VM
 
-`db-pitr-dropped-table-vm` and `db-pitr-dropped-table-vm-lsn` run the same scenario against a real Linux VM whose PostgreSQL is a systemd service: the instance is serving, a table is dropped, and the restore flushes the archive, stops the unit with `sudo systemctl stop`, restores in place and starts it again. They inject over SSH (`ssh_exec`), so they run from the `faulttest` binary with `--external=false`, not from the `go test` sweeps:
+`db-pitr-dropped-table-vm` and `db-pitr-dropped-table-vm-lsn` run the same scenario against a real Linux VM whose PostgreSQL is a systemd service: the instance is serving, a table is dropped and the restore flushes the archive, stops the unit with `sudo systemctl stop`, restores in place and starts it again. They inject over SSH (`ssh_exec`), so they run from the `faulttest` binary with `--external=false`, not from the `go test` sweeps:
 
 ```bash
 go run ./testing/cmd/faulttest run --ids db-pitr-dropped-table-vm --external=false \
@@ -966,7 +982,7 @@ go run ./testing/cmd/faulttest run --ids db-pitr-dropped-table-vm --external=fal
 
 What they need, beyond the Docker fault:
 
-- The SSH user is `postgres`: the scripts run `psql` and `pgbackrest` directly, and only the repair branch of the teardown uses `sudo systemctl restart`. `testing/docker/setup-pgbackrest-vm.sh` adds that grant and the `systemctl stop` one the restore needs.
+- The SSH user is `postgres`: the scripts run `psql` and `pgbackrest` directly and only the repair branch of the teardown uses `sudo systemctl restart`. `testing/docker/setup-pgbackrest-vm.sh` adds that grant and the `systemctl stop` one the restore needs.
 - Three values in each script are the VM's own, edited in the catalog (or a custom catalog copy) as for `db-pgdata-corrupted-vm`: `PG_UNIT`, `STANZA` and `DB` (the database named in the entry's `connection_string`). The harness reads the plan for the stanza `main`, so the VM's stanza must be called that.
 - `--agent-conn` names the VM's infra entry; it is the target the plan is read for (the VM faults have no `agent_conn_override`). `--conn` is where `verify_sql` connects from the harness machine, so that machine needs a route to the database.
 - Add `--audit-url <auditd URL>` (the audit API key is the gateway's, `--api-key`) so the run also checks the `recovery_decision` trail the restore left, as `make faulttest-pitr` does; without it the trail is not checked.
@@ -980,7 +996,7 @@ To prove a PITR fault's script and recovery without a model, `TestIntegration_PI
 
 ### 7.1 Zero-setup smoke test (auto-DB)
 
-The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down, and writes a report. No database setup required — just Docker and a reachable Gateway.
+The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down and writes a report. No database setup required — just Docker and a reachable Gateway.
 
 ```bash
 faulttest run --auto-db \
@@ -1233,7 +1249,7 @@ The Job logs `Gate pending — resolve_url=...` and polls every 15 seconds. Reso
 
 ### 7.7 Vault: tracking history and drift
 
-After running `faulttest run` a few times, use the vault to review trends and pairing status. For the full vault concept, lifecycle, and three customer workflows, see [VAULT.md](VAULT.md).
+After running `faulttest run` a few times, use the vault to review trends and pairing status. For the full vault concept, lifecycle and three customer workflows, see [VAULT.md](VAULT.md).
 
 **Check what's covered and what's missing:**
 
@@ -1346,19 +1362,19 @@ The JSON report contains one entry per fault:
 | `tool_evidence_mode` | How tool evidence was determined — three-tier fallback (see below). Omitted when no tools were expected. |
 | `ordering_pass` | Tool ordering constraints satisfied (e.g., inspect before terminate) |
 | `score` | Weighted combination — see the weights table in [§1.1](#11-scoring-formula) |
-| `passed` | Four independent gates, all required — see [§1.1](#11-scoring-formula): `score >= 0.6`, `keyword_pass`, `ordering_pass`, and (when the fault declares `objective_evidence_signal` on a `--via-gateway` run) the evidence-content gate |
+| `passed` | Four independent gates, all required — see [§1.1](#11-scoring-formula): `score >= 0.6`, `keyword_pass`, `ordering_pass` and (when the fault declares `objective_evidence_signal` on a `--via-gateway` run) the evidence-content gate |
 | `evidence_coverage_gap` | `true` when the fault declared `objective_evidence_signal` but it never fired at all — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. See §1.1. |
 | `evidence_required_but_unconfirmed` | `true` when the fault declared `objective_evidence_signal`, it fired, but wasn't confirmed — forces `passed = false` regardless of `score`. Omitted when the fault doesn't declare the field. See §1.1. |
 | `judge_reasoning` | One-sentence explanation from the judge LLM (omitted when skipped) |
 | `judge_model` | Model that produced the judge score (omitted when skipped) |
-| `judge_skipped` | `true` when judge was disabled, narrative was absent, or the judge call failed |
+| `judge_skipped` | `true` when judge was disabled, narrative was absent or the judge call failed |
 | `recovery_time_seconds` | Seconds from the fault's injection to `verify_sql` first passing (*v0.32*; before, from the start of the `verify_sql` poll). Only present when `--remediate` was set. |
 | `remediation_score` | 0.0–1.0: `1.0` if recovered within half the fault's `timeout`, `0.75` if recovered later, `0.0` if `verify_sql` never passed. Only present when `--remediate` was set. |
 | `remediation_method` | `playbook` or `agent_prompt` (only when `--remediate` was set) |
 | `overall_score` | `score × 0.6 + remediation_score × 0.4` when remediation was attempted; equals `score` otherwise |
 | `remediation_judge_score` | 0.0–1.0 mapped from the judge's 0–3 score. Only present when `--remediation-judge` was set and the judge call succeeded. |
 | `remediation_judge_reasoning` | One-sentence explanation from the remediation judge LLM (omitted when skipped). |
-| `remediation_judge_skipped` | `true` when `--remediation-judge` was not set, no steps were recorded, or the judge call failed. |
+| `remediation_judge_skipped` | `true` when `--remediation-judge` was not set, no steps were recorded or the judge call failed. |
 
 **Tool evidence: three-tier fallback**
 
@@ -1367,7 +1383,7 @@ The JSON report contains one entry per fault:
 | Priority | Mode | How | When available |
 |----------|------|-----|----------------|
 | 1 | `audit` | Exact tool names from auditd's `tool_execution` events | `--audit-url` is set and auditd is reachable |
-| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a Gateway `/api/v1/query`, or a Gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
+| 2 | `structured` | Exact tool names from the `tool_call_summary` DataPart emitted by ADK agents | Agents built with `agentutil.ServeA2A` — available whether the call is a direct A2A request, a Gateway `/api/v1/query` or a Gateway playbook run. For a playbook run that auto-chains through multiple hops, the `tool_calls` field is the deduped union across every hop in the chain (`aggregateChainToolCalls` in `cmd/gateway/playbooks.go`), not just the entry-point hop's own tools. |
 | 3 | `text_fallback` | Keyword pattern matching against the agent's response text | All other cases |
 
 `audit` mode is the most accurate: it queries auditd directly for `tool_execution` events in the time window of the agent call, giving exact tool names regardless of which agent or transport was used. `text_fallback` is least reliable — a tool name appearing in the response text does not prove the tool was actually called. The mode used is recorded in `tool_evidence_mode` so you can assess reliability.
@@ -1390,7 +1406,7 @@ faulttest run --external \
 | `diagnosis_pass=false` | Agent diagnosed a different root cause category |
 | `tool_evidence=false` | Agent responded without calling the expected tools (fabricated answer) |
 | `ordering_pass=false` | Agent terminated a session without first inspecting it |
-| `error` field set | Injection, teardown, or agent call failed — fault did not run |
+| `error` field set | Injection, teardown or agent call failed — fault did not run |
 
 **Governance gap tests:** a small number of faults are marked `governance_gap: true`. These document known agent behaviour gaps (e.g., an imperative "terminate it immediately" prompt that causes the agent to skip the inspect step). A failed evaluation on a governance-gap test is expected and does not count as a failure in the summary — it is logged separately so you can track whether the gap narrows over time.
 
@@ -1402,7 +1418,7 @@ faulttest run --external \
 
 Every `faulttest` binary ships with the built-in catalog embedded at compile time — you can run `faulttest list` in a directory with no source tree present and see all 36 built-in faults. Customer catalog files layer on top of this without modifying the binary.
 
-A customer catalog is a plain YAML file you author, validate with `faulttest validate`, and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
+A customer catalog is a plain YAML file you author, validate with `faulttest validate` and pass to any subcommand via `--catalog`. The flag is repeatable; multiple files are merged in order. IDs must be globally unique — any collision with a built-in fault or another custom file is an error.
 
 The workflow is:
 
@@ -1425,7 +1441,7 @@ faulttest example --category host
 faulttest example --category compound
 ```
 
-Every field supported in the built-in catalog is supported in customer catalogs. The `version` field is optional in customer files (it is required in the built-in catalog). The `source` field is set automatically by `faulttest` — never write it in YAML.
+Every field supported in the built-in catalog is supported in customer catalogs. The `version` field is optional in customer files (it is required in the built-in catalog). The `source` field is set automatically by `faulttest` — never write it in YAML. A fault whose remediation restores a value from history can ask for a reading to be recorded before injection: see [`pre_snapshots`](#recording-a-healthy-reading-first-pre_snapshots).
 
 **Minimal example (SQL fault):**
 
@@ -1579,7 +1595,7 @@ One values key serves three consumers — set it once and it's available to whic
   kubectl -n helpdesk-system logs -f job/helpdesk-vault-query
   ```
 
-  See [`vault accuracy`](VAULT.md#vault-accuracy) for what the output means, and [`vault list`/`versions`/`incidents`/etc.](VAULT.md) for other subcommands `vaultQuery.subcommand` accepts.
+  See [`vault accuracy`](VAULT.md#vault-accuracy) for what the output means and [`vault list`/`versions`/`incidents`/etc.](VAULT.md) for other subcommands `vaultQuery.subcommand` accepts.
 
 ---
 

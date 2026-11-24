@@ -38,6 +38,11 @@ type Failure struct {
 	// *where* the agent falls short, not to enforce that it passes.
 	GovernanceGap bool `yaml:"governance_gap,omitempty"`
 
+	// PreSnapshots lists read-only tools the harness calls through the gateway
+	// before injecting, so a reading of the healthy state is on record for a
+	// remediation that restores what the fault breaks (see CaptureSnapshots).
+	PreSnapshots []string `yaml:"pre_snapshots,omitempty"`
+
 	// Prerequisites documents manual steps required before running this fault
 	// (e.g. CNPG-specific GRANT or cluster patch commands). Informational only.
 	Prerequisites string `yaml:"prerequisites,omitempty"`

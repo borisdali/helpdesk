@@ -32,11 +32,14 @@ Operational best practices for taking advantage of aiHelpDesk [Playbooks](PLAYBO
 
 ### 1.1 Schedule regular baselines (required for DB-down diagnosis)
 
-The database agent's `get_saved_snapshots` tool retrieves previously recorded tool outputs from the audit history. During a DB-down investigation the agent uses this to find `data_directory`, `config_file`, `log_directory`, and prior `pg_settings`. This information may not be easily accessible when a database is down.
+The database agent's `get_saved_snapshots` tool retrieves previously recorded tool outputs from the audit history. During a DB-down investigation the agent uses this to find `data_directory`, `config_file`, `log_directory` and prior `pg_settings`. This information may not be easily accessible when a database is down.
 
-**If no baseline has ever been captured, `get_saved_snapshots` returns nothing and the agent is limited to infrastructure config alone.**
+**If no baseline has ever been captured, `get_saved_snapshots` returns nothing and the agent is limited to infrastructure config alone**
 
-Set up a scheduled fleet job that runs `get_baseline` against all database servers at least twice a day (morning/evening), but the prefered interval (and the default) is four times a day. `get_baseline` collects server info, non-default pg_settings, extensions, and disk usage in a single call and stores the result in the audit trail.
+**Baselines are also what a settings fix is restored from**   
+[Rollback](ROLLBACK.md) undoes an agent's *own* mutation from the state captured at the moment it ran and it does not cover configuration changes such as `set_archive_command` or `reset_pg_setting`. When a setting was broken by something else (a bad deploy, a hand edit), the state just before the agent acts is already the broken value. The remediation playbooks (for example `pbs_db_backup_archiving_remediate`) restore the last reading recorded **before the failure** and, with none, stop and ask for a human-supplied value rather than guess. Without a baseline job the safe outcome is `no_action`. The fault-test suite records one reading itself before such a fault ([`pre_snapshots`](FAULTTEST.md#recording-a-healthy-reading-first-pre_snapshots)), standing in for this job on a test stack.
+
+Set up a scheduled fleet job that runs `get_baseline` against all database servers at least twice a day (morning/evening), but the prefered interval (and the default) is four times a day. `get_baseline` collects server info, non-default `pg_settings`, extensions and disk usage in a single call and stores the result in the audit trail.
 
 **Job file — `jobs/db-baseline.json`:**
 
@@ -156,8 +159,8 @@ pbs_db_restart_triage  (entry_point: true)
 ```
 
 - **Start at `pbs_db_restart_triage` every time.** It classifies the failure and either resolves it or emits `ESCALATE_TO:` pointing to the next playbook.
-- For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_host_triage` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed, or was OOM-killed and adjusts the diagnosis accordingly.
-- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_host_triage` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it, or use `approval_mode=force` to authorize the full chain up front.
+- For **Docker-hosted** databases, the DB agent escalates to `pbs_sysadmin_host_triage` automatically — it cannot inspect the container without docker tools. The SysAdmin agent determines whether the container stopped cleanly, crashed or was OOM-killed and adjusts the diagnosis accordingly.
+- If the inspection confirms a condition that warrants a restart, `pbs_sysadmin_host_triage` escalates to `pbs_db_restart_action` (the remediation step). Because `pbs_db_restart_action` has `approval_mode: manual`, the gateway returns `suggested_next` for this step with `auto` or `session` — it requires the operator to explicitly invoke it or use `approval_mode=force` to authorize the full chain up front.
 - If the inspection instead finds `"could not find the database system"` (missing/corrupt `pg_control` — real data loss, not a clean shutdown), `pbs_sysadmin_host_triage` transitions straight to `pbs_pgbackrest_health_triage` (v0.31) rather than dead-ending in a human-only finding. It does NOT bounce back to the DB agent: `pbs_db_data_loss_triage` already front-loaded everything decidable without log evidence (single instance? pgBackRest in use? PITR already decided?) into its own escalation FINDINGS, so `pbs_sysadmin_host_triage` only has to judge the one evidence-dependent condition (does the log text suggest anything beyond what a plain restore would fix?) and can act on the combined picture itself. `pbs_pgbackrest_health_triage` then gets a real, tool-verified backup-health check (not an assumption) before `pbs_pgbackrest_restore_remediate` ever touches the data directory.
 - **Do not jump to `pbs_db_config_triage` or `pbs_db_data_loss_triage` without running restart triage first**, unless you already have clear `FATAL`/`PANIC` evidence.
 
@@ -348,7 +351,7 @@ curl -s -H "X-User: ops@example.com" -H "X-Purpose: diagnostic" \
 ### 2.4 Step 4: Provide an Informed Consent (aka Review/Approve the Gate)
 Once the diagnosis is reached (by either running a single triage playbook or by auto-chaining the original playbook to others), a [gate](PLAYBOOKS.md#informed-gate) opens to allow a human operator to review the diagnosis and the proposed remediation plan.
 
-**Best Practice:** Provide gate-level feedback on two questions: (1) whether the diagnosis makes sense, and (2) whether the proposed remediation approach is appropriate. Both questions are answered at the same gate, before remediation runs — making this the highest-quality feedback you can provide, since it's free of outcome bias. This feedback is optional, but it's critical for improving both triage and remediation playbooks over time. We highly encourage you to not skip this step. See [Vault Feedback & Commands](VAULT_FEEDBACK_FLOW.md) for a full explanation of the feedback model and how each piece feeds the `vault` commands.
+**Best Practice:** Provide gate-level feedback on two questions: (1) whether the diagnosis makes sense and (2) whether the proposed remediation approach is appropriate. Both questions are answered at the same gate, before remediation runs — making this the highest-quality feedback you can provide, since it's free of outcome bias. This feedback is optional, but it's critical for improving both triage and remediation playbooks over time. We highly encourage you to not skip this step. See [Vault Feedback & Commands](VAULT_FEEDBACK_FLOW.md) for a full explanation of the feedback model and how each piece feeds the `vault` commands.
 
 ```bash
 # Check what is waiting at the gate for this run
@@ -435,7 +438,7 @@ curl -s -H "X-User: ops@example.com" \
   | jq '{outcome, findings_summary, escalated_to}'
 ```
 
-If the incident was resolved by operator action after the playbook completed, or if you abandoned the investigation, patch the run:
+If the incident was resolved by operator action after the playbook completed or if you abandoned the investigation, patch the run:
 
 ```bash
 # Resolved
@@ -534,6 +537,6 @@ See [here](PLAYBOOKS.md#record-an-outcome) for the patching instructions.
 | [VAULT.md](VAULT.md) | The Operational SRE/DBA Flywheel, how drafts enter the Vault, vault commands (`vault list`, `vault status`, `vault drift`, `vault suggest`) |
 | [PLAYBOOKS.md](PLAYBOOKS.md) | Playbook schema, CRUD API, import formats, system playbooks |
 | [FAULTTEST.md](FAULTTEST.md) | Fault injection CLI, fault catalog, remediation mode, LLM-as-judge scoring |
-| [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md) | Feedback model deep-dive: the 4 feedback combinations, when each is captured, which `vault` commands consume them, and the recommended weekly review workflow |
+| [VAULT_FEEDBACK_FLOW.md](VAULT_FEEDBACK_FLOW.md) | Feedback model deep-dive: the 4 feedback combinations, when each is captured, which `vault` commands consume them and the recommended weekly review workflow |
 | [FLEET.md](FLEET.md) | Fleet runner, job definitions, scheduled baseline capture |
 | [API.md](API.md) | Full REST API reference including `/fleet/playbooks/from-trace` |

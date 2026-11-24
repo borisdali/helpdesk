@@ -258,6 +258,9 @@ func TestFaultInjection(t *testing.T) {
 			// RunFaultCycle tears down automatically before returning; see
 			// its doc comment for why this used to need a
 			// defer-registered-before-Inject dance here.
+			if err := faultlib.CaptureSnapshots(ctx, cfg, f); err != nil {
+				t.Fatalf("Snapshot before injection: %v", err)
+			}
 			t.Log("Injecting failure...")
 			faultTraceID := "gotest-" + runID + "-" + f.ID
 			faultStart := time.Now() // recovery time is measured from here
