@@ -630,6 +630,9 @@ func TestExternalModeInjection(t *testing.T) {
 			ctx := context.Background()
 			origConn := cfg.ConnStr
 
+			if err := faultlib.CaptureSnapshots(ctx, cfg, f); err != nil {
+				t.Fatalf("Snapshot before injection: %v", err)
+			}
 			t.Logf("Injecting (external mode): %s", f.Name)
 			faultTraceID := "gotest-" + runID + "-" + f.ID
 			cycle := faultlib.RunFaultCycle(ctx, injector, runner, f, faultTraceID, func() {

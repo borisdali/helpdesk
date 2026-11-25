@@ -1235,6 +1235,9 @@ failures:
       to 0, restores in a one-off pod, and resumes it with restart_container.
       Added v0.33: v0.32 verified each of those tools in-cluster but the
       playbooks did not route a Kubernetes data-loss case to them.
+      Gateway only (a direct run skips it). Each run takes a fresh full
+      backup in the shared db-destruct repository before injecting, so the
+      restore has a current backup on the current timeline.
     # Resolved from the gateway's own infrastructure config (an entry with
     # k8s_namespace db-destruct and k8s_pod_selector app=pgbackrest-demo, see
     # testing/k8s/helm-values-pgbackrest.yaml); the harness needs none.

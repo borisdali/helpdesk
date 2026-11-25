@@ -924,12 +924,24 @@ Some remediations restore a value the fault is about to break and can only do so
     pre_snapshots: [get_pg_settings]
 ```
 
-Before injecting, the harness (`CaptureSnapshots` in `testing/faultlib/snapshots.go`) calls each listed tool once through the gateway's direct tool route (`POST /api/v1/db/<tool>`), against the connection the fault's prompt uses (`agent_conn_override`, else `--agent-conn`). The gateway stores the result in the audit trail, exactly as it does for the scheduled job, so the remediation finds it. Notes:
+Before injecting, the harness (`CaptureSnapshots` in `testing/faultlib/snapshots.go`, called by both the `go test` sweeps and the `faulttest run` CLI) calls each listed tool once through the gateway's direct tool route (`POST /api/v1/db/<tool>`), against the connection the fault's prompt uses (`agent_conn_override`, else `--agent-conn`). The gateway stores the result in the audit trail, exactly as it does for the scheduled job, so the remediation finds it. Notes:
 
 - It needs `--gateway` (`FAULTTEST_VIA_GATEWAY`). A direct-to-agent run has no audit trail to record into and the helper does nothing.
 - It stands in for the baseline job and is for test stacks only. It is not a rollback feature: [ROLLBACK.md](ROLLBACK.md) captures the state before an agent's *own* mutation, which for a settings fault would be the already broken value.
 - Only read-only tools belong in the list. If the call fails, the fault stops before it is injected and names the tool and the gateway's answer.
 - The fault only needs this when the healthy value is not already in the history. Anything that holds a snapshot from before the failure (a baseline job, an earlier run through the gateway) makes it redundant but harmless.
+
+#### Faults only the gateway chain can exercise (`gateway_only`)
+
+A fault marked `gateway_only: true` is skipped by a direct-to-agent `go test` run, before anything is injected. `db-pgdata-corrupted-k8s` is the example: the database agent's first hop cannot read a pod's logs and hands off by design, so a direct run scores the wording of an unfinished answer (it passed about one run in six) and says nothing about the fault. Run it through the gateway, which drives the four hops and the restore:
+
+```bash
+go run ./testing/cmd/faulttest run --ids db-pgdata-corrupted-k8s --remediate --via-gateway \
+  --gateway $GW --api-key $KEY --conn pgbackrest-k8s-destruct --context minikube \
+  --approval-mode force --gate-escalation --operator <you>
+```
+
+The same run needs a repository the restore can use: the fault's inject script runs `pgbackrest check` and takes a **fresh full backup** in the `db-destruct` pod before it deletes `pg_control`, because every earlier run restores onto a new timeline and leaves the last backup stale with a broken WAL chain (the restore playbooks then refuse, correctly). It stops before injecting if either step fails. A skipped fault is expected in `make faulttest-fast-nocache`, which runs in direct mode.
 
 ---
 
