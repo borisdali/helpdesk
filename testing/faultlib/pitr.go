@@ -358,3 +358,13 @@ func PITRSkipReason(f Failure, cfg HarnessConfig) string {
 	}
 	return ""
 }
+
+// GatewayOnlySkipReason says why a direct run should not run f, or "" when it
+// can: a gateway-only fault (Failure.GatewayOnly) is only meaningful through
+// the playbook chain.
+func GatewayOnlySkipReason(f Failure, cfg HarnessConfig) string {
+	if f.GatewayOnly && !cfg.ViaGateway {
+		return "this fault runs through the gateway's playbook chain (FAULTTEST_VIA_GATEWAY=true): the first agent hands off by design"
+	}
+	return ""
+}

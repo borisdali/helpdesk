@@ -70,6 +70,13 @@ type Failure struct {
 	// AgentURLFor.
 	DirectAgent string `yaml:"direct_agent,omitempty"`
 
+	// GatewayOnly marks a fault that only the gateway's playbook chain can
+	// exercise: the first agent is told to hand off (it has no tool for the
+	// evidence), so a direct run scores the wording of an unfinished answer, not
+	// the fault. A direct run skips it before injecting (see
+	// GatewayOnlySkipReason).
+	GatewayOnly bool `yaml:"gateway_only,omitempty"`
+
 	// PITR marks a fault whose remediation is a point-in-time restore: its
 	// inject script prints the recovery target (PITR_TARGET, see pitr.go) and
 	// the harness supplies it, with the plan digest, at the gate.

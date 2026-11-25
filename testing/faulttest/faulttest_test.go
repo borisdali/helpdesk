@@ -212,6 +212,9 @@ func TestFaultInjection(t *testing.T) {
 			if why := faultlib.PITRSkipReason(f, *cfg); why != "" {
 				t.Skip(why)
 			}
+			if why := faultlib.GatewayOnlySkipReason(f, *cfg); why != "" {
+				t.Skip(why)
+			}
 
 			// Check database connectivity for database failures.
 			if f.Category == "database" && cfg.ConnStr == "" {

@@ -571,6 +571,20 @@ func checkDroppedTableFault(t *testing.T, f Failure) {
 	}
 }
 
+func TestGatewayOnlySkipReason(t *testing.T) {
+	gw := Failure{ID: "g", GatewayOnly: true}
+	plain := Failure{ID: "x"}
+	if got := GatewayOnlySkipReason(plain, HarnessConfig{}); got != "" {
+		t.Errorf("an ordinary fault is never skipped, got %q", got)
+	}
+	if got := GatewayOnlySkipReason(gw, HarnessConfig{ViaGateway: true}); got != "" {
+		t.Errorf("a gateway run must not skip, got %q", got)
+	}
+	if got := GatewayOnlySkipReason(gw, HarnessConfig{}); got == "" {
+		t.Error("a direct run of a gateway-only fault must skip")
+	}
+}
+
 func TestPITRSkipReason(t *testing.T) {
 	pitr := Failure{ID: "p", PITR: &PITRSpec{}}
 	plain := Failure{ID: "x"}

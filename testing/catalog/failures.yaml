@@ -1239,6 +1239,9 @@ failures:
     # k8s_namespace db-destruct and k8s_pod_selector app=pgbackrest-demo, see
     # testing/k8s/helm-values-pgbackrest.yaml); the harness needs none.
     agent_conn_override: pgbackrest-k8s-destruct
+    # The database agent's first hop hands off (it cannot read pod logs), so a
+    # direct run scores an unfinished answer; only the gateway chain tests this.
+    gateway_only: true
     prerequisites: |
       The helpdesk stack deployed in-cluster (or a local stack whose
       sysadmin agent can reach the cluster) with an inventory entry
