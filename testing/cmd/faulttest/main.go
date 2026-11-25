@@ -492,6 +492,16 @@ func cmdRun(args []string) {
 			// real bug found and fixed live: a failed k8s-node-memory-pressure
 			// injection left a noisy-neighbor pod running on the cluster for
 			// 36+ minutes before that fix).
+			if err := faultlib.CaptureSnapshots(ctx, &cfg.HarnessConfig, f); err != nil {
+				slog.Error("snapshot before injection failed", "id", f.ID, "rep", rep+1, "err", err)
+				repResults = append(repResults, EvalResult{
+					FailureID:   f.ID,
+					FailureName: f.Name,
+					Category:    f.Category,
+					Error:       fmt.Sprintf("snapshot before injection failed: %v", err),
+				})
+				break // abort remaining reps for this fault
+			}
 			callStart := time.Now()
 			remediator.SetFaultStart(callStart)
 			remediator.SetFault(f)

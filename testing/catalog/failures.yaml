@@ -1271,6 +1271,14 @@ failures:
         K="kubectl $CTX_ARG -n $NS"
         POD=$($K get pod -l app=pgbackrest-demo -o jsonpath='{.items[0].metadata.name}')
         [ -n "$POD" ] || { echo "no pgbackrest-demo pod in $NS" >&2; exit 1; }
+        # The agent-driven restore refuses a stale backup or a broken WAL chain,
+        # and every earlier run of this fault restored the pod onto a new
+        # timeline: take a fresh full backup on the current one first, so the
+        # fault tests the chain and not what the last run left in the repo.
+        $K exec "$POD" -- su postgres -c 'pgbackrest --stanza=main check' >/dev/null 2>&1 \
+          || { echo "pgbackrest check failed in $NS before injecting: fix the repository first" >&2; exit 1; }
+        $K exec "$POD" -- su postgres -c 'pgbackrest --stanza=main --type=full backup' >/dev/null 2>&1 \
+          || { echo "could not take a fresh full backup in $NS before injecting" >&2; exit 1; }
         $K exec "$POD" -- rm -f /var/lib/postgresql/data/global/pg_control
         $K delete pod "$POD" --wait=true
         # Postgres cannot start without pg_control: wait for the state a real
