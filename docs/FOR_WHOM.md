@@ -1,6 +1,6 @@
 # Who aiHelpDesk Is For
 
-This document answers six questions that come up repeatedly from people evaluating
+This document answers seven questions that come up repeatedly from people evaluating
 aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platforms:
 
 1. [Who is the target audience?](#1-who-this-is-for)
@@ -9,6 +9,7 @@ aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platfo
 4. [Where aiHelpDesk fits in the AI landscape](#4-where-aihelpdesk-fits-in-the-ai-landscape)
 5. [Why now, not later?](#5-why-now-not-later)
 6. [We already have scripts and automation. What would we gain?](#6-we-already-have-scripts-and-automation-what-would-we-gain)
+7. [Is this just faster incident response?](#7-is-this-just-faster-incident-response)
 
 ---
 
@@ -269,10 +270,26 @@ better, is in [aiHelpDesk and the automation you already have](VS_YOUR_SCRIPTS.m
 
 ---
 
+## 7. Is This Just Faster Incident Response?
+
+No. Faster troubleshooting and remediation is what every AI SRE tool promises, and it is the claim that is
+hardest to tell apart from the next vendor's. We aim to be fast, but for a database the harder questions are
+the ones a faster fix does not answer: what will this restore throw away, can the business afford the
+downtime, was the backup ever restored and can you show afterwards who agreed and what the numbers were.
+Faster response is the entry ticket. Recovery you can plan, price, practice and defend afterwards is what the
+accountability layer is for.
+
+The full answer is its own page: [Is AI SRE just faster incident response?](WHY_AI_SRE.md). It covers what
+the model does and does not do, how playbooks differ from runbooks, the objectives and the budget, the
+platforms we verify and the drills, and what we do not claim.
+
+---
+
 ## See Also
 
 | Document | What it covers |
 |----------|----------------|
+| [WHY_AI_SRE.md](WHY_AI_SRE.md) | Why an AI SRE is more than faster incident response; what the model does and does not do; what we do not claim |
 | [VS_YOUR_SCRIPTS.md](VS_YOUR_SCRIPTS.md) | What a restore script, runbook or operator already gives you and what aiHelpDesk adds in the path of the same action; where it does not help |
 | [JUDGMENT_LAYER.md](JUDGMENT_LAYER.md) | The three categories of irreplaceable DBA/SRE judgment; the manual improvement path when AI proposals regress |
 | [CUSTOMER_RIGHTS.md](CUSTOMER_RIGHTS.md) | Ten commitments aiHelpDesk makes to operators; the mechanisms that back each one |
