@@ -11,7 +11,7 @@ We aim to be fast too (beyond the obvious speed of fast log analysis, aiHelpDesk
 does not answer, starting with whether or not a restore is the right answer (in favor of a failover for example), what will this restore throw away, can the business afford the downtime, was the backup ever
 restored properly and can you show afterwards who agreed and what the numbers were. A fast restore that loses data nobody expected to lose is worse than a slow one that was carefully reviewed, deliberately chosen and approved with the [clear understanding of the consequences](INFORMED_CONSENT.md).
 
-So we treat recovery as something to plan, price and check, before, during and after an incident:
+So we treat recovery as something to plan, price and check, before, during and after [an incident](INCIDENTS.md):
 
 | When | The question | What aiHelpDesk does |
 |------|--------------|----------------------|
@@ -108,7 +108,7 @@ it (see also [this sample transcript](samples/SAMPLE032.md) for details): say wh
 you cannot, record who agreed and what the numbers were and get better at predicting its own duration from
 this server's history.   
 
-A shop that already measures its restore times, ties approvals to the downtime budget
+A shop that already measures its restore times, ties approvals to the downtime budget (e.g. like [this](PITR.md#the-downtime-budget-at-the-gate))
 and keeps the evidence has built much of this by hand. We make it the default, the standard, so it does not depend on one
 person staying. The questions to put to your own automation and where we are not better, are in
 [aiHelpDesk and the automation you already have](VS_YOUR_SCRIPTS.md), with the short version in
