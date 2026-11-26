@@ -7,11 +7,9 @@ to someone who asks "how is this different?". The audience is in [Who aiHelpDesk
 
 ## 1/ Speed is the entry ticket
 
-We aim to be fast too (aiHelpDesk [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) makes the troubleshooting and the resolution second occurrence of a failure quicker than the
-first), but speed is not what we ask you to buy. For a database the harder questions are the ones a faster fix
+We aim to be fast too (beyond the obvious speed of fast log analysis, aiHelpDesk [Operational SRE/DBA Flywheel](VAULT.md#the-operational-sredba-flywheel) makes the troubleshooting and the resolution of a second occurrence of a similar failure scenario quicker than the first), but speed is not what we ask you to buy. For a database the harder questions are the ones a faster fix
 does not answer, starting with whether or not a restore is the right answer (in favor of a failover for example), what will this restore throw away, can the business afford the downtime, was the backup ever
-restored properly and can you show afterwards who agreed and what the numbers were. A fast restore that loses data
-nobody expected to lose is worse than a slow one that was chosen.
+restored properly and can you show afterwards who agreed and what the numbers were. A fast restore that loses data nobody expected to lose is worse than a slow one that was carefully reviewed, deliberately chosen and approved with the [clear understanding of the consequences](INFORMED_CONSENT.md).
 
 So we treat recovery as something to plan, price and check, before, during and after an incident:
 
