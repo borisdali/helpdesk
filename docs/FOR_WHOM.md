@@ -13,7 +13,7 @@ aiHelpDesk, commenting on our blog posts or comparing us to horizontal AI platfo
 
 ---
 
-## 1. Who This Is For?
+## 1/ Who This Is For?
 
 **aiHelpDesk is for operations teams who are already using or seriously considering, AI
 agents for database and K8s incident response. Agents that are strictly and unequivocally
@@ -46,7 +46,7 @@ aiHelpDesk is the second kind, exclusively (see [here](https://levelup.gitconnec
 
 ---
 
-## 2. Does aiHelpDesk Replace DBAs and SREs?
+## 2/ Does aiHelpDesk Replace DBAs and SREs?
 
 No. But the framing of the question is also wrong in a specific way worth naming, because
 it's the same fear every DBA and SRE brings to this evaluation, usually unspoken: *if the
@@ -118,7 +118,7 @@ permanent record instead of its blind spot — is.**
 
 ---
 
-## 3. Is the Next Step a General-Purpose Database Agent?
+## 3/ Is the Next Step a General-Purpose Database Agent?
 
 No. Explicitly not.
 
@@ -148,7 +148,7 @@ authoring or lifecycle management.
   [OBJECTIVES.md](OBJECTIVES.md)); failover and disaster-recovery decisions judged the same way
   (planned).
 
-- More fault scenarios in the [catalog](FAULTTEST.md) (currently 33; targeting coverage
+- More fault scenarios in the [catalog](FAULTTEST.md) (`faulttest list` shows the current set; targeting coverage
   of every class of production failure a DBA or SRE encounters in the first year of
   on-call).
 - More attribution dimensions in the [stability cert](ATTRIBUTION_CERTS.md): the v0.21.0
@@ -190,7 +190,7 @@ competitive position. We are not doing that.
 
 ---
 
-## 4. Where aiHelpDesk Fits in the AI Landscape
+## 4/ Where aiHelpDesk Fits in the AI Landscape
 
 Horizontal AI platforms (Replit, internal agent platforms, general-purpose code/ops
 agents) are building the productivity layer: more code shipped, faster review cycles,
@@ -211,7 +211,7 @@ _operations defensible_.**
 
 ---
 
-## 5. Why Now, Not Later?
+## 5/ Why Now, Not Later?
 
 The value of aiHelpDesk compounds from the day you start. Here is why the adoption
 decision is time-sensitive, not evergreen.
@@ -256,7 +256,7 @@ building it into the operational workflow from the start.
 
 ---
 
-## 6. We Already Have Scripts and Automation. What Would We Gain?
+## 6/ We Already Have Scripts and Automation. What Would We Gain?
 
 For the mechanics, nothing. A restore is a restore, and a good script is as fast or faster. What a script
 usually does not do is everything around the restore: tell you what it will throw away before it runs,
@@ -270,7 +270,7 @@ better, is in [aiHelpDesk and the automation you already have](VS_YOUR_SCRIPTS.m
 
 ---
 
-## 7. Is This Just Faster Incident Response?
+## 7/ Is This Just Faster Incident Response?
 
 No. Faster troubleshooting and remediation is what every AI SRE tool promises, and it is the claim that is
 hardest to tell apart from the next vendor's. We aim to be fast, but for a database the harder questions are

@@ -80,7 +80,8 @@ docs-tools:
 	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestToolReference ./agents/...
 	@# capabilities.md is built from the agent pages, so it must come second.
 	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestCapabilityVocabularyDoc ./agentutil/toolref/
-	@echo "Regenerated docs/tools/. Review and commit the changes."
+	HELPDESK_UPDATE_TOOL_DOCS=1 go test -count=1 -run TestPlaybookReference ./playbooks/
+	@echo "Regenerated docs/tools/ and docs/PLAYBOOK_REFERENCE.md. Review and commit the changes."
 
 # ---------------------------------------------------------------------------
 # Helm chart template tests (requires helm in PATH; no Kubernetes cluster needed)

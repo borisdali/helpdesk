@@ -535,10 +535,10 @@ Lists all faults in the catalog. Add `--external` to show only externally inject
 # All faults
 faulttest list
 
-# External-compatible only (17 faults)
+# External-compatible only
 faulttest list --external
 
-# Auto-DB only — faults faulttest can inject without a BYO database (12 faults)
+# Auto-DB only — faults faulttest can inject without a BYO database
 faulttest list --auto-db
 
 # One category
@@ -1008,7 +1008,7 @@ To prove a PITR fault's script and recovery without a model, `TestIntegration_PI
 
 ### 7.1 Zero-setup smoke test (auto-DB)
 
-The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs 12 faults against it, tears it down and writes a report. No database setup required — just Docker and a reachable Gateway.
+The fastest way to validate the database agent works at all. faulttest pulls a `postgres:16-alpine` container, runs the auto-DB faults (`faulttest list --auto-db`) against it, tears it down and writes a report. No database setup required — just Docker and a reachable Gateway.
 
 ```bash
 faulttest run --auto-db \

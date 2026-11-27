@@ -146,16 +146,26 @@ New profiles: skip
 To                         Action      From
 --                         ------      ----
 22/tcp                     ALLOW IN    Anywhere
-5432/tcp                   ALLOW IN    Anywhere                   # aiHelpDesk prod db server target
-5433/tcp                   ALLOW IN    192.168.2.12
+5432/tcp                   ALLOW IN    <your IP only>            # aiHelpDesk prod db server target
+5433/tcp                   ALLOW IN    <your IP only>            # aiHelpDesk clone db server target
 22/tcp (v6)                ALLOW IN    Anywhere (v6)
-5432/tcp (v6)              ALLOW IN    Anywhere (v6)              # aiHelpDesk clone db server target
+5432/tcp (v6)              ALLOW IN    Anywhere (v6) 
+```
 
+If the port that the clone is to run on doesn't appear in the list, punch a whole in your FW, perhaps using something similar to this (but better just buy your network admin a sandwitch and get them to do that for you):
+
+```
+[boris@ ~/helpdesk]$ ssh -t $VM 'sudo ufw allow from <your IP only> to any port 5433 proto tcp'
+```
+
+Re-run the previous `ufw status verbose` command to ensure your port (5433 in my example) is indeed open. Good, then proceed to verify it:
+
+```
 [boris@ ~/helpdesk]$ nc -vz -w 3 pgbackrest-vm.test 5432; nc -vz -w 3 pgbackrest-vm.test 5433
 Connection to pgbackrest-vm.test port 5432 [tcp/postgresql] succeeded!
 Connection to pgbackrest-vm.test port 5433 [tcp/pyrrho] succeeded!
 
-[boris@cassiopeia ~]$ for p in 5432 5433; do PGPASSWORD=testpass psql -h pgbackrest-vm.test -p $p -U postgres -d postgres -c "select system_identifier, pg_is_in_recovery() from pg_control_system(), (select 1) x" ;done
+[boris@ ~/helpdesk]$ for p in 5432 5433; do PGPASSWORD=testpass psql -h pgbackrest-vm.test -p $p -U postgres -d postgres -c "select system_identifier, pg_is_in_recovery() from pg_control_system(), (select 1) x" ;done
   system_identifier  | pg_is_in_recovery
 ---------------------+-------------------
  7694453216872244409 | f
@@ -172,7 +182,7 @@ Cool, notice the same identifier on both lines and f on each. We are all set to 
 
 ## 4/ Three restore drills on a clone hosted on a remote VM (with aiHelpDesk gear running on a host)
 
-It's probably possible to run the script locally where aiHelpDesk gear is deployed, but dealing with the passwords and the sudo over the ssh because the postgres ssh user likely has only a very narrow sudo grants (at least that's how I would set it up, see [setup-pgbackrest-vm.sh](../../testing/docker/setup-pgbackrest-vm.sh) for reference, basically just `systemctl` for the unit) and so it shouldn't have ia general sudo bash... and yet the script needs root to create the second db cluster. Anyway, this is not my idea of fun, so I just copied it to the VM and invoked it remotely 😉:
+It's probably possible to run the script locally where aiHelpDesk gear is deployed, but dealing with the passwords and the sudo over the ssh is not my idea of fun, especially because the postgres ssh user likely has only a very narrow sudo grants (at least that's how I would set it up, see [setup-pgbackrest-vm.sh](../../testing/docker/setup-pgbackrest-vm.sh) for reference, basically just `systemctl` for the unit) and so it shouldn't have ia general sudo bash... and yet the script needs root to create the second db cluster. Anyway, this is not my idea of fun, so I just copied it to the VM and invoked it remotely 😉:
 
 ```
 [boris@ ~/helpdesk]$ scp restore_drill_clone_linux.sh $VM:/tmp/vmsetup

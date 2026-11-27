@@ -127,7 +127,7 @@ See the primary [Playbook page](docs/PLAYBOOKS.md) for how Playbooks take the ce
 aiHelpDesk's testing strategy is documented in [here](testing/README.md). Two guides cover fault injection testing specifically:
 
 - **[Fault Injection Testing](docs/FAULTTEST.md)** is the customer-facing guide: validate agent behavior against your own staging database using SQL-only injection, SSH-level fault injection and automated remediation verification; no Docker or cluster access required
-- **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of 27 failure modes, CI/CD integration
+- **[Internal Fault Injection Harness](testing/FAULT_INJECTION_TESTING.md)** is the engineer-facing guide: Docker-compose test stack, full catalog of failure modes (`faulttest list`), CI/CD integration
 - **[High Availability / Disaster Recovery](docs/HA_DR.md)** is the domain-specific deep dive: what's certified today (replication lag, replica disconnection) and what's on the roadmap (replica promotion, Patroni HA)
 - **[Backup & Restore](docs/BACKUP.md)** covers backup-taking health specifically: WAL archiving and pgBackRest job-level status, triage and narrow remediation
 - **[Point-in-time recovery](docs/PITR.md)** restores a single pgBackRest instance to a time or LSN a human chose, down or still serving: the safety model, the operator steps, the limits and what is verified
@@ -161,6 +161,11 @@ See the primary [API page](docs/API.md) for the full REST API reference: all end
 |--------|-------------|
 | `scripts/gateway-repl.sh` | Interactive REPL using the Gateway API (recommended for containers) |
 | `scripts/k8s-local-repl.sh` | Run orchestrator locally with K8s agents port-forwarded |
+| `testing/docker/setup-pgbackrest-vm.sh` | One-time VM setup (e.g. for exercising `db-pgdata-corrupted-vm` fault) |
+| `scripts/demo-restore-cycle.sh` | One full PITR cycle (for Docker, remote VM over SSH or K8s Pod) |
+| `scripts/run-fleet-job.sh` | Run a fleet ad-hoc job |
+| `scripts/show-fleet-job.sh` | Show a nicely formatted output from a fleet job | 
+| `scripts/check-doc-anchors.py` | Checks the broken achor links in the docs |
 
 See [here](scripts/README.md) for detailed usage.
 

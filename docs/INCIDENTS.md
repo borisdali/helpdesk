@@ -82,7 +82,7 @@ The `outcome` field is the trigger for the flywheel:
 | `"escalated"` | Handed off to a human — draft captures diagnostic steps taken before escalation |
 | `""` (empty) | Still investigating — no draft generated yet |
 
-When `outcome` is `"resolved"` or `"escalated"` and `HELPDESK_GATEWAY_URL` is configured, the gateway's `from-trace` endpoint is called automatically. A Playbook draft is synthesised from the audit trail of every tool call made during the investigation and saved to the Vault as an inactive draft. An optional `series_id` arg pins the draft to an existing series (e.g. `"pbs_vacuum_triage"`) so the draft improves that series instead of starting a new one — the same "improvement mode" `faulttest` already uses for its own draft requests below; both callers share one implementation (`agentutil.RequestPlaybookDraft`). The resulting `playbook_id` is also recorded onto the incident's own row (`draft_playbook_id`) when a tracked `incident_id` was supplied, so a later `GET /api/v1/incidents` listing can show draft status without a separate lookup.
+When `outcome` is `"resolved"` or `"escalated"` and `HELPDESK_GATEWAY_URL` is configured, the Gateway's `from-trace` endpoint is called automatically. A Playbook draft is synthesised from the audit trail of every tool call made during the investigation and saved to the Vault as an inactive draft. An optional `series_id` arg pins the draft to an existing series (e.g. `"pbs_vacuum_triage"`) so the draft improves that series instead of starting a new one — the same "improvement mode" `faulttest` already uses for its own draft requests below; both callers share one implementation (`agentutil.RequestPlaybookDraft`). The resulting `playbook_id` is also recorded onto the incident's own row (`draft_playbook_id`) when a tracked `incident_id` was supplied, so a later `GET /api/v1/incidents` listing can show draft status without a separate lookup.
 
 Under an enforcing identity provider (`HELPDESK_IDENTITY_PROVIDER=static`), this outgoing call needs its own credential — `HELPDESK_CLIENT_API_KEY` set on the incident agent's own environment (see [ARCHITECTURE.md § 4.4 Agent-specific](ARCHITECTURE.md#44-agent-specific)). Without it, `from-trace` 401s silently: the bundle itself is still created successfully, `draft_playbook_id` just never gets set — found live, v0.29.0.
 
@@ -99,15 +99,17 @@ The bundle result:
 }
 ```
 
-`playbook_id` is the Vault identifier of the persisted draft. When the gateway's auditd integration is not configured, the draft is returned inline in `playbook_draft` only.
+`playbook_id` is the Vault identifier of the persisted draft. When the Gateway's auditd integration is not configured, the draft is returned inline in `playbook_draft` only.
 
 ### Automatic Bundle Creation (opt-in)
 
-As of v0.29, setting `HELPDESK_AUTO_INCIDENT_BUNDLE=true` on the gateway adds a second way a bundle gets created, alongside the incident agent's own judgment call above: when a triage or remediation playbook run started from a genuine entry point (not a chained escalation hop) concludes with outcome `resolved`, `escalated` or `transitioned` (a same-domain TRANSITION_TO handoff — e.g. connection-triage → connection-remediate — is just as conclusive a diagnosis as a cross-domain ESCALATE_TO one and is in fact the more common of the two across this codebase's own playbook catalog), the gateway calls `create_incident_bundle` directly — no manual invocation and no incident-agent decision required. `transitioned` is normalized to `escalated` for `create_incident_bundle`'s own `outcome` arg, which only recognizes `resolved`/`escalated` (see above) — otherwise draft synthesis would silently be skipped for every TRANSITION_TO incident. This uses the same direct tool-dispatch mechanism the database, Kubernetes and sysadmin agents already use for fleet jobs (`POST /tool/{name}`, bypassing the LLM), not the conversational path shown above — an automated trigger needs `bundle_path` back as real structured JSON, not something parsed out of narration.
+As of v0.29, setting `HELPDESK_AUTO_INCIDENT_BUNDLE=true` on the Gateway adds a second way a bundle gets created, alongside the incident agent's own judgment call above: when a triage or remediation playbook run started from a genuine entry point (not a chained escalation hop) and concludes with outcome `resolved`, `escalated` or `transitioned` (a same-domain TRANSITION_TO handoff — e.g. connection-triage → connection-remediate — is just as conclusive a diagnosis as a cross-domain ESCALATE_TO one and is in fact the more common of the two across this codebase's own playbook catalog), the Gateway calls `create_incident_bundle` directly — no manual invocation and no incident-agent decision required.   
+
+`transitioned` is normalized to `escalated` for `create_incident_bundle`'s own `outcome` arg, which only recognizes `resolved`/`escalated` (see above) — otherwise draft synthesis would silently be skipped for every TRANSITION_TO incident. This uses the same direct tool-dispatch mechanism the database, K8s and SysAdmin Agents already use for fleet jobs (`POST /tool/{name}`, bypassing the LLM), not the conversational path shown above — an automated trigger needs `bundle_path` back as real structured JSON, not something parsed out of narration.
 
 The resulting bundle is linked to that run's internal audit-side incident record (a durable per-incident row, keyed to the run's trace) via its `bundle_path`, rather than the legacy `incidents.json` index this doc describes elsewhere — that index is still used for bundles created without this linkage (a human or script invoking the tool directly, with no incident record to link to). When the incident's entry playbook has a series, that series ID is also passed through as `series_id`, so an auto-triggered draft improves the same series the run itself used rather than always cold-starting a new one.
 
-Default is off; the manually-invoked path above is unaffected either way. Only the database, OS and storage layers are collected automatically — Kubernetes context isn't yet resolved for this path, so a K8s-relevant incident bundled this way will be missing that layer. Manually calling the tool with `k8s_context` set still works exactly as documented above.
+Default for that env var is off. That is, the manually-invoked path above is unaffected either way. Only the database, OS and storage layers are collected automatically (but K8s context isn't yet resolved for this path, so a K8s-relevant incident bundled this way will be missing that layer). Manually calling the tool with `k8s_context` set still works exactly as documented above.
 
 ### Injected Incidents (faulttest)
 
@@ -121,7 +123,9 @@ When remediation succeeds, faulttest calls the same `from-trace` endpoint and sa
        Vault: draft saved → pb_faulttest_a1b2c3
 ```
 
-The critical point: **from the Vault's perspective, a real Incident and an injected Incident look identical.** Both produce a draft, both go through the same human review gate before activation and neither is treated as more or less trustworthy by draft synthesis or activation — the Vault accumulates both equally. As of v0.29 they are no longer *indistinguishable*, though: every Incident is tagged `origin: "real"` or `origin: "faulttest"` on its own incidents-table row, queryable via `GET /api/v1/incidents?origin=real` or `vault incidents --origin real` (see [Listing and Retrieving Incidents](#listing-and-retrieving-incidents) below) — that filter narrows the query itself, so it's a real signal for a report or a dashboard, without changing how the Vault treats the resulting draft.
+The critical point: **From the Vault's perspective, a *real* Incident and an *injected* Incident look identical**   
+
+Both produce a draft, both go through the same human review gate before activation and neither is treated as more or less trustworthy by draft synthesis or activation. That is, the Vault accumulates both equally. As of v0.29 they are no longer *indistinguishable* from the "operational knowledge that compounds" perspective, though: every Incident is tagged `origin: "real"` or `origin: "faulttest"` on its own incidents-table row, queryable via `GET /api/v1/incidents?origin=real` or `vault incidents --origin real` (see [Listing and Retrieving Incidents](#listing-and-retrieving-incidents) below). That filter narrows the query itself, so it's a real signal for a report or a dashboard, without changing how the Vault treats the resulting draft.
 
 See also the [Life of an Incident](PLAYBOOKS.md#life-of-an-incident) for a concrete example of this path.
 
@@ -179,7 +183,7 @@ The incident agent needs its own credential to *write* to auditd — separate fr
 `HELPDESK_AUDIT_URL` (which just points at where auditd is). Once auditd enforces
 identity (`HELPDESK_IDENTITY_PROVIDER=static` or similar), every write the incident
 agent makes — recording tool-execution events, patching an incident's `bundle_path`
-after `create_incident_bundle` runs — needs `HELPDESK_AUDIT_API_KEY` set, or every one
+after `create_incident_bundle` runs — needs `HELPDESK_AUDIT_API_KEY` set or every one
 of those calls fails with `401: authentication required`, silently in the incident
 agent's own log rather than surfacing as a hard error anywhere else. `users.example.yaml`
 already ships a ready-made credential for exactly this:
@@ -197,7 +201,7 @@ governance-enabled one. This section is the one to follow once auditd enforces a
 
 **Policy enforcement** (`HELPDESK_POLICY_ENABLED`/`HELPDESK_POLICY_FILE`) gates
 `create_incident_bundle` — this agent's one `ActionWrite`-classified tool — the same
-way it gates a write tool on any other agent: operating mode, tag-based rules, and
+way it gates a write tool on any other agent: operating mode, tag-based rules and
 blast-radius bounds all apply before a bundle is created. The check uses `"incident"`
 as its policy resource type and the call's `infra_key` (or `"unknown"` when omitted)
 as the resource name.
@@ -258,7 +262,7 @@ Every stage from "Entry playbook run starts" onward writes onto the *same* durab
 ## Listing and Retrieving Incidents
 
 ```bash
-# List all incidents via the gateway — reads the v0.29 incidents table
+# List all incidents via the Gateway — reads the v0.29 incidents table
 # (real HTTP API query, not the legacy flat-file listing below)
 curl -s http://localhost:8080/api/v1/incidents \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .
@@ -279,11 +283,11 @@ curl -s http://localhost:8080/api/v1/incidents/plr_264f28fc \
 
 # The same timeline carries recovery_decisions when the incident involved a
 # recovery decision (a point-in-time restore): the plan(s) shown, the gate
-# approval or denial, and what the restore decided, oldest first. See AUDIT.md §4.6.
+# approval or denial and what the restore decided, oldest first. See AUDIT.md §4.6.
 curl -s http://localhost:8080/api/v1/incidents/plr_264f28fc \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" | jq .recovery_decisions
 
-# Create an incident bundle directly via the gateway
+# Create an incident bundle directly via the Gateway
 curl -s -X POST http://localhost:8080/api/v1/incidents \
   -H "Authorization: Bearer $HELPDESK_CLIENT_API_KEY" \
   -H "Content-Type: application/json" \
@@ -295,19 +299,19 @@ curl -s -X POST http://localhost:8080/api/v1/incidents \
   }'
 ```
 
-Each incident also records which database it is about: `target_key`, the `db_servers` key in `infrastructure.json`, and `target_input`, the target exactly as the run was started with (key, alias or connection string, credentials masked). The key is resolved once, when the incident is created, by `infra.ResolveTarget`, the same rules the agents use (key, then host and port together, then container name, then display name); a bare port that two servers share is refused rather than guessed. When nothing resolves to exactly one database, `target_key` is empty and `target_input` says what was sent, so the incident can be found and is never attributed to a database it may not be about. Incidents recorded before v0.35 have no key. `?target_key=` lists one database's incidents.
+Each incident also records which database it is about: `target_key`, the `db_servers` key in `infrastructure.json` and `target_input`, the target exactly as the run was started with (key, alias or connection string, credentials masked). The key is resolved once, when the incident is created, by `infra.ResolveTarget`, the same rules the agents use (key, then host and port together, then container name, then display name); a bare port that two servers share is refused rather than guessed. When nothing resolves to exactly one database, `target_key` is empty and `target_input` says what was sent, so the incident can be found and is never attributed to a database it may not be about. Incidents recorded before v0.35 have no key. `?target_key=` lists one database's incidents.
 
-The listing also takes three options the [availability ledger](OBJECTIVES.md#53-the-availability-ledger) reads: `?unattributed=true` (only incidents with no `target_key`), `?since=<RFC3339>` (only incidents still open, or resolved at or after that time, so one that began before the window but ran into it is kept) and `?include=series` (each incident also carries `series_ids`, the playbook series of every run it spanned). The response says `"truncated": true` when the page is full, so a caller that sums incidents knows it may have left some out.
+The listing also takes three options the [availability ledger](OBJECTIVES.md#53-the-availability-ledger) reads: `?unattributed=true` (only incidents with no `target_key`), `?since=<RFC3339>` (only incidents still open or resolved at or after that time, so one that began before the window but ran into it is kept) and `?include=series` (each incident also carries `series_ids`, the playbook series of every run it spanned). The response says `"truncated": true` when the page is full, so a caller that sums incidents knows it may have left some out.
 
 `?origin=`/`?status=`/`?attribution=`/`?series_id=`/`?target_key=` filter the query itself (proxied straight through to auditd's `GET /v1/incidents`), rather than returning everything for the caller to filter client-side. `vault incidents` (the CLI) exposes the same three as `--origin`/`--status`/`--attribution` flags on its no-argument (all-incidents) listing — e.g. `vault incidents --origin real --status open` — narrowing the same query rather than filtering the already-fetched rows client-side.
 
-Bundles themselves are still stored in `HELPDESK_INCIDENT_DIR` (default: current directory for host deployments, `/data/incidents` in Docker/K8s) and the incident agent's own `list_incidents` tool (called directly, bypassing the gateway) still reads only the legacy `incidents.json` flat-file index of bundles physically on disk — a different, narrower concern than the incidents table above (every bundle ever created vs. every tracked incident, whether or not it has a bundle yet).
+Bundles themselves are still stored in `HELPDESK_INCIDENT_DIR` (default: current directory for host deployments, `/data/incidents` in Docker/K8s) and the incident agent's own `list_incidents` tool (called directly, bypassing the Gateway) still reads only the legacy `incidents.json` flat-file index of bundles physically on disk — a different, narrower concern than the incidents table above (every bundle ever created vs. every tracked incident, whether or not it has a bundle yet).
 
 ---
 
 ## The Incident Receipt: full timeline view
 
-Every playbook-driven incident — real or injected — is assigned a `plr_*` run ID by the gateway at the moment the triage playbook is triggered. This ID is the stable handle for everything that follows: gate approval, remediation, operator feedback and evaluation scores.
+Every playbook-driven incident — real or injected — is assigned a `plr_*` run ID by the Gateway at the moment the triage playbook is triggered. This ID is the stable handle for everything that follows: gate approval, remediation, operator feedback and evaluation scores.
 
 Pass a `plr_*` run ID to `faulttest vault incidents` to retrieve the complete incident timeline in one view:
 
@@ -345,7 +349,7 @@ Notes:
 - **Image tag must match what's actually loaded on the node** — `--image-pull-policy=Never` fails with `ErrImageNeverPull` against a tag that isn't present locally (e.g. minikube's `image load` cache). Check with `minikube image ls | grep helpdesk` (or the equivalent for your cluster) rather than assuming a bare version tag like `v0.23.0` is what's loaded; it's commonly the full build tag (`v0.23.0-<short-sha>`).
 - **`--env` instead of an `--api-key` flag** — `faulttest`'s `--api-key` flag already falls back to `HELPDESK_CLIENT_API_KEY` from the environment (`os.Getenv` default in `testing/cmd/faulttest/vault.go`), so setting it via `--env` on the pod is enough; no need to pass `--api-key` explicitly. `--gateway` has no such fallback and must always be passed as a flag.
 - **`--attach --rm -i`** — `kubectl run --restart=Never` without `-i`/`--attach` creates the pod and returns immediately without streaming output; you'd otherwise have to separately `kubectl logs` it. `--rm` deletes the pod automatically once the command exits, so nothing lingers as `Completed`.
-- The gateway's own client-facing key is the `gateway-api-key` Secret in the same namespace (see the `HELPDESK_CLIENT_API_KEY` env var on the `helpdesk-gateway` Deployment) — same key `GET /api/v1/incidents/{runID}` and the raw `curl` example above require via `Authorization: Bearer`.
+- The Gateway's own client-facing key is the `gateway-api-key` Secret in the same namespace (see the `HELPDESK_CLIENT_API_KEY` env var on the `helpdesk-gateway` Deployment) — same key `GET /api/v1/incidents/{runID}` and the raw `curl` example above require via `Authorization: Bearer`.
 
 The response assembles triage, gate, remediation, evaluation scores and all operator feedback into a single chronological view:
 
@@ -393,7 +397,7 @@ Diagnosis:     1.00 (LLM judge)   Agent confidence: 95%
 
 | Section | What it shows |
 |---------|---------------|
-| `Origin`/`Status`/`Attribution`/`Bundle`/`Draft playbook` | The v0.29 incidents-table row linked to this run, when one exists — `Origin` is `real` or `faulttest`; `Status` is `open`/`resolved`/`escalated`/`abandoned`/`needs_human` (*v0.32*: the chain ended without fixing anything, on a `diagnosed` or `no_action` run; these read `resolved` before); `Attribution` is the classified root-cause label (*v0.33*: for a multi-hop chain it is set from the first later diagnostic hop that classifies to a real class, against the entry playbook's `root_cause_classes`. Until then every chain read `UNKNOWN`, because the entry hop is a hand-off with nothing diagnosed in it. A remediation hop never sets it, and a later `UNKNOWN` never replaces a real class); `Bundle`/`Draft playbook` show the paths/IDs only once a bundle or draft has actually been created for this incident. Absent entirely (not shown as empty) for any run recorded before this table existed or never tracked as an incident — fail-open, not a claim that these are unset |
+| `Origin`/`Status`/`Attribution`/`Bundle`/`Draft playbook` | The v0.29 incidents-table row linked to this run, when one exists — `Origin` is `real` or `faulttest`; `Status` is `open`/`resolved`/`escalated`/`abandoned`/`needs_human` (*v0.32*: the chain ended without fixing anything, on a `diagnosed` or `no_action` run; these read `resolved` before); `Attribution` is the classified root-cause label (*v0.33*: for a multi-hop chain it is set from the first later diagnostic hop that classifies to a real class, against the entry playbook's `root_cause_classes`. Until then every chain read `UNKNOWN`, because the entry hop is a hand-off with nothing diagnosed in it. A remediation hop never sets it and a later `UNKNOWN` never replaces a real class); `Bundle`/`Draft playbook` show the paths/IDs only once a bundle or draft has actually been created for this incident. Absent entirely (not shown as empty) for any run recorded before this table existed or never tracked as an incident — fail-open, not a claim that these are unset |
 | `TRIAGE` | The agent's primary and rejected hypotheses, confidence, evidence quoted verbatim from tool output and the triage playbook's `findings_summary` |
 | `GATE` | Who approved, when and the at-gate feedback verdicts for both triage diagnosis and remediation plan |
 | `REMEDIATION` | Which remediation playbook ran, each step's outcome and the plan summary the agent produced |

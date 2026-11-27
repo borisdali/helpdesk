@@ -54,7 +54,9 @@ Two things follow from setting them. The plan can say whether a restore fits wha
 
 ### 1.2 Keep the backups healthy
 
-`get_pgbackrest_status` reports the stanza, the newest backup and whether the archived WAL needed to restore it is continuous. Two signals sit side by side: `backup_stale` (is the newest backup older than the age you passed in) and `objective_exposure` (is the posture enough for the objectives you declared). Neither says the backup *restores*. That is what a drill is for.
+`get_pgbackrest_status` reports the stanza, the newest backup and whether the archived WAL needed to restore it is continuous.   
+
+Two signals sit side by side: `backup_stale` (is the newest backup older than the age you passed in) and `objective_exposure` (is the posture enough for the objectives you declared). Neither says the backup *restores*. That is what a drill is for.
 
 ### 1.3 Why drill
 
@@ -200,6 +202,9 @@ Drills are **never mixed with real restores**. They are two sets with two counts
 `drill_interval` (in the objectives, `"90d"` by default) is how long a database may go without a verified drill. `"0d"` turns it off. An interval that cannot be read does not switch it off: the default applies and the config problem is reported.
 
 When it is due, the reminder reads *last verified drill 143 days ago (limit 90 days)* (or *no verified restore drill of this server is recorded*) and a refused attempt since the last good drill is named with what failed. It shows in the point-in-time plan (`DRILL OVERDUE (!)`), in `get_pgbackrest_status` (`drill_currency`, `drill_overdue`) and in `faulttest vault budget`. **It only reminds**: nothing is blocked, held or refused because a drill is overdue.
+
+See [this transcript](samples/SAMPLE032.md#7-overdue-reminder) for a sample of how this reminder may look like.
+
 
 ### 2.8 Looking back at drills
 

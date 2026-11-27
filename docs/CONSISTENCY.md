@@ -766,8 +766,9 @@ following changes should trigger a re-certification run:
 | **Cert regression alert fired** | A recertification detected the fault+model transitioning from earning trust to not — see [Cert history and regression alerts](#73-cert-history-and-regression-alerts). Not a "should I" — this is the flywheel's own signal that something already changed for the worse; investigate before the next real incident hits this playbook unattended. |
 
 The recommended cadence for established deployments is a weekly CronJob (see [Kubernetes](#54-kubernetes-helm))
-covering all external-compatible faults. This is approximately 85 LLM calls against 17 faults
-at 5 runs each, typically completing in 30–40 minutes overnight.
+covering all external-compatible faults (`faulttest list --external`). At 5 runs each that is about
+110 LLM calls against the 22 faults there are today (it grows with the catalog), typically completing in
+30–40 minutes overnight.
 
 For rapid iteration during playbook development, use a single-fault run with `--repeat 3` as a
 fast feedback loop before committing and run the full `--repeat 5` certification before activating.

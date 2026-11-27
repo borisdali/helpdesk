@@ -60,7 +60,7 @@ destructive step on its own.
 
 ## 3/ What else sets it apart?
 
-1. **Playbooks, not runbooks**   
+1. **[Playbooks, not runbooks](https://medium.com/google-cloud/runbooks-rot-playbooks-learn-bec433817938?)**   
    A runbook is a fixed sequence of steps written once for the environment of that
    day and it is out of date as soon as the platform, the version or the tooling moves, which today is
    constantly.   
@@ -76,7 +76,7 @@ destructive step on its own.
    human-readable YAML you own ([Right VII](CUSTOMER_RIGHTS.md#vii-the-right-to-own-your-knowledge)),
    versioned and reviewed like code and every run records the steps it took.
 
-2. **Objectives decide what matters, the model finds a path that respects them**   
+2. **[Objectives decide what matters, the model finds a path that respects them](OBJECTIVES.md)**   
    You declare `rpo`, `rto` and the availability target; the model does not set or change them.   
 
    What it brings is the part a fixed script
